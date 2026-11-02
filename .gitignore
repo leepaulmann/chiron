@@ -1,0 +1,17 @@
+# Build output
+/build/
+/result*
+
+# Never commit game data or anything derived from it
+/game/
+*.exe
+*.dll
+*.pcx
+*.cvr
+*.flc
+*.wve
+*.wav
+*.mp3
+*.sav
+*.SAV
+/traces/
