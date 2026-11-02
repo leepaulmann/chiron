@@ -1,5 +1,4 @@
 // KERNEL32: process, modules, memory, TLS, synchronisation, threads, strings.
-#define _GNU_SOURCE
 #include <ctype.h>
 #include <errno.h>
 #include <pthread.h>
@@ -45,10 +44,31 @@ BOOL WINAPI TerminateProcess(HANDLE process, UINT code) {
 HANDLE WINAPI GetCurrentProcess(void) { return (HANDLE)-1; }
 HANDLE WINAPI GetCurrentThread(void) { return (HANDLE)-2; }
 DWORD WINAPI GetCurrentThreadId(void) { return teb_current()->tid; }
+DWORD WINAPI GetCurrentProcessId(void) { return teb_current()->pid; }
 BOOL WINAPI SetThreadPriority(HANDLE thread, int prio) { return TRUE; }
 
 DWORD WINAPI GetLastError(void) { return win32_get_last_error(); }
 void WINAPI SetLastError(DWORD err) { win32_set_last_error(err); }
+
+typedef struct {
+    DWORD size, major, minor, build, platform;
+    char csd[128];
+} OSVERSIONINFOA;
+
+BOOL WINAPI GetVersionExA(OSVERSIONINFOA *v) {
+    if (v->size < 20) return FALSE;
+    v->major = 5, v->minor = 1, v->build = 2600, v->platform = 2;  // Windows XP, VER_PLATFORM_WIN32_NT
+    if (v->size >= sizeof(*v)) v->csd[0] = 0;
+    return TRUE;
+}
+
+void WINAPI FatalAppExitA(UINT action, const char *msg) {
+    fprintf(stderr, "chiron: FatalAppExit: %s\n", msg);
+    ExitProcess(255);
+}
+
+BOOL WINAPI SetEnvironmentVariableA(const char *name, const char *value) { return TRUE; }
+BOOL WINAPI SetConsoleCtrlHandler(void *handler, BOOL add) { return TRUE; }
 
 void WINAPI OutputDebugStringA(const char *s) { fprintf(stderr, "[debug] %s", s); }
 
@@ -387,6 +407,7 @@ struct thread {
     DWORD exit_code;
     pthread_mutex_t start_lock;
     pthread_cond_t start_cond;
+    DWORD tid;
 };
 
 static __thread struct thread *current_thread;
@@ -394,7 +415,7 @@ static __thread struct thread *current_thread;
 static void *thread_main(void *arg) {
     struct thread *t = arg;
     current_thread = t;
-    teb_attach_current_thread();
+    teb_attach_current_thread(t->tid);
     pthread_mutex_lock(&t->start_lock);
     while (t->suspended) pthread_cond_wait(&t->start_cond, &t->start_lock);
     pthread_mutex_unlock(&t->start_lock);
@@ -411,6 +432,7 @@ HANDLE WINAPI CreateThread(void *sa, DWORD stack, DWORD(WINAPI *start)(void *), 
     t->start = start;
     t->param = param;
     t->suspended = (flags & 4) != 0;  // CREATE_SUSPENDED
+    t->tid = teb_new_thread_id();
     pthread_mutex_init(&t->start_lock, NULL);
     pthread_cond_init(&t->start_cond, NULL);
     pthread_attr_t attr;
@@ -424,7 +446,7 @@ HANDLE WINAPI CreateThread(void *sa, DWORD stack, DWORD(WINAPI *start)(void *), 
         return NULL;
     }
     pthread_detach(t->pt);
-    if (tid) *tid = (DWORD)(uintptr_t)t;
+    if (tid) *tid = t->tid;
     return handle_new(t);
 }
 
@@ -470,11 +492,12 @@ void WINAPI Sleep(DWORD ms) {
     while (nanosleep(&ts, &ts) && errno == EINTR) {}
 }
 
-void WINAPI GetSystemTime(WORD *st) {
+static void fill_systemtime(WORD *st, int local) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     struct tm tm;
-    gmtime_r(&ts.tv_sec, &tm);
+    if (local) localtime_r(&ts.tv_sec, &tm);
+    else gmtime_r(&ts.tv_sec, &tm);
     st[0] = tm.tm_year + 1900;
     st[1] = tm.tm_mon + 1;
     st[2] = tm.tm_wday;
@@ -484,6 +507,9 @@ void WINAPI GetSystemTime(WORD *st) {
     st[6] = tm.tm_sec;
     st[7] = ts.tv_nsec / 1000000;
 }
+
+void WINAPI GetSystemTime(WORD *st) { fill_systemtime(st, 0); }
+void WINAPI GetLocalTime(WORD *st) { fill_systemtime(st, 1); }
 
 // ---- Code pages and string conversion -------------------------------------
 // The game is single-byte Windows-1252 text. We treat it as Latin-1, which

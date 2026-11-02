@@ -5,6 +5,13 @@
 #include "win32.h"
 
 extern const struct shim_export kernel32_exports[];
+extern const struct shim_export user32_exports[];
+extern const struct shim_export gdi32_exports[];
+extern const struct shim_export advapi32_exports[];
+extern const struct shim_export winmm_exports[];
+extern const struct shim_export dsound_exports[];
+extern const struct shim_export ole32_exports[];
+extern const struct shim_export dplayx_exports[];
 
 // System DLLs we do not implement yet still belong here: their imports become
 // traps instead of falling through to copies in the game folder (GOG bundles
@@ -13,17 +20,17 @@ static const struct shim_export no_exports[] = {SHIM_END};
 
 static const struct shim_dll dlls[] = {
     {"KERNEL32.dll", kernel32_exports},
-    {"USER32.dll", no_exports},
-    {"GDI32.dll", no_exports},
-    {"ADVAPI32.dll", no_exports},
+    {"USER32.dll", user32_exports},
+    {"GDI32.dll", gdi32_exports},
+    {"ADVAPI32.dll", advapi32_exports},
     {"SHELL32.dll", no_exports},
-    {"WINMM.dll", no_exports},
+    {"WINMM.dll", winmm_exports},
     {"DDRAW.dll", no_exports},
-    {"DSOUND.dll", no_exports},
+    {"DSOUND.dll", dsound_exports},
     {"MSVFW32.dll", no_exports},
-    {"DPLAYX.dll", no_exports},
+    {"DPLAYX.dll", dplayx_exports},
     {"comdlg32.dll", no_exports},
-    {"ole32.dll", no_exports},
+    {"ole32.dll", ole32_exports},
     {"oleaut32.dll", no_exports},
     {"VERSION.dll", no_exports},
     {"MSACM32.dll", no_exports},

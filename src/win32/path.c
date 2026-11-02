@@ -1,6 +1,5 @@
 // Windows paths onto the host file system. The game folder is drive C:, and
 // every component is matched case-insensitively against what is on disk.
-#define _GNU_SOURCE
 #include <ctype.h>
 #include <dirent.h>
 #include <stdio.h>

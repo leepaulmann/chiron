@@ -1,5 +1,4 @@
 // KERNEL32: files, directories, file mappings and .ini profiles.
-#define _GNU_SOURCE
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>

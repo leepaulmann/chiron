@@ -9,7 +9,7 @@ if(NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
   message(FATAL_ERROR "Chiron hosts 32-bit Windows code and must be built for i686 (use `nix develop`).")
 endif()
 
-add_compile_definitions(_FILE_OFFSET_BITS=64 _TIME_BITS=64)
+add_compile_definitions(_GNU_SOURCE _FILE_OFFSET_BITS=64 _TIME_BITS=64)
 # Windows code only keeps the stack 4-byte aligned, so every function we
 # expose to it must realign before using SSE spills.
 add_compile_options(-Wall -Wno-unused-parameter -mincoming-stack-boundary=2 -fno-strict-aliasing
@@ -18,6 +18,9 @@ add_link_options(-no-pie)
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 find_package(Threads REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
+pkg_check_modules(FREETYPE REQUIRED IMPORTED_TARGET freetype2)
 
 # Each shim DLL's export table is generated from its WINAPI functions.
 function(shim_exports symbol dll)
@@ -32,7 +35,16 @@ function(shim_exports symbol dll)
 endfunction()
 
 set(KERNEL32_SOURCES src/win32/kernel32_proc.c src/win32/kernel32_file.c)
+set(USER32_SOURCES src/win32/user32_window.c src/win32/user32_msg.c src/win32/user32_misc.c)
+set(GDI32_SOURCES src/win32/gdi32_obj.c src/win32/gdi32_draw.c src/win32/gdi32_text.c)
 shim_exports(kernel32_exports KERNEL32.dll ${KERNEL32_SOURCES})
+shim_exports(user32_exports USER32.dll ${USER32_SOURCES})
+shim_exports(gdi32_exports GDI32.dll ${GDI32_SOURCES})
+shim_exports(advapi32_exports ADVAPI32.dll src/win32/advapi32.c)
+shim_exports(winmm_exports WINMM.dll src/win32/winmm.c)
+shim_exports(dsound_exports DSOUND.dll src/win32/dsound.c)
+shim_exports(ole32_exports ole32.dll src/win32/ole32.c)
+shim_exports(dplayx_exports DPLAYX.dll src/win32/dplayx.c)
 
 add_executable(chiron
   src/main.c
@@ -44,10 +56,18 @@ add_executable(chiron
   src/win32/registry.c
   src/win32/path.c
   src/win32/handles.c
+  src/win32/sdl_host.c
+  src/win32/advapi32.c
+  src/win32/winmm.c
+  src/win32/dsound.c
+  src/win32/ole32.c
+  src/win32/dplayx.c
   ${KERNEL32_SOURCES}
+  ${USER32_SOURCES}
+  ${GDI32_SOURCES}
   ${SHIM_EXPORT_SOURCES})
 target_include_directories(chiron PRIVATE src/win32)
-target_link_libraries(chiron PRIVATE Threads::Threads)
+target_link_libraries(chiron PRIVATE Threads::Threads PkgConfig::SDL2 PkgConfig::FREETYPE m)
 
 enable_testing()
 add_subdirectory(tests)

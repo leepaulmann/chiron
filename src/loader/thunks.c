@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include "thunks.h"
 
 #include <stdint.h>

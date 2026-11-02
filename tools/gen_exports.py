@@ -9,8 +9,9 @@ sym, dll, out, *sources = sys.argv[1:]
 names = []
 for src in sources:
     text = open(src).read()
-    # Exported functions are the non-static WINAPI definitions.
-    for m in re.finditer(r'^(?!static)[^\n;()]*\bWINAPI\s+\**(\w+)\s*\(', text, re.M):
+    # Exported functions are the non-static WINAPI (stdcall) and WINAPIV (cdecl)
+    # definitions.
+    for m in re.finditer(r'^(?!static)[^\n;()]*\bWINAPIV?\s+\**(\w+)\s*\(', text, re.M):
         names.append(m.group(1))
 # An optional "// ordinal: Name N" comment assigns ordinals for DLLs imported by number.
 ordinals = {}

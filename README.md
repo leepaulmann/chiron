@@ -45,8 +45,12 @@ ctest --test-dir build      # loader tests; no game files needed
 
 ## Status
 
-Early development. The loader maps the game and runs its C runtime start-up
-on Chiron's KERNEL32. Windowing, graphics, input and sound are next.
+Early development. The game boots to its title screen and main menu,
+drawn by Chiron's GDI in an SDL window. Sound, movies and multiplayer are
+not implemented yet; the game runs silently.
+
+For debugging, `--trace` logs Windows calls and `CHIRON_SNAPSHOT=file.bmp`
+saves the screen as it is presented (`tools/bmp2png.py` converts it).
 
 ## Licence
 

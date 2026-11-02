@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include "teb.h"
 
 #include <asm/ldt.h>
@@ -26,14 +25,19 @@ void teb_set_image_base(uint32_t base) {
     peb[2] = base;
 }
 
-struct teb *teb_attach_current_thread(void) {
+uint32_t teb_new_thread_id(void) {
+    static uint32_t next = 0x100;
+    return __atomic_fetch_add(&next, 4, __ATOMIC_RELAXED);
+}
+
+struct teb *teb_attach_current_thread(uint32_t tid) {
     if (!peb) peb = calloc(1, 0x1000);
     struct teb *t = aligned_alloc(0x1000, sizeof(struct teb) + 0x1000);
     memset(t, 0, sizeof(*t));
     t->exception_list = 0xffffffffu;
     t->self = (uint32_t)t;
     t->pid = getpid();
-    t->tid = syscall(SYS_gettid);
+    t->tid = tid ? tid : teb_new_thread_id();
     t->peb = (uint32_t)peb;
 
     pthread_attr_t attr;

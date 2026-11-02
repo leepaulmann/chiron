@@ -9,6 +9,7 @@
 _Static_assert(sizeof(void *) == 4, "Chiron's host must be built as 32-bit x86");
 
 #define WINAPI __attribute__((stdcall))
+#define WINAPIV __attribute__((cdecl))  // variadic Win32 functions
 
 typedef uint8_t BYTE;
 typedef uint16_t WORD;

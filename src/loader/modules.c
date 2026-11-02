@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include "modules.h"
 
 #include <stdio.h>

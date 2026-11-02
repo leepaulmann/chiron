@@ -1,5 +1,4 @@
 // chiron: run SMAC/SMACX natively from the player's own installation.
-#define _GNU_SOURCE
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -12,6 +11,7 @@
 #include "loader/modules.h"
 #include "loader/teb.h"
 #include "loader/thunks.h"
+#include "win32/gdi.h"
 #include "win32/kernel32.h"
 #include "win32/win32.h"
 
@@ -24,6 +24,7 @@ static void usage(void) {
             "usage: chiron [options] [-- game arguments]\n"
             "  --game DIR           game folder (default: $CHIRON_GAME_DIR or ~/.local/share/chiron/game)\n"
             "  --exe NAME           executable inside the game folder (default: terranx.exe)\n"
+            "  --screen WxH         screen size reported to the game (default: 1024x768)\n"
             "  --trace              log every Win32 call the game makes\n"
             "  --allow-unknown-exe  run an executable whose checksum is not recognised\n");
 }
@@ -36,8 +37,15 @@ static void on_fault(int sig, siginfo_t *si, void *ctx) {
     _exit(128 + sig);
 }
 
+static void on_terminate(int sig) {
+    // Debugging aid: report what the game was calling when it was stopped.
+    thunk_trace_summary();
+    _exit(128 + sig);
+}
+
 static void *game_thread(void *arg) {
-    teb_attach_current_thread();
+    teb_attach_current_thread(0);
+    user32_set_sdl_thread();
     char err[512];
     exe = modules_load_exe(arg, err, sizeof(err));
     if (!exe) {
@@ -61,6 +69,8 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--game") && i + 1 < argc) snprintf(game_dir, sizeof(game_dir), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--exe") && i + 1 < argc) exe_name = argv[++i];
         else if (!strcmp(argv[i], "--trace")) modules_trace = 1;
+        else if (!strcmp(argv[i], "--screen") && i + 1 < argc &&
+                 sscanf(argv[++i], "%dx%d", &display_width, &display_height) == 2) {}
         else if (!strcmp(argv[i], "--allow-unknown-exe")) allow_unknown = 1;
         else if (!strcmp(argv[i], "--")) { i++; break; }
         else { usage(); return 2; }
@@ -96,7 +106,11 @@ int main(int argc, char **argv) {
     sigaction(SIGILL, &sa, NULL);
     sigaction(SIGFPE, &sa, NULL);
     sigaction(SIGBUS, &sa, NULL);
-    if (modules_trace) atexit(thunk_trace_summary);
+    if (modules_trace) {
+        atexit(thunk_trace_summary);
+        signal(SIGTERM, on_terminate);
+        signal(SIGINT, on_terminate);
+    }
 
     // The game runs on its own thread so it gets a Windows-sized stack whose
     // bounds we know for the TEB.

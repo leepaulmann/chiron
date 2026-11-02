@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include "pe.h"
 
 #include <stdarg.h>

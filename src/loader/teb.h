@@ -26,7 +26,9 @@ struct teb {
 _Static_assert(__builtin_offsetof(struct teb, tls_slots) == 0xe10, "TEB layout");
 
 // Allocate a TEB for the calling thread and point %fs at it. The PEB is
-// shared and created on first use.
-struct teb *teb_attach_current_thread(void);
+// shared and created on first use. `tid` is the Windows thread id; pass 0 to
+// allocate one.
+struct teb *teb_attach_current_thread(uint32_t tid);
+uint32_t teb_new_thread_id(void);
 struct teb *teb_current(void);
 void teb_set_image_base(uint32_t base);
