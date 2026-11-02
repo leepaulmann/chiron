@@ -32,7 +32,11 @@ static void usage(void) {
             "  --allow-unknown-exe  run an executable whose checksum is not recognised\n");
 }
 
+int seh_handle_signal(int sig, siginfo_t *si, void *uctx);
+
 static void on_fault(int sig, siginfo_t *si, void *ctx) {
+    // Faults on game threads go to the game's own exception handlers.
+    if (seh_handle_signal(sig, si, ctx)) return;
     ucontext_t *uc = ctx;
     char where[128];
     modules_describe_addr(uc->uc_mcontext.gregs[REG_EIP], where, sizeof(where));
@@ -112,7 +116,8 @@ int main(int argc, char **argv) {
     for (; i < argc && n < sizeof(cmdline); i++) n += snprintf(cmdline + n, sizeof(cmdline) - n, " %s", argv[i]);
     kernel32_set_command_line(cmdline);
 
-    struct sigaction sa = {.sa_sigaction = on_fault, .sa_flags = SA_SIGINFO};
+    // SA_NODEFER: a handler that resumes from one fault may hit another.
+    struct sigaction sa = {.sa_sigaction = on_fault, .sa_flags = SA_SIGINFO | SA_NODEFER};
     sigaction(SIGSEGV, &sa, NULL);
     sigaction(SIGILL, &sa, NULL);
     sigaction(SIGFPE, &sa, NULL);

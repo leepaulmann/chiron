@@ -11,7 +11,12 @@ for src in sources:
     text = open(src).read()
     # Exported functions are the non-static WINAPI (stdcall) and WINAPIV (cdecl)
     # definitions.
-    for m in re.finditer(r'^(?!static)[^\n;()]*\bWINAPIV?\s+\**(\w+)\s*\(', text, re.M):
+    for m in re.finditer(r'^(?!static)[^\n;()]*\bWINAPIV?\s+\**(\w+)\s*\(.*$', text, re.M):
+        line = m.group(0)
+        # A prototype (ending in ';') only declares a function from elsewhere,
+        # unless it is marked "// export" (functions written in assembly).
+        if line.split('//')[0].rstrip().endswith(';') and '// export' not in line:
+            continue
         names.append(m.group(1))
 # An optional "// ordinal: Name N" comment assigns ordinals for DLLs imported by number.
 ordinals = {}

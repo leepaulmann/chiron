@@ -83,12 +83,6 @@ BOOL WINAPI IsBadReadPtr(const void *p, UINT n) { return p == NULL && n; }
 BOOL WINAPI IsBadWritePtr(void *p, UINT n) { return p == NULL && n; }
 BOOL WINAPI IsBadCodePtr(void *p) { return p == NULL; }
 
-void *WINAPI SetUnhandledExceptionFilter(void *filter) {
-    static void *current;
-    void *prev = current;
-    current = filter;
-    return prev;
-}
 
 // Environment: the game gets an empty block.
 static char empty_env_a[2];
