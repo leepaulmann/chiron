@@ -38,7 +38,18 @@ typedef struct {
     const char *menu, *class_name;
 } WNDCLASSA;
 
+WORD WINAPI RegisterClassA(const WNDCLASSA *wc);
+
+// Classes Windows provides without registration.
+static void register_system_classes(void) {
+    static int done;
+    if (done) return;
+    done = 1;
+    RegisterClassA(&(WNDCLASSA){.proc = user32_listbox_proc(), .wnd_extra = 4, .class_name = "LISTBOX"});
+}
+
 static struct wndclass *find_class(const char *name) {
+    register_system_classes();
     for (struct wndclass *c = classes; c; c = c->next)
         if ((uintptr_t)name > 0xffff && !strcasecmp(c->name, name)) return c;
     return NULL;
@@ -225,6 +236,24 @@ BOOL WINAPI DestroyWindow(HWND hwnd) {
     free(w->extra);
     free(w);
     return TRUE;
+}
+
+void *user32_window_extra(HWND hwnd) {
+    struct window *w = hwnd;
+    return is_window(w) ? w->extra : NULL;
+}
+
+DWORD user32_window_style(HWND hwnd) {
+    struct window *w = hwnd;
+    return is_window(w) ? w->style : 0;
+}
+
+HWND user32_child_by_id(HWND parent, LONG id) {
+    struct window *p = parent;
+    if (!is_window(p)) return NULL;
+    for (struct window *c = p->children; c; c = c->sibling)
+        if (c->id == id) return c;
+    return NULL;
 }
 
 BOOL WINAPI IsWindow(HWND hwnd) { return is_window(hwnd); }

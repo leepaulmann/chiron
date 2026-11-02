@@ -35,7 +35,7 @@ function(shim_exports symbol dll)
 endfunction()
 
 set(KERNEL32_SOURCES src/win32/kernel32_proc.c src/win32/kernel32_file.c src/win32/seh.c)
-set(USER32_SOURCES src/win32/user32_window.c src/win32/user32_msg.c src/win32/user32_misc.c)
+set(USER32_SOURCES src/win32/user32_window.c src/win32/user32_msg.c src/win32/user32_misc.c src/win32/user32_listbox.c)
 set(GDI32_SOURCES src/win32/gdi32_obj.c src/win32/gdi32_draw.c src/win32/gdi32_text.c)
 shim_exports(kernel32_exports KERNEL32.dll ${KERNEL32_SOURCES})
 shim_exports(user32_exports USER32.dll ${USER32_SOURCES})

@@ -239,15 +239,6 @@ struct find {
     char pattern[260];
 };
 
-struct win32_find_data {
-    DWORD attrs;
-    DWORD ctime[2], atime[2], mtime[2];
-    DWORD size_hi, size_lo;
-    DWORD reserved[2];
-    char name[260];
-    char alt_name[14];
-};
-
 static void unix_to_filetime(time_t t, DWORD *ft) {
     uint64_t v = ((uint64_t)t + 11644473600ull) * 10000000ull;
     ft[0] = (DWORD)v;

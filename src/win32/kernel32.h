@@ -5,3 +5,19 @@
 
 void kernel32_set_command_line(const char *cmdline);
 void kernel32_close_waitable(struct kobj *o);
+
+// WIN32_FIND_DATAA.
+struct win32_find_data {
+    DWORD attrs;
+    DWORD ctime[2], atime[2], mtime[2];
+    DWORD size_hi, size_lo;
+    DWORD reserved[2];
+    char name[260];
+    char alt_name[14];
+};
+
+// Win32 entry points that other shim files call directly.
+HANDLE WINAPI FindFirstFileA(const char *spec, struct win32_find_data *data);
+BOOL WINAPI FindNextFileA(HANDLE h, struct win32_find_data *data);
+BOOL WINAPI FindClose(HANDLE h);
+BOOL WINAPI SetCurrentDirectoryA(const char *dir);
