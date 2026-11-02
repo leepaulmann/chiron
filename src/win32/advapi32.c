@@ -9,6 +9,7 @@
 #include <strings.h>
 #include <sys/stat.h>
 
+#include "../loader/modules.h"
 #include "win32.h"
 
 struct reg_value {
@@ -155,6 +156,7 @@ LONG WINAPI RegOpenKeyExA(void *h, const char *sub, DWORD opts, DWORD sam, void 
     load();
     if (full_path(h, sub, path, sizeof(path))) return ERROR_INVALID_HANDLE;
     struct reg_key *k = find_key(path, 0);
+    if (modules_trace) fprintf(stderr, "[advapi32] RegOpenKeyExA %s: %s\n", path, k ? "found" : "not found");
     if (!k) return ERROR_FILE_NOT_FOUND;
     *out = open_handle(k);
     return ERROR_SUCCESS;
