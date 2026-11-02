@@ -15,3 +15,5 @@
 *.sav
 *.SAV
 /traces/
+*.idb
+*.i64

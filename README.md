@@ -48,6 +48,19 @@ ctest --test-dir build      # loader tests; no game files needed
 Early development. The loader maps the game and runs its C runtime start-up
 on Chiron's KERNEL32. Windowing, graphics, input and sound are next.
 
+## Licence
+
+Chiron is free software under the GNU General Public License, version 3 or
+(at your option) any later version; see `LICENSE`.
+
+Chiron builds on research from two earlier projects:
+
+- [OpenSMACX](https://github.com/b-casey/OpenSMACX) by Brendan Casey (GPL-3.0-or-later)
+- [Thinker](https://github.com/induktio/thinker) by the Thinker Mod authors (MIT)
+
+Code adapted from either keeps its original copyright notice, and MIT notices
+are preserved alongside Chiron's GPL header.
+
 ## How it works
 
 - `src/loader/`: maps PE images, applies relocations, binds imports to
