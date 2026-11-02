@@ -173,3 +173,21 @@ void modules_describe_addr(uint32_t addr, char *out, size_t outlen) {
         }
     snprintf(out, outlen, "0x%08x", addr);
 }
+
+void modules_scan_stack(uint32_t esp) {
+    // Without frame pointers we cannot unwind; instead list stack words that
+    // point into a loaded image, which are usually return addresses.
+    fprintf(stderr, "chiron: possible return addresses on the stack:\n");
+    const uint32_t *p = (const uint32_t *)esp;
+    for (int i = 0, shown = 0; i < 2048 && shown < 40; i++) {
+        uint32_t v = p[i];
+        for (struct pe_image *img = images; img; img = img->next)
+            if (v >= (uint32_t)img->base + 0x1000 && v < (uint32_t)img->base + img->size) {
+                char where[128];
+                modules_describe_addr(v, where, sizeof(where));
+                fprintf(stderr, "chiron:   [esp+0x%04x] %s\n", i * 4, where);
+                shown++;
+                break;
+            }
+    }
+}

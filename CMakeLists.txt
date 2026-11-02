@@ -49,6 +49,7 @@ shim_exports(dplayx_exports DPLAYX.dll src/win32/dplayx.c)
 add_executable(chiron
   src/main.c
   src/install/install.c
+  src/engine/patches.c
   src/loader/pe.c
   src/loader/teb.c
   src/loader/thunks.c

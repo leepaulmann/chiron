@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../loader/modules.h"
+#include "../loader/thunks.h"
 #include "gdi.h"
 #include "user32.h"
 
@@ -194,6 +196,8 @@ int WINAPI ShowCursor(BOOL show) {
 
 int WINAPI MessageBoxA(HWND hwnd, const char *text, const char *caption, UINT type) {
     fprintf(stderr, "chiron: MessageBox \"%s\": %s\n", caption ? caption : "", text ? text : "");
+    thunk_trace_recent();
+    modules_scan_stack((uint32_t)__builtin_frame_address(0));
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, caption ? caption : "", text ? text : "", NULL);
     // Answer OK/Yes to whatever was asked.
     switch (type & 0xf) {

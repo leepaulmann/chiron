@@ -417,8 +417,67 @@ void user32_present_if_due(void) {
     if (current_tid() == sdl_tid) maybe_present(0);
 }
 
+// CHIRON_SCRIPT drives the game for unattended testing. It is a list of
+// "<seconds> <action>" steps separated by ';', where an action is
+// "click X Y" (left click in screen coordinates), "key NAME" (an SDL key
+// name such as Return or Escape) or "close" (the window's close button):
+//   CHIRON_SCRIPT="25 click 835 362; 45 close"
+static void push_key(SDL_Keycode k) {
+    SDL_Event e = {.type = SDL_KEYDOWN};
+    e.key.keysym.sym = k;
+    e.key.state = SDL_PRESSED;
+    SDL_PushEvent(&e);
+    e.type = SDL_KEYUP;
+    e.key.state = SDL_RELEASED;
+    SDL_PushEvent(&e);
+}
+
+static void run_test_script(void) {
+    static const char *next;
+    static int started;
+    static Uint32 t0;
+    if (!started) {
+        started = 1;
+        next = getenv("CHIRON_SCRIPT");
+        t0 = SDL_GetTicks();
+    }
+    while (next && *next) {
+        double at;
+        int used;
+        if (sscanf(next, " %lf%n", &at, &used) != 1) {
+            next = NULL;
+            break;
+        }
+        if (!SDL_TICKS_PASSED(SDL_GetTicks(), t0 + (Uint32)(at * 1000))) break;
+        const char *step = next + used;
+        const char *end = strchr(step, ';');
+        next = end ? end + 1 : NULL;
+        int x, y;
+        char name[64];
+        fprintf(stderr, "chiron: script at %.1fs:%.*s\n", at, end ? (int)(end - step) : (int)strlen(step), step);
+        if (sscanf(step, " click %d %d", &x, &y) == 2) {
+            SDL_Event e = {.type = SDL_MOUSEMOTION};
+            e.motion.x = x, e.motion.y = y;
+            SDL_PushEvent(&e);
+            e = (SDL_Event){.type = SDL_MOUSEBUTTONDOWN};
+            e.button.button = SDL_BUTTON_LEFT, e.button.state = SDL_PRESSED, e.button.clicks = 1;
+            e.button.x = x, e.button.y = y;
+            SDL_PushEvent(&e);
+            e.type = SDL_MOUSEBUTTONUP, e.button.state = SDL_RELEASED;
+            SDL_PushEvent(&e);
+        } else if (sscanf(step, " key %63[^;]", name) == 1) {
+            SDL_Keycode k = SDL_GetKeyFromName(name);
+            if (k != SDLK_UNKNOWN) push_key(k);
+        } else if (!strncmp(step, " close", 6)) {
+            SDL_Event e = {.type = SDL_QUIT};
+            SDL_PushEvent(&e);
+        }
+    }
+}
+
 static void pump_sdl(int wait_ms) {
     SDL_Event e;
+    run_test_script();
     if (wait_ms != 0 && SDL_WaitEventTimeout(&e, wait_ms < 0 ? 100 : wait_ms)) handle_sdl_event(&e);
     while (SDL_PollEvent(&e)) handle_sdl_event(&e);
 }

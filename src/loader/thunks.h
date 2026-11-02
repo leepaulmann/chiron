@@ -11,3 +11,5 @@ void *thunk_trace(const char *dll, const char *name, int ordinal, void *target);
 
 // Print per-function call counts gathered by trace stubs.
 void thunk_trace_summary(void);
+// Print the last calls made through trace stubs, with their callers.
+void thunk_trace_recent(void);

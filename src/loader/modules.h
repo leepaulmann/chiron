@@ -19,5 +19,8 @@ void *modules_get_handle(const char *name);  // NULL name = main executable
 void *modules_get_proc(void *handle, const char *name, int ordinal);
 int modules_get_filename(void *handle, char *out, size_t outlen);
 
-// "terranx.exe+0x1234" style description for diagnostics.
+// List likely return addresses found on the stack above `esp`.
+void modules_scan_stack(uint32_t esp);
+
+// "terranx.exe:0x00401234" style description for diagnostics.
 void modules_describe_addr(uint32_t addr, char *out, size_t outlen);

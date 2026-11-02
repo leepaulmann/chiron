@@ -7,6 +7,7 @@
 #include <sys/ucontext.h>
 #include <unistd.h>
 
+#include "engine/patches.h"
 #include "install/install.h"
 #include "loader/modules.h"
 #include "loader/teb.h"
@@ -18,6 +19,7 @@
 #define GAME_STACK_SIZE (16u << 20)
 
 static struct pe_image *exe;
+static int known_build;
 
 static void usage(void) {
     fprintf(stderr,
@@ -34,6 +36,8 @@ static void on_fault(int sig, siginfo_t *si, void *ctx) {
     char where[128];
     modules_describe_addr(uc->uc_mcontext.gregs[REG_EIP], where, sizeof(where));
     fprintf(stderr, "chiron: %s at %s (fault address %p)\n", strsignal(sig), where, si->si_addr);
+    thunk_trace_recent();
+    modules_scan_stack(uc->uc_mcontext.gregs[REG_ESP]);
     _exit(128 + sig);
 }
 
@@ -53,6 +57,7 @@ static void *game_thread(void *arg) {
         exit(1);
     }
     teb_set_image_base((uint32_t)exe->base);
+    if (known_build) patches_apply(exe);
     // The MSVC entry point (WinMainCRTStartup) never returns; it calls ExitProcess.
     ((void(WINAPI *)(void))(exe->base + exe->entry_rva))();
     return NULL;
@@ -86,6 +91,7 @@ int main(int argc, char **argv) {
     }
     const struct known_build *build = install_identify(exe_path, hash);
     if (build) {
+        known_build = 1;
         fprintf(stderr, "chiron: found %s\n", build->description);
     } else if (allow_unknown) {
         fprintf(stderr, "chiron: warning: unrecognised %s (sha256 %s)\n", exe_name, hash);

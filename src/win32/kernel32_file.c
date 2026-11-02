@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "../loader/modules.h"
 #include "kernel32.h"
 
 static DWORD errno_to_win(int e) {
@@ -65,6 +66,9 @@ HANDLE WINAPI CreateFileA(const char *name, DWORD access, DWORD share, void *sa,
         return INVALID_HANDLE_VALUE;
     }
     int fd = open(path, flags | O_CLOEXEC, 0644);
+    if (modules_trace)
+        fprintf(stderr, "[kernel32] CreateFileA %s access=%c%c disp=%u -> %s\n", name, (access & GENERIC_READ) ? 'r' : '-',
+                (access & GENERIC_WRITE) ? 'w' : '-', disp, fd < 0 ? strerror(errno) : "ok");
     if (fd < 0) {
         win32_set_last_error(errno_to_win(errno));
         return INVALID_HANDLE_VALUE;

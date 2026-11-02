@@ -52,8 +52,32 @@ __attribute__((cdecl, noreturn)) static void trap_hit(struct import_rec *rec, ui
     abort();
 }
 
-__attribute__((cdecl)) static void trace_hit(struct import_rec *rec) {
+// The most recent calls, for explaining a crash or an error dialog.
+#define RECENT 64
+static struct {
+    struct import_rec *rec;
+    uint32_t caller;
+} recent[RECENT];
+static unsigned recent_pos;
+
+// Stack on entry: [esp] = return into stub, [esp+4] = rec, [esp+8] = caller.
+__attribute__((cdecl)) static void trace_hit(struct import_rec *rec, uint32_t caller) {
     if (rec->hits++ < 3) fprintf(stderr, "[trace] %s\n", rec->label);
+    unsigned i = __atomic_fetch_add(&recent_pos, 1, __ATOMIC_RELAXED) % RECENT;
+    recent[i].rec = rec;
+    recent[i].caller = caller;
+}
+
+void thunk_trace_recent(void) {
+    if (!traced) return;
+    fprintf(stderr, "[trace] most recent calls, oldest first:\n");
+    for (unsigned n = 0; n < RECENT; n++) {
+        unsigned i = (recent_pos + n) % RECENT;
+        if (!recent[i].rec) continue;
+        char where[128];
+        modules_describe_addr(recent[i].caller, where, sizeof(where));
+        fprintf(stderr, "[trace]   %-40s from %s\n", recent[i].rec->label, where);
+    }
 }
 
 void *thunk_trap(const char *dll, const char *name, int ordinal) {

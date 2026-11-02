@@ -65,6 +65,10 @@ struct teb *teb_attach_current_thread(uint32_t tid) {
     }
     uint16_t sel = (desc.entry_number << 3) | 7;  // LDT, ring 3
     __asm__ volatile("movw %0, %%fs" ::"r"(sel));
+    // Windows starts threads with the x87 unit at 53-bit precision; Linux
+    // uses 64-bit. MSVC-compiled code expects the Windows setting.
+    uint16_t cw = 0x027f;
+    __asm__ volatile("fninit; fldcw %0" ::"m"(cw));
     return t;
 }
 

@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include "../loader/modules.h"
+#include "../loader/thunks.h"
 #include "../loader/teb.h"
 #include "handles.h"
 #include "kernel32.h"
@@ -31,6 +32,12 @@ void WINAPI GetStartupInfoA(void *info) {
 }
 
 void WINAPI ExitProcess(UINT code) {
+    if (code) {
+        char where[128];
+        modules_describe_addr((uint32_t)__builtin_return_address(0), where, sizeof(where));
+        fprintf(stderr, "chiron: exit code %u from %s\n", code, where);
+        thunk_trace_recent();
+    }
     fflush(NULL);
     exit(code);
 }
@@ -131,8 +138,9 @@ BOOL WINAPI HeapDestroy(HANDLE h) {
 }
 
 void *WINAPI HeapAlloc(HANDLE h, DWORD flags, DWORD size) {
-    uint8_t *p = (flags & HEAP_ZERO_MEMORY) ? calloc(1, size + HDR) : malloc(size + HDR);
+    uint8_t *p = calloc(1, size + HDR);
     if (!p) {
+        fprintf(stderr, "chiron: HeapAlloc(%u bytes) failed\n", size);
         win32_set_last_error(ERROR_NOT_ENOUGH_MEMORY);
         return NULL;
     }
@@ -203,6 +211,7 @@ void *WINAPI VirtualAlloc(void *addr, DWORD size, DWORD type, DWORD prot) {
                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | (base ? MAP_FIXED_NOREPLACE : 0),
                        -1, 0);
         if (m == MAP_FAILED) {
+            fprintf(stderr, "chiron: VirtualAlloc(%p, %u, 0x%x) failed: %s\n", addr, size, type, strerror(errno));
             win32_set_last_error(ERROR_NOT_ENOUGH_MEMORY);
             return NULL;
         }
@@ -217,6 +226,7 @@ void *WINAPI VirtualAlloc(void *addr, DWORD size, DWORD type, DWORD prot) {
     if (type & MEM_COMMIT) {
         uint32_t base = PAGE_ROUND_DOWN(a), len = PAGE_ROUND_UP(a + size) - base;
         if (!a || mprotect((void *)base, len, win_prot(prot))) {
+            fprintf(stderr, "chiron: VirtualAlloc commit (%p, %u) failed\n", addr, size);
             win32_set_last_error(ERROR_INVALID_PARAMETER);
             return NULL;
         }
