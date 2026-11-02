@@ -29,3 +29,12 @@ endforeach()
 add_test(NAME seh
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_hello.sh $<TARGET_FILE:chiron>
                  ${CMAKE_CURRENT_BINARY_DIR}/seh.exe preferred)
+
+# Every shim must pop as many argument bytes as the Windows function it
+# replaces; mingw's import libraries record the real sizes.
+execute_process(COMMAND ${MINGW_CC} -print-file-name=libkernel32.a OUTPUT_VARIABLE MINGW_KERNEL32
+                OUTPUT_STRIP_TRAILING_WHITESPACE)
+get_filename_component(MINGW_LIB_DIR ${MINGW_KERNEL32} DIRECTORY)
+add_test(NAME stdcall_sizes
+         COMMAND Python3::Interpreter -I ${CMAKE_SOURCE_DIR}/tools/check_stdcall.py $<TARGET_FILE:chiron>
+                 ${MINGW_LIB_DIR} ${SHIM_EXPORT_SOURCES})

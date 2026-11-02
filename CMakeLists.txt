@@ -51,6 +51,7 @@ add_executable(chiron
   src/main.c
   src/install/install.c
   src/engine/patches.c
+  src/engine/soak.c
   src/loader/pe.c
   src/loader/teb.c
   src/loader/thunks.c

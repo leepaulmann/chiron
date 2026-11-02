@@ -6,6 +6,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "../loader/modules.h"
 #include "../loader/teb.h"
 #include "gdi.h"
 #include "user32.h"
@@ -420,8 +421,9 @@ void user32_present_if_due(void) {
 // CHIRON_SCRIPT drives the game for unattended testing. It is a list of
 // "<seconds> <action>" steps separated by ';', where an action is
 // "click X Y" (left click in screen coordinates), "key NAME" (an SDL key
-// name such as Return or Escape) or "close" (the window's close button):
-//   CHIRON_SCRIPT="25 click 835 362; 45 close"
+// name such as Return or Escape) or "close" (the window's close button).
+// "<seconds> every <interval> <action>" repeats an action from then on:
+//   CHIRON_SCRIPT="25 click 835 362; 40 every 0.5 key Return; 600 close"
 // Keys stay down for 150 ms, like a real press, so code that polls
 // GetAsyncKeyState sees them held.
 static SDL_Keycode held_key;
@@ -433,6 +435,42 @@ static void push_key(SDL_Keycode k, int down) {
     e.key.state = down ? SDL_PRESSED : SDL_RELEASED;
     SDL_PushEvent(&e);
 }
+
+static void run_action(const char *step) {
+    int x, y;
+    char name[64];
+    if (sscanf(step, " click %d %d", &x, &y) == 2) {
+        SDL_Event e = {.type = SDL_MOUSEMOTION};
+        e.motion.x = x, e.motion.y = y;
+        SDL_PushEvent(&e);
+        e = (SDL_Event){.type = SDL_MOUSEBUTTONDOWN};
+        e.button.button = SDL_BUTTON_LEFT, e.button.state = SDL_PRESSED, e.button.clicks = 1;
+        e.button.x = x, e.button.y = y;
+        SDL_PushEvent(&e);
+        e.type = SDL_MOUSEBUTTONUP, e.button.state = SDL_RELEASED;
+        SDL_PushEvent(&e);
+    } else if (sscanf(step, " key %63[^;]", name) == 1) {
+        SDL_Keycode k = SDL_GetKeyFromName(name);
+        if (k != SDLK_UNKNOWN) {
+            if (held_key) push_key(held_key, 0);
+            push_key(k, 1);
+            held_key = k;
+            release_at = SDL_GetTicks() + 150;
+        }
+    } else if (!strncmp(step, " close", 6)) {
+        SDL_Event e = {.type = SDL_QUIT};
+        SDL_PushEvent(&e);
+    }
+}
+
+#define MAX_REPEATS 8
+static struct {
+    char action[96];
+    Uint32 interval, next;
+} repeats[MAX_REPEATS];
+static int nrepeats;
+
+void soak_report(void);
 
 static void run_test_script(void) {
     static const char *next;
@@ -458,32 +496,25 @@ static void run_test_script(void) {
         const char *step = next + used;
         const char *end = strchr(step, ';');
         next = end ? end + 1 : NULL;
-        int x, y;
-        char name[64];
         fprintf(stderr, "chiron: script at %.1fs:%.*s\n", at, end ? (int)(end - step) : (int)strlen(step), step);
-        if (sscanf(step, " click %d %d", &x, &y) == 2) {
-            SDL_Event e = {.type = SDL_MOUSEMOTION};
-            e.motion.x = x, e.motion.y = y;
-            SDL_PushEvent(&e);
-            e = (SDL_Event){.type = SDL_MOUSEBUTTONDOWN};
-            e.button.button = SDL_BUTTON_LEFT, e.button.state = SDL_PRESSED, e.button.clicks = 1;
-            e.button.x = x, e.button.y = y;
-            SDL_PushEvent(&e);
-            e.type = SDL_MOUSEBUTTONUP, e.button.state = SDL_RELEASED;
-            SDL_PushEvent(&e);
-        } else if (sscanf(step, " key %63[^;]", name) == 1) {
-            SDL_Keycode k = SDL_GetKeyFromName(name);
-            if (k != SDLK_UNKNOWN) {
-                if (held_key) push_key(held_key, 0);
-                push_key(k, 1);
-                held_key = k;
-                release_at = SDL_GetTicks() + 150;
-            }
-        } else if (!strncmp(step, " close", 6)) {
-            SDL_Event e = {.type = SDL_QUIT};
-            SDL_PushEvent(&e);
+        double every;
+        int skip;
+        if (sscanf(step, " every %lf%n", &every, &skip) == 1 && nrepeats < MAX_REPEATS) {
+            int n = end ? (int)(end - step - skip) : (int)strlen(step + skip);
+            snprintf(repeats[nrepeats].action, sizeof(repeats[0].action), "%.*s", n, step + skip);
+            repeats[nrepeats].interval = (Uint32)(every * 1000);
+            repeats[nrepeats].next = SDL_GetTicks();
+            nrepeats++;
+        } else {
+            run_action(step);
         }
     }
+    for (int i = 0; i < nrepeats; i++)
+        if (SDL_TICKS_PASSED(SDL_GetTicks(), repeats[i].next)) {
+            repeats[i].next += repeats[i].interval;
+            run_action(repeats[i].action);
+        }
+    soak_report();
 }
 
 static void pump_sdl(int wait_ms) {
@@ -601,10 +632,25 @@ BOOL WINAPI TranslateMessage(const MSG *m) {
     return TRUE;
 }
 
+// Windows only calls a WM_TIMER's lParam as a TIMERPROC when it matches a
+// timer registered with that procedure; a posted WM_TIMER with any other
+// lParam goes to the window procedure.
+static int registered_timer_proc(HWND hwnd, UINT id, void *proc) {
+    for (struct timer *t = timers; t; t = t->next)
+        if (t->hwnd == hwnd && t->id == id && (void *)t->proc == proc) return 1;
+    return 0;
+}
+
 LRESULT WINAPI DispatchMessageA(const MSG *m) {
     if (m->message == WM_TIMER && m->lparam) {
-        ((TIMERPROC)m->lparam)(m->hwnd, WM_TIMER, m->wparam, SDL_GetTicks());
-        return 0;
+        if (registered_timer_proc(m->hwnd, m->wparam, (void *)m->lparam)) {
+            ((TIMERPROC)m->lparam)(m->hwnd, WM_TIMER, m->wparam, SDL_GetTicks());
+            return 0;
+        }
+        // terranx.exe posts its own WM_TIMER messages with small non-pointer
+        // lParams; calling them used to crash during combat animations.
+        if (modules_trace)
+            fprintf(stderr, "[user32] WM_TIMER lParam 0x%08x is not a registered TIMERPROC\n", (unsigned)m->lparam);
     }
     if (m->message == WM_PAINT) {
         LRESULT r = user32_send(m->hwnd, WM_PAINT, 0, 0);

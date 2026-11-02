@@ -57,7 +57,14 @@ Options: `--screen WxH` sets the screen size the game sees and
 For debugging, `--trace` logs Windows calls, `CHIRON_SNAPSHOT=file.bmp`
 saves the screen as it is presented (`tools/bmp2png.py` converts it),
 `CHIRON_AUDIO_DUMP=file` records the audio mix as raw 44.1 kHz stereo, and
-`CHIRON_SCRIPT="30 click 835 362; 50 close"` drives the game unattended.
+`CHIRON_SCRIPT="30 click 835 362; 50 close"` drives the game unattended
+(`"40 every 1 key Return"` repeats a step). `CHIRON_SOAK=1` reports the turn,
+memory and CPU every 30 seconds; `CHIRON_SOAK=ai` also hands your faction to
+the AI so a game plays itself:
+
+```sh
+CHIRON_SOAK=ai CHIRON_SCRIPT="30 click 835 362; 40 every 1 key Return" ./build/chiron
+```
 
 ## Licence
 
