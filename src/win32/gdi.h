@@ -40,6 +40,7 @@ void surface_colors_changed(struct surface *s);
 
 // Display settings reported to the game.
 extern int display_width, display_height, display_bpp;
+extern int audio_volume;  // percent, applied to the final mix
 
 // ---- USER32 services used by GDI32 ----------------------------------------
 

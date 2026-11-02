@@ -526,6 +526,21 @@ void WINAPI GetLocalTime(WORD *st) { fill_systemtime(st, 1); }
 // only differs in 0x80-0x9f punctuation.
 
 UINT WINAPI GetACP(void) { return 1252; }
+DWORD WINAPI GetUserDefaultLCID(void) { return 0x409; }  // en-US
+BOOL WINAPI IsValidCodePage(UINT cp) { return cp == 1252 || cp == 437 || cp == 0; }
+BOOL WINAPI IsValidLocale(DWORD lcid, DWORD flags) { return lcid == 0x409 || lcid == 0x400 || lcid == 0x800; }
+
+// CompareStringA: ordinal comparison, optionally ignoring case.
+int WINAPI CompareStringA(DWORD lcid, DWORD flags, const char *a, int na, const char *b, int nb) {
+    if (na < 0) na = strlen(a);
+    if (nb < 0) nb = strlen(b);
+    for (int i = 0; i < na && i < nb; i++) {
+        int ca = (unsigned char)a[i], cb = (unsigned char)b[i];
+        if (flags & 1) ca = tolower(ca), cb = tolower(cb);  // NORM_IGNORECASE
+        if (ca != cb) return ca < cb ? 1 : 3;
+    }
+    return na == nb ? 2 : na < nb ? 1 : 3;  // CSTR_LESS_THAN, EQUAL, GREATER_THAN
+}
 UINT WINAPI GetOEMCP(void) { return 437; }
 
 BOOL WINAPI GetCPInfo(UINT cp, BYTE *info) {

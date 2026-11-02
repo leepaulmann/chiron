@@ -7,6 +7,7 @@
 #include <ctype.h>
 #include <time.h>
 
+#include "../loader/modules.h"
 #include "../loader/teb.h"
 #include "win32.h"
 
@@ -131,27 +132,50 @@ typedef struct {
 
 struct mmio {
     FILE *f;
-    char buf[64 * 1024];
-    LONG buf_pos;  // file offset of buf[0]
-    LONG buf_len;
+    char *buf;          // I/O buffer: ours, or one the caller gave mmioSetBuffer
+    LONG buf_size;
+    int own_buf;
+    LONG buf_pos;       // file offset of buf[0]
+    LONG buf_len;       // valid bytes in buf
+    int memory;         // a memory file: buf is the file itself
 };
 
 int path_to_host(const char *winpath, char *out, size_t outlen);
 
+#define FOURCC_MEM FOURCC('M', 'E', 'M', ' ')
+#define MMIO_CREATE 0x1000
+#define MMIO_ALLOCBUF 0x10000
+
 void *WINAPI mmioOpenA(const char *name, MMIOINFO *info, DWORD flags) {
-    char host[4096];
-    const char *mode = (flags & 0x1000) ? "w+b" : (flags & 3) == 2 ? "r+b" : (flags & 3) == 1 ? "r+b" : "rb";
-    if (!name || path_to_host(name, host, sizeof(host))) {
-        if (info) info->error_ret = 257;  // MMIOERR_FILENOTFOUND
-        return NULL;
+    if (modules_trace) fprintf(stderr, "[winmm] mmioOpenA %s flags=0x%x\n", name ? name : "(memory)", flags);
+    FILE *f;
+    void *mem = NULL;
+    if (!name && info && info->fcc_io == FOURCC_MEM) {
+        // A memory file: mmio I/O over a caller-supplied (or allocated)
+        // block, which also serves as its I/O buffer.
+        mem = info->buffer;
+        if (!mem && (flags & MMIO_ALLOCBUF)) mem = calloc(1, info->buffer_size);
+        f = mem ? fmemopen(mem, info->buffer_size, "r+b") : NULL;
+    } else {
+        char host[4096];
+        const char *mode = (flags & MMIO_CREATE) ? "w+b" : (flags & 3) ? "r+b" : "rb";
+        f = name && !path_to_host(name, host, sizeof(host)) ? fopen(host, mode) : NULL;
     }
-    FILE *f = fopen(host, mode);
     if (!f) {
-        if (info) info->error_ret = 257;
+        if (info) info->error_ret = 257;  // MMIOERR_FILENOTFOUND
         return NULL;
     }
     struct mmio *m = calloc(1, sizeof(*m));
     m->f = f;
+    if (mem) {
+        m->memory = 1;
+        m->buf = mem;
+        m->buf_size = m->buf_len = info->buffer_size;
+    } else {
+        m->buf_size = 8192;  // MMIO_DEFAULTBUFFER
+        m->buf = malloc(m->buf_size);
+        m->own_buf = 1;
+    }
     if (info) info->error_ret = 0;
     return m;
 }
@@ -159,6 +183,7 @@ void *WINAPI mmioOpenA(const char *name, MMIOINFO *info, DWORD flags) {
 UINT WINAPI mmioClose(struct mmio *m, UINT flags) {
     if (!m) return 0;
     fclose(m->f);
+    if (m->own_buf) free(m->buf);
     free(m);
     return 0;
 }
@@ -171,7 +196,15 @@ LONG WINAPI mmioSeek(struct mmio *m, LONG off, int origin) {
     return ftell(m->f);
 }
 
-UINT WINAPI mmioSetBuffer(struct mmio *m, char *buf, LONG size, UINT flags) { return 0; }
+UINT WINAPI mmioSetBuffer(struct mmio *m, char *buf, LONG size, UINT flags) {
+    if (size <= 0 || m->memory) return 0;  // unbuffered I/O: keep a private buffer for mmioGetInfo
+    if (m->own_buf) free(m->buf);
+    m->own_buf = buf == NULL;
+    m->buf = buf ? buf : malloc(size);
+    m->buf_size = size;
+    m->buf_len = 0;
+    return 0;
+}
 
 DWORD WINAPI mmioStringToFOURCCA(const char *s, UINT flags) {
     char c[4] = {' ', ' ', ' ', ' '};
@@ -210,49 +243,69 @@ UINT WINAPI mmioAscend(struct mmio *m, MMCKINFO *ck, UINT flags) {
     return 0;
 }
 
-static void fill_info(struct mmio *m, MMIOINFO *info) {
+// Direct buffer access, with Windows semantics: mmioGetInfo only reports
+// the buffer state (an empty buffer after a seek), mmioAdvance fills the
+// buffer from where its previous contents ended, and mmioSetInfo records how
+// far the caller read, which is where later mmioRead/mmioSeek calls continue.
+// The FILE position is kept equal to that logical position between calls.
+
+static void describe(struct mmio *m, MMIOINFO *info, LONG pos) {
     info->buffer = m->buf;
-    info->buffer_size = sizeof(m->buf);
-    info->next = m->buf;
+    info->buffer_size = m->buf_size;
+    info->next = m->buf + (pos - m->buf_pos);
     info->end_read = m->buf + m->buf_len;
-    info->end_write = m->buf + sizeof(m->buf);
-    info->disk_offset = m->buf_pos + m->buf_len;
+    info->end_write = m->buf + m->buf_size;
     info->buf_offset = m->buf_pos;
+    info->disk_offset = m->buf_pos + m->buf_len;
 }
 
 UINT WINAPI mmioGetInfo(struct mmio *m, MMIOINFO *info, UINT flags) {
     memset(info, 0, sizeof(*info));
-    long pos = ftell(m->f);
-    m->buf_pos = pos;
-    m->buf_len = (LONG)fread(m->buf, 1, sizeof(m->buf), m->f);
-    fseek(m->f, pos, SEEK_SET);
-    fill_info(m, info);
+    LONG pos = ftell(m->f);
+    if (m->memory) info->fcc_io = FOURCC_MEM;
+    if (!m->memory && (pos < m->buf_pos || pos > m->buf_pos + m->buf_len)) {
+        m->buf_pos = pos;  // the buffered data is elsewhere in the file
+        m->buf_len = 0;
+    }
+    describe(m, info, pos);
     info->mmio = m;
     return 0;
 }
 
 UINT WINAPI mmioSetInfo(struct mmio *m, const MMIOINFO *info, UINT flags) {
-    // Everything up to info->next has been consumed.
-    fseek(m->f, m->buf_pos + (info->next - m->buf), SEEK_SET);
+    fseek(m->f, m->buf_pos + (LONG)(info->next - m->buf), SEEK_SET);
     return 0;
 }
 
 UINT WINAPI mmioAdvance(struct mmio *m, MMIOINFO *info, UINT flags) {
+    if (m->memory) {
+        // The whole memory file is already "buffered"; there is nothing
+        // further to read and it cannot grow.
+        if (info) {
+            describe(m, info, m->buf_size);
+            info->fcc_io = FOURCC_MEM;
+        }
+        return (flags & 2) ? 269 : 0;  // MMIOERR_CANNOTEXPAND when writing
+    }
     if (flags & 2) return 0;  // MMIO_WRITE is not supported
-    long pos = m->buf_pos + (info ? (info->next - m->buf) : m->buf_len);
-    fseek(m->f, pos, SEEK_SET);
-    m->buf_pos = pos;
-    m->buf_len = (LONG)fread(m->buf, 1, sizeof(m->buf), m->f);
-    fseek(m->f, pos, SEEK_SET);
-    if (info) fill_info(m, info);
-    return 0;
+    LONG next = m->buf_pos + m->buf_len;
+    fseek(m->f, next, SEEK_SET);
+    m->buf_pos = next;
+    m->buf_len = (LONG)fread(m->buf, 1, m->buf_size, m->f);
+    fseek(m->f, next, SEEK_SET);
+    if (info) describe(m, info, next);
+    return 0;  // end of file shows as an empty buffer
 }
 
 // ---- MCI and audio input --------------------------------------------------
 
 DWORD WINAPI mciSendCommandA(UINT device, UINT msg, DWORD flags, void *params) {
-    static int warned;
-    if (!warned++) fprintf(stderr, "chiron: MCI is not supported (command 0x%x)\n", msg);
+    fprintf(stderr, "chiron: mciSendCommandA(device=%u, msg=0x%x, flags=0x%x) not supported\n", device, msg, flags);
+    if (msg == 0x803 && params) {  // MCI_OPEN: show what is being opened
+        const char *const *p = params;
+        if (flags & 0x2000) fprintf(stderr, "chiron:   type=%s\n", (flags & 0x1000) ? "(id)" : p[2] ? p[2] : "");
+        if (flags & 0x200) fprintf(stderr, "chiron:   element=%s\n", p[3] ? p[3] : "");
+    }
     return 275;  // MCIERR_DEVICE_NOT_INSTALLED
 }
 

@@ -10,6 +10,7 @@
 #include <strings.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "../loader/modules.h"
@@ -563,4 +564,74 @@ BOOL WINAPI WritePrivateProfileStringA(const char *app, const char *key, const c
 UINT WINAPI WinExec(const char *cmd, UINT show) {
     fprintf(stderr, "chiron: WinExec(\"%s\") ignored\n", cmd);
     return 2;  // ERROR_FILE_NOT_FOUND
+}
+
+// ---- File information and times -------------------------------------------
+
+typedef struct {
+    DWORD attrs;
+    DWORD ctime[2], atime[2], mtime[2];
+    DWORD volume_serial, size_hi, size_lo, links, index_hi, index_lo;
+} BY_HANDLE_FILE_INFORMATION;
+
+BOOL WINAPI GetFileInformationByHandle(HANDLE h, BY_HANDLE_FILE_INFORMATION *info) {
+    int fd = handle_fd(h);
+    struct stat st;
+    if (fd < 0 || fstat(fd, &st)) return FALSE;
+    memset(info, 0, sizeof(*info));
+    info->attrs = S_ISDIR(st.st_mode) ? 0x10 : 0x80;
+    unix_to_filetime(st.st_ctime, info->ctime);
+    unix_to_filetime(st.st_atime, info->atime);
+    unix_to_filetime(st.st_mtime, info->mtime);
+    info->volume_serial = (DWORD)st.st_dev;
+    info->size_hi = (DWORD)((uint64_t)st.st_size >> 32);
+    info->size_lo = (DWORD)st.st_size;
+    info->links = st.st_nlink;
+    info->index_hi = (DWORD)((uint64_t)st.st_ino >> 32);
+    info->index_lo = (DWORD)st.st_ino;
+    return TRUE;
+}
+
+BOOL WINAPI PeekNamedPipe(HANDLE h, void *buf, DWORD size, DWORD *read, DWORD *avail, DWORD *left) {
+    win32_set_last_error(ERROR_INVALID_HANDLE);
+    return FALSE;
+}
+
+static int64_t filetime_to_unix(const DWORD *ft) {
+    uint64_t v = (uint64_t)ft[1] << 32 | ft[0];
+    return (int64_t)(v / 10000000ull) - 11644473600ll;
+}
+
+BOOL WINAPI FileTimeToLocalFileTime(const DWORD *in, DWORD *out) {
+    time_t t = filetime_to_unix(in);
+    struct tm tm;
+    localtime_r(&t, &tm);
+    uint64_t v = (uint64_t)in[1] << 32 | in[0];
+    v += (int64_t)tm.tm_gmtoff * 10000000ll;
+    out[0] = (DWORD)v;
+    out[1] = (DWORD)(v >> 32);
+    return TRUE;
+}
+
+BOOL WINAPI FileTimeToSystemTime(const DWORD *ft, WORD *st) {
+    uint64_t v = (uint64_t)ft[1] << 32 | ft[0];
+    time_t t = filetime_to_unix(ft);
+    struct tm tm;
+    gmtime_r(&t, &tm);
+    st[0] = tm.tm_year + 1900;
+    st[1] = tm.tm_mon + 1;
+    st[2] = tm.tm_wday;
+    st[3] = tm.tm_mday;
+    st[4] = tm.tm_hour;
+    st[5] = tm.tm_min;
+    st[6] = tm.tm_sec;
+    st[7] = (WORD)((v / 10000) % 1000);
+    return TRUE;
+}
+
+DWORD WINAPI GetTimeZoneInformation(void *tzi) {
+    // Report UTC with no daylight saving; only the C runtime's localtime
+    // uses this, and Chiron's own timestamps come from the host.
+    memset(tzi, 0, 172);
+    return 0;  // TIME_ZONE_ID_UNKNOWN
 }

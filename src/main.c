@@ -27,6 +27,7 @@ static void usage(void) {
             "  --game DIR           game folder (default: $CHIRON_GAME_DIR or ~/.local/share/chiron/game)\n"
             "  --exe NAME           executable inside the game folder (default: terranx.exe)\n"
             "  --screen WxH         screen size reported to the game (default: 1024x768)\n"
+            "  --volume N           master volume, 0-100 (default: 100)\n"
             "  --trace              log every Win32 call the game makes\n"
             "  --allow-unknown-exe  run an executable whose checksum is not recognised\n");
 }
@@ -76,11 +77,14 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--trace")) modules_trace = 1;
         else if (!strcmp(argv[i], "--screen") && i + 1 < argc &&
                  sscanf(argv[++i], "%dx%d", &display_width, &display_height) == 2) {}
+        else if (!strcmp(argv[i], "--volume") && i + 1 < argc) audio_volume = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--allow-unknown-exe")) allow_unknown = 1;
         else if (!strcmp(argv[i], "--")) { i++; break; }
         else { usage(); return 2; }
     }
 
+    if (audio_volume < 0) audio_volume = 0;
+    if (audio_volume > 100) audio_volume = 100;
     path_init(game_dir);
     char exe_path[4096], hash[65];
     if (path_to_host(exe_name, exe_path, sizeof(exe_path)) || access(exe_path, R_OK)) {
