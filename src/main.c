@@ -45,6 +45,7 @@ static void on_fault(int sig, siginfo_t *si, void *ctx) {
 static void on_terminate(int sig) {
     // Debugging aid: report what the game was calling when it was stopped.
     thunk_trace_summary();
+    thunk_trace_recent();
     _exit(128 + sig);
 }
 

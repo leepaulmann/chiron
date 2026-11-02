@@ -47,8 +47,9 @@ ctest --test-dir build      # loader tests; no game files needed
 
 Early development. The game runs from the main menu into a game (tested
 with Quick Start), drawn by Chiron's GDI in an SDL window, with sound
-effects, music and voice-overs through Chiron's DirectSound. Movies and
-multiplayer are not implemented yet.
+effects, music and voice-overs through Chiron's DirectSound, and plays the
+game's movies (decoded by the game itself) through Chiron's DirectDraw.
+Multiplayer is not implemented yet.
 
 Options: `--screen WxH` sets the screen size the game sees and
 `--volume 0-100` scales the sound.

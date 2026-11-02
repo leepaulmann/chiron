@@ -45,6 +45,7 @@ shim_exports(winmm_exports WINMM.dll src/win32/winmm.c)
 shim_exports(dsound_exports DSOUND.dll src/win32/dsound.c)
 shim_exports(ole32_exports ole32.dll src/win32/ole32.c)
 shim_exports(dplayx_exports DPLAYX.dll src/win32/dplayx.c)
+shim_exports(ddraw_exports DDRAW.dll src/win32/ddraw.c)
 
 add_executable(chiron
   src/main.c
@@ -63,6 +64,7 @@ add_executable(chiron
   src/win32/dsound.c
   src/win32/ole32.c
   src/win32/dplayx.c
+  src/win32/ddraw.c
   ${KERNEL32_SOURCES}
   ${USER32_SOURCES}
   ${GDI32_SOURCES}

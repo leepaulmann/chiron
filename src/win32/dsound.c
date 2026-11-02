@@ -64,7 +64,8 @@ struct buffer {
     LONG volume, pan;
     float gain_l, gain_r;
     int playing, looping;
-    double pos;  // in frames
+    double pos;          // in frames: everything before this has been mixed
+    double chunk_start;  // pos at the start of the last mixer callback
     struct notify_pos *notifies;
     int nnotifies;
     struct buffer *next;
@@ -72,6 +73,8 @@ struct buffer {
 
 static struct buffer *buffers;  // secondary buffers, guarded by the audio lock
 static SDL_AudioDeviceID device;
+static Uint64 mix_time;    // performance counter at the last mixer callback
+static double mix_period;  // seconds of audio that callback produced
 int audio_volume = 100;  // master volume in percent (--volume)
 
 // ---- Mixer ----------------------------------------------------------------
@@ -101,10 +104,13 @@ static inline int frame_sample(const struct buffer *b, DWORD frame, int channel)
 static void SDLCALL mix(void *userdata, Uint8 *stream, int len) {
     int16_t *out = (int16_t *)stream;
     int frames = len / 4;
+    mix_time = SDL_GetPerformanceCounter();
+    mix_period = (double)frames / MIX_RATE;
     int32_t *acc = SDL_stack_alloc(int32_t, frames * 2);
     memset(acc, 0, frames * 2 * sizeof(int32_t));
 
     for (struct buffer *b = buffers; b; b = b->next) {
+        b->chunk_start = b->pos;
         if (!b->playing || !b->data->size || !b->fmt.block_align) continue;
         DWORD total = b->data->size / b->fmt.block_align;
         double step = (double)b->frequency / MIX_RATE;
@@ -246,8 +252,26 @@ static DWORD WINAPI buf_GetCurrentPosition(struct buffer *b, DWORD *play, DWORD 
         if (write) *write = 0;
         return DS_OK;
     }
+    // Real hardware moves the play cursor sample by sample. Ours advances a
+    // whole callback at a time, which makes exact collisions with the game's
+    // own block boundaries common; terranx.exe's movie player reads an equal
+    // play and write position as an empty ring and overwrites unplayed audio.
+    // So interpolate between the last two callbacks, which also never reports
+    // a position that has not been mixed yet.
     SDL_LockAudioDevice(device);
-    DWORD p = ((DWORD)b->pos * b->fmt.block_align) % b->data->size;
+    DWORD total = b->data->size / b->fmt.block_align;
+    double est = b->pos;
+    if (b->playing && mix_period > 0) {
+        double elapsed = (double)(SDL_GetPerformanceCounter() - mix_time) / SDL_GetPerformanceFrequency();
+        double frac = elapsed / mix_period;
+        if (frac < 0) frac = 0;
+        if (frac > 1) frac = 1;
+        double advanced = b->pos - b->chunk_start;
+        if (advanced < 0) advanced += total;  // wrapped during the callback
+        est = b->chunk_start + advanced * frac;
+        if (est >= total) est -= total;
+    }
+    DWORD p = ((DWORD)est * b->fmt.block_align) % b->data->size;
     SDL_UnlockAudioDevice(device);
     if (play) *play = p;
     if (write) *write = b->playing ? (p + bytes_ahead(b)) % b->data->size : p;
@@ -305,7 +329,7 @@ static DWORD WINAPI buf_Play(struct buffer *b, DWORD reserved, DWORD priority, D
 static DWORD WINAPI buf_SetCurrentPosition(struct buffer *b, DWORD pos) {
     if (b->primary || !b->fmt.block_align) return DS_OK;
     SDL_LockAudioDevice(device);
-    b->pos = (double)((pos % (b->data->size ? b->data->size : 1)) / b->fmt.block_align);
+    b->pos = b->chunk_start = (double)((pos % (b->data->size ? b->data->size : 1)) / b->fmt.block_align);
     SDL_UnlockAudioDevice(device);
     return DS_OK;
 }

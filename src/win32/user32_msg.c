@@ -405,7 +405,7 @@ void user32_screen_dirty(void) { screen_dirty = 1; }
 
 static void maybe_present(int force) {
     struct window *w = user32_main_window();
-    if (!w || !screen_dirty) return;
+    if (!w || !screen_dirty || ddraw_owns_screen()) return;
     uint32_t now = SDL_GetTicks();
     if (!force && now - last_present < 8) return;
     last_present = now;
@@ -422,13 +422,15 @@ void user32_present_if_due(void) {
 // "click X Y" (left click in screen coordinates), "key NAME" (an SDL key
 // name such as Return or Escape) or "close" (the window's close button):
 //   CHIRON_SCRIPT="25 click 835 362; 45 close"
-static void push_key(SDL_Keycode k) {
-    SDL_Event e = {.type = SDL_KEYDOWN};
+// Keys stay down for 150 ms, like a real press, so code that polls
+// GetAsyncKeyState sees them held.
+static SDL_Keycode held_key;
+static Uint32 release_at;
+
+static void push_key(SDL_Keycode k, int down) {
+    SDL_Event e = {.type = down ? SDL_KEYDOWN : SDL_KEYUP};
     e.key.keysym.sym = k;
-    e.key.state = SDL_PRESSED;
-    SDL_PushEvent(&e);
-    e.type = SDL_KEYUP;
-    e.key.state = SDL_RELEASED;
+    e.key.state = down ? SDL_PRESSED : SDL_RELEASED;
     SDL_PushEvent(&e);
 }
 
@@ -440,6 +442,10 @@ static void run_test_script(void) {
         started = 1;
         next = getenv("CHIRON_SCRIPT");
         t0 = SDL_GetTicks();
+    }
+    if (held_key && SDL_TICKS_PASSED(SDL_GetTicks(), release_at)) {
+        push_key(held_key, 0);
+        held_key = 0;
     }
     while (next && *next) {
         double at;
@@ -467,7 +473,12 @@ static void run_test_script(void) {
             SDL_PushEvent(&e);
         } else if (sscanf(step, " key %63[^;]", name) == 1) {
             SDL_Keycode k = SDL_GetKeyFromName(name);
-            if (k != SDLK_UNKNOWN) push_key(k);
+            if (k != SDLK_UNKNOWN) {
+                if (held_key) push_key(held_key, 0);
+                push_key(k, 1);
+                held_key = k;
+                release_at = SDL_GetTicks() + 150;
+            }
         } else if (!strncmp(step, " close", 6)) {
             SDL_Event e = {.type = SDL_QUIT};
             SDL_PushEvent(&e);
@@ -480,6 +491,7 @@ static void pump_sdl(int wait_ms) {
     run_test_script();
     if (wait_ms != 0 && SDL_WaitEventTimeout(&e, wait_ms < 0 ? 100 : wait_ms)) handle_sdl_event(&e);
     while (SDL_PollEvent(&e)) handle_sdl_event(&e);
+    ddraw_present_pending();
 }
 
 // Look for a message: posted/input first, then (on the SDL thread) timers,
@@ -510,6 +522,7 @@ static int get_next(MSG *m, HWND hwnd, UINT lo, UINT hi, int remove, int *timer_
 // The game's main thread owns SDL; other threads (soundx.dll's) only use
 // their own queues.
 void user32_set_sdl_thread(void) { sdl_tid = current_tid(); }
+int user32_on_sdl_thread(void) { return current_tid() == sdl_tid; }
 
 static __thread int idle_peeks;
 

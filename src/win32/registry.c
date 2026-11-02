@@ -12,6 +12,7 @@ extern const struct shim_export winmm_exports[];
 extern const struct shim_export dsound_exports[];
 extern const struct shim_export ole32_exports[];
 extern const struct shim_export dplayx_exports[];
+extern const struct shim_export ddraw_exports[];
 
 // System DLLs we do not implement yet still belong here: their imports become
 // traps instead of falling through to copies in the game folder (GOG bundles
@@ -25,7 +26,7 @@ static const struct shim_dll dlls[] = {
     {"ADVAPI32.dll", advapi32_exports},
     {"SHELL32.dll", no_exports},
     {"WINMM.dll", winmm_exports},
-    {"DDRAW.dll", no_exports},
+    {"DDRAW.dll", ddraw_exports},
     {"DSOUND.dll", dsound_exports},
     {"MSVFW32.dll", no_exports},
     {"DPLAYX.dll", dplayx_exports},

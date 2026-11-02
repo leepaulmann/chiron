@@ -64,6 +64,12 @@ int gdi_fill_rect(HDC hdc, const RECT *r, HGDIOBJ brush);
 // For CreateIconIndirect: copy a bitmap out as 32-bit ARGB.
 int gdi_bitmap_to_argb(HGDIOBJ bitmap, HGDIOBJ mask, uint32_t **out, int *w, int *h);
 
+// True while a DirectDraw primary surface owns the screen (ddraw.c).
+int ddraw_owns_screen(void);
+// Show a frame another thread flipped; call on the SDL thread.
+void ddraw_present_pending(void);
+int user32_on_sdl_thread(void);
+
 // ---- SDL host (sdl_host.c) -------------------------------------------------
 
 void sdl_host_init(void);
