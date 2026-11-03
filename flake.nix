@@ -12,7 +12,7 @@
     in {
       devShells.x86_64-linux.default = pkgs32.mkShell {
         nativeBuildInputs = [ pkgs.pkgsCross.mingw32.buildPackages.gcc pkgs.cmake pkgs.ninja pkgs.pkg-config pkgs.gdb pkgs.innoextract pkgs.python3 ];
-        buildInputs = [ pkgs32.SDL2 pkgs32.freetype ];
+        buildInputs = [ pkgs32.SDL2 pkgs32.freetype pkgs32.fontconfig ];
       };
     };
 }

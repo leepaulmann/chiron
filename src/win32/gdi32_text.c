@@ -5,6 +5,7 @@
 #include FT_FREETYPE_H
 #include FT_TRUETYPE_TABLES_H
 #include <dirent.h>
+#include <fontconfig/fontconfig.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,18 +17,19 @@ struct font_file {
     char path[4096];
     FT_Face face;
     int bold, italic;
+    int host;  // loaded from the host's fonts, not the game folder
     struct font_file *next;
 };
 
 static FT_Library ft;
 static struct font_file *fonts;
 
-static int add_font_file(const char *host_path) {
+static struct font_file *add_font(const char *host_path, int index) {
     for (struct font_file *f = fonts; f; f = f->next)
-        if (!strcmp(f->path, host_path)) return 1;
-    if (!ft && FT_Init_FreeType(&ft)) return 0;
+        if (!strcmp(f->path, host_path) && f->face->face_index == index) return f;
+    if (!ft && FT_Init_FreeType(&ft)) return NULL;
     FT_Face face;
-    if (FT_New_Face(ft, host_path, 0, &face)) return 0;
+    if (FT_New_Face(ft, host_path, index, &face)) return NULL;
     struct font_file *f = calloc(1, sizeof(*f));
     snprintf(f->path, sizeof(f->path), "%s", host_path);
     f->face = face;
@@ -35,7 +37,49 @@ static int add_font_file(const char *host_path) {
     f->italic = (face->style_flags & FT_STYLE_FLAG_ITALIC) != 0;
     f->next = fonts;
     fonts = f;
-    return 1;
+    return f;
+}
+
+static int add_font_file(const char *host_path) { return add_font(host_path, 0) != NULL; }
+
+// Faces the game names but doesn't ship, such as Times New Roman, come from
+// the host through fontconfig: the real font if installed, otherwise a
+// metric-compatible one such as Liberation Serif.
+static struct font_file *host_font(const char *name, int bold, int italic) {
+    static struct { char name[32]; int bold, italic; struct font_file *f; } asked[16];
+    static int n_asked, fc_ok = -1;
+    for (int i = 0; i < n_asked; i++)
+        if (!strcasecmp(asked[i].name, name) && asked[i].bold == bold && asked[i].italic == italic) return asked[i].f;
+    if (fc_ok < 0) fc_ok = FcInit() ? 1 : 0;
+    if (!fc_ok || !*name) return NULL;
+    FcPattern *pat = FcPatternCreate();
+    FcPatternAddString(pat, FC_FAMILY, (const FcChar8 *)name);
+    FcPatternAddInteger(pat, FC_WEIGHT, bold ? FC_WEIGHT_BOLD : FC_WEIGHT_REGULAR);
+    FcPatternAddInteger(pat, FC_SLANT, italic ? FC_SLANT_ITALIC : FC_SLANT_ROMAN);
+    FcPatternAddString(pat, FC_FONTFORMAT, (const FcChar8 *)"TrueType");
+    FcConfigSubstitute(NULL, pat, FcMatchPattern);
+    FcDefaultSubstitute(pat);
+    FcResult res;
+    FcPattern *match = FcFontMatch(NULL, pat, &res);
+    struct font_file *f = NULL;
+    FcChar8 *file;
+    int index = 0;
+    if (match && FcPatternGetString(match, FC_FILE, 0, &file) == FcResultMatch) {
+        FcPatternGetInteger(match, FC_INDEX, 0, &index);
+        f = add_font((const char *)file, index);
+        if (f) f->host = 1;
+        if (f)
+            fprintf(stderr, "chiron: font \"%s\"%s%s from %s\n", name, bold ? " bold" : "", italic ? " italic" : "",
+                    (const char *)file);
+    }
+    if (match) FcPatternDestroy(match);
+    FcPatternDestroy(pat);
+    if (n_asked < 16) {
+        snprintf(asked[n_asked].name, sizeof(asked[n_asked].name), "%s", name);
+        asked[n_asked].bold = bold, asked[n_asked].italic = italic, asked[n_asked].f = f;
+        n_asked++;
+    }
+    return f;
 }
 
 // The game folder's own fonts are always available, as if installed.
@@ -90,6 +134,7 @@ static struct font_file *match_font(const LOGFONTA *lf) {
     struct font_file *best = NULL;
     int best_score = -1;
     for (struct font_file *f = fonts; f; f = f->next) {
+        if (f->host) continue;  // host fonts are found through host_font only
         const char *family = f->face->family_name ? f->face->family_name : "";
         int score = 0;
         if (!strcasecmp(family, lf->face)) score = 100;
@@ -98,6 +143,8 @@ static struct font_file *match_font(const LOGFONTA *lf) {
         score += (f->bold == want_bold) * 10 + (f->italic == want_italic) * 5;
         if (score > best_score) best_score = score, best = f;
     }
+    // Faces the game doesn't ship come from the host.
+    if (!best) best = host_font(lf->face, want_bold, want_italic);
     if (!best) {
         static char warned[32];
         if (strcasecmp(warned, lf->face)) {
@@ -106,7 +153,7 @@ static struct font_file *match_font(const LOGFONTA *lf) {
         }
         // Prefer Arial-like faces, then anything.
         for (struct font_file *f = fonts; f; f = f->next)
-            if (f->face->family_name && strcasestr(f->face->family_name, "Arial") && f->bold == want_bold) return f;
+            if (!f->host && f->face->family_name && strcasestr(f->face->family_name, "Arial") && f->bold == want_bold) return f;
         best = fonts;
     }
     return best;

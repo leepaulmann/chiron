@@ -21,6 +21,7 @@ find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
 pkg_check_modules(FREETYPE REQUIRED IMPORTED_TARGET freetype2)
+pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
 
 # Each shim DLL's export table is generated from its WINAPI functions.
 function(shim_exports symbol dll)
@@ -71,7 +72,7 @@ add_executable(chiron
   ${GDI32_SOURCES}
   ${SHIM_EXPORT_SOURCES})
 target_include_directories(chiron PRIVATE src/win32)
-target_link_libraries(chiron PRIVATE Threads::Threads PkgConfig::SDL2 PkgConfig::FREETYPE m)
+target_link_libraries(chiron PRIVATE Threads::Threads PkgConfig::SDL2 PkgConfig::FREETYPE PkgConfig::FONTCONFIG m)
 
 enable_testing()
 add_subdirectory(tests)

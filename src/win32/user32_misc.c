@@ -113,6 +113,8 @@ static struct cursor *system_cursor(int id) {
 }
 
 void *WINAPI LoadCursorA(void *instance, const char *name) {
+    if (modules_trace && (uintptr_t)name <= 0xffff)
+        fprintf(stderr, "[user32] LoadCursorA(%p, #%u)\n", instance, (unsigned)(uintptr_t)name);
     if (!instance && (uintptr_t)name <= 0xffff) return system_cursor((int)(uintptr_t)name);
     // Cursors stored in the game's resources are not loaded yet.
     if ((uintptr_t)name <= 0xffff) fprintf(stderr, "chiron: LoadCursorA(#%u) from module, using arrow\n", (unsigned)(uintptr_t)name);
