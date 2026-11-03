@@ -141,6 +141,7 @@ struct mmio {
 };
 
 int path_to_host(const char *winpath, char *out, size_t outlen);
+int path_to_host_write(const char *winpath, char *out, size_t outlen, int copy_up);
 
 #define FOURCC_MEM FOURCC('M', 'E', 'M', ' ')
 #define MMIO_CREATE 0x1000
@@ -159,7 +160,12 @@ void *WINAPI mmioOpenA(const char *name, MMIOINFO *info, DWORD flags) {
     } else {
         char host[4096];
         const char *mode = (flags & MMIO_CREATE) ? "w+b" : (flags & 3) ? "r+b" : "rb";
-        f = name && !path_to_host(name, host, sizeof(host)) ? fopen(host, mode) : NULL;
+        // Files opened for writing live in the user folder.
+        int ok = !name ? -1
+                 : (flags & MMIO_CREATE) ? path_to_host_write(name, host, sizeof(host), 0)
+                 : (flags & 3)           ? path_to_host_write(name, host, sizeof(host), 1)
+                                         : path_to_host(name, host, sizeof(host));
+        f = ok == 0 ? fopen(host, mode) : NULL;
     }
     if (!f) {
         if (info) info->error_ret = 257;  // MMIOERR_FILENOTFOUND

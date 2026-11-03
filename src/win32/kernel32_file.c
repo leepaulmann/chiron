@@ -37,6 +37,16 @@ static int host_path(const char *winpath, char *out, size_t outlen) {
     return 0;
 }
 
+// Where writes to winpath go (the user folder); see path_to_host_write.
+static int host_path_write(const char *winpath, char *out, size_t outlen, int copy_up) {
+    if (!winpath || path_to_host_write(winpath, out, outlen, copy_up)) {
+        win32_set_last_error(errno == ENOSPC || errno == EACCES || errno == EROFS ? errno_to_win(errno)
+                                                                                  : ERROR_PATH_NOT_FOUND);
+        return -1;
+    }
+    return 0;
+}
+
 // ---- Files ----------------------------------------------------------------
 
 struct file {
@@ -56,6 +66,19 @@ HANDLE WINAPI CreateFileA(const char *name, DWORD access, DWORD share, void *sa,
     int flags = (access & GENERIC_WRITE) ? ((access & GENERIC_READ) ? O_RDWR : O_WRONLY) : O_RDONLY;
     struct stat st;
     int existed = stat(path, &st) == 0;
+    if (existed && disp == CREATE_NEW) {
+        win32_set_last_error(ERROR_FILE_EXISTS);
+        return INVALID_HANDLE_VALUE;
+    }
+    // Anything that writes or creates goes to the user folder. Opening an
+    // existing game file for writing copies it there first, unless the open
+    // empties it anyway.
+    int writes = (access & GENERIC_WRITE) || (!existed && disp != OPEN_EXISTING && disp != TRUNCATE_EXISTING);
+    if (writes && !(existed && S_ISDIR(st.st_mode))) {
+        int copy_up = existed && (disp == OPEN_EXISTING || disp == OPEN_ALWAYS);
+        if (host_path_write(name, path, sizeof(path), copy_up)) return INVALID_HANDLE_VALUE;
+        if (existed && disp == TRUNCATE_EXISTING) flags |= O_CREAT;  // it exists in the game folder
+    }
     switch (disp) {
     case CREATE_NEW: flags |= O_CREAT | O_EXCL; break;
     case CREATE_ALWAYS: flags |= O_CREAT | O_TRUNC; break;
@@ -176,6 +199,10 @@ UINT WINAPI SetHandleCount(UINT n) { return n; }
 BOOL WINAPI DeleteFileA(const char *name) {
     char path[4096];
     if (host_path(name, path, sizeof(path))) return FALSE;
+    if (!path_in_user_layer(path) && *path_user_root() && access(path, F_OK) == 0) {
+        win32_set_last_error(ERROR_ACCESS_DENIED);  // game files are never changed
+        return FALSE;
+    }
     if (unlink(path)) {
         win32_set_last_error(errno_to_win(errno));
         return FALSE;
@@ -187,11 +214,17 @@ BOOL WINAPI MoveFileA(const char *from, const char *to) {
     char a[4096], b[4096];
     struct stat st;
     if (host_path(from, a, sizeof(a)) || host_path(to, b, sizeof(b))) return FALSE;
+    if (stat(a, &st)) {
+        win32_set_last_error(ERROR_FILE_NOT_FOUND);
+        return FALSE;
+    }
     if (stat(b, &st) == 0) {  // MoveFile never overwrites
         win32_set_last_error(ERROR_ALREADY_EXISTS);
         return FALSE;
     }
-    if (rename(a, b)) {
+    if (host_path_write(to, b, sizeof(b), 0)) return FALSE;
+    // A game file can't be moved away; the user folder gets a copy instead.
+    if (!path_in_user_layer(a) && *path_user_root() ? path_copy_file(a, b) : rename(a, b)) {
         win32_set_last_error(errno_to_win(errno));
         return FALSE;
     }
@@ -200,7 +233,13 @@ BOOL WINAPI MoveFileA(const char *from, const char *to) {
 
 BOOL WINAPI CreateDirectoryA(const char *name, void *sa) {
     char path[4096];
+    struct stat st;
     if (host_path(name, path, sizeof(path))) return FALSE;
+    if (stat(path, &st) == 0) {
+        win32_set_last_error(ERROR_ALREADY_EXISTS);
+        return FALSE;
+    }
+    if (host_path_write(name, path, sizeof(path), 0)) return FALSE;
     if (mkdir(path, 0755)) {
         win32_set_last_error(errno == EEXIST ? ERROR_ALREADY_EXISTS : errno_to_win(errno));
         return FALSE;
@@ -234,9 +273,9 @@ UINT WINAPI GetDriveTypeA(const char *root) {
 
 struct find {
     struct kobj obj;
-    struct dirent **names;  // sorted, as NTFS returns them
+    char **names;  // both layers, sorted as NTFS returns them
     int count, next;
-    char host_dir[4096];
+    char dir[264];  // the Windows folder searched, with a trailing separator
     char pattern[260];
 };
 
@@ -252,10 +291,6 @@ static int win_match(const char *pattern, const char *name) {
     return fnmatch(pattern, name, FNM_CASEFOLD) == 0;
 }
 
-static int by_name_nocase(const struct dirent **a, const struct dirent **b) {
-    return strcasecmp((*a)->d_name, (*b)->d_name);
-}
-
 static void find_free(struct find *f) {
     for (int i = 0; i < f->count; i++) free(f->names[i]);
     free(f->names);
@@ -264,12 +299,12 @@ static void find_free(struct find *f) {
 
 static int find_next(struct find *f, struct win32_find_data *out) {
     while (f->next < f->count) {
-        struct dirent *e = f->names[f->next++];
-        if (!win_match(f->pattern, e->d_name)) continue;
-        char full[8192];
+        const char *name = f->names[f->next++];
+        if (!win_match(f->pattern, name)) continue;
+        char win[600], full[4096];
         struct stat st;
-        snprintf(full, sizeof(full), "%s/%s", f->host_dir, e->d_name);
-        if (stat(full, &st)) continue;
+        snprintf(win, sizeof(win), "%s%s", f->dir, name);
+        if (path_to_host(win, full, sizeof(full)) || stat(full, &st)) continue;
         memset(out, 0, sizeof(*out));
         out->attrs = S_ISDIR(st.st_mode) ? 0x10 : 0x80;  // DIRECTORY : NORMAL
         unix_to_filetime(st.st_ctime, out->ctime);
@@ -277,7 +312,7 @@ static int find_next(struct find *f, struct win32_find_data *out) {
         unix_to_filetime(st.st_mtime, out->mtime);
         out->size_hi = (DWORD)((uint64_t)st.st_size >> 32);
         out->size_lo = (DWORD)st.st_size;
-        snprintf(out->name, sizeof(out->name), "%s", e->d_name);
+        snprintf(out->name, sizeof(out->name), "%s", name);
         return 1;
     }
     return 0;
@@ -289,13 +324,14 @@ HANDLE WINAPI FindFirstFileA(const char *spec, struct win32_find_data *data) {
     for (const char *p = spec; *p; p++)
         if (*p == '\\' || *p == '/' || *p == ':') sep = p;
     if (sep) snprintf(dir, sizeof(dir), "%.*s", (int)(sep - spec + 1), spec);
-    else snprintf(dir, sizeof(dir), ".");
+    else snprintf(dir, sizeof(dir), ".\\");
 
     struct find *f = calloc(1, sizeof(*f));
     f->obj.type = KOBJ_FIND;
     snprintf(f->pattern, sizeof(f->pattern), "%s", sep ? sep + 1 : spec);
-    if (host_path(dir, f->host_dir, sizeof(f->host_dir)) ||
-        (f->count = scandir(f->host_dir, &f->names, NULL, by_name_nocase)) < 0) {
+    snprintf(f->dir, sizeof(f->dir), "%s", dir);
+    if (*dir && dir[strlen(dir) - 1] == ':') snprintf(f->dir, sizeof(f->dir), "%s\\", dir);  // "C:" is the root
+    if ((f->count = path_list_dir(f->dir, &f->names)) < 0) {
         free(f);
         win32_set_last_error(ERROR_PATH_NOT_FOUND);
         return INVALID_HANDLE_VALUE;
@@ -403,13 +439,13 @@ BOOL WINAPI CloseHandle(HANDLE h) {
 // Profiles are small, so each call reads the whole file. A bare file name
 // lives in the Windows directory on real Windows; here it is the game folder.
 
-static int profile_path(const char *file, char *out, size_t outlen) {
+static int profile_path(const char *file, char *out, size_t outlen, int write) {
+    char win[300];
     if (!strpbrk(file, "\\/:")) {
-        char win[300];
         snprintf(win, sizeof(win), "C:\\%s", file);
-        return host_path(win, out, outlen);
+        file = win;
     }
-    return host_path(file, out, outlen);
+    return write ? host_path_write(file, out, outlen, 1) : host_path(file, out, outlen);
 }
 
 static char *slurp(const char *path, size_t *len) {
@@ -450,7 +486,7 @@ DWORD WINAPI GetPrivateProfileStringA(const char *app, const char *key, const ch
                                       DWORD size, const char *file) {
     char path[4096];
     if (!size) return 0;
-    char *data = profile_path(file, path, sizeof(path)) ? NULL : slurp(path, NULL);
+    char *data = profile_path(file, path, sizeof(path), 0) ? NULL : slurp(path, NULL);
     char list[8192];
     size_t listlen = 0;
     int in_section = 0;
@@ -505,7 +541,7 @@ UINT WINAPI GetPrivateProfileIntA(const char *app, const char *key, int def, con
 BOOL WINAPI WritePrivateProfileStringA(const char *app, const char *key, const char *value,
                                        const char *file) {
     char path[4096];
-    if (!app || profile_path(file, path, sizeof(path))) return FALSE;
+    if (!app || profile_path(file, path, sizeof(path), 1)) return FALSE;
     size_t len = 0;
     char *data = slurp(path, &len);
     FILE *out = NULL;

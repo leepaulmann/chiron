@@ -1,9 +1,15 @@
 #include "install.h"
 
+#include <dirent.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 // Executables Chiron knows how to run. Each comes from a retail or digital
 // release that players buy; Chiron never ships any of them.
@@ -76,8 +82,219 @@ const struct known_build *install_identify(const char *exe_host_path, char out_h
     return NULL;
 }
 
-void install_default_dir(char *out, size_t outlen) {
-    const char *env = getenv("CHIRON_GAME_DIR");
-    if (env && *env) snprintf(out, outlen, "%s", env);
-    else snprintf(out, outlen, "%s/.local/share/chiron/game", getenv("HOME") ? getenv("HOME") : ".");
+// ---- Folders and the config file -------------------------------------------
+
+static void xdg_dir(const char *env, const char *fallback, char *out, size_t outlen) {
+    const char *v = getenv(env);
+    if (v && *v == '/') snprintf(out, outlen, "%s/chiron", v);
+    else snprintf(out, outlen, "%s/%s/chiron", getenv("HOME") ? getenv("HOME") : ".", fallback);
+}
+
+void install_data_dir(char *out, size_t outlen) { xdg_dir("XDG_DATA_HOME", ".local/share", out, outlen); }
+
+static void config_path(char *out, size_t outlen) {
+    char dir[3072];
+    xdg_dir("XDG_CONFIG_HOME", ".config", dir, sizeof(dir));
+    snprintf(out, outlen, "%s/chiron.conf", dir);
+}
+
+static int mkdirs(const char *path) {
+    char p[4096];
+    snprintf(p, sizeof(p), "%s", path);
+    for (char *s = p + 1; *s; s++)
+        if (*s == '/') {
+            *s = 0;
+            if (mkdir(p, 0755) && errno != EEXIST) return -1;
+            *s = '/';
+        }
+    return mkdir(p, 0755) && errno != EEXIST ? -1 : 0;
+}
+
+int install_config_get(const char *key, char *out, size_t outlen) {
+    char path[4096], line[4200];
+    config_path(path, sizeof(path));
+    FILE *f = fopen(path, "r");
+    int found = 0;
+    size_t klen = strlen(key);
+    while (f && !found && fgets(line, sizeof(line), f)) {
+        char *s = line;
+        while (*s == ' ' || *s == '\t') s++;
+        if (strncmp(s, key, klen)) continue;
+        s += klen;
+        while (*s == ' ' || *s == '\t') s++;
+        if (*s++ != '=') continue;
+        while (*s == ' ' || *s == '\t') s++;
+        size_t n = strcspn(s, "\r\n");
+        snprintf(out, outlen, "%.*s", (int)n, s);
+        found = 1;
+    }
+    if (f) fclose(f);
+    return found;
+}
+
+int install_config_set(const char *key, const char *value) {
+    char path[4096], tmp[4200], line[4200], dir[4096];
+    xdg_dir("XDG_CONFIG_HOME", ".config", dir, sizeof(dir));
+    if (mkdirs(dir)) return -1;
+    config_path(path, sizeof(path));
+    snprintf(tmp, sizeof(tmp), "%s.new", path);
+    FILE *in = fopen(path, "r"), *out = fopen(tmp, "w");
+    if (!out) {
+        if (in) fclose(in);
+        return -1;
+    }
+    if (!in) fprintf(out, "# Chiron settings\n");
+    size_t klen = strlen(key);
+    int written = 0;
+    while (in && fgets(line, sizeof(line), in)) {
+        const char *s = line + strspn(line, " \t");
+        if (!strncmp(s, key, klen) && strchr(" \t=", s[klen])) {
+            if (!written) fprintf(out, "%s = %s\n", key, value);
+            written = 1;
+        } else {
+            fputs(line, out);
+        }
+    }
+    if (!written) fprintf(out, "%s = %s\n", key, value);
+    if (in) fclose(in);
+    if (fclose(out)) return -1;
+    return rename(tmp, path);
+}
+
+// ---- Finding the game --------------------------------------------------------
+
+// The file `name` in `dir`, ignoring case. Returns 1 if found.
+static int find_in_dir(const char *dir, const char *name, char *out, size_t outlen) {
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    int found = 0;
+    while (d && !found && (e = readdir(d)))
+        if (!strcasecmp(e->d_name, name)) {
+            snprintf(out, outlen, "%s/%s", dir, e->d_name);
+            found = 1;
+        }
+    if (d) closedir(d);
+    return found;
+}
+
+int install_check_dir(const char *dir, const struct known_build **build, char hash[65]) {
+    char exe[8192];
+    *build = NULL;
+    if (!find_in_dir(dir, "terranx.exe", exe, sizeof(exe))) return 0;
+    *build = install_identify(exe, hash);
+    return 1;
+}
+
+// Search `dir` and the folders below it, `depth` levels deep, for a supported
+// copy of the game. Wine prefixes are searched too, but not Windows itself.
+static int search(const char *dir, int depth, char *out, size_t outlen, char *unknown, size_t unknown_len) {
+    const struct known_build *build;
+    char hash[65];
+    if (install_check_dir(dir, &build, hash)) {
+        if (build) {
+            snprintf(out, outlen, "%s", dir);
+            return 1;
+        }
+        if (unknown && !*unknown) snprintf(unknown, unknown_len, "%s (sha256 %s)", dir, hash);
+    }
+    if (depth <= 0) return 0;
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    struct dirent *e;
+    int found = 0;
+    while (!found && (e = readdir(d))) {
+        if (e->d_name[0] == '.' && strcmp(e->d_name, ".wine")) continue;
+        if (!strcasecmp(e->d_name, "windows") || !strcasecmp(e->d_name, "node_modules")) continue;
+        char sub[4096];
+        struct stat st;
+        if ((size_t)snprintf(sub, sizeof(sub), "%s/%s", dir, e->d_name) >= sizeof(sub)) continue;
+        if (lstat(sub, &st) || !S_ISDIR(st.st_mode)) continue;  // no symlinks: they can loop
+        found = search(sub, depth - 1, out, outlen, unknown, unknown_len);
+    }
+    closedir(d);
+    return found;
+}
+
+int install_find_game(const char *start, int depth, char *out, size_t outlen, char *unknown, size_t unknown_len) {
+    if (unknown && unknown_len) *unknown = 0;
+    return search(start, depth, out, outlen, unknown, unknown_len);
+}
+
+int install_autodetect(char *out, size_t outlen) {
+    const char *home = getenv("HOME");
+    if (!home) return 0;
+    // Where GOG installs usually end up on Linux: Wine prefixes made by hand,
+    // by Lutris or by Heroic, or an installer unpacked into the home folder.
+    static const char *const roots[] = {"Games", "GOG Games", ".wine/drive_c", "Downloads"};
+    for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
+        char root[4096];
+        snprintf(root, sizeof(root), "%s/%s", home, roots[i]);
+        if (install_find_game(root, 6, out, outlen, NULL, 0)) return 1;
+    }
+    return 0;
+}
+
+// Unpack a GOG offline installer with innoextract into `dest`.
+static int unpack_installer(const char *installer, const char *dest) {
+    if (mkdirs(dest)) {
+        fprintf(stderr, "chiron: cannot create %s: %s\n", dest, strerror(errno));
+        return -1;
+    }
+    fprintf(stderr, "chiron: unpacking %s into %s\n", installer, dest);
+    pid_t pid = fork();
+    if (pid == 0) {
+        execlp("innoextract", "innoextract", "--silent", "--progress", "--output-dir", dest, installer, (char *)NULL);
+        _exit(127);
+    }
+    int status;
+    if (pid < 0 || waitpid(pid, &status, 0) < 0) return -1;
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 127) {
+        fprintf(stderr, "chiron: innoextract is needed to unpack the installer; install it and try again\n");
+        return -1;
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status)) {
+        fprintf(stderr, "chiron: innoextract failed\n");
+        return -1;
+    }
+    return 0;
+}
+
+int install_setup(const char *path, char *game_dir, size_t game_dir_len) {
+    struct stat st;
+    char unknown[4200], search_from[4096];
+    if (stat(path, &st)) {
+        fprintf(stderr, "chiron: %s: %s\n", path, strerror(errno));
+        return -1;
+    }
+    if (S_ISDIR(st.st_mode)) {
+        snprintf(search_from, sizeof(search_from), "%s", path);
+    } else {
+        // An installer: unpack it into Chiron's own folder.
+        char data[3072];
+        install_data_dir(data, sizeof(data));
+        snprintf(search_from, sizeof(search_from), "%s/game", data);
+        DIR *d = opendir(search_from);
+        int empty = 1;
+        struct dirent *e;
+        while (d && empty && (e = readdir(d))) empty = !strcmp(e->d_name, ".") || !strcmp(e->d_name, "..");
+        if (d) closedir(d);
+        if (!empty) {
+            fprintf(stderr, "chiron: %s is not empty; move it away first, or run --setup on a game folder\n",
+                    search_from);
+            return -1;
+        }
+        if (unpack_installer(path, search_from)) return -1;
+    }
+    if (!install_find_game(search_from, 6, game_dir, game_dir_len, unknown, sizeof(unknown))) {
+        if (*unknown)
+            fprintf(stderr, "chiron: found terranx.exe in %s, but not a version Chiron supports.\n", unknown);
+        else
+            fprintf(stderr, "chiron: no terranx.exe found in %s\n", search_from);
+        return -1;
+    }
+    if (install_config_set("game", game_dir)) {
+        fprintf(stderr, "chiron: cannot write the config file: %s\n", strerror(errno));
+        return -1;
+    }
+    return 0;
 }

@@ -65,11 +65,26 @@ void *win32_dll_export(const struct shim_dll *dll, const char *name, int ordinal
 void win32_set_last_error(DWORD err);
 DWORD win32_get_last_error(void);
 
-// Paths (path.c): the game sees the game folder as drive C:.
-void path_init(const char *game_root);
+// Paths (path.c): the game sees drive C: as the game folder with the user
+// folder layered on top; everything the game writes lands in the user folder.
+// An empty user folder means writes go to the game folder itself.
+void path_init(const char *game_root, const char *user_root);
 const char *path_game_root(void);
-// Translate a Windows path into a host path, matching each component
-// case-insensitively. Returns 0 on success; the last component may not exist.
+const char *path_user_root(void);
+// Translate a Windows path into a host path for reading, matching each
+// component case-insensitively: the user folder's file if it has one, else the
+// game folder's. Returns 0 on success; the last component may not exist.
 int path_to_host(const char *winpath, char *out, size_t outlen);
+// The host path to write a Windows path to, in the user folder. Folders on the
+// way are created there if the game folder has them. With copy_up, a file that
+// only the game folder has is copied first, so it can be changed in place.
+int path_to_host_write(const char *winpath, char *out, size_t outlen, int copy_up);
+// Whether a host path from path_to_host lies in the user folder.
+int path_in_user_layer(const char *host);
+int path_copy_file(const char *from, const char *to);
+// The names in a folder, both layers merged and sorted ignoring case (the
+// array and each name are malloc'd). Returns the count, or -1 if no layer
+// has the folder.
+int path_list_dir(const char *winpath, char ***names);
 const char *path_get_cwd(void);
 int path_set_cwd(const char *winpath);

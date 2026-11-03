@@ -20,9 +20,32 @@ checks the SHA-256 of `terranx.exe` at start-up:
 |---|---|
 | Alien Crossfire 2.0, GOG *Planetary Pack* | `01901cbf7196b0c5d0df9540a029520f5df8fd9a6b343deef8b5663872805fcf` |
 
-Point Chiron at the folder containing `terranx.exe` (the GOG install, or a
-GOG offline installer unpacked with `innoextract`). Chiron never copies or
-distributes game files, and this repository must never contain them.
+Chiron never copies or distributes game files, and this repository must
+never contain them.
+
+## Setting up
+
+Tell Chiron once where your copy of the game is:
+
+```sh
+chiron --setup "/path/to/Sid Meier's Alpha Centauri Planetary Pack"
+chiron --setup ~/Games/gog/alpha-centauri      # a folder above it, such as a Wine prefix
+chiron --setup setup_sid_meiers_alpha_centauri_2.0.2.23.exe   # GOG offline installer
+```
+
+A folder is searched for `terranx.exe`. An installer is unpacked with
+[innoextract](https://constexpr.org/innoextract/) into
+`~/.local/share/chiron/game`. Either way the game folder is remembered in
+`~/.config/chiron/chiron.conf`. Without a setup, Chiron looks in
+`~/.local/share/chiron/game` and then in the usual places for GOG games
+(`~/Games`, `~/GOG Games`, `~/.wine`, `~/Downloads`) and remembers what it
+finds.
+
+Chiron never writes to the game folder. Saves, the game's settings
+(`Alpha Centauri.ini`) and its temporary files go to
+`~/.local/share/chiron/user`, which the game sees layered over its own
+folder: a file there takes the place of the game folder's copy. Saves that
+are already in the game folder stay visible to the game.
 
 ## Building
 
@@ -39,7 +62,9 @@ ctest --test-dir build      # loader tests; no game files needed
 ## Running
 
 ```sh
-./build/chiron --game "/path/to/Sid Meier's Alpha Centauri Planetary Pack"
+./build/chiron              # the game set up with --setup, or found
+./build/chiron --game DIR   # another game folder, for this run only
+./build/chiron --user DIR   # another folder for saves and settings
 ./build/chiron --trace      # log every Windows call the game makes
 ```
 

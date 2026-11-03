@@ -9,7 +9,7 @@ endif()
 # Each test program is a freestanding Win32 executable linked only against
 # kernel32, like the game.
 set(TEST_PES)
-foreach(name hello seh)
+foreach(name hello seh overlay)
   set(exe ${CMAKE_CURRENT_BINARY_DIR}/${name}.exe)
   add_custom_command(
     OUTPUT ${exe}
@@ -29,6 +29,9 @@ endforeach()
 add_test(NAME seh
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_hello.sh $<TARGET_FILE:chiron>
                  ${CMAKE_CURRENT_BINARY_DIR}/seh.exe preferred)
+add_test(NAME overlay
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_hello.sh $<TARGET_FILE:chiron>
+                 ${CMAKE_CURRENT_BINARY_DIR}/overlay.exe overlay)
 
 # Every shim must pop as many argument bytes as the Windows function it
 # replaces; mingw's import libraries record the real sizes.

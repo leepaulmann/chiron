@@ -1,4 +1,5 @@
 // chiron: run SMAC/SMACX natively from the player's own installation.
+#include <SDL.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -24,7 +25,11 @@ static int known_build;
 static void usage(void) {
     fprintf(stderr,
             "usage: chiron [options] [-- game arguments]\n"
-            "  --game DIR           game folder (default: $CHIRON_GAME_DIR or ~/.local/share/chiron/game)\n"
+            "       chiron --setup PATH\n"
+            "  --setup PATH         remember where the game is: its folder, a folder above it\n"
+            "                       (such as a Wine prefix), or a GOG offline installer to unpack\n"
+            "  --game DIR           game folder for this run (default: the one set up, or found)\n"
+            "  --user DIR           folder for saves and settings (default: ~/.local/share/chiron/user)\n"
             "  --exe NAME           executable inside the game folder (default: terranx.exe)\n"
             "  --screen WxH         screen size reported to the game (default: 1024x768)\n"
             "  --volume N           master volume, 0-100 (default: 100)\n"
@@ -69,15 +74,46 @@ static void *game_thread(void *arg) {
     return NULL;
 }
 
+// Tell the player, also when Chiron was started from a desktop launcher and
+// nobody sees its output.
+static void report_problem(const char *text) {
+    fprintf(stderr, "chiron: %s\n", text);
+    if (!isatty(2)) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Chiron", text, NULL);
+}
+
+// The game folder: --game, $CHIRON_GAME_DIR, the one set up, Chiron's own
+// folder, or one found where GOG installs usually are (then remembered).
+static int choose_game_dir(char *out, size_t outlen) {
+    const char *env = getenv("CHIRON_GAME_DIR");
+    if (env && *env) {
+        snprintf(out, outlen, "%s", env);
+        return 0;
+    }
+    if (install_config_get("game", out, outlen) && *out) return 0;
+    char data[3072];
+    const struct known_build *build;
+    char hash[65];
+    install_data_dir(data, sizeof(data));
+    snprintf(out, outlen, "%s/game", data);
+    if (install_check_dir(out, &build, hash)) return 0;
+    if (install_autodetect(out, outlen)) {
+        fprintf(stderr, "chiron: found the game in %s\n", out);
+        if (install_config_set("game", out) == 0) fprintf(stderr, "chiron: remembered it for next time\n");
+        return 0;
+    }
+    return -1;
+}
+
 int main(int argc, char **argv) {
-    char game_dir[4096];
-    const char *exe_name = "terranx.exe";
+    char game_dir[4096] = "", user_dir[4096] = "";
+    const char *exe_name = "terranx.exe", *setup = NULL;
     int allow_unknown = 0;
-    install_default_dir(game_dir, sizeof(game_dir));
 
     int i = 1;
     for (; i < argc; i++) {
         if (!strcmp(argv[i], "--game") && i + 1 < argc) snprintf(game_dir, sizeof(game_dir), "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--user") && i + 1 < argc) snprintf(user_dir, sizeof(user_dir), "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--setup") && i + 1 < argc) setup = argv[++i];
         else if (!strcmp(argv[i], "--exe") && i + 1 < argc) exe_name = argv[++i];
         else if (!strcmp(argv[i], "--trace")) modules_trace = 1;
         else if (!strcmp(argv[i], "--screen") && i + 1 < argc &&
@@ -88,14 +124,37 @@ int main(int argc, char **argv) {
         else { usage(); return 2; }
     }
 
+    if (setup) {
+        if (install_setup(setup, game_dir, sizeof(game_dir))) return 1;
+        fprintf(stderr, "chiron: set up the game in %s\nRun chiron to play.\n", game_dir);
+        return 0;
+    }
+    if (!*game_dir && choose_game_dir(game_dir, sizeof(game_dir))) {
+        report_problem("Chiron could not find Alpha Centauri.\n\n"
+                       "Run \"chiron --setup PATH\" with the folder of your installed copy (GOG), "
+                       "or with the GOG offline installer.");
+        return 1;
+    }
+    if (!*user_dir) {
+        const char *env = getenv("CHIRON_USER_DIR");
+        if (env && *env) {
+            snprintf(user_dir, sizeof(user_dir), "%s", env);
+        } else {
+            char data[3072];
+            install_data_dir(data, sizeof(data));
+            snprintf(user_dir, sizeof(user_dir), "%s/user", data);
+        }
+    }
+
     if (audio_volume < 0) audio_volume = 0;
     if (audio_volume > 100) audio_volume = 100;
-    path_init(game_dir);
+    path_init(game_dir, user_dir);
     char exe_path[4096], hash[65];
     if (path_to_host(exe_name, exe_path, sizeof(exe_path)) || access(exe_path, R_OK)) {
-        fprintf(stderr, "chiron: %s not found in %s\n"
-                        "Point --game at the folder of your installed copy of the game.\n",
-                exe_name, game_dir);
+        char msg[8400];
+        snprintf(msg, sizeof(msg), "%s not found in %s.\n\nRun \"chiron --setup PATH\" with the folder of "
+                 "your installed copy of the game.", exe_name, game_dir);
+        report_problem(msg);
         return 1;
     }
     const struct known_build *build = install_identify(exe_path, hash);
@@ -105,9 +164,10 @@ int main(int argc, char **argv) {
     } else if (allow_unknown) {
         fprintf(stderr, "chiron: warning: unrecognised %s (sha256 %s)\n", exe_name, hash);
     } else {
-        fprintf(stderr, "chiron: %s (sha256 %s) is not a supported version of the game.\n"
-                        "Chiron needs an original, purchased copy; see README.md.\n",
-                exe_name, hash);
+        char msg[512];
+        snprintf(msg, sizeof(msg), "%s (sha256 %s) is not a supported version of the game.\n"
+                 "Chiron needs an original, purchased copy; see README.md.", exe_name, hash);
+        report_problem(msg);
         return 1;
     }
 
