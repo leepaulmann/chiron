@@ -46,9 +46,9 @@ ctest --test-dir build      # loader tests; no game files needed
 ## Status
 
 Early development. The game runs from the main menu into a game (tested
-with Quick Start), drawn by Chiron's GDI in an SDL window, with sound
-effects, music and voice-overs through Chiron's DirectSound, and plays the
-game's movies (decoded by the game itself) through Chiron's DirectDraw.
+with Quick Start), saves and loads games, and is drawn by Chiron's GDI in an
+SDL window, with sound effects, music and voice-overs through Chiron's
+DirectSound. It plays the game's movies (decoded by the game itself) through Chiron's DirectDraw.
 Multiplayer is not implemented yet.
 
 Options: `--screen WxH` sets the screen size the game sees and
@@ -58,7 +58,9 @@ For debugging, `--trace` logs Windows calls, `CHIRON_SNAPSHOT=file.bmp`
 saves the screen as it is presented (`tools/bmp2png.py` converts it),
 `CHIRON_AUDIO_DUMP=file` records the audio mix as raw 44.1 kHz stereo, and
 `CHIRON_SCRIPT="30 click 835 362; 50 close"` drives the game unattended
-(`"40 every 1 key Return"` repeats a step). `CHIRON_SOAK=1` reports the turn,
+(actions are `click X Y`, `dblclick X Y`, `move X Y`, `key NAME` or
+`key Ctrl+NAME`, `type TEXT` and `close`; `"40 every 1 key Return"` repeats a
+step). `CHIRON_SOAK=1` reports the turn,
 memory and CPU every 30 seconds; `CHIRON_SOAK=ai` also hands your faction to
 the AI so a game plays itself:
 
