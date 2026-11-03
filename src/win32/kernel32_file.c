@@ -234,7 +234,8 @@ UINT WINAPI GetDriveTypeA(const char *root) {
 
 struct find {
     struct kobj obj;
-    DIR *dir;
+    struct dirent **names;  // sorted, as NTFS returns them
+    int count, next;
     char host_dir[4096];
     char pattern[260];
 };
@@ -251,9 +252,19 @@ static int win_match(const char *pattern, const char *name) {
     return fnmatch(pattern, name, FNM_CASEFOLD) == 0;
 }
 
+static int by_name_nocase(const struct dirent **a, const struct dirent **b) {
+    return strcasecmp((*a)->d_name, (*b)->d_name);
+}
+
+static void find_free(struct find *f) {
+    for (int i = 0; i < f->count; i++) free(f->names[i]);
+    free(f->names);
+    free(f);
+}
+
 static int find_next(struct find *f, struct win32_find_data *out) {
-    struct dirent *e;
-    while ((e = readdir(f->dir))) {
+    while (f->next < f->count) {
+        struct dirent *e = f->names[f->next++];
         if (!win_match(f->pattern, e->d_name)) continue;
         char full[8192];
         struct stat st;
@@ -283,14 +294,14 @@ HANDLE WINAPI FindFirstFileA(const char *spec, struct win32_find_data *data) {
     struct find *f = calloc(1, sizeof(*f));
     f->obj.type = KOBJ_FIND;
     snprintf(f->pattern, sizeof(f->pattern), "%s", sep ? sep + 1 : spec);
-    if (host_path(dir, f->host_dir, sizeof(f->host_dir)) || !(f->dir = opendir(f->host_dir))) {
+    if (host_path(dir, f->host_dir, sizeof(f->host_dir)) ||
+        (f->count = scandir(f->host_dir, &f->names, NULL, by_name_nocase)) < 0) {
         free(f);
         win32_set_last_error(ERROR_PATH_NOT_FOUND);
         return INVALID_HANDLE_VALUE;
     }
     if (!find_next(f, data)) {
-        closedir(f->dir);
-        free(f);
+        find_free(f);
         win32_set_last_error(ERROR_FILE_NOT_FOUND);
         return INVALID_HANDLE_VALUE;
     }
@@ -311,8 +322,7 @@ BOOL WINAPI FindClose(HANDLE h) {
     struct find *f = handle_get(h, KOBJ_FIND);
     if (!f) return FALSE;
     handle_take(h);
-    closedir(f->dir);
-    free(f);
+    find_free(f);
     return TRUE;
 }
 
@@ -381,7 +391,7 @@ BOOL WINAPI CloseHandle(HANDLE h) {
         if (((struct mapping *)o)->fd >= 0) close(((struct mapping *)o)->fd);
         free(o);
         break;
-    case KOBJ_FIND: closedir(((struct find *)o)->dir); free(o); break;
+    case KOBJ_FIND: find_free((struct find *)o); break;
     case KOBJ_EVENT:
     case KOBJ_THREAD: kernel32_close_waitable(o); break;
     case KOBJ_HEAP: free(o); break;

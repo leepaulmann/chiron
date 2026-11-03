@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 #include "../loader/modules.h"
@@ -420,13 +421,15 @@ void user32_present_if_due(void) {
 
 // CHIRON_SCRIPT drives the game for unattended testing. It is a list of
 // "<seconds> <action>" steps separated by ';', where an action is
-// "click X Y" (left click in screen coordinates), "key NAME" (an SDL key
-// name such as Return or Escape) or "close" (the window's close button).
+// "click X Y" (left click in screen coordinates), "dblclick X Y",
+// "move X Y", "key NAME" (an SDL key name such as Return or Escape,
+// optionally "Ctrl+NAME"), "type TEXT" (typed characters, up to the next
+// ';') or "close" (the window's close button).
 // "<seconds> every <interval> <action>" repeats an action from then on:
 //   CHIRON_SCRIPT="25 click 835 362; 40 every 0.5 key Return; 600 close"
 // Keys stay down for 150 ms, like a real press, so code that polls
 // GetAsyncKeyState sees them held.
-static SDL_Keycode held_key;
+static SDL_Keycode held_key, held_mod;
 static Uint32 release_at;
 
 static void push_key(SDL_Keycode k, int down) {
@@ -436,23 +439,46 @@ static void push_key(SDL_Keycode k, int down) {
     SDL_PushEvent(&e);
 }
 
+static void release_keys(void) {
+    if (held_key) push_key(held_key, 0);
+    if (held_mod) push_key(held_mod, 0);
+    held_key = held_mod = 0;
+}
+
+static void push_click(int x, int y, int clicks) {
+    SDL_Event e = {.type = SDL_MOUSEMOTION};
+    e.motion.x = x, e.motion.y = y;
+    SDL_PushEvent(&e);
+    e = (SDL_Event){.type = SDL_MOUSEBUTTONDOWN};
+    e.button.button = SDL_BUTTON_LEFT, e.button.state = SDL_PRESSED, e.button.clicks = clicks;
+    e.button.x = x, e.button.y = y;
+    SDL_PushEvent(&e);
+    e.type = SDL_MOUSEBUTTONUP, e.button.state = SDL_RELEASED;
+    SDL_PushEvent(&e);
+}
+
 static void run_action(const char *step) {
     int x, y;
     char name[64];
     if (sscanf(step, " click %d %d", &x, &y) == 2) {
+        push_click(x, y, 1);
+    } else if (sscanf(step, " move %d %d", &x, &y) == 2) {
         SDL_Event e = {.type = SDL_MOUSEMOTION};
         e.motion.x = x, e.motion.y = y;
         SDL_PushEvent(&e);
-        e = (SDL_Event){.type = SDL_MOUSEBUTTONDOWN};
-        e.button.button = SDL_BUTTON_LEFT, e.button.state = SDL_PRESSED, e.button.clicks = 1;
-        e.button.x = x, e.button.y = y;
-        SDL_PushEvent(&e);
-        e.type = SDL_MOUSEBUTTONUP, e.button.state = SDL_RELEASED;
+    } else if (sscanf(step, " dblclick %d %d", &x, &y) == 2) {
+        push_click(x, y, 1);
+        push_click(x, y, 2);
+    } else if (sscanf(step, " type %31[^;]", name) == 1) {
+        SDL_Event e = {.type = SDL_TEXTINPUT};
+        snprintf(e.text.text, sizeof(e.text.text), "%.31s", name);
         SDL_PushEvent(&e);
     } else if (sscanf(step, " key %63[^;]", name) == 1) {
-        SDL_Keycode k = SDL_GetKeyFromName(name);
+        int ctrl = !strncasecmp(name, "Ctrl+", 5);
+        SDL_Keycode k = SDL_GetKeyFromName(name + (ctrl ? 5 : 0));
         if (k != SDLK_UNKNOWN) {
-            if (held_key) push_key(held_key, 0);
+            release_keys();
+            if (ctrl) push_key(held_mod = SDLK_LCTRL, 1);
             push_key(k, 1);
             held_key = k;
             release_at = SDL_GetTicks() + 150;
@@ -481,10 +507,7 @@ static void run_test_script(void) {
         next = getenv("CHIRON_SCRIPT");
         t0 = SDL_GetTicks();
     }
-    if (held_key && SDL_TICKS_PASSED(SDL_GetTicks(), release_at)) {
-        push_key(held_key, 0);
-        held_key = 0;
-    }
+    if (held_key && SDL_TICKS_PASSED(SDL_GetTicks(), release_at)) release_keys();
     while (next && *next) {
         double at;
         int used;
@@ -523,6 +546,7 @@ static void pump_sdl(int wait_ms) {
     if (wait_ms != 0 && SDL_WaitEventTimeout(&e, wait_ms < 0 ? 100 : wait_ms)) handle_sdl_event(&e);
     while (SDL_PollEvent(&e)) handle_sdl_event(&e);
     ddraw_present_pending();
+    sdl_host_snapshot_tick();
 }
 
 // Look for a message: posted/input first, then (on the SDL thread) timers,

@@ -7,6 +7,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "../loader/modules.h"
 #include "kernel32.h"
 #include "user32.h"
 
@@ -168,6 +169,7 @@ void *user32_listbox_proc(void) { return (void *)listbox_proc; }
 // file part is written back into path, as Windows does.
 int WINAPI DlgDirListA(HWND dlg, char *path, int list_id, int static_id, UINT type) {
     char spec[260] = "*.*";
+    if (modules_trace) fprintf(stderr, "[user32] DlgDirListA \"%s\" type=0x%x\n", path ? path : "", type);
     if (path && *path) {
         char *sep = NULL;
         for (char *p = path; *p; p++)
