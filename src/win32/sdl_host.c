@@ -72,7 +72,11 @@ void sdl_host_present(struct surface *fb, const char *title) {
             fprintf(stderr, "chiron: SDL_CreateWindow: %s\n", SDL_GetError());
             exit(1);
         }
-        renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+        // No vsync: presenting happens on the game's thread, and a hidden or
+        // occluded window can make a vsynced present block for a long time,
+        // slowing the whole game. user32 already limits presents to the
+        // display rate.
+        renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
         if (!renderer) renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
     }
     if (!texture || tex_w != fb->width || tex_h != fb->height) {

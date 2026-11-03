@@ -214,15 +214,19 @@ void user32_timers_destroyed(HWND hwnd) {
 }
 
 // Produce a WM_TIMER for the first due timer. Returns ms until the next one
-// is due (or -1 for none) when nothing fired.
-static int fire_timer(MSG *out, HWND hwnd) {
+// is due (or -1 for none) when nothing fired. Only a removing peek restarts
+// the timer, as on Windows: the game peeks without PM_REMOVE first, then
+// removes exactly that message and dispatches its MSG buffer without checking
+// the result, so a timer consumed by the first peek made it dispatch
+// uninitialised memory.
+static int fire_timer(MSG *out, HWND hwnd, int remove) {
     uint32_t now = SDL_GetTicks();
     int wait = -1;
     for (struct timer *t = timers; t; t = t->next) {
         if (hwnd && t->hwnd != hwnd) continue;
         int32_t left = (int32_t)(t->due - now);
         if (left <= 0) {
-            t->due = now + t->interval;
+            if (remove) t->due = now + t->interval;
             *out = (MSG){t->hwnd, WM_TIMER, t->id, (LPARAM)t->proc, now, cursor_pos};
             return 0;
         }
@@ -409,7 +413,7 @@ static void maybe_present(int force) {
     struct window *w = user32_main_window();
     if (!w || !screen_dirty || ddraw_owns_screen()) return;
     uint32_t now = SDL_GetTicks();
-    if (!force && now - last_present < 8) return;
+    if (!force && now - last_present < 16) return;  // about 60 per second
     last_present = now;
     screen_dirty = 0;
     sdl_host_present(user32_framebuffer(w), user32_title(w));
@@ -557,7 +561,7 @@ static int get_next(MSG *m, HWND hwnd, UINT lo, UINT hi, int remove, int *timer_
     if (current_tid() != sdl_tid) return 0;
     if ((!lo && !hi) || (lo <= WM_TIMER && hi >= WM_TIMER)) {
         MSG t;
-        int w = fire_timer(&t, hwnd);
+        int w = fire_timer(&t, hwnd, remove);
         if (w == 0) {
             *m = t;
             return 1;

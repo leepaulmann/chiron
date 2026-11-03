@@ -116,8 +116,33 @@ static struct window *focus, *active;
 #define WS_VISIBLE 0x10000000u
 #define CW_USEDEFAULT ((int)0x80000000)
 
+// Every live window, so a handle can be checked without reading through it:
+// the game sometimes passes stale or made-up handles, which Windows rejects.
+// A fixed table, so threads that post messages never see it reallocated.
+#define MAX_WINDOWS 1024
+static struct window *live[MAX_WINDOWS];
+static int live_end;  // slots past this have never been used
+
 static int is_window(struct window *w) {
-    return w && ((uintptr_t)w & 3) == 0 && (uintptr_t)w > 0x10000 && w->magic == WINDOW_MAGIC;
+    if (!w) return 0;
+    for (int i = 0; i < live_end; i++)
+        if (live[i] == w) return w->magic == WINDOW_MAGIC;
+    return 0;
+}
+
+static int add_live(struct window *w) {
+    for (int i = 0; i < MAX_WINDOWS; i++)
+        if (!live[i]) {
+            live[i] = w;
+            if (i >= live_end) live_end = i + 1;
+            return 1;
+        }
+    return 0;
+}
+
+static void remove_live(struct window *w) {
+    for (int i = 0; i < live_end; i++)
+        if (live[i] == w) live[i] = NULL;
 }
 
 static struct window *toplevel_of(struct window *w) {
@@ -170,6 +195,11 @@ HWND WINAPI CreateWindowExA(DWORD exstyle, const char *class_name, const char *t
     }
     struct window *w = calloc(1, sizeof(*w));
     w->magic = WINDOW_MAGIC;
+    if (!add_live(w)) {
+        fprintf(stderr, "chiron: CreateWindowExA: too many windows\n");
+        free(w);
+        return NULL;
+    }
     w->tid = teb_current()->tid;
     w->cls = cls;
     w->proc = cls->proc;
@@ -221,6 +251,20 @@ static void unlink_window(struct window *w) {
         }
 }
 
+// When the focused window goes away, Windows moves the focus to its parent,
+// or else to the active top-level window, rather than dropping keyboard
+// input until something calls SetFocus.
+static void focus_leaving(struct window *w) {
+    for (struct window *f = focus; f; f = f->parent)
+        if (f == w) {
+            struct window *next = w->parent ? w->parent : active != w ? active : NULL;
+            focus = next && next->visible ? next : user32_main_window();
+            if (focus == w) focus = NULL;
+            if (focus) user32_send(focus, 0x0007 /* WM_SETFOCUS */, 0, 0);
+            return;
+        }
+}
+
 BOOL WINAPI DestroyWindow(HWND hwnd) {
     struct window *w = hwnd;
     if (!is_window(w)) return FALSE;
@@ -229,9 +273,10 @@ BOOL WINAPI DestroyWindow(HWND hwnd) {
     user32_send(w, 0x0082 /* WM_NCDESTROY */, 0, 0);
     unlink_window(w);
     user32_timers_destroyed(w);
-    if (focus == w) focus = NULL;
     if (active == w) active = NULL;
+    focus_leaving(w);
     w->magic = 0;
+    remove_live(w);
     free(w->fb.bits);
     free(w->extra);
     free(w);
@@ -265,6 +310,7 @@ BOOL WINAPI ShowWindow(HWND hwnd, int cmd) {
     w->visible = cmd != 0;  // SW_HIDE = 0
     if (modules_trace) fprintf(stderr, "[user32] ShowWindow %s cmd=%d\n", w->cls->name, cmd);
     if (w->visible != was) user32_send(w, 0x0018 /* WM_SHOWWINDOW */, w->visible, 0);
+    if (!w->visible) focus_leaving(w);
     if (w->visible && !w->parent) {
         if (!active) {
             active = w;
