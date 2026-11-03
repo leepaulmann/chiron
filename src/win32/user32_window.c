@@ -63,6 +63,7 @@ WORD WINAPI RegisterClassA(const WNDCLASSA *wc) {
     struct wndclass *c = calloc(1, sizeof(*c));
     snprintf(c->name, sizeof(c->name), "%s", wc->class_name);
     c->style = wc->style;
+    if (modules_trace) fprintf(stderr, "[user32] RegisterClassA %s style=0x%x\n", wc->class_name, wc->style);
     c->proc = wc->proc;
     c->cls_extra = wc->cls_extra;
     c->wnd_extra = wc->wnd_extra;
@@ -107,7 +108,26 @@ struct window {
     uint8_t *extra;
     DWORD tid;          // owning thread
     struct surface fb;  // top-level windows only
+    HDC own_dc;         // CS_OWNDC classes: the one DC this window keeps
 };
+
+#define CS_OWNDC 0x0020u
+
+static int is_window(struct window *w);
+
+// A window of a CS_OWNDC class keeps one DC for its lifetime, so what the
+// game selects into it (its palette above all) stays selected between
+// GetDC calls. Other windows get a fresh DC each time.
+static HDC window_dc(struct window *w) {
+    if (!w || !(w->cls->style & CS_OWNDC)) return gdi_create_window_dc(w);
+    if (!w->own_dc) w->own_dc = gdi_create_window_dc(w);
+    return w->own_dc;
+}
+
+static void release_window_dc(struct window *w, HDC hdc) {
+    if (w && is_window(w) && hdc == w->own_dc) return;
+    gdi_release_window_dc(hdc);
+}
 
 static struct window *toplevels;
 static struct window *focus, *active;
@@ -275,6 +295,7 @@ BOOL WINAPI DestroyWindow(HWND hwnd) {
     user32_timers_destroyed(w);
     if (active == w) active = NULL;
     focus_leaving(w);
+    if (w->own_dc) gdi_release_window_dc(w->own_dc);
     w->magic = 0;
     remove_live(w);
     free(w->fb.bits);
@@ -499,7 +520,7 @@ HDC WINAPI BeginPaint(HWND hwnd, PAINTSTRUCT *ps) {
     struct window *w = hwnd;
     if (!is_window(w)) return NULL;
     memset(ps, 0, sizeof(*ps));
-    ps->hdc = gdi_create_window_dc(hwnd);
+    ps->hdc = window_dc(w);
     ps->paint = w->has_invalid ? w->invalid : (RECT){0, 0, 0, 0};
     if (w->erase && w->cls->background) {
         RECT all = {0, 0, w->rect.right - w->rect.left, w->rect.bottom - w->rect.top};
@@ -510,17 +531,17 @@ HDC WINAPI BeginPaint(HWND hwnd, PAINTSTRUCT *ps) {
 }
 
 BOOL WINAPI EndPaint(HWND hwnd, const PAINTSTRUCT *ps) {
-    gdi_release_window_dc(ps->hdc);
+    release_window_dc(hwnd, ps->hdc);
     return TRUE;
 }
 
 HDC WINAPI GetDC(HWND hwnd) {
     if (hwnd && !is_window(hwnd)) return NULL;
-    return gdi_create_window_dc(hwnd);
+    return window_dc(hwnd);
 }
 
 int WINAPI ReleaseDC(HWND hwnd, HDC hdc) {
-    gdi_release_window_dc(hdc);
+    release_window_dc(hwnd, hdc);
     return 1;
 }
 
