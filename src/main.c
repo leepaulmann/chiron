@@ -8,6 +8,7 @@
 #include <sys/ucontext.h>
 #include <unistd.h>
 
+#include "engine/hooks.h"
 #include "engine/patches.h"
 #include "install/install.h"
 #include "loader/modules.h"
@@ -21,6 +22,7 @@
 
 static struct pe_image *exe;
 static int known_build;
+static enum hook_mode reimpl_mode;
 
 static void usage(void) {
     fprintf(stderr,
@@ -33,6 +35,7 @@ static void usage(void) {
             "  --exe NAME           executable inside the game folder (default: terranx.exe)\n"
             "  --screen WxH         screen size reported to the game (default: 1024x768)\n"
             "  --volume N           master volume, 0-100 (default: 100)\n"
+            "  --original           run only the game's own code, none of Chiron's reimplementations\n"
             "  --trace              log every Win32 call the game makes\n"
             "  --allow-unknown-exe  run an executable whose checksum is not recognised\n");
 }
@@ -68,7 +71,10 @@ static void *game_thread(void *arg) {
         exit(1);
     }
     teb_set_image_base((uint32_t)exe->base);
-    if (known_build) patches_apply(exe);
+    if (known_build) {
+        patches_apply(exe);
+        hooks_apply(exe, reimpl_mode);
+    }
     // The MSVC entry point (WinMainCRTStartup) never returns; it calls ExitProcess.
     ((void(WINAPI *)(void))(exe->base + exe->entry_rva))();
     return NULL;
@@ -108,6 +114,7 @@ int main(int argc, char **argv) {
     char game_dir[4096] = "", user_dir[4096] = "";
     const char *exe_name = "terranx.exe", *setup = NULL;
     int allow_unknown = 0;
+    reimpl_mode = hooks_mode_from_env();
 
     int i = 1;
     for (; i < argc; i++) {
@@ -116,6 +123,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--setup") && i + 1 < argc) setup = argv[++i];
         else if (!strcmp(argv[i], "--exe") && i + 1 < argc) exe_name = argv[++i];
         else if (!strcmp(argv[i], "--trace")) modules_trace = 1;
+        else if (!strcmp(argv[i], "--original")) reimpl_mode = HOOKS_OFF;
         else if (!strcmp(argv[i], "--screen") && i + 1 < argc &&
                  sscanf(argv[++i], "%dx%d", &display_width, &display_height) == 2) {}
         else if (!strcmp(argv[i], "--volume") && i + 1 < argc) audio_volume = atoi(argv[++i]);

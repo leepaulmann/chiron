@@ -93,6 +93,21 @@ the AI so a game plays itself:
 CHIRON_SOAK=ai CHIRON_SCRIPT="30 click 835 362; 40 every 1 key Return" ./build/chiron
 ```
 
+## Reimplemented code
+
+Chiron replaces the game's own functions with open reimplementations, one
+module at a time. So far: the technology queries (whether a faction has or
+can research a tech, tech levels, categories and prerequisites).
+
+`--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
+on every call, returns the original's answer, and logs any difference; once
+a game turn it also checks every function over its whole input range. It
+prints a summary of calls and mismatches at exit:
+
+```sh
+CHIRON_REIMPL=shadow CHIRON_SOAK=ai CHIRON_SCRIPT="30 click 835 362; 40 every 1 key Return" ./build/chiron
+```
+
 ## Licence
 
 Chiron is free software under the GNU General Public License, version 3 or
@@ -111,8 +126,9 @@ are preserved alongside Chiron's GPL header.
 - `src/loader/`: maps PE images, applies relocations, binds imports to
   Chiron's shims, and gives each thread a Windows TEB through `%fs`.
 - `src/win32/`: Windows API shims, one directory of functions per DLL, kept
-  only as wide as the game needs. The game folder appears as drive `C:` with
-  case-insensitive file names.
+  only as wide as the game needs. Drive `C:` is the game folder with the user
+  folder layered on top, with case-insensitive file names.
 - `src/install/`: finds and verifies your copy of the game.
-- `src/engine/`: (planned) open reimplementations of the game's functions,
-  swapped in one at a time and checked against the original.
+- `src/engine/`: open reimplementations of the game's functions, swapped in
+  one at a time (`hooks.c`) and checked against the original in shadow mode;
+  also fixes for bugs in the original (`patches.c`).

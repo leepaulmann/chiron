@@ -1,3 +1,8 @@
+# Reimplemented game functions, tested on made-up data.
+add_executable(engine_tech engine_tech.c ${CMAKE_SOURCE_DIR}/src/engine/tech.c ${CMAKE_SOURCE_DIR}/src/engine/hooks.c
+               ${CMAKE_SOURCE_DIR}/src/engine/code.c ${CMAKE_SOURCE_DIR}/src/engine/game.c)
+add_test(NAME engine_tech COMMAND engine_tech)
+
 # Loader tests use a small Win32 program built with mingw, so they run without
 # any game files.
 find_program(MINGW_CC i686-w64-mingw32-gcc)

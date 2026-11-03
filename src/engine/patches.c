@@ -1,36 +1,13 @@
 #include "patches.h"
 
+#include "code.h"
+
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/mman.h>
 
 // Patches target terranx.exe 2.0 at its preferred base. Addresses follow the
 // naming used by OpenSMACX and Thinker.
-
-static uint8_t *stub_arena, *stub_end;
-
-static uint8_t *stub_alloc(size_t n) {
-    if (!stub_arena || stub_arena + n > stub_end) {
-        stub_arena = mmap(NULL, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (stub_arena == MAP_FAILED) return NULL;
-        stub_end = stub_arena + 0x1000;
-    }
-    uint8_t *p = stub_arena;
-    stub_arena += (n + 15) & ~15u;
-    return p;
-}
-
-static void put_rel32(uint8_t *at, uint8_t opcode, uint32_t target) {
-    at[0] = opcode;
-    *(int32_t *)(at + 1) = (int32_t)(target - ((uint32_t)at + 5));
-}
-
-static int bytes_match(struct pe_image *exe, uint32_t addr, const uint8_t *expect, size_t n) {
-    if (addr < exe->pref_base || addr + n > exe->pref_base + exe->size) return 0;
-    uint8_t *p = exe->base + (addr - exe->pref_base);
-    return !memcmp(p, expect, n);
-}
 
 // game_data (0x5A6AC0) saves and loads games. It keeps the save header on the
 // stack without initialising it, writes it to the file as-is, then checks the
@@ -43,9 +20,9 @@ static int bytes_match(struct pe_image *exe, uint32_t addr, const uint8_t *expec
 static int patch_game_data_header(struct pe_image *exe) {
     const uint32_t site = 0x5a6aeb, resume = 0x5a6af0;
     static const uint8_t original[] = {0x68, 0x1c, 0x03, 0x00, 0x00};  // push 0x31c
-    if (!bytes_match(exe, site, original, sizeof(original))) return -1;
+    if (!code_matches(exe, site, original, sizeof(original))) return -1;
 
-    uint8_t *s = stub_alloc(48), *p = s;
+    uint8_t *s = code_stub_alloc(48), *p = s;
     if (!s) return -1;
     *p++ = 0x9c;                                                   // pushfd: the next jump uses flags
     *p++ = 0x60;                                                   // pushad
@@ -62,9 +39,9 @@ static int patch_game_data_header(struct pe_image *exe) {
     *p++ = 0x9d;                                                   // popfd
     memcpy(p, original, sizeof(original));                         // the instruction we replaced
     p += sizeof(original);
-    put_rel32(p, 0xe9, (uint32_t)exe->base + (resume - exe->pref_base));  // jmp back
+    code_put_rel32(p, 0xe9, (uint32_t)code_at(exe, resume));  // jmp back
 
-    put_rel32(exe->base + (site - exe->pref_base), 0xe9, (uint32_t)s);
+    code_put_rel32(code_at(exe, site), 0xe9, (uint32_t)s);
     return 0;
 }
 

@@ -51,8 +51,12 @@ shim_exports(ddraw_exports DDRAW.dll src/win32/ddraw.c)
 add_executable(chiron
   src/main.c
   src/install/install.c
+  src/engine/code.c
+  src/engine/game.c
+  src/engine/hooks.c
   src/engine/patches.c
   src/engine/soak.c
+  src/engine/tech.c
   src/loader/pe.c
   src/loader/teb.c
   src/loader/thunks.c
