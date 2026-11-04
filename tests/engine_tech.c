@@ -8,8 +8,36 @@
 
 static struct rules_tech tree[TECH_COUNT];
 static uint8_t achieved[TECH_COUNT];
-static int32_t expansion;
+static int32_t expansion, turn, discovery_rate = 100, difficulty = 3, area_sqrt = 56, cloud, language;
+static int32_t gender, plural;
+static uint32_t rules;
+static uint8_t humans;
+static struct faction_data factions[FACTION_COUNT];
+static struct faction_def defs[FACTION_COUNT];
+static struct unit_proto protos[PROTO_COUNT];
+static struct rules_weapon weapons[WEAPON_COUNT];
+static struct rules_armor armor[ARMOR_COUNT];
+static struct rules_reactor reactors[REACTOR_COUNT];
+static struct rules_chassis chassis[CHASSIS_COUNT];
+static struct rules_facility facilities[FACILITY_COUNT];
+static struct continent continents[REGION_COUNT];
+static char *label_table[700], **labels = label_table, tech_name_buf[80];
 static int failures;
+
+// The string table hands back the strings it is given.
+static char *__attribute__((thiscall)) strings_get(void *table, char *s) { return s; }
+static int no_climax(void) { return 0; }
+static int budget(int faction, int condition, int check_mode) { return 1; }
+static int peaceful(int faction, int other, int odds) { return 0; }
+
+#define EXPECT_STR(expr, want)                                                   \
+    do {                                                                         \
+        const char *got_ = (expr);                                               \
+        if (strcmp(got_, (want))) {                                              \
+            printf("FAIL %s = \"%s\", expected \"%s\"\n", #expr, got_, want);     \
+            failures++;                                                          \
+        }                                                                        \
+    } while (0)
 
 #define EXPECT(expr, want)                                                       \
     do {                                                                         \
@@ -87,6 +115,126 @@ int main(void) {
     EXPECT(tech_infra(TECH_COUNT + 5), 1);
     EXPECT(tech_colonize(0), 1);
     EXPECT(tech_colonize(TECH_COUNT), 1);
+
+    // The faction and rules tables for the rest.
+    game_factions = factions;
+    game_faction_defs = defs;
+    game_human_factions = &humans;
+    game_protos = protos;
+    game_weapons = weapons;
+    game_armor = armor;
+    game_reactors = reactors;
+    game_chassis = chassis;
+    game_facilities = facilities;
+    game_continents = continents;
+    game_tech_discovery_rate = &discovery_rate;
+    game_rules = &rules;
+    game_difficulty = &difficulty;
+    game_map_area_sqrt = &area_sqrt;
+    game_cloud_cover = &cloud;
+    game_language = &language;
+    game_parse_gender = &gender;
+    game_parse_plural = &plural;
+    game_labels = &labels;
+    game_strings_get = strings_get;
+    game_tech_name_buffer = tech_name_buf;
+    game_climactic_battle = no_climax;
+    game_weapon_budget = budget;
+    game_wants_to_attack = peaceful;
+    game_turn = &turn;
+    for (int i = 0; i < WEAPON_COUNT; i++) weapons[i].preq_tech = TECH_NONE;
+    for (int i = 0; i < REACTOR_COUNT; i++) reactors[i].preq_tech = 50;
+    protos[PROTO_FORMERS].preq_tech = 60;
+    chassis[CHASSIS_FOIL].preq_tech = 61;
+
+    // valid_tech_leap: tech 2 needs 0 and 1, and faction 1 has what those need.
+    EXPECT(valid_tech_leap(2, 1), 1);
+    EXPECT(valid_tech_leap(2, 3), 0);  // lacks tech 0, which tech 1 needs
+    EXPECT(valid_tech_leap(4, 1), 0);  // disabled
+    reactors[1].preq_tech = 2;
+    EXPECT(valid_tech_leap(2, 1), 0);  // unlocks a reactor
+    reactors[1].preq_tech = 50;
+    weapons[5].preq_tech = 2, weapons[5].offense = 3;  // budget 1, so offense 3 is the most allowed
+    factions[1].ranking = 2;
+    EXPECT(valid_tech_leap(2, 1), 1);
+    factions[1].ranking = 3;
+    EXPECT(valid_tech_leap(2, 1), 0);  // not among the two weakest
+    factions[1].ranking = 2, weapons[5].offense = 4;
+    EXPECT(valid_tech_leap(2, 1), 0);  // too strong a weapon
+    weapons[5].preq_tech = TECH_NONE;
+
+    // say_tech and tech_name.
+    label_table[25] = "NONE", label_table[185] = "Prototype", label_table[306] = "World Map";
+    label_table[310] = "Not Available", label_table[487] = "Comm Frequency";
+    label_table[629] = "E", label_table[630] = "D", label_table[631] = "B", label_table[632] = "C";
+    tree[2].name = "Applied Physics";
+    snprintf(defs[2].adjective, sizeof(defs[2].adjective), "Gaian");
+    snprintf(defs[2].noun, sizeof(defs[2].noun), "Gaians");
+    defs[2].noun_gender = 1, defs[2].noun_plural = 1;
+    snprintf(protos[3].name, sizeof(protos[3].name), "Scout Patrol");
+    char out[128] = "Tech: ";
+    say_tech(out, 2, 1);
+    EXPECT_STR(out, "Tech: Applied Physics (D3)");
+    EXPECT_STR(tech_name(2, 0), "Applied Physics");
+    EXPECT_STR(tech_name(TECH_NONE, 0), "NONE");
+    EXPECT_STR(tech_name(TECH_DISABLED, 0), "Not Available");
+    EXPECT_STR(tech_name(9999, 1), "World Map");
+    EXPECT_STR(tech_name(TECH_COUNT + 2, 0), "Gaian Comm Frequency");
+    language = 1;
+    EXPECT_STR(tech_name(TECH_COUNT + 2, 0), "Comm Frequency (Gaians)");
+    EXPECT(gender * 10 + plural, 11);
+    language = 0;
+    EXPECT_STR(tech_name(TECH_COUNT + FACTION_COUNT + 3, 0), "Scout Patrol Prototype");
+
+    // tech_effects: techs 0 and 1 for faction 1, plus faction-file bonuses.
+    tree[0].flags = TECH_FLAG_COMMERCE | TECH_FLAG_FUNGUS_ENERGY;
+    tree[1].flags = TECH_FLAG_COMMERCE | TECH_FLAG_FUNGUS_NUTRIENT;
+    defs[1].rule_commerce = 1;
+    defs[1].bonus_count = 2;
+    defs[1].bonus_id[0] = BONUS_FUNGUS_MINERALS, defs[1].bonus_val1[0] = 2;
+    defs[1].bonus_id[1] = BONUS_FUNGUS_ENERGY, defs[1].bonus_val1[1] = -3;
+    factions[1].se_pending[SE_ECONOMY] = 4;
+    factions[1].tech_fungus[FUNGUS_UNUSED] = 7;
+    tech_effects(1);
+    EXPECT(factions[1].tech_commerce_bonus, 1 + 2 + 2);  // rule, two techs, economy 4
+    EXPECT(factions[1].tech_fungus[FUNGUS_NUTRIENT], 1);
+    EXPECT(factions[1].tech_fungus[FUNGUS_MINERALS], 2);
+    EXPECT(factions[1].tech_fungus[FUNGUS_ENERGY], 0);  // 1 - 3, held at zero
+    EXPECT(factions[1].tech_fungus[FUNGUS_UNUSED], 0);
+    tree[0].flags = tree[1].flags = 0;
+    defs[1].bonus_count = 0;
+
+    // tech_rate, worked through by hand: own progress 10, the leader's 20,
+    // AI difficulty 3, turn 100.
+    factions[1].tech_cost = -1, factions[1].earned_techs_saved = 5, factions[1].tech_ranking = 10;
+    factions[2].earned_techs_saved = 10, factions[2].tech_ranking = 20;
+    defs[1].rule_techcost = 100;
+    turn = 100;
+    EXPECT(tech_rate(1), 180);
+    rules = RULES_TECH_STAGNATION;
+    EXPECT(tech_rate(1), 300);
+    rules = 0;
+    discovery_rate = 0;
+    EXPECT(tech_rate(1), 999999999);
+    discovery_rate = 100;
+    factions[1].tech_cost = 42;
+    EXPECT(tech_rate(1), 42);
+
+    // tech_val.
+    EXPECT(tech_val(9999, 1, 0), 2);
+    weapons[2].offense = 3, armor[1].defense = 1, chassis[0].speed = 1;
+    protos[3].weapon = 2, protos[3].armor = 1, protos[3].chassis = 0, protos[3].reactor = 1;
+    EXPECT(tech_val(TECH_COUNT + FACTION_COUNT + 3, 1, 0), 2 + 1 + 1 + 1 - 2);
+    factions[1].ai_fight = 1;
+    EXPECT(tech_val(TECH_COUNT + 2, 1, 0), 3);  // neither wants war: 3 / 3 * 3
+    factions[1].ai_power = 1;
+    EXPECT(tech_val(0, 1, 1), 1 + 2 + 3 + 4 * 2);  // power weighted for this faction
+    EXPECT(tech_val(0, 1, 0), 1 + 2 + 3 + 4 * 3);  // ...more so in the full sum; had, so no more
+    // Faction 3 lacks tech 0, which two others have: 10, less 2.
+    EXPECT(tech_val(0, 3, 1), 8);
+    // In full: 10, doubled because tech 0 leads to the (made-up) Hunter-Seeker
+    // tech 0 and faction 3 has no probe defence.
+    EXPECT(tech_val(0, 3, 0), 20);
 
     if (failures) return 1;
     puts("PASS");

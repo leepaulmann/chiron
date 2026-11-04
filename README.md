@@ -96,13 +96,15 @@ CHIRON_SOAK=ai CHIRON_SCRIPT="30 click 835 362; 40 every 1 key Return" ./build/c
 ## Reimplemented code
 
 Chiron replaces the game's own functions with open reimplementations, one
-module at a time. So far: the technology queries (whether a faction has or
-can research a tech, tech levels, categories and prerequisites).
+module at a time. So far: the technology module (whether a faction has or
+can research a tech, tech levels, categories and prerequisites, tech names,
+research cost, the AI's valuation of techs, and the bonuses techs give).
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once
-a game turn it also checks every function over its whole input range. It
-prints a summary of calls and mismatches at exit:
+a game turn it also checks every function over its whole input range.
+Functions that write to memory run on copies, and the original's result is
+kept. It prints a summary of calls, mismatches and sweep times at exit:
 
 ```sh
 CHIRON_REIMPL=shadow CHIRON_SOAK=ai CHIRON_SCRIPT="30 click 835 362; 40 every 1 key Return" ./build/chiron

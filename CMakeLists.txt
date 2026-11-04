@@ -11,9 +11,10 @@ endif()
 
 add_compile_definitions(_GNU_SOURCE _FILE_OFFSET_BITS=64 _TIME_BITS=64)
 # Windows code only keeps the stack 4-byte aligned, so every function we
-# expose to it must realign before using SSE spills.
+# expose to it must realign before using SSE spills. Signed arithmetic wraps,
+# as it does in the game code that reimplementations must match.
 add_compile_options(-Wall -Wno-unused-parameter -mincoming-stack-boundary=2 -fno-strict-aliasing
-                    -fno-omit-frame-pointer)
+                    -fno-omit-frame-pointer -fwrapv)
 add_link_options(-no-pie)
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)

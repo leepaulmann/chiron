@@ -5,6 +5,7 @@
 // unit test may point them at its own tables instead.
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "../loader/pe.h"
@@ -31,10 +32,257 @@ struct rules_tech {
 };
 _Static_assert(sizeof(struct rules_tech) == 44, "layout of the game's #TECHNOLOGY entries");
 
+enum {
+    TECH_FLAG_SECRETS = 0x1,            // the first faction to discover it gets a free tech
+    TECH_FLAG_COMMERCE = 0x4,           // +1 commerce
+    TECH_FLAG_FUNGUS_ENERGY = 0x40,     // +1 energy from fungus
+    TECH_FLAG_FUNGUS_MINERALS = 0x80,   // +1 minerals from fungus
+    TECH_FLAG_FUNGUS_NUTRIENT = 0x100,  // +1 nutrient from fungus
+};
+
+// Techs tech_val() singles out.
+enum { TECH_DOCINIT = 35, TECH_CENTMED = 47, TECH_ENVECON = 59, TECH_PLAECON = 61, TECH_ALPHCEN = 64 };
+
+// ---- Layout helpers ---------------------------------------------------------
+
+// Padding from offset `from` up to offset `to` inside a game struct.
+#define GAME_PAD(from, to) uint8_t pad_##from[(to) - (from)]
+#define GAME_AT(type, field, offset) _Static_assert(offsetof(type, field) == (offset), #type "." #field)
+
+// ---- Factions -----------------------------------------------------------------
+
+enum { FACTION_COUNT = 8 };  // 0 is the natives, 1 to 7 the players
+
+enum {  // social effects, in the game's order
+    SE_ECONOMY, SE_EFFIC, SE_SUPPORT, SE_TALENT, SE_MORALE, SE_POLICE,
+    SE_GROWTH, SE_PLANET, SE_PROBE, SE_INDUSTRY, SE_RESEARCH, SE_COUNT
+};
+
+enum {  // diplo_status bits
+    TREATY_PACT = 0x1, TREATY_TREATY = 0x2, TREATY_COMMLINK = 0x8,
+    TREATY_VENDETTA = 0x10, TREATY_WANT_REVENGE = 0x20,
+};
+
+enum { FUNGUS_NUTRIENT, FUNGUS_MINERALS, FUNGUS_ENERGY, FUNGUS_UNUSED, FUNGUS_COUNT };
+
+enum {  // region_base_plan values that tech_val() looks at
+    PLAN_OFFENSIVE = 0, PLAN_DEFENSIVE = 2, PLAN_NAVAL_TRANSPORT = 7,
+};
+
+enum { REGION_COUNT = 128, LAND_REGION_COUNT = 64 };
+
+// A faction's state in the game being played (Thinker's Faction, OpenSMACX's
+// PlayerData). Only the fields Chiron uses are named.
+struct faction_data {
+    uint32_t flags;
+    int32_t ranking;     // 0 (lowest) to 7
+    int32_t diff_level;  // humans' difficulty; 3 for the AI
+    GAME_PAD(0x00c, 0x018);
+    uint32_t diplo_status[FACTION_COUNT];  // TREATY_* towards each faction
+    GAME_PAD(0x038, 0x24c);
+    int32_t se_pending[SE_COUNT];
+    int32_t se[SE_COUNT];
+    int32_t se_2[SE_COUNT];
+    int32_t se_base[SE_COUNT];
+    int32_t energy_surplus_total;
+    int32_t facility_maint_total;
+    int32_t tech_commerce_bonus;
+    int32_t turn_commerce_income;
+    int32_t unk_30c, unk_310;
+    int32_t tech_fungus[FUNGUS_COUNT];  // extra output from fungus squares
+    GAME_PAD(0x324, 0x35c);
+    int32_t tech_ranking;  // twice the techs discovered
+    int32_t unk_360;
+    GAME_PAD(0x364, 0x3d0);
+    int32_t tech_cost;  // research cost, or negative until computed
+    int32_t earned_techs_saved;
+    int32_t net_random_event;
+    int32_t ai_fight, ai_growth, ai_tech, ai_wealth, ai_power;  // the AI's priorities
+    GAME_PAD(0x3f0, 0x7fc);
+    int32_t unk_7fc;  // tech_val() treats it as ecological damage
+    GAME_PAD(0x800, 0x818);
+    int32_t best_weapon_value;
+    GAME_PAD(0x81c, 0x82c);
+    int32_t enemy_best_weapon_value;
+    GAME_PAD(0x830, 0x105c);
+    int32_t base_count;
+    GAME_PAD(0x1060, 0x117c);
+    uint8_t region_total_bases[REGION_COUNT];
+    GAME_PAD(0x11fc, 0x157c);
+    uint16_t region_visible_tiles[REGION_COUNT];
+    GAME_PAD(0x167c, 0x197c);
+    uint8_t region_base_plan[REGION_COUNT];  // PLAN_* for the AI
+    GAME_PAD(0x19fc, 0x207c);
+    int32_t corner_market_turn;
+    GAME_PAD(0x2080, 0x20cc);
+};
+_Static_assert(sizeof(struct faction_data) == 0x20cc, "faction_data size");
+GAME_AT(struct faction_data, diplo_status, 0x18);
+GAME_AT(struct faction_data, se_pending, 0x24c);
+GAME_AT(struct faction_data, se_base, 0x2d0);
+GAME_AT(struct faction_data, tech_commerce_bonus, 0x304);
+GAME_AT(struct faction_data, tech_fungus, 0x314);
+GAME_AT(struct faction_data, tech_cost, 0x3d0);
+GAME_AT(struct faction_data, ai_fight, 0x3dc);
+GAME_AT(struct faction_data, ai_power, 0x3ec);
+
+enum {  // faction_def bonus ids
+    BONUS_FUNGUS_NUTRIENT = 7, BONUS_FUNGUS_MINERALS = 8, BONUS_FUNGUS_ENERGY = 9,
+};
+
+// A faction as its faction file defines it (Thinker's MFaction, OpenSMACX's
+// Player).
+struct faction_def {
+    GAME_PAD(0x000, 0x2e4);
+    char noun[24];
+    int32_t noun_gender;
+    int32_t noun_plural;
+    char adjective[128];  // the name as an adjective, such as "Gaian"
+    GAME_PAD(0x384, 0x4f0);
+    int32_t rule_population, rule_hurry, rule_techcost, rule_psi, rule_sharetech, rule_commerce, rule_flags;
+    int32_t bonus_count;
+    int32_t bonus_id[8], bonus_val1[8], bonus_val2[8];
+    GAME_PAD(0x570, 0x59c);
+};
+_Static_assert(sizeof(struct faction_def) == 0x59c, "faction_def size");
+GAME_AT(struct faction_def, adjective, 0x304);
+GAME_AT(struct faction_def, rule_techcost, 0x4f8);
+GAME_AT(struct faction_def, bonus_count, 0x50c);
+GAME_AT(struct faction_def, bonus_val1, 0x530);
+
+// ---- Units and the rules tables ---------------------------------------------
+
+enum { PROTO_COUNT = 512, PROTO_FORMERS = 1 };
+enum { WEAPON_COUNT = 26, ARMOR_COUNT = 14, REACTOR_COUNT = 4, CHASSIS_COUNT = 9 };
+enum { CHASSIS_FOIL = 3, REACTOR_FUSION = 2, REACTOR_QUANTUM = 3 };  // ids; reactors count from 1
+enum {
+    FAC_TREE_FARM = 13, FAC_HYBRID_FOREST = 14, FAC_HAB_COMPLEX = 24, FAC_HABITATION_DOME = 25,
+    FAC_CENTAURI_PRESERVE = 31, FAC_TEMPLE_OF_PLANET = 32, FAC_HUNTER_SEEKER = 85,
+    FAC_DREAM_TWISTER = 89, FAC_ASCENT = 102, FACILITY_COUNT = 134,
+};
+
+struct unit_proto {
+    char name[32];
+    uint32_t abilities;
+    uint8_t chassis, weapon, armor, reactor;
+    GAME_PAD(0x28, 0x32);
+    int16_t preq_tech;
+};
+_Static_assert(sizeof(struct unit_proto) == 0x34, "unit_proto size");
+GAME_AT(struct unit_proto, chassis, 0x24);
+
+struct rules_weapon {
+    char *name, *short_name;
+    int8_t offense;  // negative for psi
+    int8_t icon;
+    uint8_t mode, cost;
+    int16_t preq_tech;
+    int16_t pad;
+};
+_Static_assert(sizeof(struct rules_weapon) == 0x10, "rules_weapon size");
+
+struct rules_armor {
+    char *name, *short_name;
+    int8_t defense;
+    uint8_t mode, cost;
+    int8_t pad1;
+    int16_t preq_tech;
+    int16_t pad2;
+};
+_Static_assert(sizeof(struct rules_armor) == 0x10, "rules_armor size");
+
+struct rules_reactor {
+    char *name, *short_name;
+    int16_t preq_tech;
+    int16_t power;
+};
+_Static_assert(sizeof(struct rules_reactor) == 0xc, "rules_reactor size");
+
+struct rules_chassis {
+    GAME_PAD(0x00, 0x48);
+    uint8_t speed;
+    GAME_PAD(0x49, 0x8e);
+    int16_t preq_tech;
+};
+_Static_assert(sizeof(struct rules_chassis) == 0x90, "rules_chassis size");
+
+struct rules_facility {
+    GAME_PAD(0x00, 0x14);
+    int32_t preq_tech;
+    GAME_PAD(0x18, 0x30);
+};
+_Static_assert(sizeof(struct rules_facility) == 0x30, "rules_facility size");
+
+struct continent {
+    int32_t tile_count;
+    GAME_PAD(0x04, 0x1c);
+};
+_Static_assert(sizeof(struct continent) == 0x1c, "continent size");
+
+enum {  // game_rules bits
+    RULES_TECH_STAGNATION = 0x20,
+    RULES_BLIND_RESEARCH = 0x200,
+};
+
+// ---- The game's data ----------------------------------------------------------
+
 extern struct rules_tech *game_tech;  // [TECH_COUNT]
 extern uint8_t *game_tech_achieved;   // [TECH_COUNT], one bit per faction
 extern int32_t *game_expansion;       // non-zero when playing Alien Crossfire
 extern int32_t *game_turn;            // the current turn
 
+extern struct faction_data *game_factions;    // [FACTION_COUNT]
+extern struct faction_def *game_faction_defs;  // [FACTION_COUNT]
+extern uint8_t *game_human_factions;          // bit per faction
+extern struct unit_proto *game_protos;        // [PROTO_COUNT]
+extern struct rules_weapon *game_weapons;     // [WEAPON_COUNT]
+extern struct rules_armor *game_armor;        // [ARMOR_COUNT]
+extern struct rules_reactor *game_reactors;   // [REACTOR_COUNT], for reactor ids 1 to 4
+extern struct rules_chassis *game_chassis;    // [CHASSIS_COUNT]
+extern struct rules_facility *game_facilities;  // [FACILITY_COUNT]
+extern struct continent *game_continents;     // [REGION_COUNT]
+extern int32_t *game_tech_discovery_rate;     // percent; 0 stops research
+extern uint32_t *game_rules;                  // RULES_* chosen for this game
+extern int32_t *game_difficulty;              // the AI's difficulty level
+extern int32_t *game_map_area_sqrt;           // square root of the map's area
+extern int32_t *game_cloud_cover;
+extern int32_t *game_language;                // non-zero for translated text
+extern int32_t *game_parse_gender, *game_parse_plural;  // grammar for the next noun in text
+extern char ***game_labels;                   // the strings of labels.txt
+extern void *game_strings;                    // the string table
+extern char *game_tech_name_buffer;           // what tech_name() returns
+
+// Game functions the reimplementations call.
+extern char *(__attribute__((thiscall)) * game_strings_get)(void *table, char *s);
+extern int (*game_climactic_battle)(void);
+extern int (*game_weapon_budget)(int faction, int condition, int check_mode);
+extern int (*game_wants_to_attack)(int faction, int other, int odds);
+
 // Point the variables above at a loaded terranx.exe.
 void game_bind(struct pe_image *exe);
+
+// ---- Small helpers the original code inlines --------------------------------
+
+static inline int game_is_human(int faction) { return (*game_human_factions & (1u << (faction & 31))) != 0; }
+
+static inline uint32_t game_has_treaty(int faction, int other, uint32_t treaty) {
+    return game_factions[faction].diplo_status[other] & treaty;
+}
+
+// The game's range(): min if below it (or if max < min), max if above it.
+static inline int game_range(int value, int min, int max) {
+    if (value < min || max < min) return min;
+    return value > max ? max : value;
+}
+
+static inline int game_bit_count(uint32_t bits) {
+    int n = 0;
+    for (; bits; n++) bits &= bits - 1;
+    return n;
+}
+
+// A region number that stands for no real land or sea area.
+static inline int game_bad_region(int region) { return (region & 63) == 63 || !(region & 63); }
+
+// A label from labels.txt, by index.
+static inline char *game_label(int i) { return game_strings_get(game_strings, (*game_labels)[i]); }

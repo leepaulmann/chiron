@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "code.h"
@@ -29,6 +30,14 @@ static const struct {
 };
 
 #define N_MODULES (sizeof(modules) / sizeof(modules[0]))
+
+static double sweep_ms_total[N_MODULES], sweep_ms_max[N_MODULES];
+
+static double now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
+}
 
 enum hook_mode hooks_mode_from_env(void) {
     const char *v = getenv("CHIRON_REIMPL");
@@ -84,7 +93,11 @@ void hooks_shadow_tick(void) {
     last_turn = *game_turn;
     for (size_t m = 0; m < N_MODULES; m++) {
         for (int i = 0; i < *modules[m].count; i++) modules[m].hooks[i].stats->sweeps++;
+        double start = now_ms();
         modules[m].sweep();
+        double ms = now_ms() - start;
+        sweep_ms_total[m] += ms;
+        if (ms > sweep_ms_max[m]) sweep_ms_max[m] = ms;
     }
 }
 
@@ -103,9 +116,15 @@ void hooks_summary(void) {
     if (hooks_mode != HOOKS_SHADOW || done) return;
     done = 1;
     fprintf(stderr, "chiron: shadow summary (function, calls from the game, mismatches, sweeps)\n");
-    for (size_t m = 0; m < N_MODULES; m++)
+    for (size_t m = 0; m < N_MODULES; m++) {
+        unsigned sweeps = 0;
         for (int i = 0; i < *modules[m].count; i++) {
             const struct hook_stats *s = modules[m].hooks[i].stats;
             fprintf(stderr, "  %-16s %12llu %6llu %6u\n", s->name, s->calls, s->mismatches, s->sweeps);
+            sweeps = s->sweeps;
         }
+        if (sweeps)
+            fprintf(stderr, "  (%s sweeps took %.1f ms on average, %.1f at most)\n", modules[m].name,
+                    sweep_ms_total[m] / sweeps, sweep_ms_max[m]);
+    }
 }

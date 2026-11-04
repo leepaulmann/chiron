@@ -45,6 +45,36 @@ static int patch_game_data_header(struct pe_image *exe) {
     return 0;
 }
 
+// wants_to_attack (0x55BC80) counts the bases each faction has on the
+// continents the two factions share, in an array of seven on its stack that
+// it never clears: it takes the maximum of each entry and what it finds.
+// What decides war then depends on whatever was on the stack, so the same
+// question asked from two places can get two answers. Thinker clears the
+// array too. The stub clears it right after the frame is set up.
+static int patch_wants_to_attack_counts(struct pe_image *exe) {
+    const uint32_t site = 0x55bc83, resume = 0x55bc89;
+    static const uint8_t original[] = {0x81, 0xec, 0x34, 0x01, 0x00, 0x00};  // sub esp, 0x134
+    if (!code_matches(exe, site, original, sizeof(original))) return -1;
+
+    uint8_t *s = code_stub_alloc(sizeof(original) + 7 * 10 + 5), *p = s;
+    if (!s) return -1;
+    memcpy(p, original, sizeof(original));  // the instruction we replaced
+    p += sizeof(original);
+    for (int32_t off = -0x130; off < -0x130 + 7 * 4; off += 4) {
+        *p++ = 0xc7;  // mov dword [ebp+off], 0
+        *p++ = 0x85;
+        memcpy(p, &off, 4);
+        p += 4;
+        memset(p, 0, 4);
+        p += 4;
+    }
+    code_put_rel32(p, 0xe9, (uint32_t)code_at(exe, resume));  // jmp back
+
+    // The site is 6 bytes; the jump takes 5, and the 6th is never reached.
+    code_put_rel32(code_at(exe, site), 0xe9, (uint32_t)s);
+    return 0;
+}
+
 struct patch {
     const char *name;
     int (*apply)(struct pe_image *exe);
@@ -52,6 +82,7 @@ struct patch {
 
 static const struct patch patches[] = {
     {"initialise save header in game_data", patch_game_data_header},
+    {"clear base counts in wants_to_attack", patch_wants_to_attack_counts},
 };
 
 void patches_apply(struct pe_image *exe) {
