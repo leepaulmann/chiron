@@ -104,8 +104,11 @@ module at a time. So far:
 - the map: coordinates and distances, what a square holds (altitude,
   region, units and bases, resources, pods, elevation), territory, zones of
   control, sensors, landmarks, where units can reach and how bases, coasts
-  and seas connect; and the code that changes squares and landmarks. Map
-  generation and loading are still the game's own.
+  and seas connect; and the code that changes squares and landmarks;
+- map generation, in part: raising and lowering land, painting continents
+  and hills, riverbeds, temperature, polar caps, contours and the checks on
+  a finished map. The top-level builder, rainfall, rivers, shorelines,
+  landmarks and map loading are still the game's own.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once

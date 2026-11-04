@@ -44,6 +44,12 @@ uint32_t *game_state;
 int32_t *game_net_multiplayer;
 uint32_t *game_draw_state;
 int32_t *game_base_find_dist;
+struct rules_worldbuilder *game_worldbuilder;
+int32_t *game_map_area, *game_abstract_area, *game_sea_level_council, *game_land_coverage, *game_planet_orbit;
+int32_t *game_ocean_coverage, *game_brush_total, *game_brush_land_wanted, *game_brush_stroke;
+int32_t *game_alt_natural_default, *game_base_submerged_count, *game_base_submerged_veh, *game_world_skip_territory;
+uint8_t *game_data;
+size_t game_data_size;
 int32_t *game_radius_near_x, *game_radius_near_y, *game_radius_x, *game_radius_y, *game_radius_count;
 
 char *(__attribute__((thiscall)) * game_strings_get)(void *table, char *s);
@@ -54,6 +60,15 @@ int (*game_base_at)(int x, int y);
 int (*game_veh_at)(int x, int y);
 int (*game_base_find)(int x, int y);
 int (*game_base_find3)(int x, int y, int faction, int region, int owner, int seen_by);
+void (*game_alt_set)(int x, int y, int altitude);
+int (*game_rand)(void);
+void *(*game_getptd)(void);
+int (*game_random)(int min, int max);
+void (*game_random_reseed)(int seed);
+void (*game_do_all_non_input)(void);
+void(__attribute__((thiscall)) * game_path_continents)(void *path);
+void *game_path;
+void (*game_draw_radius)(int x, int y, int radius, int unk);
 
 void game_bind(struct pe_image *exe) {
     game_tech = (struct rules_tech *)code_at(exe, 0x94f358);
@@ -106,6 +121,23 @@ void game_bind(struct pe_image *exe) {
     game_net_multiplayer = (int32_t *)code_at(exe, 0x93f660);
     game_draw_state = (uint32_t *)code_at(exe, 0x90d91c);
     game_base_find_dist = (int32_t *)code_at(exe, 0x90ea04);
+    game_worldbuilder = (struct rules_worldbuilder *)code_at(exe, 0x9502a8);
+    game_map_area = (int32_t *)code_at(exe, 0x949884);
+    game_abstract_area = (int32_t *)code_at(exe, 0x94a29c);
+    game_sea_level_council = (int32_t *)code_at(exe, 0x949880);
+    game_land_coverage = (int32_t *)code_at(exe, 0x94a2a8);
+    game_planet_orbit = (int32_t *)code_at(exe, 0x94a2b0);
+    game_alt_natural_default = (int32_t *)code_at(exe, 0x68faf4);
+    game_base_submerged_count = (int32_t *)code_at(exe, 0x9b2290);
+    game_base_submerged_veh = (int32_t *)code_at(exe, 0x9b22bc);
+    game_world_skip_territory = (int32_t *)code_at(exe, 0x9b22ec);
+    game_ocean_coverage = (int32_t *)code_at(exe, 0x94a2a4);
+    game_brush_total = (int32_t *)code_at(exe, 0x9b22b0);
+    game_brush_land_wanted = (int32_t *)code_at(exe, 0x9b22b4);
+    game_brush_stroke = (int32_t *)code_at(exe, 0x9b22b8);
+    // .data and the two small sections after it, up to the read-only .rsrc.
+    game_data = code_at(exe, 0x682000);
+    game_data_size = 0x9ca000 - 0x682000;
     game_radius_near_x = (int32_t *)code_at(exe, 0x66ef50);
     game_radius_near_y = (int32_t *)code_at(exe, 0x66ef74);
     game_radius_x = (int32_t *)code_at(exe, 0x66efbc);
@@ -120,4 +152,13 @@ void game_bind(struct pe_image *exe) {
     game_veh_at = (void *)code_at(exe, 0x5bfe90);
     game_base_find = (void *)code_at(exe, 0x4e3b80);
     game_base_find3 = (void *)code_at(exe, 0x4e3d50);
+    game_alt_set = (void *)code_at(exe, 0x591290);
+    game_rand = (void *)code_at(exe, 0x64601d);
+    game_getptd = (void *)code_at(exe, 0x6491c3);
+    game_random = (void *)code_at(exe, 0x625810);
+    game_random_reseed = (void *)code_at(exe, 0x6257e0);
+    game_do_all_non_input = (void *)code_at(exe, 0x5fcb20);
+    game_path_continents = (void *)code_at(exe, 0x59c790);
+    game_path = code_at(exe, 0x945b00);
+    game_draw_radius = (void *)code_at(exe, 0x46aef0);
 }

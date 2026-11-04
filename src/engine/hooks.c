@@ -16,8 +16,8 @@ enum hook_mode hooks_mode = HOOKS_OFF;
 int hooks_nested;
 
 // Each module defines its hooks and sweep.
-extern struct hook_module tech_module, map_module;
-static struct hook_module *const modules[] = {&tech_module, &map_module};
+extern struct hook_module tech_module, map_module, mapgen_module;
+static struct hook_module *const modules[] = {&tech_module, &map_module, &mapgen_module};
 
 #define N_MODULES (sizeof(modules) / sizeof(modules[0]))
 
@@ -62,8 +62,9 @@ void hooks_apply(struct pe_image *exe, enum hook_mode mode) {
     for (size_t m = 0; m < N_MODULES; m++)
         for (int i = 0; i < modules[m]->count; i++) {
             const struct hook *h = &modules[m]->hooks[i];
-            total++;
-            if (install(exe, h, mode) == 0) installed++;
+            if (h->shadow_only && mode != HOOKS_SHADOW) continue;
+            if (!h->shadow_only) total++;
+            if (install(exe, h, mode) == 0) installed += !h->shadow_only;
             else fprintf(stderr, "chiron: %s (0x%x) not replaced: unexpected code\n", h->stats->name, h->addr);
         }
     fprintf(stderr, "chiron: %d of %d game functions reimplemented%s\n", installed, total,
@@ -76,7 +77,7 @@ void hooks_apply(struct pe_image *exe, enum hook_mode mode) {
 }
 
 void hooks_shadow_tick(struct hook_module *m) {
-    if (hooks_nested || *game_turn == m->last_turn) return;
+    if (hooks_nested || hooks_sweeping || *game_turn == m->last_turn) return;
     m->last_turn = *game_turn;
     m->sweeps++;
     double start = now_ms();
@@ -84,6 +85,7 @@ void hooks_shadow_tick(struct hook_module *m) {
     double ms = now_ms() - start;
     m->sweep_ms_total += ms;
     if (ms > m->sweep_ms_max) m->sweep_ms_max = ms;
+    if (m->also) hooks_shadow_tick(m->also);
 }
 
 void hooks_mismatch(struct hook_stats *s, const char *fmt, ...) {
@@ -142,6 +144,13 @@ void hooks_writes_begin(struct hook_writes *w) {
     }
     writes_copy(w, saves[w->depth].buf[0], 1);
 }
+
+void hooks_writes_abandon(struct hook_writes *w) {
+    writes_copy(w, saves[w->depth].buf[0], 0);
+    writes_depth--;
+}
+
+int hooks_checking(void) { return writes_depth > 0; }
 
 void hooks_writes_middle(struct hook_writes *w) {
     writes_copy(w, saves[w->depth].buf[1], 1);

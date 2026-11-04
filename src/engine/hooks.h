@@ -29,6 +29,7 @@ struct hook {
     void *ours, *shadow;
     void **original;  // receives the trampoline to the original
     struct hook_stats *stats;
+    int shadow_only;  // installed in shadow mode only, to keep checks quiet
 };
 
 // A module: its hooks, and in shadow mode a sweep that checks every one of
@@ -38,6 +39,9 @@ struct hook_module {
     const struct hook *hooks;
     int count;
     void (*sweep)(void);
+    // Another module to sweep whenever this one does, for one whose own
+    // functions the game seldom calls.
+    struct hook_module *also;
     // Shadow mode bookkeeping.
     int32_t last_turn;
     unsigned sweeps;
@@ -71,7 +75,7 @@ struct hook_writes {
     struct {
         void *p;
         size_t size;
-    } span[4];
+    } span[8];
     int n;
     int depth;  // which save buffers, as checks can nest
 };
@@ -83,6 +87,13 @@ void hooks_writes_add(struct hook_writes *w, void *p, size_t size);
 void hooks_writes_begin(struct hook_writes *w);
 // After the original: save its writes and put the memory back.
 void hooks_writes_middle(struct hook_writes *w);
+// Instead of the original: put the memory back as it was at begin. For a
+// sweep that changes the game state to test on.
+void hooks_writes_abandon(struct hook_writes *w);
+
+// Non-zero while a writing function is being checked.
+int hooks_checking(void);
+
 // After ours: compare with the original's writes and return value, then
 // leave the memory as described above. Returns NULL if they agree, or else
 // what differs.

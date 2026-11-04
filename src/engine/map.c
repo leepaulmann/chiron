@@ -669,7 +669,7 @@ void rebuild_base_bits(void) {
 
 // Functions that read squares or bases start the sweep; the others can be
 // called while a map is being loaded or made, so they don't.
-extern struct hook_module map_module;
+extern struct hook_module map_module, mapgen_module;
 #define MAP (&map_module)
 #define PURE NULL
 
@@ -934,7 +934,7 @@ static void map_sweep(void) {
     if (!*game_map || *game_map_width <= 0 || *game_map_height <= 0) return;
     // The game's base_find() leaves its distance behind, and callers read
     // it; the sweep's calls mustn't change it.
-    int find_dist = *game_base_find_dist;
+    int find_dist = *game_base_find_dist, sweeping = hooks_sweeping;
     hooks_sweeping = 1;
     sweep_pure();
     sweep_squares();
@@ -942,7 +942,7 @@ static void map_sweep(void) {
     sweep_territory();
     sweep_units();
     sweep_setters();
-    hooks_sweeping = 0;
+    hooks_sweeping = sweeping;
     *game_base_find_dist = find_dist;
 }
 
@@ -1024,4 +1024,4 @@ static const struct hook map_hooks[] = {
     HOOK(0x532a90, rebuild_vehicle_bits, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),
     HOOK(0x532b70, rebuild_base_bits, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x0d, 0x74, 0x98, 0x94, 0x00),  // push ecx; mov ecx, [0x949874]
 };
-struct hook_module map_module = {"map", map_hooks, HOOK_COUNT(map_hooks), map_sweep, -1};
+struct hook_module map_module = {"map", map_hooks, HOOK_COUNT(map_hooks), map_sweep, &mapgen_module, -1};

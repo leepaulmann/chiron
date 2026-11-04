@@ -585,4 +585,4 @@ static const struct hook tech_hooks[] = {
     HOOK(0x5bcbe0, tech_val, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x20),                 // ...; sub esp, 0x20
     HOOK(0x5be6b0, tech_rate, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x10),                // ...; sub esp, 0x10
 };
-struct hook_module tech_module = {"technology", tech_hooks, HOOK_COUNT(tech_hooks), tech_sweep, -1};
+struct hook_module tech_module = {"technology", tech_hooks, HOOK_COUNT(tech_hooks), tech_sweep, NULL, -1};

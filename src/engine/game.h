@@ -219,7 +219,8 @@ _Static_assert(sizeof(struct rules_facility) == 0x30, "rules_facility size");
 // A region: a continent, an island or a body of water.
 struct continent {
     int32_t tile_count;
-    GAME_PAD(0x04, 0x14);
+    int32_t open_terrain;  // land squares that are neither arid, rocky nor fungus
+    GAME_PAD(0x08, 0x14);
     uint8_t sea_coasts[8];  // bit per land region its shore touches
 };
 _Static_assert(sizeof(struct continent) == 0x1c, "continent size");
@@ -255,12 +256,15 @@ struct map_tile {
 _Static_assert(sizeof(struct map_tile) == 0x2c, "map_tile size");
 
 enum {  // map_tile.bits
+    MAP_RIVERBED = 0x100,
     MAP_BASE = 0x1, MAP_UNIT = 0x2, MAP_RESOURCE = 0x400, MAP_MONOLITH = 0x2000,
     MAP_ENERGY_RESOURCE = 0x10000, MAP_MINERAL_RESOURCE = 0x20000, MAP_POD_TAKEN = 0x100000,
     MAP_UNITY_POD = 0xc000000,  // either bit, without unity scattering
     MAP_SUPPLY_POD = 0x10000000, MAP_NUTRIENT_RESOURCE = 0x20000000, MAP_SENSOR = 0x80000000,
+    MAP_FUNGUS = 0x20, MAP_UNK_4000 = 0x4000, MAP_THERMAL_BORE = 0x1000000, MAP_UNK_40000000 = 0x40000000,
 };
 enum {  // map_tile.bits2
+    MAP2_CRATER = 0x1,
     MAP2_NEXUS = 0x2000,          // the Manifold Nexus
     MAP2_CHANGED = 0x400000,      // rainfall or rockiness set since the map was made
     MAP2_UNK_80000000 = 0x80000000,
@@ -275,6 +279,17 @@ enum {  // map_tile.climate >> 5
 };
 
 enum { LANDMARK_COUNT = 64 };
+
+// alphax.txt's #WORLDBUILDER: how maps are made.
+struct rules_worldbuilder {
+    int32_t land_base, land_mod, continent_base, continent_mod, hills_base, hills_mod, plateau_base, plateau_mod;
+    int32_t rivers_base, rivers_rain_mod, solar_energy, thermal_band, thermal_deviance, global_warming;
+    int32_t sea_level_rises, cloudmass_peaks, cloudmass_hills, rainfall_coeff;
+    int32_t deep_water, shelf, plains, beach, hills, peaks, fungus;
+    int32_t cont_size_ratio[5], islands;
+};
+GAME_AT(struct rules_worldbuilder, solar_energy, 0x28);
+GAME_AT(struct rules_worldbuilder, islands, 0x78);
 
 struct landmark {
     int32_t x, y;
@@ -376,6 +391,22 @@ extern uint32_t *game_state;                  // GAME_STATE_*
 extern int32_t *game_net_multiplayer;         // non-zero in a network game
 extern uint32_t *game_draw_state;             // what the map view must redraw
 extern int32_t *game_base_find_dist;          // set by the game's base_find()
+extern struct rules_worldbuilder *game_worldbuilder;
+extern int32_t *game_map_area;                // squares stored: half width times height
+extern int32_t *game_abstract_area;           // bytes of the abstract map
+extern int32_t *game_sea_level_council;       // sea level change voted in council
+extern int32_t *game_land_coverage, *game_planet_orbit;  // the map settings chosen
+extern int32_t *game_alt_natural_default;     // [11] game_alt_natural as the map is made
+extern int32_t *game_base_submerged_count;    // [8] world_alt_set() resets these
+extern int32_t *game_base_submerged_veh;      // [8]
+extern int32_t *game_world_skip_territory;    // non-zero: alt_set() leaves bases and units alone
+extern int32_t *game_ocean_coverage;          // the map setting: 2 - land coverage
+// Brush counts while land is painted: squares since the world was begun,
+// the land wanted before continents shrink, and squares this stroke.
+extern int32_t *game_brush_total, *game_brush_land_wanted, *game_brush_stroke;
+// terranx.exe's writable memory: all of its game state but the heap.
+extern uint8_t *game_data;
+extern size_t game_data_size;
 // Square offsets: the 8 neighbours clockwise from north-east, then the
 // square itself; and every square within each radius, nearest first, with
 // game_radius_count[r] the number within radius r.
@@ -394,6 +425,15 @@ extern int (*game_base_find)(int x, int y);  // the nearest base, or -1
 // The nearest base in `region` (any if negative) that `faction` may see,
 // held by `owner` (see base_find in OpenSMACX), or -1.
 extern int (*game_base_find3)(int x, int y, int faction, int region, int owner, int seen_by);
+extern void (*game_alt_set)(int x, int y, int altitude);  // with floods, bases and units
+extern int (*game_rand)(void);                    // the C runtime's rand()
+extern void *(*game_getptd)(void);                // the C runtime's per-thread data
+extern int (*game_random)(int min, int max);      // the game's own generator: min to max - 1
+extern void (*game_random_reseed)(int seed);
+extern void (*game_do_all_non_input)(void);       // redraws and the message pump
+extern void(__attribute__((thiscall)) * game_path_continents)(void *path);  // finds the regions
+extern void (*game_draw_radius)(int x, int y, int radius, int unk);           // redraws squares
+extern void *game_path;
 
 // Point the variables above at a loaded terranx.exe.
 void game_bind(struct pe_image *exe);
@@ -422,6 +462,12 @@ static inline int game_bit_count(uint32_t bits) {
 
 // A region number that stands for no real land or sea area.
 static inline int game_bad_region(int region) { return (region & 63) == 63 || !(region & 63); }
+
+// rand()'s state, in the calling thread's C runtime data.
+static inline uint32_t *game_rand_state(void) { return (uint32_t *)((uint8_t *)game_getptd() + 0x14); }
+
+// The game's rnd(n): 0 to n - 1, or 0 for n below 2.
+static inline int game_rnd(int n) { return n - 1 > 0 ? game_rand() % n : 0; }
 
 // A label from labels.txt, by index.
 static inline char *game_label(int i) { return game_strings_get(game_strings, (*game_labels)[i]); }

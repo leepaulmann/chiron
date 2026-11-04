@@ -21,6 +21,11 @@ static inline void shadow_tick(struct hook_module *m) {
     if (m) hooks_shadow_tick(m);
 }
 
+// Calls made while a check of a writing function runs ours, or during a
+// sweep, go straight to ours: the outer check compares their effects, and
+// a check of their own would undo them in a sweep.
+static inline int shadow_bypass(void) { return hooks_sweeping || hooks_checking(); }
+
 #define SHADOW_DECLARE(ret, name, params) \
     static ret(*orig_##name) params;      \
     static struct hook_stats stats_##name = {#name};
@@ -28,6 +33,7 @@ static inline void shadow_tick(struct hook_module *m) {
 #define SHADOW_ENTRY(module, ret, name, params, args) \
     static ret shadow_##name params {                \
         if (hooks_nested) return orig_##name args;   \
+        if (shadow_bypass()) return name args;       \
         stats_##name.calls++;                        \
         shadow_tick(module);                         \
         return check_##name args;                    \
@@ -100,6 +106,7 @@ static inline void shadow_tick(struct hook_module *m) {
 #define SHADOW_WRITER_ENTRY(module, ret, name, params, args) \
     static ret shadow_##name params {                        \
         if (hooks_nested) SHADOW_TAIL_##ret(orig_##name args); \
+        if (shadow_bypass()) SHADOW_TAIL_##ret(name args);     \
         stats_##name.calls++;                                \
         shadow_tick(module);                                 \
         SHADOW_TAIL_##ret(check_##name args);                \
