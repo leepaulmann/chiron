@@ -34,7 +34,7 @@ CHIRON_REIMPL=shadow ...       # check reimplementations against the original; s
 
 - `30 click 835 362` is Quick Start. `30 click 835 287; 40 every 2 key Return` goes through Start Game, which is the path where the game builds a new map with `world_build`.
 - `CHIRON_SNAPSHOT=file.bmp` saves the screen (`tools/bmp2png.py` converts it). `CHIRON_SHADOW_DIFFS=1` lists every differing byte range of a shadow mismatch.
-- AI soaks can stall for good at "TURN COMPLETE". This also happens with `--original`, so a stall alone isn't evidence against a change. Pace varies a lot between random maps (roughly turns 100–145 in 7 minutes).
+- `CHIRON_SOAK=ai` hands the player's faction to the AI by clearing its human bit. The game still gives the player's console a pass over its units after each round, and would wait at "TURN COMPLETE" for orders for any unit the AI left with moves. `soak.c` skips such units when a turn hasn't moved for 30 seconds. Pace varies a lot between random maps (roughly turns 100–145 in 7 minutes); a whole game ends around turn 275.
 
 ## Architecture
 
