@@ -1,5 +1,6 @@
-// Bases: what each square of a base's radius yields. Reimplemented from
-// terranx.exe 2.0's disassembly. Names follow OpenSMACX (Brendan Casey,
+// Bases: what each square of a base's radius yields, and the totals
+// base_compute() works out from it. Reimplemented from terranx.exe 2.0's
+// disassembly. Names follow OpenSMACX (Brendan Casey,
 // GPL-3.0-or-later) and Thinker (MIT); Thinker's mod_crop_yield and friends
 // were a guide, but they change the game's rules in places (the economy
 // bonus on a base square, Manifold Harmonics, monolith energy) and the code
@@ -337,6 +338,10 @@ void base_nutrient(void) {
     if (*game_base_upkeep_state == 1) f->nutrient_surplus_total += game_range(b->surplus[RESOURCE_NUTRIENT], 0, 99);
 }
 
+// What the original base_minerals() leaves in the stack word that
+// base_energy() reads before setting it; see there.
+static int minerals_left;
+
 // Minerals, then the ecological damage they cause.
 void base_minerals(void) {
     struct base *b = *game_current_base;
@@ -365,6 +370,7 @@ void base_minerals(void) {
     int cleaner = has_fac(FAC_NANOREPLICATOR, id, 0) || holds_project(SP_SINGULARITY_INDUCTOR, faction) ? 2 : 1;
     cleaner += has_facility(id, FAC_CENTAURI_PRESERVE) + has_facility(id, FAC_TEMPLE_OF_PLANET) +
                holds_project(SP_PHOLUS_MUTAGEN, faction);
+    minerals_left = cleaner;
     b->eco_damage += (b->intake_2[RESOURCE_MINERAL] - clean - game_range(f->satellites[RESOURCE_MINERAL], 0, b->pop_size)) / cleaner;
     if (game_is_human(faction)) {
         // Atrocities and tectonic payloads, each divided on its own.
@@ -395,12 +401,419 @@ void base_minerals(void) {
     }
 }
 
+// ---- Energy -------------------------------------------------------------------
+
+static inline int is_alien(int faction) { return (game_faction_defs[faction].rule_flags & RULE_FLAG_ALIEN) != 0; }
+
+// Energy lost to distance from headquarters, out of `energy`. Without
+// headquarters the faction counts as 16 squares away. While bases are
+// worked through at the end of a turn, the loss at every EFFICIENCY from 4
+// down to -4 is added up for the AI.
+int black_market(int energy) {
+    if (energy <= 0) return 0;
+    const struct base *b = *game_current_base;
+    int faction = b->faction, dist = 999;
+    for (int i = 0; i < *game_base_count; i++)
+        if (game_bases[i].faction == faction && has_facility(i, FAC_HEADQUARTERS)) {
+            int d = vector_dist(game_bases[i].x, game_bases[i].y, b->x, b->y);
+            if (d < dist) dist = d;
+        }
+    if (dist == 999) dist = 16;
+    else if (!dist) return 0;
+    // A creche counts as 2 more EFFICIENCY.
+    int creche = has_facility(*game_current_base_id, FAC_CHILDREN_CRECHE);
+    struct faction_data *f = &game_factions[faction];
+    if (*game_base_upkeep_state == 1)
+        for (int i = 0; i < 9; i++) {
+            int loss = creche ? i - 2 : i;
+            f->social_effic[i] += loss >= 8 ? energy : energy * dist / (8 * (8 - loss));
+        }
+    int loss = 4 - f->se_pending[SE_EFFIC] - (creche ? 2 : 0);
+    if (loss >= 8) return energy;
+    int v = energy * dist / ((8 - loss) * 8);
+    return v < 0 ? 0 : v > energy ? energy : v;
+}
+
+// How many citizens of a base are content before anything else counts
+// (fewer on harder levels), and how many bases the faction may have
+// before more make drones (OpenSMACX calls them drones and talents).
+void psych_check(int faction, int *content, int *base_limit) {
+    *content = 6 - (game_is_human(faction) ? game_factions[faction].diff_level : 3);
+    int effic = game_factions[faction].se_pending[SE_EFFIC];
+    *base_limit = (*content + 2) * (effic < 0 ? 4 : effic + 4) * *game_map_area_sqrt / 56 / 2;
+}
+
+// The faction's base that has `rank` of its others above it by energy
+// intake, ties going to the later base; or -1.
+int base_rank(int faction, int rank) {
+    // The original reads outside its list for a negative rank; nothing
+    // asks for one.
+    if (rank < 0) return -1;
+    for (int i = 0; i < *game_base_count; i++) {
+        if (game_bases[i].faction != faction) continue;
+        int v = game_bases[i].intake[RESOURCE_ENERGY] * 512 + i, above = 0;
+        for (int j = 0; j < *game_base_count; j++)
+            if (game_bases[j].faction == faction && game_bases[j].intake[RESOURCE_ENERGY] * 512 + j > v) above++;
+        if (above == rank) return i;
+    }
+    return -1;
+}
+
+// v kept within 0 and hi, and 0 when hi is negative.
+static int clamp_to(int v, int hi) { return v < 0 || hi < 0 ? 0 : v > hi ? hi : v; }
+
+// The current base's energy: trade, the alien energy grid, losses, the
+// split into economy, psych and labs with specialists, facilities and
+// projects, then base_psych().
+void base_energy(void) {
+    struct base *b = *game_current_base;
+    int faction = b->faction, id = *game_current_base_id;
+    struct faction_data *f = &game_factions[faction];
+    int32_t *intake = &b->intake_2[RESOURCE_ENERGY];
+    *intake += game_base_convoy_to[RESOURCE_ENERGY];
+    b->consumption[RESOURCE_ENERGY] = game_base_convoy_from[RESOURCE_ENERGY];
+    b->inefficiency[RESOURCE_ENERGY] = black_market(*intake - b->consumption[RESOURCE_ENERGY]);
+    b->surplus[RESOURCE_ENERGY] = *intake - b->consumption[RESOURCE_ENERGY] - b->inefficiency[RESOURCE_ENERGY];
+
+    // Where the base ranks among the faction's by energy intake, and where
+    // it sits in the base table.
+    int rank = 0, self = id;
+    int mine = b->intake[RESOURCE_ENERGY] * 512 + id;
+    for (int i = 0; i < *game_base_count; i++)
+        if (game_bases[i].faction == faction) {
+            if (game_bases[i].intake[RESOURCE_ENERGY] * 512 + i > mine) rank++;
+            if (&game_bases[i] == b) self = i;
+        }
+
+    // Trade with each faction it has a treaty with, base against the base
+    // of the same rank there. The original keeps the last import in the
+    // same local it later counts the alien energy grid in, without setting
+    // that first: with no trade to count, the grid starts from what
+    // base_minerals() left in that stack word, which every caller runs
+    // just before.
+    int grid = minerals_left;
+    for (int i = 1; i < FACTION_COUNT; i++) {
+        game_base_commerce_import[i] = game_base_commerce_export[i] = 0;
+        const struct faction_data *other = &game_factions[i];
+        if (i == faction) continue;
+        if (!(f->diplo_status[i] & TREATY_TREATY) && !(other->diplo_status[faction] & TREATY_TREATY)) continue;
+        if (!other->base_count) continue;
+        int theirs = base_rank(i, rank);
+        if (theirs < 0) continue;
+        int value = (game_bases[theirs].intake[RESOURCE_ENERGY] + b->intake[RESOURCE_ENERGY] + 7) / 8;
+        if (game_proposal_passes[PROPOSAL_GLOBAL_TRADE_PACT] > game_proposal_passes[PROPOSAL_REPEAL_GLOBAL_TRADE_PACT])
+            value *= 2;
+        int techs = *game_tech_commerce_count + 1;
+        int out = ((other->tech_commerce_bonus + 1) * value + techs / 2) / techs;
+        int in = ((f->tech_commerce_bonus + 1) * value + techs / 2) / techs;
+        if (!(f->diplo_status[i] & TREATY_PACT)) in /= 2, out /= 2;
+        if (*game_governor_faction == faction) in++;
+        if (*game_governor_faction == i) out++;
+        if (f->sanction_turns || other->sanction_turns || is_alien(faction) || is_alien(i)) in = out = 0;
+        grid = in;
+        game_base_commerce_import[i] = in;
+        game_base_commerce_export[i] = out;
+        *intake += in;
+    }
+    // Alien Crossfire's aliens get half of 1 a facility and 5 a project.
+    if (*game_expansion && is_alien(faction)) {
+        for (int i = 0; i < FAC_FIRST_PROJECT; i++)
+            if (b->facilities_built[i / 8] & (1 << (i % 8))) grid++;
+        for (int i = 0; i < SP_COUNT; i++)
+            if (game_secret_projects[i] == self) grid += 5;
+        grid /= 2;
+        if (f->sanction_turns) grid = 0;
+        *intake += grid;
+    }
+
+    // The faction total takes the surplus from before trade.
+    if (*game_base_upkeep_state == 1) f->energy_surplus_total += game_range(b->surplus[RESOURCE_ENERGY], 0, 99999);
+    b->inefficiency[RESOURCE_ENERGY] = black_market(*intake - b->consumption[RESOURCE_ENERGY]);
+    b->surplus[RESOURCE_ENERGY] = *intake - b->consumption[RESOURCE_ENERGY] - b->inefficiency[RESOURCE_ENERGY];
+
+    // The allocation, in tenths rounded; labs get what is left over.
+    int total = game_range(b->surplus[RESOURCE_ENERGY], 0, 9999);
+    int psych = (f->alloc_psych * total + 4) / 10;
+    b->psych_total = psych < 0 ? 0 : psych > total ? total : psych;
+    int left = total - b->psych_total;
+    b->economy_total = clamp_to(((10 - f->alloc_labs - f->alloc_psych) * total + 4) / 10, left);
+    b->labs_total = total - b->psych_total - b->economy_total;
+    b->unk_total = clamp_to(((9 - f->alloc_labs - f->alloc_psych) * total + 4) / 10, left);
+
+    // Specialists past the sixteenth have no slot and are chosen afresh.
+    // One the faction's techs have made obsolete becomes the first kind
+    // available that is at least as good at everything.
+    for (int i = 0; i < b->specialist_total; i++) {
+        int kind = i < 16 ? (int)(b->specialist_types[i / 8] >> (i % 8 * 4) & 0xf) : game_best_specialist();
+        kind = kind < 0 ? 0 : kind > CITIZEN_KINDS - 1 ? CITIZEN_KINDS - 1 : kind;
+        const struct citizen *c = &game_citizens[kind];
+        if (has_tech(c->obsol_tech, faction))
+            for (int j = 0; j < CITIZEN_KINDS; j++) {
+                const struct citizen *n = &game_citizens[j];
+                if (has_tech(n->preq_tech, faction) && !has_tech(n->obsol_tech, faction) && n->econ >= c->econ &&
+                    n->psych >= c->psych && n->labs >= c->labs) {
+                    kind = j;
+                    if (i < 16) {
+                        int shift = i % 8 * 4;
+                        b->specialist_types[i / 8] = (b->specialist_types[i / 8] & ~(0xfu << shift)) | (uint32_t)j << shift;
+                    }
+                    break;
+                }
+            }
+        b->economy_total += game_citizens[kind].econ;
+        b->psych_total += game_citizens[kind].psych;
+        b->labs_total += game_citizens[kind].labs;
+    }
+
+    // Facilities raise each in quarters.
+    b->labs_total += game_faction_defs[faction].rule_research;
+    if (has_facility(id, FAC_BIOLOGY_LAB)) b->labs_total += 2;
+    int econ_q = 4, labs_q = 4, psych_q = 4;
+    if (has_facility(id, FAC_ENERGY_BANK) || holds_project(SP_PLANETARY_ENERGY_GRID, faction)) econ_q = 6;
+    if (has_facility(id, FAC_NETWORK_NODE)) labs_q = 6;
+    if (has_facility(id, FAC_HOLOGRAM_THEATRE) ||
+        (has_facility(id, FAC_NETWORK_NODE) && holds_project(SP_VIRTUAL_WORLD, faction)))
+        psych_q = 6;
+    if (has_facility(id, FAC_RESEARCH_HOSPITAL)) psych_q++, labs_q += 2;
+    if (has_facility(id, FAC_NANOHOSPITAL)) psych_q++, labs_q += 2;
+    if (has_facility(id, FAC_TREE_FARM)) econ_q += 2, psych_q += 2;
+    if (has_facility(id, FAC_HYBRID_FOREST)) econ_q += 2, psych_q += 2;
+    if (has_facility(id, FAC_FUSION_LAB)) econ_q += 2, labs_q += 2;
+    if (has_facility(id, FAC_QUANTUM_LAB)) econ_q += 2, labs_q += 2;
+    b->psych_total = (b->psych_total * psych_q + 3) / 4;
+    b->labs_total = (b->labs_total * labs_q + 3) / 4;
+    if (game_secret_projects[SP_SUPERCOLLIDER] == id) b->labs_total *= 2;
+    if (game_secret_projects[SP_THEORY_OF_EVERYTHING] == id) b->labs_total *= 2;
+    b->economy_total = (b->economy_total * econ_q + 3) / 4;
+    if (game_secret_projects[SP_SPACE_ELEVATOR] == id) b->economy_total *= 2;
+    if (game_secret_projects[SP_LONGEVITY_VACCINE] == id && f->se_models_pending[1] == ECONOMICS_FREE_MARKET)
+        b->economy_total += b->economy_total / 2;
+    b->unk_total = (b->unk_total * econ_q + 3) / 4;
+    // The Network Backbone: a lab for every network node anywhere, and the
+    // base's trade or energy grid again.
+    if (game_secret_projects[SP_NETWORK_BACKBONE] == id) {
+        for (int i = 0; i < *game_base_count; i++)
+            if (has_facility(i, FAC_NETWORK_NODE)) b->labs_total++;
+        if (is_alien(faction)) b->labs_total += grid;
+        for (int i = 1; i < FACTION_COUNT; i++)
+            if (!f->sanction_turns && !game_factions[i].sanction_turns && !is_alien(faction) && !is_alien(i))
+                b->labs_total += game_base_commerce_import[i];
+    }
+
+    // Lopsided allocations cost labs and economy, unless EFFICIENCY is 4
+    // or more: the side given more loses up to 40%, the other up to 80%.
+    int labs = f->alloc_labs, psych_alloc = f->alloc_psych;
+    int lopsided = psych_alloc + 2 * labs - 10;
+    if (lopsided < 0) lopsided = 2 * (5 - labs) - psych_alloc;
+    lopsided /= 2;
+    int effic = 2 * (4 - game_range(f->se_pending[SE_EFFIC], -4, 4));
+    if (lopsided && effic) {
+        int p = effic * lopsided;
+        int small_cut = 100 - game_range(p, 0, 40), big_cut = 100 - game_range(2 * p, 0, 80);
+        int labs_more = labs > 10 - labs - psych_alloc;
+        b->labs_total = (b->labs_total * (labs_more ? small_cut : big_cut) + 50) / 100;
+        b->economy_total = (b->economy_total * (labs_more ? big_cut : small_cut) + 50) / 100;
+    }
+
+    // Stockpile Energy turns half the minerals into economy, rounded up,
+    // and a quarter more with the Planetary Energy Grid; from its second
+    // turn on.
+    if (b->queue[0] == -FAC_STOCKPILE_ENERGY && b->surplus[RESOURCE_MINERAL] > 0 &&
+        b->production_last == -FAC_STOCKPILE_ENERGY) {
+        int v = (b->surplus[RESOURCE_MINERAL] + 1) / 2;
+        if (holds_project(SP_PLANETARY_ENERGY_GRID, faction)) v = (v * 5 + 3) / 4;
+        b->economy_total += v;
+    }
+    base_psych();
+}
+
+// ---- Talents and drones ------------------------------------------------------
+
+// Until talents, drones and superdrones fit among the citizens at work:
+// a talent cancels a superdrone or a drone, then drones beyond the workers
+// go, and superdrones are kept to the drones.
+static void psych_fit(struct base *b) {
+    for (;;) {
+        int workers = b->pop_size - b->specialist_total;
+        if (b->talent_total + b->drone_total + b->superdrone_total <= workers) return;
+        if (b->talent_total) {
+            b->talent_total--;
+            if (b->superdrone_total) b->superdrone_total--;
+            else if (b->drone_total) b->drone_total--;
+        } else if (b->drone_total > workers) {
+            b->drone_total--;
+        } else {
+            b->superdrone_total = clamp_to(b->superdrone_total, b->drone_total);
+            return;
+        }
+    }
+}
+
+// Kept within the population, fitted, and noted as one of the steps.
+static void psych_step(struct base *b, int step) {
+    b->drone_total = clamp_to(b->drone_total, b->pop_size);
+    b->talent_total = clamp_to(b->talent_total, b->pop_size);
+    psych_fit(b);
+    game_psych_talents[step] = b->talent_total;
+    game_psych_drones[step] = b->drone_total;
+    game_psych_superdrones[step] = b->superdrone_total;
+}
+
+// Alien Crossfire's Cult of Planet: its psi land units police twice. So do
+// the first prototype ids' psi units and id 15 (the Spore Launcher, in the
+// standard rules).
+static int worm_police(int proto, int faction) {
+    const struct unit_proto *u = &game_protos[proto];
+    return (game_faction_defs[faction].rule_flags & RULE_FLAG_WORM_POLICE) && proto < 64 &&
+           (game_weapons[u->weapon].offense < 0 || proto == 15) && game_chassis[u->chassis].triad == TRIAD_LAND;
+}
+
+// What base_psych() works out once for the base, before TALENT and POLICE.
+struct psych_base {
+    int drones, talents;       // from the population, the level and the faction's rules
+    int bureaucracy;           // drones for having too many bases
+    int facility_drones;       // made (or, negative, calmed) by facilities
+    int facility_talents;      // from a Paradise Garden
+    int project_talents;       // from secret projects
+    int punished;              // a Punishment Sphere
+};
+
+// One pass of the steps, at the given TALENT and POLICE.
+static void psych_pass(struct base *b, const struct psych_base *p, int talent, int police) {
+    int faction = b->faction, pop = b->pop_size;
+    const struct faction_data *f = &game_factions[faction];
+    // POLICE -2 allows no units; -1 and 0 one; 1 two; from 2 three.
+    int units = game_range(police + 2, 0, 4);
+    if (units > 1) units--;
+    b->drone_total = p->drones;
+    b->talent_total = p->talents;
+    if (talent >= 0) b->talent_total += talent;
+    else b->drone_total -= talent;
+    b->drone_total = clamp_to(b->drone_total, pop) + p->bureaucracy;
+    b->superdrone_total = clamp_to(b->drone_total - pop, pop);
+    b->drone_total = clamp_to(b->drone_total, pop);
+    psych_fit(b);
+    game_psych_talents[0] = b->talent_total;
+    game_psych_drones[0] = b->drone_total;
+    game_psych_superdrones[0] = b->superdrone_total;
+
+    // Psych energy: a talent for every 2.
+    b->talent_total += b->psych_total / 2;
+    psych_step(b, 1);
+
+    b->drone_total += p->facility_drones;
+    b->talent_total += p->facility_talents;
+    psych_step(b, 2);
+
+    // Police: the Self-Aware Colony counts as one unit. Units that police
+    // twice go first, then the other combat units on the square, whoever
+    // they belong to. POLICE 3 or more calms one more drone a unit.
+    if (units > 0) {
+        int used = 0;
+        if (holds_project(SP_SELF_AWARE_COLONY, faction)) {
+            used = 1;
+            if (b->drone_total) b->drone_total--;
+            if (police >= 3 && b->drone_total) b->drone_total--;
+        }
+        for (int pass = 0; pass < 2 && used < units; pass++)
+            for (int v = game_stack_fix(game_veh_at(b->x, b->y)); v >= 0; v = game_vehs[v].next_in_stack) {
+                int proto = game_vehs[v].proto;
+                if (game_protos[proto].plan > PLAN_RECON) continue;
+                int twice = game_has_abil(proto, ABILITY_POLICE_2X) != 0 || worm_police(proto, faction);
+                if (twice == pass) continue;
+                if (b->drone_total) b->drone_total--;
+                if (game_has_abil(proto, ABILITY_POLICE_2X) && b->drone_total) b->drone_total--;
+                if (police >= 3 && b->drone_total) b->drone_total--;
+                if (worm_police(proto, faction) && b->drone_total) b->drone_total--;
+                if (++used >= units) break;
+            }
+    }
+    // Below -2, units away from home make drones.
+    int away = *game_base_pacifism;
+    if (police == -3) {
+        if (away > 1) b->drone_total += away - 1;
+    } else if (police == -4) {
+        b->drone_total += away;
+    } else if (police < -4) {
+        b->drone_total += 2 * away;
+    }
+    psych_step(b, 3);
+
+    // The Longevity Vaccine takes a drone under Planned, and another under
+    // anything but Free Market, even with none left (the original
+    // doesn't check).
+    b->talent_total += p->project_talents;
+    if (holds_project(SP_LONGEVITY_VACCINE, faction)) {
+        if (f->se_models_pending[1] == ECONOMICS_PLANNED) b->drone_total--;
+        if (f->se_models_pending[1] != ECONOMICS_FREE_MARKET) b->drone_total--;
+    }
+    if (p->punished || b->nerve_staple_turns) b->drone_total = b->talent_total = 0;
+    psych_step(b, 4);
+}
+
+// How content a pass left the base, as the AI scores it.
+static int psych_score(const struct base *b) {
+    int score = b->talent_total - b->drone_total;
+    if (score > 0) {
+        if (b->drone_total || 2 * b->talent_total < b->pop_size) score /= 2;
+    } else if (score < 0) {
+        score -= b->pop_size;
+        if (b->pop_size < 6) score *= 2;
+    }
+    return score;
+}
+
+void base_psych(void) {
+    struct base *b = *game_current_base;
+    int faction = b->faction, id = *game_current_base_id, pop = b->pop_size;
+    struct faction_data *f = &game_factions[faction];
+    const struct faction_def *m = &game_faction_defs[faction];
+    struct psych_base p = {0};
+    int content, limit;
+    psych_check(faction, &content, &limit);
+    if (limit) p.bureaucracy = clamp_to((id % limit + f->base_count - limit) / limit, pop);
+    int diff = game_is_human(faction) ? f->diff_level : 3;
+    p.drones = clamp_to(pop - content, pop);
+    // A captured base, for a while.
+    p.drones += clamp_to((b->assimilation_turns + 9) / 10, (pop + diff - 2) / 4);
+    if (m->rule_drone) p.drones += pop / m->rule_drone;
+    if (m->rule_talent) p.talents = (m->rule_talent + pop - 1) / m->rule_talent;
+    for (int i = 0; i < m->bonus_count; i++)
+        if (m->bonus_id[i] == BONUS_NODRONE) {
+            p.drones -= m->bonus_val1[i];
+            if (p.drones < 0) p.drones = 0;
+            break;
+        }
+    if (has_facility(id, FAC_GENEJACK_FACTORY)) p.facility_drones = game_rules_basic->drones_genejack;
+    if (has_facility(id, FAC_RECREATION_COMMONS)) p.facility_drones -= 2;
+    if ((has_facility(id, FAC_NETWORK_NODE) && holds_project(SP_VIRTUAL_WORLD, faction)) ||
+        has_facility(id, FAC_HOLOGRAM_THEATRE))
+        p.facility_drones -= 2;
+    if (holds_project(SP_PLANETARY_TRANSIT_SYSTEM, faction) && pop <= 3) p.facility_drones--;
+    if (has_facility(id, FAC_PARADISE_GARDEN)) p.facility_talents = 2;
+    if (has_facility(id, FAC_RESEARCH_HOSPITAL)) p.facility_drones--;
+    if (has_facility(id, FAC_NANOHOSPITAL)) p.facility_drones--;
+    p.project_talents = holds_project(SP_HUMAN_GENOME_PROJECT, faction) + 2 * holds_project(SP_CLINICAL_IMMORTALITY, faction);
+    p.punished = has_facility(id, FAC_PUNISHMENT_SPHERE);
+
+    // At the end of a turn, every TALENT from -3 to 4 against every POLICE
+    // from -5 to 3, for the AI; then the faction's own, with 2 more POLICE
+    // for a Brood Pit, which the base keeps.
+    if (*game_base_upkeep_state == 1)
+        for (int t = 7; t >= 0; t--)
+            for (int q = 8; q >= 0; q--) {
+                psych_pass(b, &p, t - 3, q - 5);
+                f->social_psych[t][q] += psych_score(b);
+            }
+    psych_pass(b, &p, f->se_pending[SE_TALENT], f->se_pending[SE_POLICE] + 2 * has_facility(id, FAC_BROOD_PIT));
+}
+
 // ---- Hooks and shadow checks ------------------------------------------------
 
 extern struct hook_module base_module;
 #define BASE (&base_module)
 
-#define WRITES_YIELD WRITES(game_terraform_reduce, 4), WRITES(game_terraform_energy, 4)
+#define WRITES_YIELD WRITES(game_terraform_reduce, 4); WRITES(game_terraform_energy, 4)
 #define YIELD(name)                                                                                              \
     SHADOW_WRITER(BASE, int, name, (int a, int b, int c, int d, int e), (a, b, c, d, e), WRITES_YIELD, \
                   "%d, %d, %d, %d, %d", a, b, c, d, e)
@@ -413,11 +826,29 @@ SHADOW3(BASE, int, has_fac, int, int, int)
 // The totals write the current base, the base-compute globals and the
 // base's faction.
 #define WRITES_CURRENT                                                         \
-    WRITES(*game_current_base, sizeof(struct base)),                           \
-        WRITES(game_base_globals, BASE_GLOBALS_END - BASE_GLOBALS_START),      \
+    WRITES(*game_current_base, sizeof(struct base));                           \
+        WRITES(game_base_globals, BASE_GLOBALS_END - BASE_GLOBALS_START);      \
         WRITES(&game_factions[(*game_current_base)->faction], sizeof(struct faction_data))
 SHADOW_WRITER(BASE, void, base_nutrient, (void), (), WRITES_CURRENT, "%s", "")
 SHADOW_WRITER(BASE, void, base_minerals, (void), (), WRITES_CURRENT, "%s", "")
+SHADOW_WRITER(BASE, int, black_market, (int a), (a), WRITES_CURRENT, "%d", a)
+#define WRITES_PSYCH_CHECK WRITES(b, sizeof(*b)); WRITES(c, sizeof(*c))
+SHADOW_WRITER(BASE, void, psych_check, (int a, int *b, int *c), (a, b, c), WRITES_PSYCH_CHECK, "%d", a)
+SHADOW2(BASE, int, base_rank, int, int)
+
+// Calls fn with `value` in the stack word its frame keeps at [ebp-4],
+// where the original base_energy() reads before it writes.
+void call_with_ebp4(void (*fn)(void), int value);
+__asm__(".text\n"
+        "call_with_ebp4:\n"
+        "    movl 4(%esp), %eax\n"
+        "    movl 8(%esp), %ecx\n"
+        "    movl %ecx, -12(%esp)\n"  // below the return address and fn's saved ebp
+        "    call *%eax\n"
+        "    ret\n");
+SHADOW_WRITER(BASE, void, base_psych, (void), (), WRITES_CURRENT, "%s", "")
+SHADOW_WRITER_VIA(BASE, void, base_energy, (void), (), call_with_ebp4(orig_base_energy, minerals_left), WRITES_CURRENT,
+                  "%s", "")
 
 static int slice;
 
@@ -463,15 +894,36 @@ static void sweep_bases(void) {
         *game_current_base_id = b;
         check_base_nutrient();
         check_base_minerals();
+        check_base_energy();
+        for (int e = -1; e <= 40; e += 7) check_black_market(e);
         // Early on no base makes enough minerals to do damage, so also
         // with more minerals, and damage left from last turn.
         base->intake_2[RESOURCE_MINERAL] = 20 + (b * 7 + slice * 3) % 60;
         base->eco_damage = (b * 13 + slice * 5) % 300;
         check_base_minerals();
+        // And energy as at the end of a turn, with more of it, some
+        // specialists and another allocation.
+        struct faction_data *f = &game_factions[base->faction], saved_f = *f;
+        int upkeep_state = *game_base_upkeep_state;
+        *game_base_upkeep_state = 1;
+        base->intake_2[RESOURCE_ENERGY] += (b * 5 + slice * 11) % 40;
+        base->specialist_total = (b + slice) % 4;
+        base->specialist_types[0] = (uint32_t)(b * 0x9e3779b9u + slice);
+        f->alloc_psych = (b + slice) % 4;
+        f->alloc_labs = (b * 3 + slice) % (11 - f->alloc_psych);
+        check_base_energy();
+        check_base_psych();
+        *game_base_upkeep_state = upkeep_state;
+        *f = saved_f;
         *base = saved;
     }
     *game_current_base = current;
     *game_current_base_id = current_id;
+    for (int f = 0; f < FACTION_COUNT; f++) {
+        int content, limit;
+        check_psych_check(f, &content, &limit);
+        for (int r = 0; r <= *game_base_count + 1; r++) check_base_rank(f, r);
+    }
 }
 
 static void base_sweep(void) {
@@ -493,5 +945,10 @@ static const struct hook base_hooks[] = {
     HOOK(0x421670, has_fac, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x56, 0x57),                       // push ecx; push esi; push edi
     HOOK(0x4e9b70, base_nutrient, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),                 // sub esp, 8
     HOOK(0x4e9cb0, base_minerals, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10),                 // sub esp, 16
+    HOOK(0x4ea1f0, black_market, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x1c),                  // sub esp, 28
+    HOOK(0x4ea4a0, psych_check, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x4d, 0x08),                   // mov ecx, [ebp+8]
+    HOOK(0x4eb490, base_rank, PUSH_EBP_MOV_EBP_ESP, 0xb8, 0x00, 0x10, 0x00, 0x00),         // mov eax, 0x1000
+    HOOK(0x4ea540, base_psych, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x48),                    // sub esp, 72
+    HOOK(0x4eb560, base_energy, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x28),                   // sub esp, 40
 };
 struct hook_module base_module = {"base", base_hooks, HOOK_COUNT(base_hooks), base_sweep, NULL, -1};

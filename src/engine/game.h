@@ -66,7 +66,7 @@ enum {  // diplo_status bits
 enum { FUNGUS_NUTRIENT, FUNGUS_MINERALS, FUNGUS_ENERGY, FUNGUS_UNUSED, FUNGUS_COUNT };
 
 enum {  // region_base_plan values that tech_val() looks at
-    PLAN_OFFENSIVE = 0, PLAN_DEFENSIVE = 2, PLAN_NAVAL_TRANSPORT = 7,
+    PLAN_OFFENSIVE = 0, PLAN_DEFENSIVE = 2, PLAN_RECON = 3, PLAN_NAVAL_TRANSPORT = 7,
 };
 
 enum { REGION_COUNT = 128, LAND_REGION_COUNT = 64 };
@@ -79,9 +79,13 @@ struct faction_data {
     int32_t diff_level;  // humans' difficulty; 3 for the AI
     GAME_PAD(0x00c, 0x018);
     uint32_t diplo_status[FACTION_COUNT];  // TREATY_* towards each faction
-    GAME_PAD(0x038, 0x1d8);
+    GAME_PAD(0x038, 0x0c0);
+    int32_t sanction_turns;  // economic sanctions: no commerce while above 0
+    GAME_PAD(0x0c4, 0x1d8);
     int32_t major_atrocities;
-    GAME_PAD(0x1dc, 0x24c);
+    GAME_PAD(0x1dc, 0x228);
+    int32_t se_models_pending[4];  // politics, economics, values, future
+    GAME_PAD(0x238, 0x24c);
     int32_t se_pending[SE_COUNT];
     int32_t se[SE_COUNT];
     int32_t se_2[SE_COUNT];
@@ -92,7 +96,8 @@ struct faction_data {
     int32_t turn_commerce_income;
     int32_t unk_30c, unk_310;
     int32_t tech_fungus[FUNGUS_COUNT];  // extra output from fungus squares
-    GAME_PAD(0x324, 0x35c);
+    int32_t alloc_psych, alloc_labs;  // energy allocation, in tenths; economy gets the rest
+    GAME_PAD(0x32c, 0x35c);
     int32_t tech_ranking;  // twice the techs discovered
     int32_t unk_360, unk_364;
     int32_t transcendent_techs;  // techs past the end of the tree
@@ -103,7 +108,12 @@ struct faction_data {
     int32_t ai_fight, ai_growth, ai_tech, ai_wealth, ai_power;  // the AI's priorities
     GAME_PAD(0x3f0, 0x464);
     int32_t clean_minerals;  // minerals a base makes before ecological damage
-    GAME_PAD(0x468, 0x7fc);
+    GAME_PAD(0x468, 0x6b0);
+    // How content bases would be at each TALENT from -3 and POLICE from -5,
+    // added up for the AI.
+    int32_t social_psych[8][9];
+    int32_t social_effic[9];  // energy lost this turn at each EFFICIENCY from 4 down, for the AI
+    GAME_PAD(0x7f4, 0x7fc);
     int32_t unk_7fc;  // tech_val() treats it as ecological damage
     int32_t nutrient_surplus_total, labs_total;
     int32_t satellites[4];  // orbital nutrient, mineral and energy satellites, and defense pods
@@ -135,10 +145,18 @@ GAME_AT(struct faction_data, major_atrocities, 0x1d8);
 GAME_AT(struct faction_data, transcendent_techs, 0x368);
 GAME_AT(struct faction_data, clean_minerals, 0x464);
 GAME_AT(struct faction_data, nutrient_surplus_total, 0x800);
+GAME_AT(struct faction_data, sanction_turns, 0xc0);
+GAME_AT(struct faction_data, se_models_pending, 0x228);
+GAME_AT(struct faction_data, energy_surplus_total, 0x2fc);
+GAME_AT(struct faction_data, alloc_psych, 0x324);
+GAME_AT(struct faction_data, social_psych, 0x6b0);
+GAME_AT(struct faction_data, social_effic, 0x7d0);
+GAME_AT(struct faction_data, base_count, 0x105c);
 GAME_AT(struct faction_data, best_weapon_value, 0x818);
 
 enum {  // faction_def bonus ids
     BONUS_FUNGUS_NUTRIENT = 7, BONUS_FUNGUS_MINERALS = 8, BONUS_FUNGUS_ENERGY = 9,
+    BONUS_NODRONE = 14,  // drones made content at each base
 };
 
 // A faction as its faction file defines it (Thinker's MFaction, OpenSMACX's
@@ -149,7 +167,8 @@ struct faction_def {
     int32_t noun_gender;
     int32_t noun_plural;
     char adjective[128];  // the name as an adjective, such as "Gaian"
-    GAME_PAD(0x384, 0x4f0);
+    GAME_PAD(0x384, 0x4dc);
+    int32_t rule_research, rule_drone, rule_talent, rule_energy, rule_interest;
     int32_t rule_population, rule_hurry, rule_techcost, rule_psi, rule_sharetech, rule_commerce, rule_flags;
     int32_t bonus_count;
     int32_t bonus_id[8], bonus_val1[8], bonus_val2[8];
@@ -157,6 +176,7 @@ struct faction_def {
 };
 _Static_assert(sizeof(struct faction_def) == 0x59c, "faction_def size");
 GAME_AT(struct faction_def, adjective, 0x304);
+GAME_AT(struct faction_def, rule_research, 0x4dc);
 GAME_AT(struct faction_def, rule_techcost, 0x4f8);
 GAME_AT(struct faction_def, bonus_count, 0x50c);
 GAME_AT(struct faction_def, bonus_val1, 0x530);
@@ -176,11 +196,14 @@ struct unit_proto {
     char name[32];
     uint32_t abilities;
     uint8_t chassis, weapon, armor, reactor;
-    GAME_PAD(0x28, 0x32);
+    uint8_t carry, cost;
+    uint8_t plan;  // PLAN_*; up to PLAN_RECON for combat units
+    GAME_PAD(0x2b, 0x32);
     int16_t preq_tech;
 };
 _Static_assert(sizeof(struct unit_proto) == 0x34, "unit_proto size");
 GAME_AT(struct unit_proto, chassis, 0x24);
+GAME_AT(struct unit_proto, plan, 0x2a);
 
 struct rules_weapon {
     char *name, *short_name;
@@ -330,17 +353,23 @@ _Static_assert(sizeof(struct landmark) == 0x28, "landmark size");
 enum { BASE_COUNT = 512 };
 
 enum {
-    FAC_HEADQUARTERS = 1, FAC_CHILDREN_CRECHE = 2, FAC_RECYCLING_TANKS = 3, FAC_ROBOTIC_ASSEMBLY_PLANT = 19,
+    FAC_HEADQUARTERS = 1, FAC_CHILDREN_CRECHE = 2, FAC_RECYCLING_TANKS = 3, FAC_RECREATION_COMMONS = 6,
+    FAC_ENERGY_BANK = 7, FAC_NETWORK_NODE = 8, FAC_BIOLOGY_LAB = 9, FAC_HOLOGRAM_THEATRE = 11,
+    FAC_PARADISE_GARDEN = 12, FAC_FUSION_LAB = 15, FAC_PUNISHMENT_SPHERE = 23, FAC_BROOD_PIT = 35,
+    FAC_QUANTUM_LAB = 16, FAC_RESEARCH_HOSPITAL = 17, FAC_NANOHOSPITAL = 18, FAC_ROBOTIC_ASSEMBLY_PLANT = 19,
     FAC_NANOREPLICATOR = 20, FAC_QUANTUM_CONVERTER = 21, FAC_GENEJACK_FACTORY = 22, FAC_PRESSURE_DOME = 26,
     FAC_AQUAFARM = 36, FAC_SUBSEA_TRUNKLINE = 37, FAC_THERMOCLINE_TRANSDUCER = 38, FAC_GEOSYNC_SURVEY_POD = 41,
     // Built in orbit; the Space Elevator doubles minerals for them.
-    FAC_SKY_HYDRO_LAB = 65, FAC_ORBITAL_DEFENSE_POD = 68,
+    FAC_SKY_HYDRO_LAB = 65, FAC_ORBITAL_DEFENSE_POD = 68, FAC_STOCKPILE_ENERGY = 69,
     FAC_FIRST_PROJECT = 70,
 };
 // Secret projects, as indices into game_secret_projects (facility id - 70).
 enum {
-    SP_MERCHANT_EXCHANGE = 3, SP_PHOLUS_MUTAGEN = 16, SP_SPACE_ELEVATOR = 27, SP_SINGULARITY_INDUCTOR = 28,
-    SP_BULK_MATTER_TRANSMITTER = 29, SP_ASCENT = 31, SP_MANIFOLD_HARMONICS = 33, SP_COUNT = 64,
+    SP_HUMAN_GENOME_PROJECT = 0, SP_MERCHANT_EXCHANGE = 3, SP_VIRTUAL_WORLD = 6, SP_PLANETARY_TRANSIT_SYSTEM = 7, SP_SUPERCOLLIDER = 12, SP_LONGEVITY_VACCINE = 14,
+    SP_PHOLUS_MUTAGEN = 16, SP_THEORY_OF_EVERYTHING = 18, SP_NETWORK_BACKBONE = 21, SP_SPACE_ELEVATOR = 27, SP_SINGULARITY_INDUCTOR = 28,
+    SP_BULK_MATTER_TRANSMITTER = 29, SP_ASCENT = 31, SP_SELF_AWARE_COLONY = 25,
+    SP_CLINICAL_IMMORTALITY = 26, SP_MANIFOLD_HARMONICS = 33,
+    SP_PLANETARY_ENERGY_GRID = 36, SP_COUNT = 64,
 };
 
 enum { BASE_STATE_GOLDEN_AGE = 0x4 };
@@ -416,7 +445,18 @@ GAME_AT(struct rules_basic, mine_road_limit, 0x24);
 GAME_AT(struct rules_basic, tech_three_nutrients, 0x4c);
 GAME_AT(struct rules_basic, tech_mining_platform_bonus, 0xa4);
 
-enum { RULE_FLAG_AQUATIC = 0x100 };  // faction_def.rule_flags
+enum { RULE_FLAG_WORM_POLICE = 0x40, RULE_FLAG_ALIEN = 0x80, RULE_FLAG_AQUATIC = 0x100 };  // faction_def.rule_flags
+enum { ECONOMICS_FREE_MARKET = 1, ECONOMICS_PLANNED = 2 };  // faction_data.se_models_pending[1]
+enum { ABILITY_POLICE_2X = 0x400000 };  // unit_proto.abilities
+
+// A kind of specialist (Thinker's CCitizen), from alphax.txt.
+struct citizen {
+    char *name, *plural;
+    int32_t preq_tech, obsol_tech;
+    int32_t econ, psych, labs;  // what one adds to the base
+};
+_Static_assert(sizeof(struct citizen) == 0x1c, "citizen size");
+enum { CITIZEN_KINDS = 7 };  // the ones base_energy() looks at
 
 static inline int game_has_facility(const struct base *b, int facility) {
     return (b->facilities_built[facility / 8] & (1 << (facility % 8))) != 0;
@@ -563,6 +603,17 @@ extern int32_t *game_base_convoy_from, *game_base_convoy_to;  // [RESOURCE_COUNT
 extern int32_t *game_base_forces_upkeep;
 extern int32_t *game_base_upkeep_state;  // 1 while bases are worked through at the end of a turn
 extern int32_t *game_tectonic_detonations;  // [FACTION_COUNT]
+// Energy the current base gains from and gives to each faction by trade.
+extern int32_t *game_base_commerce_import, *game_base_commerce_export;  // [FACTION_COUNT]
+extern struct citizen *game_citizens;
+extern int32_t *game_tech_commerce_count;  // techs that raise commerce
+// How often each Planetary Council proposal has passed.
+extern int32_t *game_proposal_passes;
+enum { PROPOSAL_GLOBAL_TRADE_PACT = 3, PROPOSAL_REPEAL_GLOBAL_TRADE_PACT = 4 };
+// base_psych()'s talents, drones and superdrones after each step: before
+// anything, psych energy, facilities, police, projects.
+extern int32_t *game_psych_talents, *game_psych_drones, *game_psych_superdrones;  // [5]
+extern int32_t *game_base_pacifism;  // military units away from home, as POLICE counts them
 // The base-compute globals from game_base_convoy_from to game_current_base.
 enum { BASE_GLOBALS_START = 0x90e8fc, BASE_GLOBALS_END = 0x90ea38 };
 extern uint8_t *game_base_globals;
@@ -583,6 +634,8 @@ extern void *(*game_getptd)(void);                // the C runtime's per-thread 
 extern int (*game_random)(int min, int max);      // the game's own generator: min to max - 1
 extern void (*game_random_reseed)(int seed);
 extern void (*game_do_all_non_input)(void);       // redraws and the message pump
+extern int (*game_best_specialist)(void);         // for the current base
+extern int (*game_has_abil)(int proto, uint32_t ability);
 extern void(__attribute__((thiscall)) * game_path_continents)(void *path);  // finds the regions
 extern void (*game_draw_radius)(int x, int y, int radius, int unk);           // redraws squares
 extern int (*game_base_find2)(int x, int y, int faction);  // the nearest base of the faction, or -1

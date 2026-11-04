@@ -114,7 +114,8 @@ module at a time. So far:
   units. Loading and saving maps are still the game's own;
 - bases, begun: what each square yields in nutrients, minerals and energy,
   facilities, and a base's nutrient and mineral totals with growth and
-  ecological damage.
+  ecological damage; its energy with trade, losses to inefficiency and the
+  split into economy, psych and labs; and its talents and drones.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once

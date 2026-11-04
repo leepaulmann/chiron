@@ -72,14 +72,18 @@ static inline int shadow_bypass(void) { return hooks_sweeping || hooks_checking(
 // that returns nothing, give void as `ret`.
 #define WRITES(p, size) hooks_writes_add(&w_, (void *)(p), (size))
 
-#define SHADOW_WRITER(module, ret, name, params, args, writes, fmt, ...)            \
+#define SHADOW_WRITER(module, ret, name, params, args, writes, fmt, ...) \
+    SHADOW_WRITER_VIA(module, ret, name, params, args, orig_##name args, writes, fmt, __VA_ARGS__)
+
+// The same, calling the original with the expression `call`.
+#define SHADOW_WRITER_VIA(module, ret, name, params, args, call, writes, fmt, ...)  \
     SHADOW_DECLARE(ret, name, params)                                               \
     static ret check_##name params {                                                \
         struct hook_writes w_ = {0};                                                \
         writes;                                                                     \
         hooks_writes_begin(&w_);                                                    \
         hooks_nested++;                                                             \
-        SHADOW_RESULT_##ret(want) orig_##name args;                                 \
+        SHADOW_RESULT_##ret(want) call;                                             \
         hooks_nested--;                                                             \
         hooks_writes_middle(&w_);                                                   \
         SHADOW_RESULT_##ret(got) name args;                                         \

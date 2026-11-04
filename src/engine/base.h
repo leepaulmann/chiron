@@ -1,4 +1,5 @@
-// Bases: what the squares around them yield.
+// Bases: what the squares around them yield, and the totals worked out
+// from it.
 #pragma once
 
 // What a square yields to `base` (or -1 for none) of `faction`; with `flag`
@@ -19,3 +20,19 @@ int has_fac(int facility, int base, int queue);
 // ecological damage, from the intake base_yield() found.
 void base_nutrient(void);
 void base_minerals(void);
+
+// Energy lost to distance from headquarters, out of `energy` at the
+// current base.
+int black_market(int energy);
+// Citizens content before anything else, and bases allowed before more
+// make drones, for the faction.
+void psych_check(int faction, int *content, int *base_limit);
+// The faction's base with `rank` of its others above it by energy intake,
+// or -1.
+int base_rank(int faction, int rank);
+// The current base's energy and its split into economy, psych and labs,
+// then base_psych().
+void base_energy(void);
+// The current base's talents, drones and superdrones; at the end of a
+// turn also how content it would be at each TALENT and POLICE, for the AI.
+void base_psych(void);

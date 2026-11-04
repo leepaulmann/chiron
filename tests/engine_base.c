@@ -28,7 +28,7 @@ static struct rules_basic rules_basic = {
     .mine_road_limit = 1, .nutrient_effect_mine = -1,
     .tech_three_nutrients = 10, .tech_three_minerals = 11, .tech_three_energy = 12, .tech_mining_platform_bonus = 13,
 };
-static int32_t projects[SP_COUNT], governor, dust, flares, upkeep_a, reduce, base_energy;
+static int32_t projects[SP_COUNT], governor, dust, flares, upkeep_a, reduce, terraform_energy;
 static struct base *current;
 static int32_t near_x[9] = {1, 2, 1, 0, -1, -2, -1, 0, 0}, near_y[9] = {-1, 0, 1, 2, 1, 0, -1, -2, 0};
 static int failures;
@@ -55,6 +55,17 @@ static void put(int x, int y, int alt, int rain, int rocky, uint32_t bits) {
     t->bits = bits;
 }
 
+static int best_specialist_stub(void) { return 2; }
+// One unit can stand on base 1's square, as veh 0.
+static struct veh vehs[1];
+static struct unit_proto protos[2];
+static struct rules_weapon weapons[2];
+static struct rules_chassis chassis[2];
+static int unit_here;
+static int veh_at_stub(int x, int y) { return unit_here && x == bases[1].x && y == bases[1].y ? 0 : -1; }
+static int stack_fix_stub(int veh) { return veh; }
+static int has_abil_stub(int proto, uint32_t ability) { return (protos[proto].abilities & ability) != 0; }
+
 static void give(int base, int facility) { bases[base].facilities_built[facility / 8] |= (uint8_t)(1 << (facility % 8)); }
 
 int main(void) {
@@ -67,7 +78,7 @@ int main(void) {
     game_res_info = &res, game_rules_basic = &rules_basic;
     game_secret_projects = projects, game_governor_faction = &governor;
     game_dust_cloud = &dust, game_solar_flares = &flares, game_control_upkeep_a = &upkeep_a;
-    game_current_base = &current, game_terraform_reduce = &reduce, game_terraform_energy = &base_energy;
+    game_current_base = &current, game_terraform_reduce = &reduce, game_terraform_energy = &terraform_energy;
     game_radius_near_x = near_x, game_radius_near_y = near_y;
     for (int i = 0; i < TECH_COUNT; i++) techs[i].preq1 = techs[i].preq2 = TECH_NONE;
     for (int i = 0; i < SP_COUNT; i++) projects[i] = -1;
@@ -134,7 +145,7 @@ int main(void) {
     give(0, FAC_HEADQUARTERS);
     factions[1].se_pending[SE_ECONOMY] = 3;
     EXPECT(energy_yield(1, 0, 2, 2, 0), 5);  // 1, headquarters 1, ECONOMY 3 gives 2, and 1 for ECONOMY 2
-    EXPECT(base_energy, 5);
+    EXPECT(terraform_energy, 5);
     factions[1].se_pending[SE_ECONOMY] = 5;
     EXPECT(energy_yield(1, 0, 2, 2, 0), 7);
     factions[1].se_pending[SE_ECONOMY] = -1;
@@ -318,6 +329,268 @@ int main(void) {
     EXPECT(b->intake_2[RESOURCE_MINERAL], 72);
     EXPECT(b->surplus[RESOURCE_MINERAL], 69);
     EXPECT(b->mineral_surplus_final, 33);
+
+    // Energy. A second base of faction 1, 3 squares from base 0's
+    // headquarters, and a base of faction 2.
+    int32_t import[8] = {0}, export[8] = {0}, commerce_techs = 1, passes[11] = {0}, area_sqrt = 10;
+    static struct citizen citizens[CITIZEN_KINDS];
+    game_base_commerce_import = import, game_base_commerce_export = export;
+    game_tech_commerce_count = &commerce_techs, game_proposal_passes = passes, game_map_area_sqrt = &area_sqrt;
+    game_citizens = citizens, game_best_specialist = best_specialist_stub;
+    int32_t talents[5], drones[5], superdrones[5], pacifism = 0;
+    game_psych_talents = talents, game_psych_drones = drones, game_psych_superdrones = superdrones;
+    game_base_pacifism = &pacifism;
+    game_vehs = vehs, game_protos = protos, game_weapons = weapons, game_chassis = chassis;
+    game_veh_at = veh_at_stub, game_stack_fix = stack_fix_stub, game_has_abil = has_abil_stub;
+    vehs[0].next_in_stack = -1;
+    for (int i = 0; i < CITIZEN_KINDS; i++) citizens[i].preq_tech = citizens[i].obsol_tech = TECH_DISABLED;
+    base_count = 3;
+    struct base *b1 = &bases[1];
+    b1->x = 6, b1->y = 4, b1->faction = 1, b1->pop_size = 3;
+    bases[2].x = 0, bases[2].y = 0, bases[2].faction = 2;
+
+    // Content citizens and the base limit: 5 * 4 * 10 / 56 / 2 for the AI.
+    int content, limit;
+    psych_check(1, &content, &limit);
+    EXPECT(content, 3);
+    EXPECT(limit, 1);
+    factions[1].se_pending[SE_EFFIC] = 3;
+    psych_check(1, &content, &limit);
+    EXPECT(limit, 3);  // 5 * 7 * 10 / 56 / 2
+    humans = 1 << 1, factions[1].diff_level = 5;
+    psych_check(1, &content, &limit);
+    EXPECT(content, 1);
+    EXPECT(limit, 1);  // 3 * 7 * 10 / 56 / 2
+    humans = 0, factions[1].se_pending[SE_EFFIC] = 0;
+
+    // Energy lost: 40 * 3 squares / 32 at EFFICIENCY 0; a creche counts as
+    // 2 more; none at headquarters; 16 squares away without one.
+    current = b1, current_id = 1, upkeep_state = 0;
+    EXPECT(black_market(40), 3);
+    EXPECT(black_market(0), 0);
+    give(1, FAC_CHILDREN_CRECHE);
+    EXPECT(black_market(40), 2);  // 120 / 48
+    memset(b1->facilities_built, 0, sizeof(b1->facilities_built));
+    factions[1].se_pending[SE_EFFIC] = -4;
+    EXPECT(black_market(40), 40);
+    factions[1].se_pending[SE_EFFIC] = 0;
+    bases[0].faction = 3;
+    EXPECT(black_market(40), 20);
+    bases[0].faction = 1;
+    current = b, current_id = 0;
+    EXPECT(black_market(40), 0);
+    current = b1, current_id = 1, upkeep_state = 1;
+    black_market(40);
+    EXPECT(factions[1].social_effic[0], 1);   // 120 / 64
+    EXPECT(factions[1].social_effic[7], 15);  // 120 / 8
+    EXPECT(factions[1].social_effic[8], 40);
+
+    // Ranks by energy intake, ties to the later base.
+    b->intake[RESOURCE_ENERGY] = 5, b1->intake[RESOURCE_ENERGY] = 9;
+    EXPECT(base_rank(1, 0), 1);
+    EXPECT(base_rank(1, 1), 0);
+    EXPECT(base_rank(1, 2), -1);
+    EXPECT(base_rank(2, 0), 2);
+    b1->intake[RESOURCE_ENERGY] = 5;
+    EXPECT(base_rank(1, 0), 1);
+
+    // 20 energy, 1 lost: 19 split 2 psych, 5 labs, 3 economy in tenths,
+    // then labs (allocated more) lose 8% and economy 16% to the imbalance.
+    factions[1].alloc_psych = 2, factions[1].alloc_labs = 5;
+    b1->intake_2[RESOURCE_ENERGY] = 20;
+    b->intake[RESOURCE_ENERGY] = 0, b1->intake[RESOURCE_ENERGY] = 4;
+    base_energy();
+    EXPECT(b1->inefficiency[RESOURCE_ENERGY], 1);
+    EXPECT(b1->surplus[RESOURCE_ENERGY], 19);
+    EXPECT(factions[1].energy_surplus_total, 19);
+    EXPECT(b1->psych_total, 4);
+    EXPECT(b1->labs_total, 8);     // 9 * 92%
+    EXPECT(b1->economy_total, 5);  // 6 * 84%
+    EXPECT(b1->unk_total, 4);
+
+    // Trade with faction 2's best base: (12 + 4 + 7) / 8, times 3 for the
+    // commerce bonus, over 2; halved without a pact.
+    factions[1].diplo_status[2] = TREATY_TREATY;
+    factions[2].base_count = 1, factions[1].tech_commerce_bonus = 2;
+    bases[2].intake[RESOURCE_ENERGY] = 12;
+    b1->intake_2[RESOURCE_ENERGY] = 20;
+    base_energy();
+    EXPECT(import[2], 1);
+    EXPECT(export[2], 0);
+    factions[1].diplo_status[2] = TREATY_TREATY | TREATY_PACT;
+    governor = 2;
+    b1->intake_2[RESOURCE_ENERGY] = 20;
+    base_energy();
+    EXPECT(import[2], 3);
+    EXPECT(export[2], 2);  // 1, and 1 for the governor
+    EXPECT(b1->intake_2[RESOURCE_ENERGY], 23);
+    EXPECT(b1->surplus[RESOURCE_ENERGY], 21);
+    passes[PROPOSAL_GLOBAL_TRADE_PACT] = 1;
+    b1->intake_2[RESOURCE_ENERGY] = 20;
+    base_energy();
+    EXPECT(import[2], 6);
+    factions[2].sanction_turns = 1;
+    b1->intake_2[RESOURCE_ENERGY] = 20;
+    base_energy();
+    EXPECT(import[2], 0);
+    EXPECT(b1->intake_2[RESOURCE_ENERGY], 20);
+    factions[2].sanction_turns = 0, governor = 0, passes[PROPOSAL_GLOBAL_TRADE_PACT] = 0;
+    factions[1].diplo_status[2] = 0;
+
+    // An alien base's energy grid: half of 2 facilities and a project, and
+    // of the 1 base_minerals() left behind (its eco-damage divisor).
+    expansion = 1, faction_defs[1].rule_flags = RULE_FLAG_ALIEN;
+    give(1, FAC_RECYCLING_TANKS);
+    give(1, FAC_PRESSURE_DOME);
+    projects[SP_VIRTUAL_WORLD] = 1;
+    b1->intake_2[RESOURCE_ENERGY] = 20;
+    base_energy();
+    EXPECT(b1->intake_2[RESOURCE_ENERGY], 24);  // (1 + 2 + 5) / 2
+    expansion = 0, faction_defs[1].rule_flags = 0, projects[SP_VIRTUAL_WORLD] = -1;
+    memset(b1->facilities_built, 0, sizeof(b1->facilities_built));
+
+    // A technician gives 3 economy; once obsolete, an engineer takes its
+    // slot. No imbalance with 5 labs and 5 economy.
+    factions[1].alloc_psych = 0, factions[1].alloc_labs = 5;
+    citizens[0].preq_tech = TECH_NONE, citizens[0].econ = 3;
+    citizens[1].preq_tech = 5, citizens[1].econ = 3, citizens[1].labs = 2;
+    b1->specialist_total = 1, b1->specialist_types[0] = 0;
+    b1->intake_2[RESOURCE_ENERGY] = 0;
+    base_energy();
+    EXPECT(b1->economy_total, 3);
+    EXPECT(b1->labs_total, 0);
+    citizens[0].obsol_tech = 5;
+    base_energy();
+    EXPECT(b1->specialist_types[0], 0);  // the engineer isn't available yet
+    achieved[5] = 1 << 1;
+    base_energy();
+    EXPECT(b1->specialist_types[0], 1);
+    EXPECT(b1->labs_total, 2);
+    // A network node: labs times 6/4, rounded up; the Supercollider doubles.
+    give(1, FAC_NETWORK_NODE);
+    base_energy();
+    EXPECT(b1->labs_total, 3);
+    projects[SP_SUPERCOLLIDER] = 1;
+    base_energy();
+    EXPECT(b1->labs_total, 6);
+    projects[SP_SUPERCOLLIDER] = -1;
+    // Stockpile Energy from its second turn: half the minerals, rounded up.
+    b1->queue[0] = b1->production_last = -FAC_STOCKPILE_ENERGY;
+    b1->surplus[RESOURCE_MINERAL] = 7;
+    base_energy();
+    EXPECT(b1->economy_total, 7);
+    b1->production_last = 0;
+    base_energy();
+    EXPECT(b1->economy_total, 3);
+    // The seventeenth specialist has no slot and is chosen afresh.
+    b1->specialist_total = 17;
+    citizens[2].preq_tech = TECH_NONE, citizens[2].psych = 2;
+    base_energy();
+    EXPECT(b1->psych_total, 2);
+
+    // Talents and drones, for base 1 of 5 citizens: 3 content at the AI's
+    // level, so 2 drones.
+    memset(b1, 0, sizeof(*b1));
+    b1->x = 6, b1->y = 4, b1->faction = 1, b1->pop_size = 5;
+    factions[1].base_count = 1;
+    upkeep_state = 0;
+    base_psych();
+    EXPECT(b1->drone_total, 2);
+    EXPECT(b1->talent_total, 0);
+    // Psych energy: a talent for every 2; a talent then cancels a drone
+    // when they no longer fit.
+    b1->psych_total = 4;
+    base_psych();
+    EXPECT(b1->talent_total, 2);
+    EXPECT(b1->drone_total, 2);
+    b1->psych_total = 8;
+    base_psych();
+    EXPECT(b1->talent_total, 3);
+    EXPECT(b1->drone_total, 1);
+    EXPECT(talents[0], 0);
+    EXPECT(drones[0], 2);
+    EXPECT(talents[1], 3);
+    b1->psych_total = 0;
+    // TALENT both ways, and drones for too many bases (1 allowed here).
+    factions[1].se_pending[SE_TALENT] = -2;
+    base_psych();
+    EXPECT(b1->drone_total, 4);
+    factions[1].se_pending[SE_TALENT] = 2;
+    base_psych();
+    EXPECT(b1->talent_total, 2);
+    factions[1].se_pending[SE_TALENT] = 0;
+    factions[1].base_count = 3;
+    base_psych();
+    EXPECT(b1->drone_total, 4);
+    // Drones past the population become superdrones.
+    b1->pop_size = 2;
+    factions[1].se_pending[SE_TALENT] = -2;
+    base_psych();
+    EXPECT(b1->drone_total, 2);
+    EXPECT(b1->superdrone_total, 2);
+    b1->pop_size = 5;
+    factions[1].se_pending[SE_TALENT] = 0, factions[1].base_count = 1;
+    // Police: a unit calms a drone, twice with the ability; POLICE 3 one
+    // more. A unit that isn't for combat doesn't count.
+    unit_here = 1;
+    base_psych();
+    EXPECT(b1->drone_total, 1);
+    protos[0].abilities = ABILITY_POLICE_2X;
+    base_psych();
+    EXPECT(b1->drone_total, 0);
+    protos[0].abilities = 0;
+    factions[1].se_pending[SE_POLICE] = 3;
+    base_psych();
+    EXPECT(b1->drone_total, 0);
+    factions[1].se_pending[SE_POLICE] = 0;
+    protos[0].plan = 4;
+    base_psych();
+    EXPECT(b1->drone_total, 2);
+    protos[0].plan = 0, unit_here = 0;
+    // Units away from home: POLICE -3 counts all but one, -5 each twice.
+    pacifism = 2;
+    factions[1].se_pending[SE_POLICE] = -3;
+    base_psych();
+    EXPECT(b1->drone_total, 3);
+    factions[1].se_pending[SE_POLICE] = -5;
+    base_psych();
+    EXPECT(b1->drone_total, 5);  // 6, at most the population
+    factions[1].se_pending[SE_POLICE] = 0, pacifism = 0;
+    // Facilities, projects, and a Punishment Sphere.
+    rules_basic.drones_genejack = 1;
+    give(1, FAC_GENEJACK_FACTORY);
+    base_psych();
+    EXPECT(b1->drone_total, 3);
+    give(1, FAC_RECREATION_COMMONS);
+    base_psych();
+    EXPECT(b1->drone_total, 1);
+    projects[SP_HUMAN_GENOME_PROJECT] = 1;
+    base_psych();
+    EXPECT(b1->talent_total, 1);
+    projects[SP_HUMAN_GENOME_PROJECT] = -1;
+    projects[SP_LONGEVITY_VACCINE] = 1;
+    factions[1].se_models_pending[1] = ECONOMICS_PLANNED;
+    b1->psych_total = 2;
+    base_psych();
+    EXPECT(b1->drone_total, 0);  // 1 - 2, kept at 0
+    EXPECT(b1->talent_total, 1);
+    projects[SP_LONGEVITY_VACCINE] = -1;
+    factions[1].se_models_pending[1] = 0;
+    give(1, FAC_PUNISHMENT_SPHERE);
+    base_psych();
+    EXPECT(b1->drone_total, 0);
+    EXPECT(b1->talent_total, 0);
+    memset(b1->facilities_built, 0, sizeof(b1->facilities_built));
+    b1->psych_total = 0;
+    // At the end of a turn, every TALENT and POLICE is scored: at 0 and 0,
+    // 2 drones and no talents is -2, less 5, doubled for a small base; at
+    // TALENT 4, 3 talents and a drone is 2, halved for the drone.
+    upkeep_state = 1;
+    memset(factions[1].social_psych, 0, sizeof(factions[1].social_psych));  // base_energy() ran it before
+    base_psych();
+    EXPECT(factions[1].social_psych[3][5], -14);
+    EXPECT(factions[1].social_psych[7][5], 1);
+    EXPECT(b1->drone_total, 2);
 
     if (failures) return 1;
     printf("engine_base: all tests passed\n");
