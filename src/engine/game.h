@@ -361,7 +361,8 @@ enum { BASE_COUNT = 512 };
 enum {
     FAC_HEADQUARTERS = 1, FAC_CHILDREN_CRECHE = 2, FAC_RECYCLING_TANKS = 3, FAC_RECREATION_COMMONS = 6,
     FAC_ENERGY_BANK = 7, FAC_NETWORK_NODE = 8, FAC_BIOLOGY_LAB = 9, FAC_HOLOGRAM_THEATRE = 11,
-    FAC_PARADISE_GARDEN = 12, FAC_FUSION_LAB = 15, FAC_PUNISHMENT_SPHERE = 23, FAC_BROOD_PIT = 35,
+    FAC_PARADISE_GARDEN = 12, FAC_FUSION_LAB = 15, FAC_PUNISHMENT_SPHERE = 23, FAC_AEROSPACE_COMPLEX = 29,
+    FAC_BROOD_PIT = 35,
     FAC_QUANTUM_LAB = 16, FAC_RESEARCH_HOSPITAL = 17, FAC_NANOHOSPITAL = 18, FAC_ROBOTIC_ASSEMBLY_PLANT = 19,
     FAC_NANOREPLICATOR = 20, FAC_QUANTUM_CONVERTER = 21, FAC_GENEJACK_FACTORY = 22, FAC_PRESSURE_DOME = 26,
     FAC_AQUAFARM = 36, FAC_SUBSEA_TRUNKLINE = 37, FAC_THERMOCLINE_TRANSDUCER = 38, FAC_GEOSYNC_SURVEY_POD = 41,
@@ -375,10 +376,15 @@ enum {
     SP_PHOLUS_MUTAGEN = 16, SP_THEORY_OF_EVERYTHING = 18, SP_NETWORK_BACKBONE = 21, SP_SPACE_ELEVATOR = 27, SP_SINGULARITY_INDUCTOR = 28,
     SP_BULK_MATTER_TRANSMITTER = 29, SP_ASCENT = 31, SP_SELF_AWARE_COLONY = 25,
     SP_CLINICAL_IMMORTALITY = 26, SP_MANIFOLD_HARMONICS = 33,
-    SP_PLANETARY_ENERGY_GRID = 36, SP_COUNT = 64,
+    SP_CLOUDBASE_ACADEMY = 35, SP_PLANETARY_ENERGY_GRID = 36, SP_COUNT = 64,
 };
 
-enum { BASE_STATE_GOLDEN_AGE = 0x4 };
+enum { BASE_STATE_GOLDEN_AGE = 0x4, BASE_STATE_UNK_100 = 0x100, BASE_STATE_WORKS_OCEAN = 0x8000 };
+enum {  // base.governor
+    GOVERNOR_CITIZENS = 0x40,  // the governor places the workers
+    GOVERNOR_EXPLORE = 0x1000000, GOVERNOR_DISCOVER = 0x2000000, GOVERNOR_BUILD = 0x4000000,
+    GOVERNOR_CONQUER = 0x8000000, GOVERNOR_ACTIVE = 0x80000000,
+};
 enum {  // base.event: this turn's random events
     BASE_EVENT_BUMPER = 0x200, BASE_EVENT_FAMINE = 0x400,        // nutrients +1 / -1 a square
     BASE_EVENT_INDUSTRY = 0x800, BASE_EVENT_BUST = 0x1000,       // minerals
@@ -499,7 +505,7 @@ GAME_AT(struct veh, order, 0x11);
 GAME_AT(struct veh, visibility, 0x27);
 GAME_AT(struct veh, home_base, 0x2e);
 
-enum { RADIUS_SQUARES = 289 };
+enum { RADIUS_SQUARES = 289, BASE_RADIUS_SQUARES = 21 };  // BASE_RADIUS_SQUARES: a base's own radius
 
 // ---- The game's data ----------------------------------------------------------
 
@@ -629,6 +635,11 @@ enum { PROPOSAL_GLOBAL_TRADE_PACT = 3, PROPOSAL_REPEAL_GLOBAL_TRADE_PACT = 4 };
 // anything, psych energy, facilities, police, projects.
 extern int32_t *game_psych_talents, *game_psych_drones, *game_psych_superdrones;  // [5]
 extern int32_t *game_base_pacifism;  // military units away from home, as POLICE counts them
+// base_yield(): citizens left to place, squares other bases or units have
+// taken (farm_compute() works them out), and whether a square was weighed
+// with food to spare.
+extern int32_t *game_base_workers, *game_base_reserved, *game_base_food_ok;
+extern int32_t *game_current_turn;
 // Units the current base supports, and how many of them cost minerals.
 extern int32_t *game_base_forces_supported, *game_base_forces_paid;
 // The base-compute globals from game_base_convoy_from to game_current_base.
@@ -653,6 +664,7 @@ extern void (*game_random_reseed)(int seed);
 extern void (*game_do_all_non_input)(void);       // redraws and the message pump
 extern int (*game_best_specialist)(void);         // for the current base
 extern int (*game_has_abil)(int proto, uint32_t ability);
+extern void (*game_farm_compute)(void);  // fills game_base_reserved for the current base
 extern void(__attribute__((thiscall)) * game_path_continents)(void *path);  // finds the regions
 extern void (*game_draw_radius)(int x, int y, int radius, int unk);           // redraws squares
 extern int (*game_base_find2)(int x, int y, int faction);  // the nearest base of the faction, or -1

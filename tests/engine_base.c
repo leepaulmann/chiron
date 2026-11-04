@@ -56,6 +56,24 @@ static void put(int x, int y, int alt, int rain, int rocky, uint32_t bits) {
 }
 
 static int best_specialist_stub(void) { return 2; }
+static int32_t reserved;
+static int farm_calls;
+static void farm_compute_stub(void) { farm_calls++; }
+// A made-up radius table: the base square, the 8 around it, 12 more.
+static int32_t radius_x[21] = {0, 1, 2, 1, 0, -1, -2, -1, 0, 2, 3, 2, -2, -3, -2, 0, 4, 0, -4, 1, -1};
+static int32_t radius_y[21] = {0, -1, 0, 1, 2, 1, 0, -1, -2, -2, -1, 2, 2, 1, -2, 4, 0, -4, 0, 3, -3};
+
+// What the worked squares of base `id` yield, as base_yield() adds it up.
+static int worked_yield(int id, int type) {
+    const struct base *base = &bases[id];
+    int sum = 0;
+    for (int i = 0; i < 21; i++) {
+        if (!(base->worked_tiles & (1u << i))) continue;
+        int x = (base->x + radius_x[i] + W) % W, y = base->y + radius_y[i];
+        if (y >= 0 && y < H) sum += resource_yield(type, base->faction, id, x, y);
+    }
+    return sum;
+}
 // One unit can stand on base 1's square, as veh 0.
 static struct veh vehs[6];
 static struct unit_proto protos[3];
@@ -660,6 +678,78 @@ int main(void) {
     EXPECT(to[RESOURCE_NUTRIENT], 0);
     EXPECT(from[RESOURCE_NUTRIENT], 1);
     veh_count = 1;
+
+    // Placing citizens: base 1 of 3, with nothing worked yet, works its own
+    // square and 3 others, or keeps specialists; the intake is what the
+    // worked squares yield.
+    int32_t workers = 0, food_ok = 0, turn = 1;
+    game_base_workers = &workers, game_base_reserved = &reserved, game_base_food_ok = &food_ok;
+    game_current_turn = &turn, game_farm_compute = farm_compute_stub;
+    game_radius_x = radius_x, game_radius_y = radius_y;
+    for (int x = 0; x < W; x++)
+        for (int y = 0; y < H; y++)
+            if ((x + y) % 2 == 0 && !(at(x, y)->bits & MAP_BASE)) at(x, y)->climate = (uint8_t)(3 << 5 | (x % 3) << 3);
+    veh_count = 1;
+    memset(b1, 0, sizeof(*b1));
+    b1->x = 6, b1->y = 4, b1->faction = 1, b1->pop_size = 3;
+    current = b1, current_id = 1;
+    base_yield();
+    EXPECT(farm_calls, 1);
+    EXPECT(b1->worked_tiles & 1, 1);
+    EXPECT(__builtin_popcount(b1->worked_tiles) + b1->specialist_total, 4);
+    for (int r = 0; r < RESOURCE_UNUSED; r++) {
+        EXPECT(b1->intake[r], worked_yield(1, r));
+        EXPECT(b1->intake_2[r], b1->intake[r]);
+    }
+    // Worked again, the squares are kept.
+    uint32_t chosen = b1->worked_tiles;
+    base_yield();
+    EXPECT(b1->worked_tiles, chosen);
+    // A square another base has taken is let go and not chosen.
+    int taken = __builtin_ctz(chosen & ~1u);
+    reserved = 1 << taken;
+    base_yield();
+    EXPECT(b1->worked_tiles & (1u << taken), 0);
+    EXPECT(__builtin_popcount(b1->worked_tiles) + b1->specialist_total, 4);
+    reserved = 0;
+    // Satellites add up to one a citizen, halved without an Aerospace
+    // Complex.
+    projects[SP_SPACE_ELEVATOR] = -1;
+    factions[1].satellites[RESOURCE_MINERAL] = 9;
+    b1->worked_tiles = 1;
+    base_yield();
+    EXPECT(b1->intake[RESOURCE_MINERAL], 3 + worked_yield(1, RESOURCE_MINERAL));
+    factions[1].satellites[RESOURCE_MINERAL] = 3;
+    base_yield();
+    EXPECT(b1->intake[RESOURCE_MINERAL], 2 + worked_yield(1, RESOURCE_MINERAL));
+    factions[1].satellites[RESOURCE_MINERAL] = 0;
+    // Terraforming damage: a mine counts once, twice on a worked square.
+    // With every other square taken, only the base square is worked.
+    reserved = ~1;
+    b1->worked_tiles = 1;
+    base_yield();
+    EXPECT(b1->worked_tiles, 1);
+    EXPECT(b1->specialist_total, 3);
+    int damage = b1->eco_damage;
+    struct map_tile *mined = at((b1->x + radius_x[1]) % W, b1->y + radius_y[1]);
+    uint32_t mined_bits = mined->bits;
+    mined->bits = mined_bits & ~(uint32_t)0x1c8805c;
+    base_yield();
+    damage = b1->eco_damage;
+    mined->bits |= MAP_MINE;
+    base_yield();
+    EXPECT(b1->eco_damage, damage + 1);
+    at(6, 4)->bits |= MAP_MINE;
+    base_yield();
+    EXPECT(b1->eco_damage, damage + 3);
+    at(6, 4)->bits &= ~(uint32_t)MAP_MINE;
+    mined->bits = mined_bits;
+    reserved = 0;
+    give(1, FAC_TREE_FARM);
+    give(1, FAC_HYBRID_FOREST);
+    base_yield();
+    EXPECT(b1->eco_damage, 0);
+    memset(b1->facilities_built, 0, sizeof(b1->facilities_built));
 
     if (failures) return 1;
     printf("engine_base: all tests passed\n");

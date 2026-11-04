@@ -30,6 +30,9 @@ static inline int landmark_code(uint32_t bits2) { return (int32_t)bits2 >> 24; }
 
 static inline int alt_of(const struct map_tile *t) { return t->climate >> 5; }
 
+// v kept within 0 and hi, and 0 when hi is negative.
+static int clamp_to(int v, int hi) { return v < 0 || hi < 0 ? 0 : v > hi ? hi : v; }
+
 // A base square, as these functions see it: the base bit and a faction.
 static inline int is_base_square(const struct map_tile *t) { return (t->bits & MAP_BASE) && (t->owner_site & 0xf) < 8; }
 
@@ -318,6 +321,247 @@ static inline int holds_project(int project, int faction) {
     return b >= 0 && game_bases[b].faction == faction;
 }
 
+// A specialist's kind: from its slot for the first 16, chosen afresh past
+// them.
+static int specialist_kind(const struct base *b, int i) {
+    return i < 16 ? (int)(b->specialist_types[i / 8] >> (i % 8 * 4) & 0xf) : game_best_specialist();
+}
+
+static void set_specialist(struct base *b, int i, int kind) {
+    if (i >= 16) return;
+    int shift = i % 8 * 4;
+    b->specialist_types[i / 8] = (b->specialist_types[i / 8] & ~(0xfu << shift)) | (uint32_t)kind << shift;
+}
+
+// The square of the base's radius table entry `i`, if it is on the map.
+static int radius_square(const struct base *b, int i, int *x, int *y) {
+    int w = *game_map_width;
+    *x = b->x + game_radius_x[i];
+    if (!(*game_map_flat & 1)) *x = *x < 0 ? *x + w : *x >= w ? *x - w : *x;
+    *y = b->y + game_radius_y[i];
+    return *y >= 0 && *y < *game_map_height && *x >= 0 && *x < w;
+}
+
+// Adds (or, with sign -1, takes away) what the square yields to the
+// base's intake, and notes an ocean square.
+static void work_square(struct base *b, int i, int sign) {
+    int x, y;
+    if (!radius_square(b, i, &x, &y)) return;
+    if (alt_of(tile(x, y)) < ALT_SHORE_LINE) b->state |= BASE_STATE_WORKS_OCEAN;
+    for (int type = 0; type < RESOURCE_COUNT; type++)
+        b->intake_2[type] += sign * resource_yield(type, b->faction, *game_current_base_id, x, y);
+}
+
+static int popcount(uint32_t v) { return __builtin_popcount(v); }
+
+// How the square choice weighs each resource: the AI's priorities, a human
+// governor's, or none.
+struct priorities {
+    int growth, tech, wealth, power, fight;
+};
+
+static struct priorities base_priorities(const struct base *b) {
+    const struct faction_data *f = &game_factions[b->faction];
+    struct priorities p = {0};
+    if (!game_is_human(b->faction)) {
+        p = (struct priorities){f->ai_growth, f->ai_tech, f->ai_wealth, f->ai_power, f->ai_fight};
+    } else if (b->governor & GOVERNOR_ACTIVE) {
+        uint32_t g = b->governor;
+        p.growth = (g & GOVERNOR_EXPLORE) != 0;
+        p.tech = g & GOVERNOR_DISCOVER ? 2 : 0;
+        p.wealth = g & GOVERNOR_BUILD ? 2 : 0;
+        p.power = g & GOVERNOR_CONQUER ? 2 : 0;
+        p.fight = p.power ? 2 : p.growth || p.wealth ? 0 : p.tech ? -2 : f->ai_fight;
+    }
+    return p;
+}
+
+// What working square `i` is worth, for the citizens left to place. Food
+// counts for more while the base is short of it; minerals and energy for
+// more while the base makes little of them.
+static int square_score(const struct base *b, const struct priorities *p, int x, int y, int *most_food) {
+    int faction = b->faction, id = *game_current_base_id, pop = b->pop_size;
+    int n = crop_yield(faction, id, x, y, 0), m = mine_yield(faction, id, x, y, 0), e = energy_yield(faction, id, x, y, 0);
+    if (n > *most_food) *most_food = n;
+    int workers = *game_base_workers, eat = game_rules_basic->nutrient_intake_citizen, need = pop * eat;
+    int hunger = 0;
+    if (b->intake_2[RESOURCE_NUTRIENT] + workers / eat < need) {
+        hunger = b->intake_2[RESOURCE_NUTRIENT] + workers >= need ? 2 : 8;
+        n += clamp_to(n, hunger);
+    } else {
+        *game_base_food_ok = 1;
+    }
+    n *= 2, m *= 2, e *= 2;
+    // A square with no food is worth less until the base has plenty.
+    if (b->intake_2[RESOURCE_NUTRIENT] <= pop + need && !n) m /= 2, e /= 2;
+    if (!m && !hunger) n /= 2;
+    int food = game_range(2 * (b->intake_2[RESOURCE_NUTRIENT] - pop / 3 - need + workers) - 2, 1, 99);
+    int score = (p->growth + 4) * n * 256 / food;
+    // Building a secret project (past the first) counts minerals for more.
+    int project = b->queue[0] < -FAC_FIRST_PROJECT ? 2 : -p->tech;
+    int minerals = game_range((b->intake_2[RESOURCE_MINERAL] - *game_base_forces_upkeep + 1) / 2, 1, 99);
+    score += (project + p->fight + p->power + p->wealth + 6) * pop * m * 64 / minerals;
+    int energy = game_range(b->intake_2[RESOURCE_ENERGY], 1, 99);
+    score += (p->wealth + 2 * p->tech + 1) * game_range(pop - p->power, 1, 99) * e * 64 / energy;
+    return score;
+}
+
+// Places the current base's citizens: keeps the squares it worked if they
+// still fit, then adds the best square (or, for the AI and governed bases
+// past turn 100, a specialist) one at a time; when every citizen is placed
+// and food is short, tries one swap of the worst worked square for the
+// best free one. The rest become specialists. Then the intake, and the
+// damage the terraforming in the radius does.
+void base_yield(void) {
+    game_farm_compute();
+    struct base *b = *game_current_base;
+    int faction = b->faction, id = *game_current_base_id;
+    const struct faction_data *f = &game_factions[faction];
+    int eat = game_rules_basic->nutrient_intake_citizen;
+    *game_base_workers = b->pop_size + 1;  // with the base square
+    int automatic = !game_is_human(faction) || ((b->governor & GOVERNOR_CITIZENS) && (b->governor & GOVERNOR_ACTIVE));
+    b->state &= ~(uint32_t)BASE_STATE_WORKS_OCEAN;
+    uint32_t worked = 0;
+    b->specialist_adjust = 0;
+    b->worked_tiles &= ~(uint32_t)*game_base_reserved | 1;
+    // Satellites, halved without an Aerospace Complex or the projects that
+    // stand for one, up to one a citizen.
+    for (int r = 0; r < RESOURCE_UNUSED; r++) {
+        int v = f->satellites[r];
+        if (!has_facility(id, FAC_AEROSPACE_COMPLEX) && !holds_project(SP_SPACE_ELEVATOR, faction) &&
+            !holds_project(SP_CLOUDBASE_ACADEMY, faction))
+            v = (v + 1) / 2;
+        b->intake_2[r] = v > b->pop_size ? b->pop_size : v;
+    }
+    b->intake_2[RESOURCE_UNUSED] = 0;
+
+    int keep = 1;
+    if (automatic) {
+        if (*game_control_upkeep_a) {
+            keep = 0;
+        } else {
+            // Specialists that give no psych may be put to work.
+            for (int i = 0; i < b->specialist_total; i++)
+                if (!game_citizens[specialist_kind(b, i)].psych) b->specialist_adjust++;
+            b->specialist_total -= b->specialist_adjust;
+        }
+    }
+    if (keep && *game_base_workers >= popcount(b->worked_tiles)) {
+        for (int i = 0; i < BASE_RADIUS_SQUARES; i++) {
+            if (i && !(b->worked_tiles & (1u << i))) continue;
+            worked |= 1u << i;
+            work_square(b, i, 1);
+            if (!--*game_base_workers) break;
+        }
+        if (*game_base_workers == b->specialist_adjust + b->specialist_total) goto done;
+    }
+    // Drop the specialists counted above from their slots. After dropping
+    // one the original moves on, skipping the one that took its place.
+    if (automatic && b->specialist_total)
+        for (int i = 0; i < b->specialist_adjust + b->specialist_total; i++) {
+            if (game_citizens[specialist_kind(b, i)].psych) continue;
+            for (int j = i + 1; j <= b->specialist_adjust + b->specialist_total; j++)
+                set_specialist(b, j - 1, specialist_kind(b, j));
+            if (b->specialist_adjust) b->specialist_adjust--;
+        }
+    if (!(worked & 1)) {
+        work_square(b, 0, 1);
+        worked |= 1;
+        --*game_base_workers;
+    }
+
+    struct priorities p = base_priorities(b);
+    *game_base_food_ok = 0;
+    for (;;) {
+        int full = *game_base_workers <= b->specialist_adjust + b->specialist_total;
+        uint32_t taken = (full ? 0 : worked) | (uint32_t)*game_base_reserved;
+        int best = 0, best_score = 0, most_food = 0, worst = -1, worst_score = 9999;
+        for (int i = 1; i < BASE_RADIUS_SQUARES; i++) {
+            int x, y;
+            if ((taken & (1u << i)) || !radius_square(b, i, &x, &y)) continue;
+            int score = square_score(b, &p, x, y, &most_food);
+            if (worked & (1u << i)) {
+                if (score < worst_score) worst_score = score, worst = i;
+            } else if (score > best_score) {
+                best_score = score, best = i;
+            }
+        }
+        if (automatic && b->pop_size >= 5 &&
+            (b->intake_2[RESOURCE_NUTRIENT] > b->pop_size * eat || !most_food) && *game_current_turn > 100)
+            for (int k = 0; k < CITIZEN_KINDS; k++) {
+                const struct citizen *c = &game_citizens[k];
+                if (!has_tech(c->preq_tech, faction) || has_tech(c->obsol_tech, faction)) continue;
+                int energy = game_range(b->intake_2[RESOURCE_ENERGY] + b->specialist_adjust, 1, 99);
+                int score = c->psych * 64 + (p.wealth + 2) * b->pop_size * c->econ * 64 / energy +
+                            (p.tech + 2) * b->pop_size * c->labs * 64 / energy;
+                if (score > best_score) best_score = score, best = -(k + 1);
+            }
+        if (full) {
+            if (best <= 0 || best_score <= worst_score || worst <= 0) break;
+            worked = (worked & ~(1u << worst)) | (1u << best);
+            work_square(b, worst, -1);
+            work_square(b, best, 1);
+            if (b->intake_2[RESOURCE_NUTRIENT] < (b->pop_size + 1) * eat) {
+                worked = (worked & ~(1u << best)) | (1u << worst);
+                work_square(b, best, -1);
+                work_square(b, worst, 1);
+            }
+            break;
+        }
+        if (best < 0) {
+            if (b->specialist_adjust < 16) set_specialist(b, b->specialist_adjust, -best - 1);
+            b->specialist_adjust++;
+        } else if (!best) {
+            break;
+        } else {
+            worked |= 1u << best;
+            work_square(b, best, 1);
+            --*game_base_workers;
+        }
+        if (*game_base_workers <= b->specialist_adjust + b->specialist_total &&
+            b->intake_2[RESOURCE_NUTRIENT] >= b->pop_size * eat)
+            break;
+    }
+
+done:
+    // Citizens left over become the specialist that gives the most psych
+    // (and, in bases big enough, economy and labs).
+    for (int i = b->specialist_total; i < *game_base_workers; i++) {
+        int kind = 0, most = -999;
+        for (int k = 0; k < CITIZEN_KINDS; k++) {
+            const struct citizen *c = &game_citizens[k];
+            if (!has_tech(c->preq_tech, b->faction)) continue;
+            int v = c->psych;
+            if (b->pop_size >= game_rules_basic->min_base_size_specialists) v += c->econ + c->labs;
+            if (v > most) most = v, kind = k;
+        }
+        set_specialist(b, i, kind);
+    }
+    b->worked_tiles = worked;
+    b->specialist_total = *game_base_workers;
+    b->state &= ~(uint32_t)BASE_STATE_UNK_100;
+    for (int r = 0; r < RESOURCE_COUNT; r++) b->intake[r] = b->intake_2[r];
+    // Terraforming damage: improvements count once, twice on a worked
+    // square, with more for boreholes, mirrors and condensers and one less
+    // for forest; tree farms halve it, both together clear it.
+    b->eco_damage = 0;
+    for (int i = 0; i < BASE_RADIUS_SQUARES; i++) {
+        int x, y;
+        if (!radius_square(b, i, &x, &y)) continue;
+        uint32_t bits = tile(x, y)->bits;
+        int d = popcount(bits & 0x1c8805c);
+        if (b->worked_tiles & (1u << i)) d *= 2;
+        if (bits & MAP_THERMAL_BORE) d += 8;
+        if (bits & MAP_ECHELON_MIRROR) d += 6;
+        if (bits & MAP_CONDENSER) d += 4;
+        if (bits & MAP_FOREST) d--;
+        int tree = has_facility(id, FAC_TREE_FARM), hybrid = has_facility(id, FAC_HYBRID_FOREST);
+        if (tree && hybrid) d = 0;
+        if (tree || hybrid) d /= 2;
+        b->eco_damage += d;
+    }
+}
+
 // The current base's units: what its supply convoys bring in or carry out,
 // the minerals its units cost beyond those SUPPORT keeps free, and its
 // armed units away from home, which make drones under a low POLICE.
@@ -436,8 +680,9 @@ void base_minerals(void) {
     b->surplus[RESOURCE_MINERAL] -= b->inefficiency[RESOURCE_MINERAL];
     b->mineral_surplus_final = b->surplus[RESOURCE_MINERAL];
 
-    // Last turn's damage, an eighth kept (rounding down, as a shift), is
-    // first taken off the minerals the faction may make cleanly.
+    // The terraforming damage base_yield() found, an eighth kept (rounding
+    // down, as a shift), is first taken off the minerals the faction may
+    // make cleanly.
     b->eco_damage >>= 3;
     int clean = f->clean_minerals + 16;
     if (b->eco_damage > 0) {
@@ -537,8 +782,6 @@ int base_rank(int faction, int rank) {
     return -1;
 }
 
-// v kept within 0 and hi, and 0 when hi is negative.
-static int clamp_to(int v, int hi) { return v < 0 || hi < 0 ? 0 : v > hi ? hi : v; }
 
 // The current base's energy: trade, the alien energy grid, losses, the
 // split into economy, psych and labs with specialists, facilities and
@@ -622,7 +865,7 @@ void base_energy(void) {
     // One the faction's techs have made obsolete becomes the first kind
     // available that is at least as good at everything.
     for (int i = 0; i < b->specialist_total; i++) {
-        int kind = i < 16 ? (int)(b->specialist_types[i / 8] >> (i % 8 * 4) & 0xf) : game_best_specialist();
+        int kind = specialist_kind(b, i);
         kind = kind < 0 ? 0 : kind > CITIZEN_KINDS - 1 ? CITIZEN_KINDS - 1 : kind;
         const struct citizen *c = &game_citizens[kind];
         if (has_tech(c->obsol_tech, faction))
@@ -631,10 +874,7 @@ void base_energy(void) {
                 if (has_tech(n->preq_tech, faction) && !has_tech(n->obsol_tech, faction) && n->econ >= c->econ &&
                     n->psych >= c->psych && n->labs >= c->labs) {
                     kind = j;
-                    if (i < 16) {
-                        int shift = i % 8 * 4;
-                        b->specialist_types[i / 8] = (b->specialist_types[i / 8] & ~(0xfu << shift)) | (uint32_t)j << shift;
-                    }
+                    set_specialist(b, i, j);
                     break;
                 }
             }
@@ -909,6 +1149,7 @@ SHADOW3(BASE, int, has_fac, int, int, int)
         WRITES(&game_factions[(*game_current_base)->faction], sizeof(struct faction_data))
 #define WRITES_SUPPORT WRITES_CURRENT; WRITES(game_vehs, *game_veh_count * sizeof(struct veh))
 SHADOW_WRITER(BASE, void, base_support, (void), (), WRITES_SUPPORT, "%s", "")
+SHADOW_WRITER(BASE, void, base_yield, (void), (), WRITES_CURRENT, "%s", "")
 SHADOW_WRITER(BASE, void, base_nutrient, (void), (), WRITES_CURRENT, "%s", "")
 SHADOW_WRITER(BASE, void, base_minerals, (void), (), WRITES_CURRENT, "%s", "")
 SHADOW_WRITER(BASE, int, black_market, (int a), (a), WRITES_CURRENT, "%d", a)
@@ -972,6 +1213,7 @@ static void sweep_bases(void) {
         struct base *base = &game_bases[b], saved = *base;
         *game_current_base = base;
         *game_current_base_id = b;
+        check_base_yield();
         check_base_support();
         check_base_nutrient();
         check_base_minerals();
@@ -982,6 +1224,13 @@ static void sweep_bases(void) {
         base->intake_2[RESOURCE_MINERAL] = 20 + (b * 7 + slice * 3) % 60;
         base->eco_damage = (b * 13 + slice * 5) % 300;
         check_base_minerals();
+        // The squares chosen afresh from others worked.
+        uint32_t tiles = base->worked_tiles;
+        base->worked_tiles = (uint32_t)(b * 0x9e3779b9u + slice * 0x85ebca6bu) & 0x1fffff;
+        check_base_yield();
+        base->worked_tiles = 0;
+        check_base_yield();
+        base->worked_tiles = tiles;
         // And energy as at the end of a turn, with more of it, some
         // specialists and another allocation.
         struct faction_data *f = &game_factions[base->faction], saved_f = *f;
@@ -1025,6 +1274,7 @@ static const struct hook base_hooks[] = {
     HOOK(0x4e7750, energy_yield, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x18),                  // sub esp, 24
     HOOK(0x4e7dc0, resource_yield, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                // mov eax, [ebp+8]
     HOOK(0x421670, has_fac, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x56, 0x57),                       // push ecx; push esi; push edi
+    HOOK(0x4e80b0, base_yield, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x58),                    // sub esp, 88
     HOOK(0x4e9550, base_support, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x3c),                  // sub esp, 60
     HOOK(0x4e9b70, base_nutrient, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),                 // sub esp, 8
     HOOK(0x4e9cb0, base_minerals, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10),                 // sub esp, 16
