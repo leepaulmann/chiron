@@ -1,0 +1,64 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+Chiron runs *Sid Meier's Alpha Centauri / Alien Crossfire* (GOG 2.0, `terranx.exe`) natively on 32-bit Linux without Wine: a PE loader maps the game, Chiron's own Win32 shims stand in for the DLLs, and the game's functions are replaced one at a time by GPL reimplementations that shadow mode verifies against the original.
+
+## Hard rules
+
+- Never commit game files or anything derived from them (disassembly, extracted tables, strings, `.idb`). Disassembly and the OpenSMACX/Thinker reference checkouts belong outside the repo (a scratch directory), never in it.
+- Game tables are read from game memory through pointers set in `src/engine/game.c`, never copied into the source. Addresses, struct layouts and a function's first few bytes (for hook checks) are fine.
+- Keep the purchase check (sha256 allowlist in `src/install/`).
+- The developer plays from the same dev copy (`~/.local/share/chiron/game`, saves in `~/.local/share/chiron/user`). Never bulk-delete saves there.
+- Test runs open a game window on the developer's screen; avoid triggering error dialogs.
+
+## Commands
+
+All tooling comes from the Nix flake (32-bit gcc, SDL2, mingw for the loader tests):
+
+```sh
+nix develop -c cmake -S . -B build -G Ninja
+nix develop -c ninja -C build
+nix develop -c ctest --test-dir build          # no game files needed
+nix develop -c ctest --test-dir build -R engine_mapgen   # one test
+./build/tests/engine_map                       # or run a test binary directly
+```
+
+Running the game unattended (needs the game set up; see README):
+
+```sh
+CHIRON_SOAK=ai CHIRON_SCRIPT="30 click 835 362; 40 every 1 key Return" timeout -s INT 420 ./build/chiron
+CHIRON_REIMPL=shadow ...       # check reimplementations against the original; summary printed at exit
+./build/chiron --original      # game's own code only
+```
+
+- `30 click 835 362` is Quick Start. `30 click 835 287; 40 every 2 key Return` goes through Start Game, which is the path where the game builds a new map with `world_build`.
+- `CHIRON_SNAPSHOT=file.bmp` saves the screen (`tools/bmp2png.py` converts it). `CHIRON_SHADOW_DIFFS=1` lists every differing byte range of a shadow mismatch.
+- AI soaks can stall for good at "TURN COMPLETE". This also happens with `--original`, so a stall alone isn't evidence against a change. Pace varies a lot between random maps (roughly turns 100–145 in 7 minutes).
+
+## Architecture
+
+- `src/loader/`: maps the PE image, applies relocations, binds imports to the shims, and gives each thread a Windows TEB through `%fs`.
+- `src/win32/`: one shim file (or group) per DLL, kept only as wide as the game needs. Drive `C:` is the game folder with the user folder layered over it, and file names are case-insensitive. Every shim must pop the same argument bytes as the real stdcall function; the `stdcall_sizes` test checks this.
+- `src/install/`: finds and verifies the user's copy of the game.
+- `src/main.c`: runs the game on its own thread, then `patches_apply` (byte fixes for bugs in the original, `src/engine/patches.c`) and `hooks_apply`.
+- `src/engine/`: the reimplementations.
+  - `game.h`/`game.c`: the game's struct layouts (with `GAME_AT` offset asserts) and pointers to its globals and functions, bound from the image base.
+  - `tech.c`, `map.c`, `mapgen.c`: modules. Each ends with a hook table and a `struct hook_module` listed in `hooks.c`.
+  - `hooks.c`: hook machinery. A hook writes a JMP over the original's start after checking its expected first bytes (skipped, with a warning, if they differ). A trampoline keeps the original callable through `orig_<name>`. Modes are on (default), off (`--original`) and shadow.
+  - `shadow.h`: shadow-mode wrappers. `SHADOWn` is for pure functions. `SHADOW_WRITER` is for functions that write: it saves the named memory spans, runs the original, rewinds, runs Chiron's version, compares, and keeps the original's result. Map generation checks cover all of the game's writable memory (0x682000–0x9ca000), the map and `rand()`'s per-thread state, with `GetTickCount` held still.
+  - Calls made inside a check or a sweep go straight to Chiron's code (`shadow_bypass`). Shadow-only "quiet" hooks keep the game's message pump and drawing idle while state is protected: the heap isn't rewound, so drawing in a check produces spurious differences.
+  - Each module's sweep runs once a game turn in shadow mode and checks its functions over a range of inputs on a protected copy of the game.
+
+## Reimplementing a function
+
+- Work from the disassembly of `terranx.exe`. Disassemble from the function's own address with `i686-w64-mingw32-objdump -d -M intel --start-address=...`; a linear pass over the whole file loses sync. Behaviour must match the original exactly, quirks included.
+- Names come from OpenSMACX and Thinker. Their signatures and logic are often wrong in details, and OpenSMACX's map generation is marked untested, so trust the disassembly and shadow mode over the reference.
+- Reimplementations call each other directly, and call game code through the `game_*` pointers. Code adapted from either reference keeps its copyright notice.
+- Add a unit test in `tests/engine_<module>.c`. These run on a small made-up map with stand-ins for the game functions.
+- Verify with a shadow soak (0 mismatches) and a normal-mode soak. A planted bug that shadow mode catches is a good check that the sweep reaches the code.
+- Write comments in plain prose describing behaviour, and note where the original differs from OpenSMACX.
+
+## Commits
+
+End commit messages with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. The repo is public at github.com/leepaulmann/chiron, and commits use the GitHub noreply email.
