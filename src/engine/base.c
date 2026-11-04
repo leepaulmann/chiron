@@ -1196,6 +1196,78 @@ void base_psych(void) {
     psych_pass(b, &p, f->se_pending[SE_TALENT], f->se_pending[SE_POLICE] + 2 * has_facility(id, FAC_BROOD_PIT));
 }
 
+// ---- Growth -------------------------------------------------------------------
+
+// The population a base aims for: a sixth of the way from its size to 36,
+// at least 6, and no more than a habitation limit allows.
+int pop_goal(int base) {
+    const struct base *b = &game_bases[base];
+    int faction = b->faction, ascetic = holds_project(SP_ASCETIC_VIRTUES, faction) ? 2 : 0;
+    int rule = game_faction_defs[faction].rule_population;
+    int goal = (36 - b->pop_size) / 6 + b->pop_size;
+    if (goal <= 6) goal = 6;
+    if (!has_facility(base, FAC_HAB_COMPLEX)) {
+        int limit = game_rules_basic->pop_limit_hab_complex - rule + ascetic;
+        if (goal >= limit) goal = limit;
+    }
+    if (!has_facility(base, FAC_HABITATION_DOME)) {
+        int limit = game_rules_basic->pop_limit_hab_dome - rule + ascetic;
+        if (goal >= limit) goal = limit;
+    }
+    return goal;
+}
+
+// The habitation facility the base needs to grow further, or 0.
+int pop_goal_fac(int base) {
+    const struct base *b = &game_bases[base];
+    int faction = b->faction, ascetic = holds_project(SP_ASCETIC_VIRTUES, faction) ? 2 : 0;
+    int pop = b->pop_size - ascetic + game_faction_defs[faction].rule_population;
+    if (pop >= game_rules_basic->pop_limit_hab_complex && !has_facility(base, FAC_HAB_COMPLEX)) return FAC_HAB_COMPLEX;
+    if (pop >= game_rules_basic->pop_limit_hab_dome && !has_facility(base, FAC_HABITATION_DOME)) return FAC_HABITATION_DOME;
+    return 0;
+}
+
+// The faction's cost of growth (type 0) or of building (1), in tenths of
+// the rules' rows: the AI's by difficulty, less 1 against a far stronger
+// faction and 1 against a human at the top in a single-player game; then
+// the rules' multiplier, the planet size, and GROWTH (with a creche and a
+// golden age at `base`) or INDUSTRY.
+int cost_factor(int faction, int type, int base) {
+    int factor;
+    if (game_is_human(faction)) {
+        factor = 10;
+    } else {
+        int top = game_faction_rankings[7];
+        int human_top = !*game_net_multiplayer && game_is_human(top);
+        factor = game_cost_base[*game_difficulty] - (game_great_satan(top, 0) != 0) - human_top;
+    }
+    int multiplier = type ? game_rules_basic->mineral_cost_multi : game_rules_basic->nutrient_cost_multi;
+    if (multiplier != 10) factor = factor * multiplier / 10;
+    if (game_map_settings[0] == 1) factor = factor * 9 / 10;
+    else if (game_map_settings[0] == 0) factor = factor * 8 / 10;
+    const struct faction_data *f = &game_factions[faction];
+    if (!type) {
+        int growth = f->se_pending[SE_GROWTH];
+        if (base >= 0) {
+            if (has_facility(base, FAC_CHILDREN_CRECHE)) growth += 2;
+            if (game_bases[base].state & BASE_STATE_GOLDEN_AGE) growth += 2;
+        }
+        return ((10 - game_range(growth, -2, 5)) * factor + 9) / 10;
+    }
+    if (type != 1) return factor;
+    switch (f->se_pending[SE_INDUSTRY]) {
+    case -7: case -6: case -5: case -4: case -3: return (factor * 13 + 9) / 10;
+    case -2: return (factor * 6 + 4) / 5;
+    case -1: return (factor * 11 + 9) / 10;
+    case 0: return factor;
+    case 1: return (factor * 9 + 9) / 10;
+    case 2: return (factor * 4 + 4) / 5;
+    case 3: return (factor * 7 + 9) / 10;
+    case 4: return (factor * 3 + 4) / 5;
+    default: return (factor + 1) / 2;
+    }
+}
+
 // ---- The whole of it -------------------------------------------------------
 
 // Works out the current base, unless it was the last one worked out and
@@ -1243,6 +1315,9 @@ SHADOW_WRITER(BASE, int, black_market, (int a), (a), WRITES_CURRENT, "%d", a)
 #define WRITES_PSYCH_CHECK WRITES(b, sizeof(*b)); WRITES(c, sizeof(*c))
 SHADOW_WRITER(BASE, void, psych_check, (int a, int *b, int *c), (a, b, c), WRITES_PSYCH_CHECK, "%d", a)
 SHADOW2(BASE, int, base_rank, int, int)
+SHADOW1(BASE, int, pop_goal, int)
+SHADOW1(BASE, int, pop_goal_fac, int)
+SHADOW3(BASE, int, cost_factor, int, int, int)
 
 // Calls fn with `value` in the stack word its frame keeps at [ebp-4],
 // where the original base_energy() reads before it writes.
@@ -1340,7 +1415,12 @@ static void sweep_bases(void) {
     }
     *game_current_base = current;
     *game_current_base_id = current_id;
+    for (int b = -1; b < *game_base_count; b++) {
+        if (b >= 0) check_pop_goal(b), check_pop_goal_fac(b);
+        for (int type = 0; type <= 2; type++) check_cost_factor(game_bases[b < 0 ? 0 : b].faction, type, b);
+    }
     for (int f = 0; f < FACTION_COUNT; f++) {
+        for (int type = 0; type <= 2; type++) check_cost_factor(f, type, -1);
         int content, limit;
         check_psych_check(f, &content, &limit);
         for (int r = 0; r <= *game_base_count + 1; r++) check_base_rank(f, r);
@@ -1364,6 +1444,9 @@ static const struct hook base_hooks[] = {
     HOOK(0x4e7750, energy_yield, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x18),                  // sub esp, 24
     HOOK(0x4e7dc0, resource_yield, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                // mov eax, [ebp+8]
     HOOK(0x421670, has_fac, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x56, 0x57),                       // push ecx; push esi; push edi
+    HOOK(0x4ef090, pop_goal, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),                      // sub esp, 8
+    HOOK(0x4eef80, pop_goal_fac, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x45, 0x08),            // push ecx; mov eax, [ebp+8]
+    HOOK(0x4e4430, cost_factor, PUSH_EBP_MOV_EBP_ESP, 0x53, 0xa1, 0xe8, 0x64, 0x9a, 0x00), // push ebx; mov eax, [0x9a64e8]
     HOOK(0x4ec3b0, base_compute, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                  // mov eax, [ebp+8]
     HOOK(0x4e68b0, farm_compute, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x1c),                  // sub esp, 28
     HOOK(0x4e80b0, base_yield, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x58),                    // sub esp, 88

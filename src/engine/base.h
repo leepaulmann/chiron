@@ -48,3 +48,11 @@ void base_psych(void);
 // Works out the current base from scratch: support, squares, nutrients,
 // minerals, energy. Only when `update` is set or the base has changed.
 void base_compute(int update);
+
+// The population the base aims for, and the habitation facility it needs
+// to grow further (or 0).
+int pop_goal(int base);
+int pop_goal_fac(int base);
+// The faction's cost of growth (type 0) or building (1), in tenths; base
+// may be -1.
+int cost_factor(int faction, int type, int base);

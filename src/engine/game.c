@@ -72,6 +72,8 @@ uint8_t *game_base_globals;
 int32_t *game_base_commerce_import, *game_base_commerce_export, *game_tech_commerce_count, *game_proposal_passes;
 struct citizen *game_citizens;
 int32_t *game_base_forces_supported, *game_base_forces_paid, *game_computed_base_id;
+int32_t *game_faction_rankings, *game_cost_base;
+int (*game_great_satan)(int faction, int is_aggressive);
 int32_t *game_base_workers, *game_base_reserved, *game_base_food_ok, *game_current_turn;
 int32_t *game_base_square_flags;
 void (*game_add_goal)(int faction, int type, int priority, int x, int y, int base);
@@ -245,6 +247,9 @@ void game_bind(struct pe_image *exe) {
     game_base_food_ok = (int32_t *)code_at(exe, 0x90e900);
     game_current_turn = (int32_t *)code_at(exe, 0x9a64d4);
     game_computed_base_id = (int32_t *)code_at(exe, 0x689374);
+    game_faction_rankings = (int32_t *)code_at(exe, 0x9a64ec);
+    game_cost_base = (int32_t *)code_at(exe, 0x689378);
+    game_great_satan = (void *)code_at(exe, 0x539c00);
     game_base_square_flags = (int32_t *)code_at(exe, 0x90e99c);
     game_add_goal = (void *)code_at(exe, 0x579a30);
     game_stack_check = (void *)code_at(exe, 0x5b9580);

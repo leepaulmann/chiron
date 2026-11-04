@@ -116,8 +116,9 @@ module at a time. So far:
   facilities, and a base's nutrient and mineral totals with growth and
   ecological damage; which squares its citizens work and which become
   specialists; unit upkeep and supply convoys; its energy with trade,
-  losses to inefficiency and the split into economy, psych and labs; and
-  its talents and drones.
+  losses to inefficiency and the split into economy, psych and labs; its
+  talents and drones; its population goal; and the cost factors for
+  growth and building.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once

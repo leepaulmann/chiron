@@ -373,7 +373,7 @@ enum {
 // Secret projects, as indices into game_secret_projects (facility id - 70).
 enum {
     SP_HUMAN_GENOME_PROJECT = 0, SP_MERCHANT_EXCHANGE = 3, SP_VIRTUAL_WORLD = 6, SP_PLANETARY_TRANSIT_SYSTEM = 7, SP_SUPERCOLLIDER = 12, SP_LONGEVITY_VACCINE = 14,
-    SP_PHOLUS_MUTAGEN = 16, SP_THEORY_OF_EVERYTHING = 18, SP_NETWORK_BACKBONE = 21, SP_SPACE_ELEVATOR = 27, SP_SINGULARITY_INDUCTOR = 28,
+    SP_ASCETIC_VIRTUES = 13, SP_PHOLUS_MUTAGEN = 16, SP_THEORY_OF_EVERYTHING = 18, SP_NETWORK_BACKBONE = 21, SP_SPACE_ELEVATOR = 27, SP_SINGULARITY_INDUCTOR = 28,
     SP_BULK_MATTER_TRANSMITTER = 29, SP_ASCENT = 31, SP_SELF_AWARE_COLONY = 25,
     SP_CLINICAL_IMMORTALITY = 26, SP_MANIFOLD_HARMONICS = 33,
     SP_CLOUDBASE_ACADEMY = 35, SP_PLANETARY_ENERGY_GRID = 36, SP_COUNT = 64,
@@ -620,6 +620,9 @@ extern int32_t *game_terraform_reduce, *game_terraform_energy;
 // it, and the minerals its units cost.
 extern int32_t *game_current_base_id;
 extern int32_t *game_computed_base_id;  // the base base_compute() last worked out
+extern int32_t *game_faction_rankings;  // [8] factions from weakest to strongest
+extern int32_t *game_cost_base;         // [6] the AI's cost factor at each difficulty, in tenths
+extern int (*game_great_satan)(int faction, int is_aggressive);  // whether the faction is far ahead
 extern int32_t *game_base_growth;
 extern int32_t *game_base_convoy_from, *game_base_convoy_to;  // [RESOURCE_COUNT]
 extern int32_t *game_base_forces_upkeep;

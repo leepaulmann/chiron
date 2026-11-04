@@ -56,6 +56,11 @@ static void put(int x, int y, int alt, int rain, int rocky, uint32_t bits) {
 }
 
 static int best_specialist_stub(void) { return 2; }
+static int satan;
+static int great_satan_stub(int faction, int aggressive) {
+    (void)faction, (void)aggressive;
+    return satan;
+}
 static int32_t reserved, square_flags[25];
 static int goals, hostile;
 static void add_goal_stub(int faction, int type, int priority, int x, int y, int base) {
@@ -795,6 +800,63 @@ int main(void) {
     base_compute(0);
     EXPECT(computed, 1);
     EXPECT(b1->surplus[RESOURCE_ENERGY] != -77, 1);
+
+    // Population goals: a sixth of the way to 36, at least 6, held to the
+    // habitation limits (7 and 14 here, 2 more with the Ascetic Virtues).
+    rules_basic.pop_limit_hab_complex = 7, rules_basic.pop_limit_hab_dome = 14;
+    b1->pop_size = 3;
+    EXPECT(pop_goal(1), 7);  // 33 / 6 + 3 = 8, held to 7
+    projects[SP_ASCETIC_VIRTUES] = 1;
+    EXPECT(pop_goal(1), 8);
+    projects[SP_ASCETIC_VIRTUES] = -1;
+    b1->pop_size = 7;
+    EXPECT(pop_goal_fac(1), FAC_HAB_COMPLEX);
+    give(1, FAC_HAB_COMPLEX);
+    EXPECT(pop_goal_fac(1), 0);
+    EXPECT(pop_goal(1), 11);  // 29 / 6 + 7
+    b1->pop_size = 14;
+    EXPECT(pop_goal_fac(1), FAC_HABITATION_DOME);
+    EXPECT(pop_goal(1), 14);
+    b1->pop_size = 0;
+    EXPECT(pop_goal(1), 6);  // 36 / 6
+    memset(b1->facilities_built, 0, sizeof(b1->facilities_built));
+
+    // Cost factors: 10 for a human; the AI's by difficulty, less 1 for a
+    // far stronger faction at the top. GROWTH 2 makes growth cost 8/10.
+    int32_t rankings[8] = {0}, cost_base[6] = {13, 12, 11, 10, 8, 7}, net = 0, settings[7] = {2};
+    game_faction_rankings = rankings, game_cost_base = cost_base, game_net_multiplayer = &net;
+    game_map_settings = settings, game_great_satan = great_satan_stub;
+    rules_basic.nutrient_cost_multi = rules_basic.mineral_cost_multi = 10;
+    difficulty = 3;
+    EXPECT(cost_factor(1, 1, -1), 10);
+    satan = 1;
+    EXPECT(cost_factor(1, 1, -1), 9);
+    rankings[7] = 1, humans = 1 << 1;
+    EXPECT(cost_factor(1, 1, -1), 10);  // human
+    EXPECT(cost_factor(2, 1, -1), 8);   // 10, less the satan, less a human on top
+    humans = 0, satan = 0, rankings[7] = 0;
+    factions[1].se_pending[SE_GROWTH] = 2;
+    EXPECT(cost_factor(1, 0, -1), 8);  // (8 * 10 + 9) / 10
+    give(1, FAC_CHILDREN_CRECHE);
+    EXPECT(cost_factor(1, 0, 1), 6);   // GROWTH 4
+    factions[1].se_pending[SE_GROWTH] = 9;
+    EXPECT(cost_factor(1, 0, 1), 5);   // at most 5
+    factions[1].se_pending[SE_GROWTH] = 0;
+    memset(b1->facilities_built, 0, sizeof(b1->facilities_built));
+    // INDUSTRY in steps; the planet size; the rules' multiplier.
+    factions[1].se_pending[SE_INDUSTRY] = 2;
+    EXPECT(cost_factor(1, 1, -1), 8);
+    factions[1].se_pending[SE_INDUSTRY] = -3;
+    EXPECT(cost_factor(1, 1, -1), 13);
+    factions[1].se_pending[SE_INDUSTRY] = 9;
+    EXPECT(cost_factor(1, 1, -1), 5);
+    factions[1].se_pending[SE_INDUSTRY] = 0;
+    settings[0] = 0;
+    EXPECT(cost_factor(1, 1, -1), 8);
+    settings[0] = 2, rules_basic.mineral_cost_multi = 15;
+    EXPECT(cost_factor(1, 1, -1), 15);
+    EXPECT(cost_factor(1, 2, -1), 15);  // any other type: the factor alone
+    rules_basic.mineral_cost_multi = 10;
 
     if (failures) return 1;
     printf("engine_base: all tests passed\n");
