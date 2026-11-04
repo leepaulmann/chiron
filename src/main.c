@@ -186,7 +186,9 @@ int main(int argc, char **argv) {
     kernel32_set_command_line(cmdline);
 
     // SA_NODEFER: a handler that resumes from one fault may hit another.
-    struct sigaction sa = {.sa_sigaction = on_fault, .sa_flags = SA_SIGINFO | SA_NODEFER};
+    // SA_ONSTACK: game threads handle faults on their own signal stack (see
+    // teb_attach_current_thread), leaving the space below esp to seh.c.
+    struct sigaction sa = {.sa_sigaction = on_fault, .sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK};
     sigaction(SIGSEGV, &sa, NULL);
     sigaction(SIGILL, &sa, NULL);
     sigaction(SIGFPE, &sa, NULL);

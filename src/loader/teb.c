@@ -2,6 +2,7 @@
 
 #include <asm/ldt.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -65,6 +66,18 @@ struct teb *teb_attach_current_thread(uint32_t tid) {
     }
     uint16_t sel = (desc.entry_number << 3) | 7;  // LDT, ring 3
     __asm__ volatile("movw %0, %%fs" ::"r"(sel));
+    // Faults are handled on a stack of their own: the handler builds the
+    // game's exception records just below the faulting esp, where the
+    // kernel would otherwise have put the signal frame (and its saved FPU
+    // state, whose size depends on the CPU).
+    size_t alt_size = 256 * 1024;
+    long min = sysconf(_SC_SIGSTKSZ);
+    if (min > 0 && (size_t)min * 4 > alt_size) alt_size = (size_t)min * 4;
+    stack_t alt = {.ss_sp = malloc(alt_size), .ss_size = alt_size};
+    if (!alt.ss_sp || sigaltstack(&alt, NULL) != 0) {
+        perror("chiron: sigaltstack");
+        abort();
+    }
     // Windows starts threads with the x87 unit at 53-bit precision; Linux
     // uses 64-bit. MSVC-compiled code expects the Windows setting.
     uint16_t cw = 0x027f;

@@ -229,7 +229,9 @@ int seh_handle_signal(int sig, siginfo_t *si, void *uctx) {
     ucontext_t *uc = uctx;
     greg_t *g = uc->uc_mcontext.gregs;
     if (!(g[REG_FS] & 4)) return 0;  // not a thread with a Windows TEB
-    uint32_t sp = (g[REG_ESP] - 512) & ~15u;  // leave the red zone and a gap for seh_resume
+    // The handler runs on the thread's signal stack, so the space below esp
+    // is free. Leave a gap for seh_resume.
+    uint32_t sp = (g[REG_ESP] - 512) & ~15u;
     sp -= sizeof(CONTEXT);
     CONTEXT *ctx = (CONTEXT *)sp;
     sp -= sizeof(EXCEPTION_RECORD);
