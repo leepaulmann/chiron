@@ -236,6 +236,7 @@ enum { FACTION_FLAG_MAP_REVEALED = 0x200 };  // faction_data.flags
 enum { TREATY_UNK_8000000 = 0x8000000 };  // with TREATY_COMMLINK, whose_territory() names the owner
 
 enum { GAME_STATE_OMNISCIENT = 0x80 };  // game_state bits
+enum { FACTION_FLAG_BASE_SUBMERGED = 0x80000 };  // faction_data.flags
 
 // ---- The map -------------------------------------------------------------------
 
@@ -256,7 +257,8 @@ struct map_tile {
 _Static_assert(sizeof(struct map_tile) == 0x2c, "map_tile size");
 
 enum {  // map_tile.bits
-    MAP_RIVERBED = 0x100,
+    MAP_RIVER = 0x80, MAP_RIVERBED = 0x100, MAP_RIVER_LAKE = 0x200,  // a river, where one may begin, more water shown
+    MAP_FOREST = 0x200000, MAP_CONDENSER = 0x400000,
     MAP_BASE = 0x1, MAP_UNIT = 0x2, MAP_RESOURCE = 0x400, MAP_MONOLITH = 0x2000,
     MAP_ENERGY_RESOURCE = 0x10000, MAP_MINERAL_RESOURCE = 0x20000, MAP_POD_TAKEN = 0x100000,
     MAP_UNITY_POD = 0xc000000,  // either bit, without unity scattering
@@ -267,6 +269,7 @@ enum {  // map_tile.bits2
     MAP2_CRATER = 0x1,
     MAP2_NEXUS = 0x2000,          // the Manifold Nexus
     MAP2_CHANGED = 0x400000,      // rainfall or rockiness set since the map was made
+    MAP2_RIVER_PATH = 0x800000,   // world_rivers() marks the river it is laying
     MAP2_UNK_80000000 = 0x80000000,
     MAP2_LANDMARK_CODE = 0xff000000,  // which square of its landmark this is
 };
@@ -312,18 +315,24 @@ _Static_assert(sizeof(struct landmark) == 0x28, "landmark size");
 
 enum { BASE_COUNT = 512 };
 
-enum { FAC_GEOSYNC_SURVEY_POD = 41 };
+enum { FAC_PRESSURE_DOME = 26, FAC_GEOSYNC_SURVEY_POD = 41 };
 
 struct base {
     int16_t x, y;
     uint8_t faction;
-    GAME_PAD(0x05, 0x09);
+    uint8_t faction_former;
+    int8_t pop_size;
+    GAME_PAD(0x07, 0x0a);
     uint8_t visibility;  // bit per faction that can see it
-    GAME_PAD(0x0a, 0x8c);
+    GAME_PAD(0x0b, 0x13);
+    char name[25];
+    GAME_PAD(0x2c, 0x8c);
     uint8_t facilities_built[12];  // bit per facility, below the secret projects
     GAME_PAD(0x98, 0x134);
 };
 _Static_assert(sizeof(struct base) == 0x134, "base size");
+GAME_AT(struct base, visibility, 0x0a);
+GAME_AT(struct base, name, 0x13);
 GAME_AT(struct base, facilities_built, 0x8c);
 
 static inline int game_has_facility(const struct base *b, int facility) {
@@ -332,7 +341,8 @@ static inline int game_has_facility(const struct base *b, int facility) {
 
 // ---- Units ---------------------------------------------------------------------
 
-enum { VEH_FLAG_INVISIBLE = 0x400 };
+enum { VEH_FLAG_UNK_20 = 0x20, VEH_FLAG_INVISIBLE = 0x400 };
+enum { UNIT_FUNGAL_TOWER = 19 };
 
 struct veh {
     int16_t x, y;
@@ -412,6 +422,27 @@ extern int32_t *game_base_submerged_count;    // [8] world_alt_set() resets thes
 extern int32_t *game_base_submerged_veh;      // [8]
 extern int32_t *game_world_skip_territory;    // non-zero: alt_set() leaves bases and units alone
 extern int32_t *game_ocean_coverage;          // the map setting: 2 - land coverage
+// The map settings: planet size, ocean coverage, land coverage, erosive
+// forces, orbit, cloud cover and native life, each 0 to 2 or negative for
+// random.
+extern int32_t *game_map_settings;            // [7]
+extern int32_t *game_erosive_forces, *game_native_life;
+extern int32_t *game_world_add_temperature;   // non-zero while a map is made: shown as it grows
+extern int32_t *game_halted;                  // non-zero: don't redraw
+extern int32_t *game_current_faction;         // the faction the player is
+extern int32_t *game_control_turn;
+extern int32_t *game_battle_state;            // non-zero: no messages now
+extern uint32_t *game_fungus_clears;          // map_tile.bits fungus removes
+// world_rainfall(): a base near a square whose rainfall changed, and the
+// faction of a base near one that got drier; -1 for none.
+extern int32_t *game_rain_base, *game_rain_faction;
+extern void **game_map_wins;                  // [8] the map windows
+extern void *game_world_win, *game_console;
+extern char **game_script_file;               // script.txt, for popups
+extern char *game_flood_texts;                // [8][16] popup labels and pictures when a base floods
+extern char *game_text_climate_begin, *game_text_climate_end;
+// The four diagonal neighbours, north-east clockwise, then the square.
+extern int32_t *game_diag_x, *game_diag_y;    // [5]
 // Brush counts while land is painted: squares since the world was begun,
 // the land wanted before continents shrink, and squares this stroke.
 extern int32_t *game_brush_total, *game_brush_land_wanted, *game_brush_stroke;
@@ -440,7 +471,6 @@ extern int (*game_base_find)(int x, int y);  // the nearest base, or -1
 // The nearest base in `region` (any if negative) that `faction` may see,
 // held by `owner` (see base_find in OpenSMACX), or -1.
 extern int (*game_base_find3)(int x, int y, int faction, int region, int owner, int seen_by);
-extern void (*game_alt_set)(int x, int y, int altitude);  // with floods, bases and units
 extern int (*game_rand)(void);                    // the C runtime's rand()
 extern void *(*game_getptd)(void);                // the C runtime's per-thread data
 extern int (*game_random)(int min, int max);      // the game's own generator: min to max - 1
@@ -448,8 +478,25 @@ extern void (*game_random_reseed)(int seed);
 extern void (*game_do_all_non_input)(void);       // redraws and the message pump
 extern void(__attribute__((thiscall)) * game_path_continents)(void *path);  // finds the regions
 extern void (*game_draw_radius)(int x, int y, int radius, int unk);           // redraws squares
-extern void (*game_world_rainfall)(void);
-extern void (*game_world_build)(void);  // makes a whole new map
+extern int (*game_base_find2)(int x, int y, int faction);  // the nearest base of the faction, or -1
+extern void (*game_delete_landmark)(int x, int y);
+extern void (*game_set_fac)(int facility, int base, int on);
+extern int (*game_is_objective)(int base);
+extern void(__attribute__((thiscall)) * game_console_focus)(void *console, int x, int y, int faction);
+extern int (*game_parse_says)(int slot, char *text, int gender, int plural);
+extern int (*game_popp)(char *file, char *label, int flags, char *picture, int unk);
+extern int (*game_x_pop2)(char *label, char *picture, int unk);
+extern void (*game_base_kill)(int base);
+extern int (*game_stack_fix)(int veh);
+extern int (*game_veh_kill)(int veh);
+extern int (*game_veh_init)(int unit, int faction, int x, int y);
+extern void(__attribute__((thiscall)) * game_map_win_clear_terrain)(void *win);
+extern void(__attribute__((thiscall)) * game_world_win_clear_terrain)(void *win);
+extern void (*game_draw_map)(int unk);
+extern void (*game_draw_tile)(int x, int y, int unk);
+extern void (*game_do_checksums)(int stage);
+extern void (*game_log_say)(char *text, int a, int b, int c);
+extern void (*game_reset_territory)(void);
 extern void (*game_fixup_landmarks)(void);
 extern uint32_t(__attribute__((stdcall)) * game_time_get_time)(void);         // the game's timeGetTime import
 extern void *game_path;

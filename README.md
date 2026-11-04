@@ -105,17 +105,20 @@ module at a time. So far:
   region, units and bases, resources, pods, elevation), territory, zones of
   control, sensors, landmarks, where units can reach and how bases, coasts
   and seas connect; and the code that changes squares and landmarks;
-- map generation: raising and lowering land, painting continents and
-  hills, riverbeds, temperature, polar caps, contours, the checks on a
-  finished map, and all 16 landmarks. The top-level builder, rainfall,
-  rivers, shorelines, the altitude setter and map loading are still the
-  game's own.
+- map generation: all of making a new map (continents, hills, erosion,
+  shorelines, temperature, rivers, rainfall, fungus, rockiness and all 16
+  landmarks), the climate pass that reworks the map when the sea level
+  changes, and the altitude setter, with the floods it brings to bases and
+  units. Loading and saving maps are still the game's own.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once
 a game turn it also checks every function over its whole input range.
 Functions that write to memory run on copies, and the original's result is
-kept. It prints a summary of calls, mismatches and sweep times at exit:
+kept; while they run, the game's message pump and drawing are held off.
+A mismatch names the first byte that differs (`CHIRON_SHADOW_DIFFS=1`
+lists every range). It prints a summary of calls, mismatches and sweep
+times at exit:
 
 ```sh
 CHIRON_REIMPL=shadow CHIRON_SOAK=ai CHIRON_SCRIPT="30 click 835 362; 40 every 1 key Return" ./build/chiron

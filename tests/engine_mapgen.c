@@ -42,12 +42,9 @@ static int failures;
 static struct map_tile *at(int x, int y) { return &tiles[x / 2 + y * (W / 2)]; }
 static int bit2_at_test(const struct map_tile *t) { return (t->bits2 & MAP2_LANDMARK(LM_FRESH)) != 0; }
 
-// Stand-ins. alt_set only sets the altitude; the generators count up.
-static int alt_set_calls;
-static void fake_alt_set(int x, int y, int alt) {
-    alt_set_calls++;
-    at(x, y)->climate = (uint8_t)((at(x, y)->climate & 0x1f) | alt << 5);
-}
+// Stand-ins: the generators count up. Before the game begins (turn 0)
+// alt_set() only sets the altitude.
+static int32_t turn;
 static int rand_next;
 static int fake_rand(void) { return rand_next++; }
 static uint32_t thread_data[6];  // rand()'s state is the word at 0x14
@@ -67,6 +64,25 @@ static char *__attribute__((thiscall)) fake_strings_get(void *table, char *s) {
     (void)table;
     return s;
 }
+// For alt_set() during a game.
+static struct base bases[2];
+static int base_here = -1, landmarks_deleted, domes_given, bases_killed, towers;
+static int32_t skip_territory, battle_state, net_game, add_temperature, halted, native_life = 1;
+static int32_t erosive_forces, settings[7], rain_base, rain_faction, current_faction = 1, control_turn;
+static uint32_t fungus_clears = MAP_FOREST;
+static uint8_t human_factions;
+static int fake_base_at(int x, int y) { (void)x, (void)y; return base_here; }
+static int fake_veh_at(int x, int y) { (void)x, (void)y; return -1; }
+static int fake_stack_fix(int v) { return v; }
+static void fake_delete_landmark(int x, int y) { (void)x, (void)y; landmarks_deleted++; }
+static void fake_set_fac(int facility, int base, int on) {
+    if (facility == FAC_PRESSURE_DOME && on) bases[base].facilities_built[FAC_PRESSURE_DOME / 8] |= 1 << FAC_PRESSURE_DOME % 8;
+    domes_given++;
+}
+static int fake_is_objective(int base) { (void)base; return 0; }
+static void fake_base_kill(int base) { (void)base; bases_killed++; }
+static int fake_base_find2(int x, int y, int f) { (void)x, (void)y, (void)f; return -1; }
+static int fake_veh_init(int unit, int f, int x, int y) { (void)unit, (void)f, (void)x, (void)y; return towers++; }
 
 int main(void) {
     game_map = &tiles_ptr, game_abstract_map = &abstract_ptr;
@@ -79,12 +95,22 @@ int main(void) {
     game_base_submerged_count = submerged, game_base_submerged_veh = submerged_veh;
     game_radius_near_x = near_x, game_radius_near_y = near_y;
     game_radius_x = radius_x, game_radius_y = radius_y, game_radius_count = radius_count;
-    game_alt_set = fake_alt_set, game_rand = fake_rand, game_getptd = fake_getptd;
+    game_turn = &turn, game_rand = fake_rand, game_getptd = fake_getptd;
     game_random = fake_random, game_random_reseed = fake_reseed, game_do_all_non_input = fake_pump;
     game_path_continents = fake_path, game_base_find = fake_base_find;
     game_ocean_coverage = &ocean_coverage, game_brush_total = &brush_total, game_brush_land_wanted = &brush_wanted;
     game_brush_stroke = &brush_stroke, game_cloud_cover = &cloud_cover, game_state = &state;
     game_landmarks = landmarks, game_natural = natural, game_strings_get = fake_strings_get, game_expansion = &expansion;
+    game_bases = bases, game_base_at = fake_base_at, game_veh_at = fake_veh_at, game_stack_fix = fake_stack_fix;
+    game_delete_landmark = fake_delete_landmark, game_set_fac = fake_set_fac, game_is_objective = fake_is_objective;
+    game_base_kill = fake_base_kill, game_base_find2 = fake_base_find2, game_veh_init = fake_veh_init;
+    game_world_skip_territory = &skip_territory, game_battle_state = &battle_state, game_net_multiplayer = &net_game;
+    game_control_turn = &control_turn, game_world_add_temperature = &add_temperature, game_halted = &halted;
+    game_native_life = &native_life, game_erosive_forces = &erosive_forces, game_map_settings = settings;
+    game_rain_base = &rain_base, game_rain_faction = &rain_faction, game_current_faction = &current_faction;
+    game_fungus_clears = &fungus_clears, game_human_factions = &human_factions;
+    static int32_t diag_x[5] = {1, 1, -1, -1, 0}, diag_y[5] = {-1, 1, 1, -1, 0};
+    game_diag_x = diag_x, game_diag_y = diag_y;
     for (int i = 0; i < LM_COUNT; i++) natural[i].name = names[i];
     radius_x[0] = radius_y[0] = 0;
     for (int i = 1; i < RADIUS_SQUARES; i++) {
@@ -264,6 +290,125 @@ int main(void) {
     EXPECT(bit2_at_test(at(3, 3)), 0);
     EXPECT(landmark_count, 1);
     EXPECT(landmarks[0].y, 5);  // the first row with the region, from the south
+
+    // alt_set() during a game. Raising land may make it rockier: one roll in
+    // (rockiness + 4) does.
+    map_wipe();
+    turn = 5;
+    at(2, 2)->climate = 3 << 5, at(2, 2)->rocky_lock = 0;
+    rand_next = 8, draw_state = 0;
+    alt_set(2, 2, 4);
+    EXPECT(alt_at(2, 2), 4);
+    EXPECT(at(2, 2)->rocky_lock >> 6, 1);
+    EXPECT(at(2, 2)->bits2 & MAP2_CHANGED, MAP2_CHANGED);
+    EXPECT(draw_state, DRAW_TERRAIN | DRAW_LANDMARKS);
+    EXPECT(landmarks_deleted, 1);
+    rand_next = 9;  // 9 % 5: no
+    alt_set(2, 2, 5);
+    EXPECT(at(2, 2)->rocky_lock >> 6, 1);
+    // Lowering it may make it less rocky: all rolls but one in
+    // (rockiness + 1) do.
+    rand_next = 1;
+    alt_set(2, 2, 3);
+    EXPECT(at(2, 2)->rocky_lock >> 6, 0);
+    // Land sunk under the sea loses its improvements, and what each faction
+    // saw of them.
+    at(2, 2)->bits = MAP_FOREST | MAP_RIVER | MAP_BASE;
+    skip_territory = 1;
+    alt_set(2, 2, 1);
+    EXPECT(bit_at(2, 2), MAP_BASE | MAP_RIVER);  // 0x7e1377a3 keeps these
+    EXPECT(at(2, 2)->bits_seen[3], MAP_BASE | MAP_RIVER);
+    // A base there floods: it loses citizens (half, at least 2 to 4) and is
+    // given a pressure dome.
+    skip_territory = 0, battle_state = 1;
+    at(2, 2)->climate = 3 << 5;
+    base_here = 0, bases[0].faction = 1, bases[0].pop_size = 9;
+    rand_next = 3;  // 3 % 3 + 2 = 2 lost, under half
+    alt_set(2, 2, 2);
+    EXPECT(bases[0].pop_size, 5);
+    EXPECT(domes_given, 1);
+    EXPECT(submerged[1], 1);
+    EXPECT(factions[1].flags & FACTION_FLAG_BASE_SUBMERGED, FACTION_FLAG_BASE_SUBMERGED);
+    // With a dome, nothing more happens.
+    at(2, 2)->climate = 3 << 5;
+    alt_set(2, 2, 2);
+    EXPECT(bases[0].pop_size, 5);
+    // A base with too few citizens is lost, unless it is its faction's last.
+    memset(bases[0].facilities_built, 0, sizeof(bases[0].facilities_built));
+    at(2, 2)->climate = 3 << 5, bases[0].pop_size = 2, factions[1].base_count = 1;
+    alt_set(2, 2, 2);
+    EXPECT(bases[0].pop_size, 1);
+    EXPECT(bases_killed, 0);
+    memset(bases[0].facilities_built, 0, sizeof(bases[0].facilities_built));
+    at(2, 2)->climate = 3 << 5, bases[0].pop_size = 2, factions[1].base_count = 4;
+    alt_set(2, 2, 2);
+    EXPECT(bases_killed, 1);
+    base_here = -1, turn = 0;
+
+    // Shorelines: each square's altitude from its contour, then slopes made
+    // smooth from the peaks down.
+    for (int i = 0; i < W / 2 * H; i++) tiles[i].contour = 15, tiles[i].climate = 0;
+    at(4, 2)->contour = 45;
+    world_shorelines();
+    EXPECT(alt_at(4, 2), 4);
+    EXPECT(alt_at(5, 3), 3);
+    EXPECT(alt_at(0, 2), 2);  // ring 2, four west
+    EXPECT(alt_at(2, 0), 2);
+
+    // Rockiness and resource kinds: the sea gets the energy kind, high land
+    // the mineral kind, low dry land neither.
+    map_wipe();
+    at(2, 2)->climate = 5 << 5, at(4, 2)->climate = 3 << 5;
+    world_rocky();
+    EXPECT(bit_at(0, 0) & (MAP_ENERGY_RESOURCE | MAP_MINERAL_RESOURCE), MAP_ENERGY_RESOURCE);
+    EXPECT(bit_at(2, 2) & (MAP_ENERGY_RESOURCE | MAP_MINERAL_RESOURCE), MAP_MINERAL_RESOURCE);
+    EXPECT(bit_at(4, 2) & (MAP_ENERGY_RESOURCE | MAP_MINERAL_RESOURCE), 0);
+
+    // Fungus: with bands wide enough everywhere, every square but rocky land
+    // gets it, losing what fungus clears. The noise takes 324 rolls, and each
+    // square given fungus one more, for a fungal tower.
+    map_wipe();
+    native_life = 2, worldbuilder.fungus = 100, expansion = 0;
+    at(2, 2)->climate = 3 << 5, at(2, 2)->rocky_lock = 2 << 6;
+    at(4, 2)->bits = MAP_FOREST;
+    rand_next = 0;
+    world_fungus();
+    EXPECT(rand_next, 324 + W / 2 * H - 1);
+    EXPECT(bit_at(4, 2), MAP_FUNGUS);
+    EXPECT(bit_at(2, 2), 0);
+    EXPECT(towers, 0);
+    expansion = 1;
+
+    // Rivers: from a riverbed down to the sea, marked as river all the way,
+    // with no path marks left.
+    map_wipe();
+    for (int i = 0; i < W / 2 * H; i++) tiles[i].climate = 3 << 5, tiles[i].contour = 40;
+    at(2, 2)->contour = 60, at(2, 2)->bits = MAP_RIVERBED;
+    at(3, 3)->contour = 50;
+    at(4, 4)->contour = 10, at(4, 4)->climate = 1 << 5;
+    random_next = 0;
+    world_rivers();
+    EXPECT(bit_at(2, 2) & MAP_RIVER, MAP_RIVER);
+    int path_left = 0, river_squares = 0;
+    for (int i = 0; i < W / 2 * H; i++) {
+        path_left |= (tiles[i].bits2 & MAP2_RIVER_PATH) != 0;
+        river_squares += (tiles[i].bits & MAP_RIVER) != 0;
+    }
+    EXPECT(path_left, 0);
+    EXPECT(river_squares > 1, 1);
+
+    // Rainfall: flat dry land gets none; wind off a sea square carries
+    // moisture east along its row. The top and bottom rows get none.
+    map_wipe();
+    for (int i = 0; i < W / 2 * H; i++) tiles[i].climate = 3 << 5 | 2;
+    at(0, 2)->climate = 1 << 5 | 2;
+    cloud_cover = 0;
+    world_rainfall();
+    EXPECT(at(3, 1)->climate >> 3 & 3, 0);
+    EXPECT(at(2, 2)->climate >> 3 & 3, 1);
+    EXPECT(at(4, 2)->climate >> 3 & 3, 1);
+    EXPECT(at(0, 0)->climate >> 3 & 3, 0);
+    EXPECT(rain_base, -1);
 
     if (failures) return 1;
     puts("PASS");

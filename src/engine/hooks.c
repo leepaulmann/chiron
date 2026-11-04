@@ -178,16 +178,25 @@ const char *hooks_writes_end(struct hook_writes *w, int got, int want) {
     static char diff[96];
     const char *result = NULL;
     const uint8_t *orig = saves[w->depth].buf[1];
-    for (int i = 0; i < w->n && !result; i++) {
+    // CHIRON_SHADOW_DIFFS=1 lists every range that differs, not just the first.
+    static int list = -1;
+    if (list < 0) list = getenv("CHIRON_SHADOW_DIFFS") != NULL;
+    for (int i = 0; i < w->n && (!result || list); i++) {
         const uint8_t *mem = w->span[i].p;
         size_t size = w->span[i].size;
         if (memcmp(mem, orig, size))
             for (size_t j = 0; j < size; j++)
                 if (mem[j] != orig[j]) {
-                    snprintf(diff, sizeof(diff), "wrote 0x%02x at %p, original 0x%02x", mem[j], (void *)(mem + j),
-                             orig[j]);
-                    result = diff;
-                    break;
+                    if (!result) {
+                        snprintf(diff, sizeof(diff), "wrote 0x%02x at %p, original 0x%02x", mem[j], (void *)(mem + j),
+                                 orig[j]);
+                        result = diff;
+                        if (!list) break;
+                    }
+                    size_t k = j;
+                    while (k < size && mem[k] != orig[k]) k++;
+                    fprintf(stderr, "chiron:   differs at %p, %zu bytes\n", (void *)(mem + j), k - j);
+                    j = k;
                 }
         orig += size;
     }

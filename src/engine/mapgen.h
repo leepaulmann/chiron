@@ -2,6 +2,7 @@
 #pragma once
 
 // Changing altitude.
+void alt_set(int x, int y, int altitude);
 void alt_set_both(int x, int y, int altitude);
 void world_alt_set(int x, int y, int altitude, int both);
 void world_raise_alt(int x, int y);
@@ -22,6 +23,14 @@ void world_analysis(void);
 void world_alt_put_detail(int x, int y);
 void world_polar_caps(void);
 void world_linearize_contours(void);
+void world_erosion(void);
+void world_rocky(void);
+void world_fungus(void);
+void world_rivers(void);
+void world_shorelines(void);
+void world_rainfall(void);
+void world_climate(void);
+void world_build(void);
 
 // Landmarks: each at (x, y), or a site of its own when that is off the map.
 void world_crater(int x, int y);
