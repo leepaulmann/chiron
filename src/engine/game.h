@@ -198,10 +198,13 @@ struct rules_reactor {
 };
 _Static_assert(sizeof(struct rules_reactor) == 0xc, "rules_reactor size");
 
+enum { TRIAD_LAND, TRIAD_SEA, TRIAD_AIR };
+
 struct rules_chassis {
     GAME_PAD(0x00, 0x48);
     uint8_t speed;
-    GAME_PAD(0x49, 0x8e);
+    uint8_t triad;  // TRIAD_*
+    GAME_PAD(0x4a, 0x8e);
     int16_t preq_tech;
 };
 _Static_assert(sizeof(struct rules_chassis) == 0x90, "rules_chassis size");
@@ -229,6 +232,10 @@ enum {  // game_rules bits
 
 enum { FACTION_FLAG_MAP_REVEALED = 0x200 };  // faction_data.flags
 
+enum { TREATY_UNK_8000000 = 0x8000000 };  // with TREATY_COMMLINK, whose_territory() names the owner
+
+enum { GAME_STATE_OMNISCIENT = 0x80 };  // game_state bits
+
 // ---- The map -------------------------------------------------------------------
 
 // Squares are stored for x + y even only, so a row holds width / 2 of them.
@@ -251,9 +258,17 @@ enum {  // map_tile.bits
     MAP_BASE = 0x1, MAP_UNIT = 0x2, MAP_RESOURCE = 0x400, MAP_MONOLITH = 0x2000,
     MAP_ENERGY_RESOURCE = 0x10000, MAP_MINERAL_RESOURCE = 0x20000, MAP_POD_TAKEN = 0x100000,
     MAP_UNITY_POD = 0xc000000,  // either bit, without unity scattering
-    MAP_SUPPLY_POD = 0x10000000, MAP_NUTRIENT_RESOURCE = 0x20000000,
+    MAP_SUPPLY_POD = 0x10000000, MAP_NUTRIENT_RESOURCE = 0x20000000, MAP_SENSOR = 0x80000000,
 };
-enum { MAP2_LANDMARK_CODE = 0xff000000 };  // map_tile.bits2
+enum {  // map_tile.bits2
+    MAP2_NEXUS = 0x2000,          // the Manifold Nexus
+    MAP2_CHANGED = 0x400000,      // rainfall or rockiness set since the map was made
+    MAP2_UNK_80000000 = 0x80000000,
+    MAP2_LANDMARK_CODE = 0xff000000,  // which square of its landmark this is
+};
+enum {  // game_draw_state bits the map setters raise
+    DRAW_TERRAIN = 0x1, DRAW_LANDMARKS = 0x4,
+};
 
 enum {  // map_tile.climate >> 5
     ALT_SHORE_LINE = 3,  // the lowest land
@@ -271,12 +286,44 @@ _Static_assert(sizeof(struct landmark) == 0x28, "landmark size");
 
 enum { BASE_COUNT = 512 };
 
+enum { FAC_GEOSYNC_SURVEY_POD = 41 };
+
 struct base {
     int16_t x, y;
     uint8_t faction;
-    GAME_PAD(0x05, 0x134);
+    GAME_PAD(0x05, 0x09);
+    uint8_t visibility;  // bit per faction that can see it
+    GAME_PAD(0x0a, 0x8c);
+    uint8_t facilities_built[12];  // bit per facility, below the secret projects
+    GAME_PAD(0x98, 0x134);
 };
 _Static_assert(sizeof(struct base) == 0x134, "base size");
+GAME_AT(struct base, facilities_built, 0x8c);
+
+static inline int game_has_facility(const struct base *b, int facility) {
+    return (b->facilities_built[facility / 8] & (1 << (facility % 8))) != 0;
+}
+
+// ---- Units ---------------------------------------------------------------------
+
+enum { VEH_FLAG_INVISIBLE = 0x400 };
+
+struct veh {
+    int16_t x, y;
+    uint32_t state;
+    uint16_t flags;  // VEH_FLAG_*
+    int16_t proto;
+    int16_t unk_c;
+    uint8_t faction;
+    GAME_PAD(0x0f, 0x27);
+    uint8_t visibility;  // bit per other faction that can see it
+    GAME_PAD(0x28, 0x2e);
+    int16_t home_base;
+    int16_t next_in_stack, prev_in_stack;  // -1 at the ends
+};
+_Static_assert(sizeof(struct veh) == 0x34, "veh size");
+GAME_AT(struct veh, visibility, 0x27);
+GAME_AT(struct veh, home_base, 0x2e);
 
 enum { RADIUS_SQUARES = 289 };
 
@@ -323,6 +370,12 @@ extern int32_t *game_landmark_count;
 extern struct landmark *game_landmarks;       // [LANDMARK_COUNT]
 extern struct base *game_bases;               // [BASE_COUNT]
 extern int32_t *game_base_count;
+extern struct veh *game_vehs;
+extern int32_t *game_veh_count;
+extern uint32_t *game_state;                  // GAME_STATE_*
+extern int32_t *game_net_multiplayer;         // non-zero in a network game
+extern uint32_t *game_draw_state;             // what the map view must redraw
+extern int32_t *game_base_find_dist;          // set by the game's base_find()
 // Square offsets: the 8 neighbours clockwise from north-east, then the
 // square itself; and every square within each radius, nearest first, with
 // game_radius_count[r] the number within radius r.
@@ -335,11 +388,19 @@ extern char *(__attribute__((thiscall)) * game_strings_get)(void *table, char *s
 extern int (*game_climactic_battle)(void);
 extern int (*game_weapon_budget)(int faction, int condition, int check_mode);
 extern int (*game_wants_to_attack)(int faction, int other, int odds);
+extern int (*game_base_at)(int x, int y);    // the base on the square, or -1
+extern int (*game_veh_at)(int x, int y);     // the top unit on the square, or -1
+extern int (*game_base_find)(int x, int y);  // the nearest base, or -1
+// The nearest base in `region` (any if negative) that `faction` may see,
+// held by `owner` (see base_find in OpenSMACX), or -1.
+extern int (*game_base_find3)(int x, int y, int faction, int region, int owner, int seen_by);
 
 // Point the variables above at a loaded terranx.exe.
 void game_bind(struct pe_image *exe);
 
 // ---- Small helpers the original code inlines --------------------------------
+
+static inline int game_veh_triad(int veh) { return game_chassis[game_protos[game_vehs[veh].proto].chassis].triad; }
 
 static inline int game_is_human(int faction) { return (*game_human_factions & (1u << (faction & 31))) != 0; }
 

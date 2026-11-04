@@ -96,10 +96,96 @@ void hooks_mismatch(struct hook_stats *s, const char *fmt, ...) {
     va_end(ap);
 }
 
+int hooks_sweeping;
+
+// Two save buffers per nesting level: the memory before the original ran,
+// and after.
+enum { WRITES_DEPTH = 8 };
+static struct {
+    uint8_t *buf[2];
+    size_t cap;
+} saves[WRITES_DEPTH];
+static int writes_depth;
+
+void hooks_writes_add(struct hook_writes *w, void *p, size_t size) {
+    if (w->n >= (int)(sizeof(w->span) / sizeof(w->span[0]))) abort();
+    w->span[w->n].p = p;
+    w->span[w->n].size = size;
+    w->n++;
+}
+
+static size_t writes_total(const struct hook_writes *w) {
+    size_t total = 0;
+    for (int i = 0; i < w->n; i++) total += w->span[i].size;
+    return total;
+}
+
+static void writes_copy(const struct hook_writes *w, uint8_t *buf, int save) {
+    for (int i = 0; i < w->n; i++) {
+        if (save) memcpy(buf, w->span[i].p, w->span[i].size);
+        else memcpy(w->span[i].p, buf, w->span[i].size);
+        buf += w->span[i].size;
+    }
+}
+
+void hooks_writes_begin(struct hook_writes *w) {
+    if (writes_depth >= WRITES_DEPTH) abort();
+    w->depth = writes_depth++;
+    size_t total = writes_total(w);
+    if (total > saves[w->depth].cap) {
+        for (int i = 0; i < 2; i++) {
+            free(saves[w->depth].buf[i]);
+            saves[w->depth].buf[i] = malloc(total);
+            if (!saves[w->depth].buf[i]) abort();
+        }
+        saves[w->depth].cap = total;
+    }
+    writes_copy(w, saves[w->depth].buf[0], 1);
+}
+
+void hooks_writes_middle(struct hook_writes *w) {
+    writes_copy(w, saves[w->depth].buf[1], 1);
+    writes_copy(w, saves[w->depth].buf[0], 0);
+}
+
+const char *hooks_writes_end(struct hook_writes *w, int got, int want) {
+    static char diff[96];
+    const char *result = NULL;
+    const uint8_t *orig = saves[w->depth].buf[1];
+    for (int i = 0; i < w->n && !result; i++) {
+        const uint8_t *mem = w->span[i].p;
+        size_t size = w->span[i].size;
+        if (memcmp(mem, orig, size))
+            for (size_t j = 0; j < size; j++)
+                if (mem[j] != orig[j]) {
+                    snprintf(diff, sizeof(diff), "wrote 0x%02x at %p, original 0x%02x", mem[j], (void *)(mem + j),
+                             orig[j]);
+                    result = diff;
+                    break;
+                }
+        orig += size;
+    }
+    if (!result && got != want) {
+        snprintf(diff, sizeof(diff), "= %d, original %d", got, want);
+        result = diff;
+    }
+    writes_copy(w, saves[w->depth].buf[hooks_sweeping ? 0 : 1], 0);
+    writes_depth--;
+    return result;
+}
+
+// The summary can be asked for by two threads at once, the signal handler
+// and exit; one prints it, and the other waits for it, as either may end
+// the process when it returns.
+static int summary_state;  // 0 not started, 1 printing, 2 printed
+
 void hooks_summary(void) {
-    static int done;
-    if (hooks_mode != HOOKS_SHADOW || done) return;
-    done = 1;
+    if (hooks_mode != HOOKS_SHADOW) return;
+    int expected = 0;
+    if (!__atomic_compare_exchange_n(&summary_state, &expected, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        for (int i = 0; i < 500 && __atomic_load_n(&summary_state, __ATOMIC_ACQUIRE) != 2; i++) usleep(10000);
+        return;
+    }
     fprintf(stderr, "chiron: shadow summary (function, calls from the game, mismatches, sweeps)\n");
     for (size_t m = 0; m < N_MODULES; m++) {
         const struct hook_module *mod = modules[m];
@@ -111,4 +197,5 @@ void hooks_summary(void) {
             fprintf(stderr, "  (%s sweeps took %.1f ms on average, %.1f at most)\n", mod->name,
                     mod->sweep_ms_total / mod->sweeps, mod->sweep_ms_max);
     }
+    __atomic_store_n(&summary_state, 2, __ATOMIC_RELEASE);
 }

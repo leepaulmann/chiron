@@ -10,6 +10,7 @@
 //           answer; mismatches are logged and counted
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "../loader/pe.h"
@@ -61,6 +62,31 @@ void hooks_shadow_tick(struct hook_module *m);
 
 // Shadow mode: record a mismatch; the first few are printed.
 void hooks_mismatch(struct hook_stats *s, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+
+// Shadow mode for functions that write: the memory a call may change. A
+// check saves it, runs the original, saves what that wrote, puts the memory
+// back, runs ours, and compares. It then leaves the original's writes, or,
+// while hooks_sweeping, the memory as it was before.
+struct hook_writes {
+    struct {
+        void *p;
+        size_t size;
+    } span[4];
+    int n;
+    int depth;  // which save buffers, as checks can nest
+};
+
+extern int hooks_sweeping;
+
+void hooks_writes_add(struct hook_writes *w, void *p, size_t size);
+// Before the original runs.
+void hooks_writes_begin(struct hook_writes *w);
+// After the original: save its writes and put the memory back.
+void hooks_writes_middle(struct hook_writes *w);
+// After ours: compare with the original's writes and return value, then
+// leave the memory as described above. Returns NULL if they agree, or else
+// what differs.
+const char *hooks_writes_end(struct hook_writes *w, int got, int want);
 
 // Shadow mode: print calls and mismatches per function.
 void hooks_summary(void);

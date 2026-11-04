@@ -60,6 +60,51 @@ static inline void shadow_tick(struct hook_module *m) {
     SHADOW_FN(m, ret, name, (t1 a, t2 b, t3 c, t4 d, t5 e), (a, b, c, d, e), "%d, %d, %d, %d, %d", \
               (int)a, (int)b, (int)c, (int)d, (int)e)
 
+// Functions that write. `writes` is code that names the memory a call may
+// change, with WRITES(pointer, size), using the arguments a, b, c...; the
+// check compares that memory as well as the return value. For a function
+// that returns nothing, give void as `ret`.
+#define WRITES(p, size) hooks_writes_add(&w_, (void *)(p), (size))
+
+#define SHADOW_WRITER(module, ret, name, params, args, writes, fmt, ...)            \
+    SHADOW_DECLARE(ret, name, params)                                               \
+    static ret check_##name params {                                                \
+        struct hook_writes w_ = {0};                                                \
+        writes;                                                                     \
+        hooks_writes_begin(&w_);                                                    \
+        hooks_nested++;                                                             \
+        SHADOW_RESULT_##ret(want) orig_##name args;                                 \
+        hooks_nested--;                                                             \
+        hooks_writes_middle(&w_);                                                   \
+        SHADOW_RESULT_##ret(got) name args;                                         \
+        const char *diff_ = hooks_writes_end(&w_, SHADOW_INT_##ret(got), SHADOW_INT_##ret(want)); \
+        if (diff_) hooks_mismatch(&stats_##name, "(" fmt ") %s", __VA_ARGS__, diff_);  \
+        SHADOW_RETURN_##ret(want);                                                  \
+    }                                                                               \
+    SHADOW_WRITER_ENTRY(module, ret, name, params, args)
+
+// How SHADOW_WRITER keeps a result, by return type.
+#define SHADOW_RESULT_int(v) int v =
+#define SHADOW_RESULT_void(v)
+#define SHADOW_INT_int(v) v
+#define SHADOW_INT_void(v) 0
+#define SHADOW_RETURN_int(v) return v
+#define SHADOW_RETURN_void(v) return
+#define SHADOW_TAIL_int(call) return call
+#define SHADOW_TAIL_void(call) \
+    do {                       \
+        call;                  \
+        return;                \
+    } while (0)
+
+#define SHADOW_WRITER_ENTRY(module, ret, name, params, args) \
+    static ret shadow_##name params {                        \
+        if (hooks_nested) SHADOW_TAIL_##ret(orig_##name args); \
+        stats_##name.calls++;                                \
+        shadow_tick(module);                                 \
+        SHADOW_TAIL_##ret(check_##name args);                \
+    }
+
 // A hook table entry: the original's address, our function, and the first
 // bytes of the original (whole instructions, no relative jumps).
 #define HOOK(addr, name, ...)                                                                   \

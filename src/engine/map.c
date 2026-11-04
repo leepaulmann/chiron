@@ -9,6 +9,8 @@
 // squares on the map.
 #include "map.h"
 
+#include <string.h>
+
 #include "game.h"
 #include "shadow.h"
 
@@ -349,6 +351,320 @@ int naval_base(int base) {
     return 0;
 }
 
+// ---- Territory, units and sensors ----------------------------------------------
+
+// The faction whose territory the square is, or -1: for none, for the
+// natives, and for a faction `faction` hasn't a commlink and
+// TREATY_UNK_8000000 with (unless ignore_comm, or the omniscient view). For
+// another faction's territory, *base gets the nearest base in the square's
+// region.
+int whose_territory(int faction, int x, int y, int *base, int ignore_comm) {
+    const struct map_tile *t = tile(x, y);
+    int owner = t->territory;
+    if (owner <= 0) return -1;
+    if (owner == faction) return owner;
+    const uint32_t known = TREATY_COMMLINK | TREATY_UNK_8000000;
+    if (!ignore_comm && !(*game_state & GAME_STATE_OMNISCIENT) && game_has_treaty(faction, owner, known) != known)
+        return -1;
+    if (base) *base = game_base_find3(x, y, -1, t->region, -1, -1);
+    return owner;
+}
+
+// The nearest base of a faction whose territory the square is, when one of
+// the two is human and they aren't at war, or -1.
+int base_territory(int faction, int x, int y) {
+    int base;
+    int owner = whose_territory(faction, x, y, &base, 0);
+    if (owner < 0 || owner == faction) return -1;
+    if (!game_is_human(faction) && !game_is_human(owner)) return -1;
+    if (game_has_treaty(faction, owner, TREATY_VENDETTA)) return -1;
+    return base;
+}
+
+// Whether the unit can run a supply convoy between its home base and `base`.
+int convoy(int veh, int base) {
+    int home = game_vehs[veh].home_base;
+    if (home < 0 || home == base) return 0;
+    int triad = game_veh_triad(veh);
+    if (triad == TRIAD_AIR) return 1;
+    int region = region_at(game_bases[base].x, game_bases[base].y);
+    if (region == region_at(game_bases[home].x, game_bases[home].y) &&
+        (region >= LAND_REGION_COUNT) == (triad == TRIAD_SEA))
+        return 1;
+    if (triad == TRIAD_LAND) return 0;
+    return port_to_port(base, home);
+}
+
+// Whether the unit could get to the square at all: by land within its
+// region, by sea along shores and through ports.
+int get_there(int veh, int x, int y) {
+    int triad = game_veh_triad(veh);
+    if (triad == TRIAD_AIR) return 1;
+    int vx = game_vehs[veh].x, vy = game_vehs[veh].y;
+    int from = region_at(vx, vy), to = region_at(x, y);
+    if (triad == TRIAD_LAND) return from == to;
+    int base_from = game_base_at(vx, vy), base_to = game_base_at(x, y);
+    if (base_to >= 0) return base_from >= 0 ? port_to_port(base_from, base_to) : base_on_sea(base_to, from);
+    if (is_ocean(x, y)) return base_from >= 0 ? base_on_sea(base_from, to) : from == to;
+    return base_from >= 0 ? port_to_coast(base_from, to) : sea_coast(to, from);
+}
+
+// For a square in the faction's territory, the index of the first neighbour
+// that is sea or outside it, or of the first neighbour at all when the
+// second square's region differs from the first's; otherwise 0. Callers
+// treat it as true or false, and pass the same square twice.
+int coast_or_border(int x, int y, int x2, int y2, int faction) {
+    if (whose_territory(faction, x, y, NULL, 0) != faction) return 0;
+    int region2 = region_at(x2, y2);
+    for (int i = 1; i < 9; i++) {
+        int xi = xrange(x + game_radius_x[i]), yi = y + game_radius_y[i];
+        if (!on_map(xi, yi)) continue;
+        if (is_ocean(xi, yi) || whose_territory(faction, xi, yi, NULL, 0) != faction || region_at(x, y) != region2)
+            return i;
+    }
+    return 0;
+}
+
+// Whether the faction may name a landmark on the square: its own territory,
+// or no one's with no other faction's base nearest.
+int valid_landmark(int x, int y, int faction) {
+    int owner = *game_net_multiplayer ? tile(x, y)->territory : whose_territory(faction, x, y, NULL, 0);
+    if (owner == faction) return 1;
+    if (owner > 0) return 0;
+    int base = game_base_find(x, y);
+    return base < 0 || game_bases[base].faction == faction;
+}
+
+// The sensor covering the square: 1 a sensor array on it, 2 the nearest
+// base's Geosynchronous Survey Pod (on a square two or none away along each
+// axis, as the original checks), or 0.
+int is_sensor(int x, int y) {
+    if (tile(x, y)->bits & MAP_SENSOR) return 1;
+    int base = game_base_find(x, y);
+    if (base == -1) return 0;
+    const struct base *b = &game_bases[base];
+    int dx = x_dist(x, b->x), dy = iabs(y - b->y);
+    if ((dx && dx != 2) || (dy && dy != 2)) return 0;
+    return game_has_facility(b, FAC_GEOSYNC_SURVEY_POD) ? 2 : 0;
+}
+
+// Whether the faction holds and has seen the first square of the Manifold
+// Nexus.
+int has_temple(int faction) {
+    for (int y = 0; y < *game_map_height; y++)
+        for (int x = y & 1; x < *game_map_width; x += 2) {
+            const struct map_tile *t = tile(x, y);
+            if ((t->bits2 & (MAP2_UNK_80000000 | MAP2_NEXUS)) == MAP2_NEXUS && !(t->bits2 & MAP2_LANDMARK_CODE) &&
+                whose_territory(faction, x, y, NULL, 0) == faction &&
+                (t->visibility & (uint8_t)(1u << (faction & 31))))
+                return 1;
+        }
+    return 0;
+}
+
+// Zone of control for a move: a neighbour, on land if the square is land
+// and at sea if it is sea, holding a unit of a faction without a pact that
+// the faction can see (or, outside network games, that isn't cloaked).
+// Gives that faction plus one, or 0.
+int zoc_sea(int x, int y, int faction) {
+    int sea = is_ocean(x, y);
+    for (int i = 0; i < 8; i++) {
+        int xi = xrange(x + game_radius_near_x[i]), yi = y + game_radius_near_y[i];
+        if (!on_map(xi, yi)) continue;
+        int owner = veh_who(xi, yi);
+        if (owner < 0 || owner == faction || is_ocean(xi, yi) != sea || game_has_treaty(faction, owner, TREATY_PACT))
+            continue;
+        for (int v = game_veh_at(xi, yi); v >= 0; v = game_vehs[v].next_in_stack) {
+            const struct veh *u = &game_vehs[v];
+            if (u->faction == faction) continue;
+            if (u->visibility & (uint8_t)(1u << (faction & 31))) return owner + 1;
+            if (!*game_net_multiplayer && !(u->flags & VEH_FLAG_INVISIBLE)) return owner + 1;
+        }
+    }
+    return 0;
+}
+
+// zoc_sea, except that a base square has none.
+int zoc_move(int x, int y, int faction) {
+    if (base_who(x, y) >= 0) return 0;
+    return zoc_sea(x, y, faction);
+}
+
+// Of the neighbours that would give zone of control (as zoc_sea, without
+// looking at the units), the one furthest from the destination; ties go to
+// the last. Leaves *zx and *zy alone if there is none.
+void quick_zoc(int x, int y, int faction, int dest_x, int dest_y, int *zx, int *zy) {
+    int sea = is_ocean(x, y), furthest = -1;
+    for (int i = 0; i < 8; i++) {
+        int xi = xrange(x + game_radius_near_x[i]), yi = y + game_radius_near_y[i];
+        if (!on_map(xi, yi)) continue;
+        int owner = veh_who(xi, yi);
+        if (owner < 0 || owner == faction || is_ocean(xi, yi) != sea || game_has_treaty(faction, owner, TREATY_PACT))
+            continue;
+        int d = vector_dist(xi, yi, dest_x, dest_y);
+        if (d >= furthest) {
+            furthest = d;
+            *zx = xi;
+            *zy = yi;
+        }
+    }
+}
+
+// ---- Changing squares ------------------------------------------------------------
+
+void temp_set(int x, int y, int temperature) {
+    struct map_tile *t = tile(x, y);
+    t->climate = (uint8_t)((t->climate & ~7) | (temperature & 7));
+}
+
+void climate_set(int x, int y, int rainfall) {
+    struct map_tile *t = tile(x, y);
+    t->climate = (uint8_t)((t->climate & 0xe7) | (rainfall & 3) << 3);
+    t->bits2 |= MAP2_CHANGED;
+    *game_draw_state |= DRAW_TERRAIN;
+}
+
+void alt_put_detail(int x, int y, int contour) { tile(x, y)->contour = (uint8_t)contour; }
+
+void owner_set(int x, int y, int faction) {
+    struct map_tile *t = tile(x, y);
+    t->owner_site = (uint8_t)((t->owner_site & 0xf0) | (faction & 0xf));
+}
+
+void site_set(int x, int y, int site) {
+    struct map_tile *t = tile(x, y);
+    t->owner_site = (uint8_t)((t->owner_site & 0xf) | site << 4);
+}
+
+void region_set(int x, int y, int region) { tile(x, y)->region = (uint8_t)region; }
+
+void using_set(int x, int y, int faction) {
+    struct map_tile *t = tile(x, y);
+    t->rocky_lock = (uint8_t)((t->rocky_lock & 0xf8) | (faction & 7));
+}
+
+void lock_set(int x, int y, int faction) {
+    struct map_tile *t = tile(x, y);
+    t->rocky_lock = (uint8_t)((t->rocky_lock & 0xc7) | (faction & 7) << 3);
+}
+
+// Locks the square for the faction; returns 1 if another faction holds it.
+int lock_map(int x, int y, int faction) {
+    int lock = tile(x, y)->rocky_lock >> 3 & 7;
+    if (lock != faction) {
+        if (lock) return 1;
+        lock_set(x, y, faction);
+    }
+    return 0;
+}
+
+void unlock_map(int x, int y, int faction) {
+    struct map_tile *t = tile(x, y);
+    if ((t->rocky_lock >> 3 & 7) == faction) t->rocky_lock &= 0xc7;
+}
+
+void rocky_set(int x, int y, int rocky) {
+    struct map_tile *t = tile(x, y);
+    t->rocky_lock = (uint8_t)((t->rocky_lock & 0x3f) | rocky << 6);
+    t->bits2 |= MAP2_CHANGED;
+    *game_draw_state |= DRAW_TERRAIN;
+}
+
+void bit_put(int x, int y, uint32_t bits) { tile(x, y)->bits = bits; }
+
+void bit_set(int x, int y, uint32_t bits, int set) {
+    struct map_tile *t = tile(x, y);
+    if (set) t->bits |= bits;
+    else t->bits &= ~bits;
+}
+
+void bit2_set(int x, int y, uint32_t bits, int set) {
+    struct map_tile *t = tile(x, y);
+    if (set) t->bits2 |= bits;
+    else t->bits2 &= ~bits;
+}
+
+void code_set(int x, int y, int code) {
+    struct map_tile *t = tile(x, y);
+    t->bits2 = (t->bits2 & ~MAP2_LANDMARK_CODE) | (uint32_t)code << 24;
+    *game_draw_state |= DRAW_LANDMARKS;
+}
+
+// Records what the faction now sees of the square. As in the original,
+// faction n writes the n-th word after bits2, whatever n is.
+void synch_bit(int x, int y, int faction) {
+    if (!faction) return;
+    struct map_tile *t = tile(x, y);
+    uint32_t *seen = (uint32_t *)((uint8_t *)t + offsetof(struct map_tile, bits2)) + faction;
+    *seen = t->bits;
+}
+
+void abstract_set(int x, int y, int region) {
+    (*game_abstract_map)[(x >> 1) + y * (*game_abstract_width >> 1)] = (uint8_t)region;
+}
+
+// Clears the site of the squares in a base's radius. The third argument is
+// unused.
+void site_radius(int x, int y, int unused) {
+    (void)unused;
+    for (int i = 0; i < 21; i++) {
+        int xi = xrange(x + game_radius_x[i]), yi = y + game_radius_y[i];
+        if (on_map(xi, yi)) tile(xi, yi)->owner_site &= 0xf;
+    }
+}
+
+// Adds a landmark; returns its index, or -1 if there are already 64. The
+// name is copied unbounded, as in the original.
+int new_landmark(int x, int y, const char *name) {
+    int n = *game_landmark_count;
+    if (n >= LANDMARK_COUNT) return -1;
+    *game_landmark_count = n + 1;
+    game_landmarks[n].x = x;
+    game_landmarks[n].y = y;
+    strcpy(game_landmarks[n].name, name);
+    return n;
+}
+
+// Removes the first landmark on or next to the square.
+void kill_landmark(int x, int y) {
+    int l = find_landmark(x, y, 1);
+    if (l < 0) return;
+    for (int i = l; i < *game_landmark_count - 1; i++) game_landmarks[i] = game_landmarks[i + 1];
+    (*game_landmark_count)--;
+}
+
+// ---- The whole map ---------------------------------------------------------------
+
+// Marks the squares with units or bases, and their owners, from the unit and
+// base lists. Both walk the squares in storage order.
+void rebuild_vehicle_bits(void) {
+    struct map_tile *t = *game_map;
+    for (int y = 0; y < *game_map_height; y++)
+        for (int x = y & 1; x < *game_map_width; x += 2, t++) {
+            t->bits &= ~MAP_UNIT;
+            for (int v = 0; v < *game_veh_count; v++)
+                if (game_vehs[v].x == x && game_vehs[v].y == y) {
+                    t->bits |= MAP_UNIT;
+                    if (!(t->bits & MAP_BASE)) t->owner_site = (uint8_t)((t->owner_site & 0xf0) | (game_vehs[v].faction & 0xf));
+                    break;
+                }
+        }
+}
+
+void rebuild_base_bits(void) {
+    struct map_tile *t = *game_map;
+    for (int y = 0; y < *game_map_height; y++)
+        for (int x = y & 1; x < *game_map_width; x += 2, t++) {
+            t->bits &= ~MAP_BASE;
+            for (int b = 0; b < *game_base_count; b++)
+                if (game_bases[b].x == x && game_bases[b].y == y) {
+                    t->bits |= MAP_BASE;
+                    t->owner_site = (uint8_t)((t->owner_site & 0xf0) | (game_bases[b].faction & 0xf));
+                    break;
+                }
+        }
+}
+
 // ---- Hooks and shadow checks ------------------------------------------------
 
 // Functions that read squares or bases start the sweep; the others can be
@@ -395,6 +711,54 @@ SHADOW2(MAP, int, port_to_coast, int, int)
 SHADOW2(MAP, int, port_to_port, int, int)
 SHADOW1(MAP, int, transport_base, int)
 SHADOW1(MAP, int, naval_base, int)
+SHADOW_WRITER(MAP, int, whose_territory, (int a, int b, int c, int *d, int e), (a, b, c, d, e), if (d) WRITES(d, sizeof(*d)),
+              "%d, %d, %d, %p, %d", a, b, c, (void *)d, e)
+SHADOW3(MAP, int, base_territory, int, int, int)
+SHADOW2(MAP, int, convoy, int, int)
+SHADOW3(MAP, int, get_there, int, int, int)
+SHADOW5(MAP, int, coast_or_border, int, int, int, int, int)
+SHADOW3(MAP, int, valid_landmark, int, int, int)
+SHADOW2(MAP, int, is_sensor, int, int)
+SHADOW1(MAP, int, has_temple, int)
+SHADOW3(MAP, int, zoc_sea, int, int, int)
+SHADOW3(MAP, int, zoc_move, int, int, int)
+SHADOW_WRITER(MAP, void, quick_zoc, (int a, int b, int c, int d, int e, int *f, int *g), (a, b, c, d, e, f, g),
+              WRITES(f, sizeof(*f)); WRITES(g, sizeof(*g)), "%d, %d, %d, %d, %d", a, b, c, d, e)
+
+// Setters write their square, and some the redraw flags.
+#define WRITES_SQUARE(x, y) WRITES(tile(x, y), sizeof(struct map_tile))
+#define WRITES_SQUARE_DRAW(x, y) WRITES_SQUARE(x, y); WRITES(game_draw_state, sizeof(*game_draw_state))
+#define SET3(ret, name, t3, writes) SHADOW_WRITER(MAP, ret, name, (int a, int b, t3 c), (a, b, c), writes, "%d, %d, %d", a, b, (int)c)
+#define SET4(name, t3) \
+    SHADOW_WRITER(MAP, void, name, (int a, int b, t3 c, int d), (a, b, c, d), WRITES_SQUARE(a, b), "%d, %d, 0x%x, %d", a, b, (unsigned)c, d)
+SET3(void, temp_set, int, WRITES_SQUARE(a, b))
+SET3(void, climate_set, int, WRITES_SQUARE_DRAW(a, b))
+SET3(void, alt_put_detail, int, WRITES_SQUARE(a, b))
+SET3(void, owner_set, int, WRITES_SQUARE(a, b))
+SET3(void, site_set, int, WRITES_SQUARE(a, b))
+SET3(void, region_set, int, WRITES_SQUARE(a, b))
+SET3(void, using_set, int, WRITES_SQUARE(a, b))
+SET3(void, lock_set, int, WRITES_SQUARE(a, b))
+SET3(int, lock_map, int, WRITES_SQUARE(a, b))
+SET3(void, unlock_map, int, WRITES_SQUARE(a, b))
+SET3(void, rocky_set, int, WRITES_SQUARE_DRAW(a, b))
+SET3(void, bit_put, uint32_t, WRITES_SQUARE(a, b))
+SET4(bit_set, uint32_t)
+SET4(bit2_set, uint32_t)
+SET3(void, code_set, int, WRITES_SQUARE_DRAW(a, b))
+SET3(void, synch_bit, int, if (c) WRITES((uint32_t *)((uint8_t *)tile(a, b) + offsetof(struct map_tile, bits2)) + c, 4))
+SET3(void, abstract_set, int, WRITES(&(*game_abstract_map)[(a >> 1) + b * (*game_abstract_width >> 1)], 1))
+
+// Functions that may write anywhere on the map, or the landmarks.
+static size_t map_bytes(void) { return (size_t)*game_map_half_width * *game_map_height * sizeof(struct map_tile); }
+#define WRITES_MAP WRITES(*game_map, map_bytes())
+#define WRITES_LANDMARKS \
+    WRITES(game_landmark_count, sizeof(*game_landmark_count)); WRITES(game_landmarks, LANDMARK_COUNT * sizeof(struct landmark))
+SET3(void, site_radius, int, WRITES_MAP)
+SHADOW_WRITER(MAP, int, new_landmark, (int a, int b, const char *c), (a, b, c), WRITES_LANDMARKS, "%d, %d, \"%s\"", a, b, c)
+SHADOW_WRITER(MAP, void, kill_landmark, (int a, int b), (a, b), WRITES_LANDMARKS, "%d, %d", a, b)
+SHADOW_WRITER(MAP, void, rebuild_vehicle_bits, (void), (), WRITES_MAP, "%s", "")
+SHADOW_WRITER(MAP, void, rebuild_base_bits, (void), (), WRITES_MAP, "%s", "")
 
 // Input sweeps, run once a turn in shadow mode. Squares are the map's own
 // (x + y even), as the originals don't check; functions that look around a square reach
@@ -483,12 +847,103 @@ static void sweep_bases(void) {
     }
 }
 
+// Units, territory and sensors, on every square for every faction; the
+// costlier checks on a share of the squares each turn.
+static void sweep_territory(void) {
+    int w = *game_map_width, h = *game_map_height;
+    for (int y = 0; y < h; y++)
+        for (int x = y & 1; x < w; x += 2) {
+            int n = x + y * w, base, zx = -1, zy = -1;
+            check_is_sensor(x, y);
+            for (int f = 0; f < FACTION_COUNT; f++) {
+                check_zoc_sea(x, y, f);
+                check_zoc_move(x, y, f);
+                check_quick_zoc(x, y, f, w / 2, h / 2, &zx, &zy);
+                check_whose_territory(f, x, y, NULL, 0);
+                check_whose_territory(f, x, y, NULL, 1);
+                check_coast_or_border(x, y, x, y, f);
+                if ((n + f + slice) % 8 == 0) {
+                    check_whose_territory(f, x, y, &base, 0);
+                    check_base_territory(f, x, y);
+                    check_valid_landmark(x, y, f);
+                }
+            }
+        }
+    for (int f = 0; f < FACTION_COUNT; f++) check_has_temple(f);
+}
+
+// Every unit: where it could get to, and convoys to a share of the bases.
+static void sweep_units(void) {
+    int w = *game_map_width, h = *game_map_height;
+    for (int v = 0; v < *game_veh_count; v++) {
+        for (int b = 0; b < *game_base_count; b++)
+            if ((v + b + slice) % 16 == 0) {
+                check_convoy(v, b);
+                check_get_there(v, game_bases[b].x, game_bases[b].y);
+            }
+        for (int y = (v + slice) % 7; y < h; y += 7) {
+            int x = ((v * 13 + y * 5) % w & ~1) | (y & 1);
+            if (x < w) check_get_there(v, x, y);
+        }
+    }
+}
+
+// The setters, each on every square with values that change from turn to
+// turn; the map is put back after each.
+static void sweep_setters(void) {
+    int w = *game_map_width, h = *game_map_height;
+    for (int y = 0; y < h; y++)
+        for (int x = y & 1; x < w; x += 2) {
+            int v = x * 7 + y * 3 + slice, f = v & 7;
+            check_temp_set(x, y, v);
+            check_climate_set(x, y, v >> 1);
+            check_alt_put_detail(x, y, v * 11);
+            check_owner_set(x, y, v);
+            check_site_set(x, y, v >> 2);
+            check_region_set(x, y, v * 5);
+            check_using_set(x, y, f);
+            check_lock_set(x, y, f);
+            check_lock_map(x, y, f);
+            check_unlock_map(x, y, f);
+            check_unlock_map(x, y, tile(x, y)->rocky_lock >> 3 & 7);
+            check_rocky_set(x, y, v >> 3);
+            check_bit_put(x, y, (uint32_t)v * 0x9e3779b9u);
+            check_bit_set(x, y, 1u << (v & 31), v & 1);
+            check_bit2_set(x, y, 1u << (v & 31), ~v & 1);
+            check_code_set(x, y, v);
+            check_synch_bit(x, y, f);
+        }
+    if (*game_abstract_map)
+        for (int y = 0; y < *game_abstract_height; y++)
+            for (int x = 0; x < *game_abstract_width; x++) check_abstract_set(x, y, x + y + slice);
+    // These save the whole map: a few squares a turn.
+    for (int i = 0; i < 4; i++) {
+        int y = (slice * 5 + i * 17) % h, x = ((slice * 11 + i * 29) % w & ~1) | (y & 1);
+        if (x < w) check_site_radius(x, y, 0);
+    }
+    check_rebuild_vehicle_bits();
+    check_rebuild_base_bits();
+    // On the landmark itself, or diagonally off it, which it still reaches.
+    for (int l = 0; l < *game_landmark_count; l++)
+        check_kill_landmark(xrange(game_landmarks[l].x + ((l + slice) & 1)), game_landmarks[l].y + ((l + slice) & 1));
+    check_new_landmark(slice % w, 0, "Chiron");
+}
+
 static void map_sweep(void) {
     slice++;
     if (!*game_map || *game_map_width <= 0 || *game_map_height <= 0) return;
+    // The game's base_find() leaves its distance behind, and callers read
+    // it; the sweep's calls mustn't change it.
+    int find_dist = *game_base_find_dist;
+    hooks_sweeping = 1;
     sweep_pure();
     sweep_squares();
     sweep_bases();
+    sweep_territory();
+    sweep_units();
+    sweep_setters();
+    hooks_sweeping = 0;
+    *game_base_find_dist = find_dist;
 }
 
 // The first bytes of each original: whole instructions, no relative jumps.
@@ -535,5 +990,38 @@ static const struct hook map_hooks[] = {
     HOOK(0x50e160, port_to_port, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x18),
     HOOK(0x50e310, transport_base, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x56),  // push ecx; push esi
     HOOK(0x50e3c0, naval_base, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x28),
+    HOOK(0x4e3ef0, whose_territory, PUSH_EBP_MOV_EBP_ESP, LOAD_HALF_WIDTH),
+    HOOK(0x4e3fa0, base_territory, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x4d, 0x10),  // mov ecx, [ebp+16]
+    HOOK(0x50e5c0, convoy, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x18),
+    HOOK(0x56b320, get_there, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x45, 0x08),     // push ecx; mov eax, [ebp+8]
+    HOOK(0x56b480, coast_or_border, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),
+    HOOK(0x592650, valid_landmark, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0x60, 0xf6, 0x93, 0x00),  // mov eax, [0x93f660]
+    HOOK(0x5bf010, is_sensor, PUSH_EBP_MOV_EBP_ESP, LOAD_HALF_WIDTH),
+    HOOK(0x5bf130, has_temple, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0x74, 0x98, 0x94, 0x00),  // mov eax, [0x949874]
+    HOOK(0x5c8ba0, zoc_sea, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),
+    HOOK(0x5c8d40, zoc_move, PUSH_EBP_MOV_EBP_ESP, LOAD_HALF_WIDTH),
+    HOOK(0x593830, quick_zoc, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10),
+    HOOK(0x591ad0, temp_set, PUSH_EBP_MOV_EBP_ESP, LOAD_HALF_WIDTH),
+    HOOK(0x591a80, climate_set, PUSH_EBP_MOV_EBP_ESP, LOAD_HALF_WIDTH),
+    HOOK(0x591260, alt_put_detail, PUSH_EBP_MOV_EBP_ESP, LOAD_HALF_WIDTH),
+    HOOK(0x591b10, owner_set, PUSH_EBP_MOV_EBP_ESP, LOAD_HALF_WIDTH),
+    HOOK(0x591b50, site_set, PUSH_EBP_MOV_EBP_ESP, LOAD_HALF_WIDTH),
+    HOOK(0x591b90, region_set, PUSH_EBP_MOV_EBP_ESP, LOAD_HALF_WIDTH),
+    HOOK(0x591c10, using_set, PUSH_EBP_MOV_EBP_ESP, LOAD_HALF_WIDTH),
+    HOOK(0x591c50, lock_set, PUSH_EBP_MOV_EBP_ESP, LOAD_HALF_WIDTH),
+    HOOK(0x591c90, lock_map, PUSH_EBP_MOV_EBP_ESP, LOAD_HALF_WIDTH),
+    HOOK(0x591cf0, unlock_map, PUSH_EBP_MOV_EBP_ESP, LOAD_HALF_WIDTH),
+    HOOK(0x591bc0, rocky_set, PUSH_EBP_MOV_EBP_ESP, LOAD_HALF_WIDTH),
+    HOOK(0x591d30, bit_put, PUSH_EBP_MOV_EBP_ESP, LOAD_HALF_WIDTH),
+    HOOK(0x591d60, bit_set, PUSH_EBP_MOV_EBP_ESP, LOAD_HALF_WIDTH),
+    HOOK(0x591db0, bit2_set, PUSH_EBP_MOV_EBP_ESP, LOAD_HALF_WIDTH),
+    HOOK(0x591e00, code_set, PUSH_EBP_MOV_EBP_ESP, LOAD_HALF_WIDTH),
+    HOOK(0x591e50, synch_bit, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x4d, 0x10),
+    HOOK(0x591230, abstract_set, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0x94, 0xa2, 0x94, 0x00),  // mov eax, [0x94a294]
+    HOOK(0x592400, site_radius, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0x70, 0x98, 0x94, 0x00),   // mov eax, [0x949870]
+    HOOK(0x592600, new_landmark, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0x90, 0x98, 0x94, 0x00),  // mov eax, [0x949890]
+    HOOK(0x5926f0, kill_landmark, PUSH_EBP_MOV_EBP_ESP, 0x51, 0xa1, 0xc8, 0xf8, 0x66, 0x00),  // push ecx; mov eax, [0x66f8c8]
+    HOOK(0x532a90, rebuild_vehicle_bits, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),
+    HOOK(0x532b70, rebuild_base_bits, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x0d, 0x74, 0x98, 0x94, 0x00),  // push ecx; mov ecx, [0x949874]
 };
 struct hook_module map_module = {"map", map_hooks, HOOK_COUNT(map_hooks), map_sweep, -1};

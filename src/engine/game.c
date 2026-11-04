@@ -38,12 +38,22 @@ int32_t *game_landmark_count;
 struct landmark *game_landmarks;
 struct base *game_bases;
 int32_t *game_base_count;
+struct veh *game_vehs;
+int32_t *game_veh_count;
+uint32_t *game_state;
+int32_t *game_net_multiplayer;
+uint32_t *game_draw_state;
+int32_t *game_base_find_dist;
 int32_t *game_radius_near_x, *game_radius_near_y, *game_radius_x, *game_radius_y, *game_radius_count;
 
 char *(__attribute__((thiscall)) * game_strings_get)(void *table, char *s);
 int (*game_climactic_battle)(void);
 int (*game_weapon_budget)(int faction, int condition, int check_mode);
 int (*game_wants_to_attack)(int faction, int other, int odds);
+int (*game_base_at)(int x, int y);
+int (*game_veh_at)(int x, int y);
+int (*game_base_find)(int x, int y);
+int (*game_base_find3)(int x, int y, int faction, int region, int owner, int seen_by);
 
 void game_bind(struct pe_image *exe) {
     game_tech = (struct rules_tech *)code_at(exe, 0x94f358);
@@ -90,6 +100,12 @@ void game_bind(struct pe_image *exe) {
     game_landmarks = (struct landmark *)code_at(exe, 0x949894);
     game_bases = (struct base *)code_at(exe, 0x97d040);
     game_base_count = (int32_t *)code_at(exe, 0x9a64cc);
+    game_vehs = (struct veh *)code_at(exe, 0x952828);
+    game_veh_count = (int32_t *)code_at(exe, 0x9a64c8);
+    game_state = (uint32_t *)code_at(exe, 0x9a64c0);
+    game_net_multiplayer = (int32_t *)code_at(exe, 0x93f660);
+    game_draw_state = (uint32_t *)code_at(exe, 0x90d91c);
+    game_base_find_dist = (int32_t *)code_at(exe, 0x90ea04);
     game_radius_near_x = (int32_t *)code_at(exe, 0x66ef50);
     game_radius_near_y = (int32_t *)code_at(exe, 0x66ef74);
     game_radius_x = (int32_t *)code_at(exe, 0x66efbc);
@@ -100,4 +116,8 @@ void game_bind(struct pe_image *exe) {
     game_climactic_battle = (void *)code_at(exe, 0x539e40);
     game_weapon_budget = (void *)code_at(exe, 0x57f0b0);
     game_wants_to_attack = (void *)code_at(exe, 0x55bc80);
+    game_base_at = (void *)code_at(exe, 0x4e3a50);
+    game_veh_at = (void *)code_at(exe, 0x5bfe90);
+    game_base_find = (void *)code_at(exe, 0x4e3b80);
+    game_base_find3 = (void *)code_at(exe, 0x4e3d50);
 }
