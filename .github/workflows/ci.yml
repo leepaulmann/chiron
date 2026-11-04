@@ -1,0 +1,26 @@
+# Builds Chiron and runs its tests, which need no game files: the engine
+# tests use made-up data and the loader tests small Win32 programs built
+# with mingw. The toolchain comes from the Nix flake, as for local builds.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Fetch the development shell
+        run: nix develop -c true
+      - name: Configure
+        run: nix develop -c cmake -S . -B build -G Ninja
+      - name: Build
+        run: nix develop -c ninja -C build
+      - name: Test
+        run: nix develop -c ctest --test-dir build --output-on-failure
+        env:
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy

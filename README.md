@@ -1,5 +1,7 @@
 # Chiron
 
+[![CI](https://github.com/leepaulmann/chiron/actions/workflows/ci.yml/badge.svg)](https://github.com/leepaulmann/chiron/actions/workflows/ci.yml)
+
 Chiron runs *Sid Meier's Alpha Centauri* and *Alien Crossfire* natively on
 Linux, without Wine, using **your own purchased copy** of the game.
 
