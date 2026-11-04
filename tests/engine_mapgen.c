@@ -18,6 +18,10 @@ static int32_t landmark_count = 3, base_count, veh_count, coverage = 2, orbit = 
 static int32_t submerged[8], submerged_veh[8];
 static int32_t ocean_coverage, brush_total, brush_wanted = 1000, brush_stroke, cloud_cover;
 static uint32_t state;
+static struct landmark landmarks[LANDMARK_COUNT];
+static struct rules_natural natural[LM_COUNT];
+static char *names[LM_COUNT] = {[LM_NEXUS] = "Nexus", [LM_FRESH] = "Fresh", [LM_CRATER] = "Crater"};
+static int32_t expansion = 1;
 static struct continent continents[REGION_COUNT];
 static struct faction_data factions[FACTION_COUNT];
 static struct rules_worldbuilder worldbuilder;
@@ -36,6 +40,7 @@ static int failures;
     } while (0)
 
 static struct map_tile *at(int x, int y) { return &tiles[x / 2 + y * (W / 2)]; }
+static int bit2_at_test(const struct map_tile *t) { return (t->bits2 & MAP2_LANDMARK(LM_FRESH)) != 0; }
 
 // Stand-ins. alt_set only sets the altitude; the generators count up.
 static int alt_set_calls;
@@ -58,6 +63,10 @@ static void __attribute__((thiscall)) fake_path(void *path) {
     path_calls++;
 }
 static int fake_base_find(int x, int y) { (void)x, (void)y; return -1; }
+static char *__attribute__((thiscall)) fake_strings_get(void *table, char *s) {
+    (void)table;
+    return s;
+}
 
 int main(void) {
     game_map = &tiles_ptr, game_abstract_map = &abstract_ptr;
@@ -75,6 +84,8 @@ int main(void) {
     game_path_continents = fake_path, game_base_find = fake_base_find;
     game_ocean_coverage = &ocean_coverage, game_brush_total = &brush_total, game_brush_land_wanted = &brush_wanted;
     game_brush_stroke = &brush_stroke, game_cloud_cover = &cloud_cover, game_state = &state;
+    game_landmarks = landmarks, game_natural = natural, game_strings_get = fake_strings_get, game_expansion = &expansion;
+    for (int i = 0; i < LM_COUNT; i++) natural[i].name = names[i];
     radius_x[0] = radius_y[0] = 0;
     for (int i = 1; i < RADIUS_SQUARES; i++) {
         radius_x[i] = i < 9 ? near_x[i - 1] : 100;
@@ -222,6 +233,37 @@ int main(void) {
     worldbuilder.rivers_base = worldbuilder.rivers_rain_mod = 0;
     world_riverbeds();
     EXPECT(bit_at(2, 2), 0);
+
+    // Landmarks on a given square. The Manifold Nexus marks the square and
+    // its neighbours, each with its place in the radius table.
+    map_wipe();
+    world_temple(4, 2);
+    EXPECT(landmark_count, 1);
+    EXPECT(strcmp(landmarks[0].name, "Nexus"), 0);
+    EXPECT(landmarks[0].x * 10 + landmarks[0].y, 42);
+    EXPECT(alt_at(4, 2), ALT_SHORE_LINE);
+    EXPECT(at(5, 3)->bits2, MAP2_LANDMARK(LM_NEXUS) | 3u << 24);  // south-east: radius-table square 3
+    EXPECT(bit_at(4, 2) & MAP_POD_TAKEN, MAP_POD_TAKEN);
+    // The crater: rolling ground of one temperature over a ring of hills.
+    map_wipe();
+    at(4, 2)->climate |= 2;  // its temperature
+    world_crater(4, 2);
+    EXPECT(alt_at(4, 2), ALT_SHORE_LINE);
+    EXPECT(at(3, 1)->climate & 7, 2);
+    EXPECT(at(3, 1)->rocky_lock >> 6, 1);
+    EXPECT(at(3, 1)->bits2 >> 24, 7);  // north-west: radius-table square 7
+    EXPECT(strcmp(landmarks[0].name, "Crater"), 0);
+    // A freshwater sea: the region given, all of it, named in its first row
+    // from the south.
+    map_wipe();
+    landmark_count = 0;
+    for (int i = 0; i < W / 2 * H; i++) tiles[i].region = 70;
+    at(0, 4)->region = at(2, 4)->region = at(1, 5)->region = 90;
+    world_fresh(0, 4);
+    EXPECT(bit2_at_test(at(2, 4)), 1);
+    EXPECT(bit2_at_test(at(3, 3)), 0);
+    EXPECT(landmark_count, 1);
+    EXPECT(landmarks[0].y, 5);  // the first row with the region, from the south
 
     if (failures) return 1;
     puts("PASS");

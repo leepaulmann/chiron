@@ -481,10 +481,20 @@ void kernel32_close_waitable(struct kobj *o) {
 
 // ---- Time -----------------------------------------------------------------
 
-DWORD WINAPI GetTickCount(void) {
+static _Thread_local int ticks_held;
+static _Thread_local DWORD ticks_held_at;
+
+static DWORD ticks_now(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (DWORD)(ts.tv_sec * 1000ull + ts.tv_nsec / 1000000);
+}
+
+DWORD WINAPI GetTickCount(void) { return ticks_held ? ticks_held_at : ticks_now(); }
+
+void kernel32_hold_ticks(int hold) {
+    if (hold && !ticks_held++) ticks_held_at = ticks_now();
+    if (!hold && ticks_held) ticks_held--;
 }
 
 void WINAPI Sleep(DWORD ms) {

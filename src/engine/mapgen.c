@@ -409,6 +409,384 @@ void world_linearize_contours(void) {
     for (int i = 0; i < 11; i++) game_alt_natural[i] = to[i];
 }
 
+// ---- Landmarks -------------------------------------------------------------------
+
+// Each landmark takes a square, or finds one when given a square off the
+// map, then shapes the land around it, marks its squares (MAP2_LANDMARK and
+// each square's code, its place in the radius table) and names it. Several
+// put the name two rows below the centre.
+
+static const char *landmark_name(int id) { return game_strings_get(game_strings, game_natural[id].name); }
+
+// Square i of the radius table around (x, y), and whether it is on the map.
+static int radius_square(int x, int y, int i, int *xi, int *yi) {
+    *xi = xrange(x + game_radius_x[i]);
+    *yi = y + game_radius_y[i];
+    return on_map(*xi, *yi);
+}
+
+static inline int iabs(int v) { return v < 0 ? -v : v; }
+
+// A random site, away from the poles, on land or at sea as asked, with no
+// landmark within 8 squares. 0 after 1000 tries.
+static int landmark_site(int *x, int *y, int sea) {
+    for (int tries = 0;;) {
+        *y = game_rnd(*game_map_height - 16) + 8;
+        int xs = game_rnd(*game_map_width);
+        *x = ((xs ^ *y) & 1) ^ xs;
+        if (++tries >= 1000) return 0;
+        if (is_ocean(*x, *y) == sea && !near_landmark(*x, *y)) return 1;
+    }
+}
+
+// Marks a landmark square.
+static void landmark_mark(int x, int y, int id, int code) {
+    bit2_set(x, y, MAP2_LANDMARK(id), 1);
+    code_set(x, y, code);
+}
+
+// Garland Crater: a deep crater in a ring of hills, rolling and of one
+// temperature.
+void world_crater(int x, int y) {
+    if (!on_map(x, y) && !landmark_site(&x, &y, 0)) return;
+    static const int8_t shape[] = {0, 6, 3, 2, 3};
+    for (int i = 0; i < 5; i++) world_alt_set(x, y, shape[i], 1);
+    int temperature = tile(x, y)->climate & 7;
+    for (int i = 0; i < 49; i++) {
+        int xi, yi;
+        if (!radius_square(x, y, i, &xi, &yi)) continue;
+        bit_set(xi, yi, MAP_RIVERBED, 0);
+        landmark_mark(xi, yi, LM_CRATER, i);
+        if (i < 21) {
+            rocky_set(xi, yi, 1);
+            temp_set(xi, yi, temperature);
+        }
+    }
+    new_landmark(x, y, landmark_name(LM_CRATER));
+}
+
+// Monsoon Jungle: a rainy coast near the equator, its sea within two
+// squares filled in. (OpenSMACX marks it with the landmark's number, not
+// its bit.)
+void world_monsoon(int x, int y) {
+    game_world_rainfall();
+    if (!on_map(x, y)) {
+        for (int tries = 0;;) {
+            y = *game_map_height / 2 + game_rand() % 4 - 2;
+            int xs = game_rnd(*game_map_width);
+            x = ((xs ^ y) & 1) ^ xs;
+            int land = 0;
+            for (int i = 0; i < 121; i++) {
+                int xi, yi;
+                if (radius_square(x, y, i, &xi, &yi) && !is_ocean(xi, yi)) land++;
+            }
+            if (++tries >= 1000) return;
+            if (is_ocean(x, y) || !is_coast(x, y, 1) || land < 40 || (tile(x, y)->climate & 0x18) <= 8) continue;
+            if (!near_landmark(x, y)) break;
+        }
+    }
+    for (int i = 0; i < 121; i++) {
+        int xi, yi, on = radius_square(x, y, i, &xi, &yi);
+        if (iabs(yi - y) > 8 || !on) continue;
+        if (i < 21 && is_ocean(xi, yi)) world_alt_set(xi, yi, ALT_SHORE_LINE, 1);
+        landmark_mark(xi, yi, LM_JUNGLE, i);
+    }
+    new_landmark(x, y, landmark_name(LM_JUNGLE));
+}
+
+// New Sargasso: shallow sea thick with fungus, with supply pods at its heart.
+void world_sargasso(int x, int y) {
+    if (!on_map(x, y) && !landmark_site(&x, &y, 1)) return;
+    int skipped = 0;
+    for (int i = 0; i < 81; i++) {
+        int xi, yi;
+        if (!radius_square(x, y, i, &xi, &yi) || !(is_ocean(xi, yi) || i < 21)) continue;
+        world_alt_set(xi, yi, 2, 1);
+        landmark_mark(xi, yi, LM_SARGASSO, i);
+        if (i <= 4) bit_set(xi, yi, MAP_SUPPLY_POD, 1);
+        if ((skipped || i < 25 || game_rand() % 24) && (i < 49 || game_rand() % 3)) bit_set(xi, yi, MAP_FUNGUS, 1);
+        else skipped = 1;
+    }
+    new_landmark(x, y, landmark_name(LM_SARGASSO));
+}
+
+// Ruins: flat land under fungus with monoliths around the centre.
+void world_ruin(int x, int y) {
+    if (!on_map(x, y) && !landmark_site(&x, &y, 0)) return;
+    for (int i = 0; i < 25; i++) {
+        int xi, yi;
+        if (!radius_square(x, y, i, &xi, &yi)) continue;
+        world_alt_set(xi, yi, ALT_SHORE_LINE, 1);
+        if (!is_ocean(xi, yi)) {
+            bit_set(xi, yi, MAP_FUNGUS | MAP_POD_TAKEN, 1);
+            if (!i) bit_set(xi, yi, MAP_FUNGUS, 0);
+            else if (i < 9) bit_set(xi, yi, MAP_MONOLITH, 1);
+        } else if (i && i < 9) {
+            bit_set(xi, yi, MAP_MONOLITH, 1);
+        }
+        landmark_mark(xi, yi, LM_RUINS, i);
+    }
+    new_landmark(x, y + 2, landmark_name(LM_RUINS));
+}
+
+// Great Dunes: flat arid land in the middle latitudes, with two low ridges.
+void world_dune(int x, int y) {
+    game_world_rainfall();
+    if (!on_map(x, y)) {
+        int h = *game_map_height;
+        for (int tries = 0;;) {
+            int r = game_rnd(h / 2);
+            y = h / 2 - h / 4 + r;
+            int xs = game_rnd(*game_map_width);
+            x = ((xs ^ y) & 1) ^ xs;
+            if (++tries >= 1000) return;
+            if (is_ocean(x, y) || (tile(x, y)->climate & 0x18)) continue;
+            if (!near_landmark(x, y)) break;
+        }
+    }
+    for (int i = 0; i < 25; i++) {
+        int xi, yi;
+        if (!radius_square(x, y, i, &xi, &yi)) continue;
+        if (is_ocean(xi, yi) && i >= 9 && !(game_rand() % 3)) continue;
+        world_alt_set(xi, yi, i == 2 || i == 7 ? 4 : ALT_SHORE_LINE, 1);
+        bit_set(xi, yi, MAP_FUNGUS, 0);
+        bit2_set(xi, yi, MAP2_LANDMARK(LM_DUNES), 1);
+        rocky_set(xi, yi, 0);
+        code_set(xi, yi, i);
+    }
+    new_landmark(x, y + 2, landmark_name(LM_DUNES));
+}
+
+// Uranium Flats: flat land without fungus.
+void world_diamond(int x, int y) {
+    if (!on_map(x, y) && !landmark_site(&x, &y, 0)) return;
+    for (int i = 0; i < 21; i++) {
+        int xi, yi;
+        if (!radius_square(x, y, i, &xi, &yi)) continue;
+        if (i >= 9 && is_ocean(xi, yi) && !(game_rand() % 3)) continue;
+        world_alt_set(xi, yi, ALT_SHORE_LINE, 1);
+        bit2_set(xi, yi, MAP2_LANDMARK(LM_URANIUM), 1);
+        rocky_set(xi, yi, 0);
+        bit_set(xi, yi, MAP_FUNGUS, 0);
+        code_set(xi, yi, i);
+    }
+    new_landmark(x, y, landmark_name(LM_URANIUM));
+}
+
+// Freshwater Sea: the sea region given, or the largest of 3 to 32 squares,
+// all marked; named in the middle of the first row it spans, counting from
+// the south.
+void world_fresh(int x, int y) {
+    int region;
+    if (on_map(x, y)) {
+        region = region_at(x, y);
+        if (!is_ocean(x, y)) return;
+    } else {
+        int best = -1, best_count = 0;
+        for (int r = LAND_REGION_COUNT; r < REGION_COUNT; r++) {
+            int n = game_continents[r].tile_count;
+            if (n >= 3 && n <= 32 && n >= best_count) best_count = n, best = r;
+        }
+        if (best < 0) return;
+        region = best;
+    }
+    int first_x = -1, named = 0;
+    for (int yi = *game_map_height - 1; yi >= 0; yi--)
+        for (int xi = yi & 1; xi < *game_map_width; xi += 2) {
+            if (region_at(xi, yi) == region) {
+                bit2_set(xi, yi, MAP2_LANDMARK(LM_FRESH), 1);
+                if (first_x < 0) first_x = xi;
+            } else if (!named && first_x >= 0) {
+                int xf = (first_x + xi - 2) / 2;
+                new_landmark(((xf ^ yi) & 1) ^ xf, yi, landmark_name(LM_FRESH));
+                named = 1;
+            }
+        }
+}
+
+// Mount Planet: a rocky peak with a trench under it, cleared of
+// improvements and pods. Also used without a name.
+void world_volcano(int x, int y, int no_name) {
+    if (!on_map(x, y) && !landmark_site(&x, &y, 0)) return;
+    world_alt_set(x, y, 0, 1);
+    world_alt_set(x, y, 6, 1);
+    for (int i = 0; i < 9; i++) {
+        int xi, yi;
+        if (!radius_square(x, y, i, &xi, &yi)) continue;
+        landmark_mark(xi, yi, LM_VOLCANO, i);
+        uint32_t bits = bit_at(xi, yi) & 0xee377e83;
+        if (!i) bits &= ~MAP_UNITY_POD;
+        bit_put(xi, yi, bits | MAP_POD_TAKEN);
+        rocky_set(xi, yi, 2);
+    }
+    *game_mount_planet_x = x;
+    *game_mount_planet_y = y;
+    if (!no_name) new_landmark(x, y + 2, landmark_name(LM_VOLCANO));
+}
+
+// The Ruins of Borehole Cluster: three thermal boreholes among the square
+// and its neighbours, chosen by the clock, with land around each.
+void world_borehole(int x, int y) {
+    if (!on_map(x, y) && !landmark_site(&x, &y, 0)) return;
+    uint32_t t = game_time_get_time();
+    int s = t & 7, c = ((int32_t)t >> 3) & 3;
+    int bore[3] = {8, s / 3 + 5, 3 - s % 3};
+    if (c & 2) {
+        bore[1]--, bore[2]--;
+        if (c & 1) bore[1]++, bore[0] = 8, bore[2]++;
+        else bore[1]--, bore[0] = 6, bore[2]--;
+        for (int k = 0; k < 3; k++) bore[k] = (bore[k] + 8) % 8 + 1;
+    }
+    for (int i = 0; i < 9; i++) {
+        int xi, yi;
+        if (!radius_square(x, y, i, &xi, &yi)) continue;
+        world_alt_set(xi, yi, ALT_SHORE_LINE, 1);
+        bit_set(xi, yi, MAP_POD_TAKEN, 1);
+        if (i == bore[0] || i == bore[1] || i == bore[2]) {
+            bit_set(xi, yi, MAP_THERMAL_BORE, 1);
+            landmark_mark(xi, yi, LM_BOREHOLE, i);
+        }
+    }
+    for (int k = 0; k < 3; k++) {
+        int cx = xrange(x + game_radius_x[bore[k]]), cy = y + game_radius_y[bore[k]];
+        for (int j = 1; j < 9; j++) {
+            int xn, yn;
+            if (radius_square(cx, cy, j, &xn, &yn) && is_ocean(xn, yn)) world_alt_set(xn, yn, ALT_SHORE_LINE, 1);
+        }
+    }
+    bit2_set(x, y, MAP2_LANDMARK(LM_BOREHOLE), 1);
+    new_landmark(x, y, landmark_name(LM_BOREHOLE));
+}
+
+// The Manifold Nexus.
+void world_temple(int x, int y) {
+    if (!on_map(x, y) && !landmark_site(&x, &y, 0)) return;
+    for (int i = 0; i < 9; i++) {
+        int xi, yi;
+        if (!radius_square(x, y, i, &xi, &yi)) continue;
+        world_alt_set(xi, yi, ALT_SHORE_LINE, 1);
+        bit_set(xi, yi, MAP_POD_TAKEN, 1);
+        landmark_mark(xi, yi, LM_NEXUS, i);
+    }
+    new_landmark(x, y, landmark_name(LM_NEXUS));
+}
+
+// The Unity wreckage (Alien Crossfire only): raised land around two squares
+// diagonally either side of the site, then flat clear ground with supply
+// pods at four places.
+void world_unity(int x, int y) {
+    if (!*game_expansion) return;
+    if (!on_map(x, y) && !landmark_site(&x, &y, 0)) return;
+    for (int pass = 0; pass < 2; pass++) {
+        int cx = pass ? x + 1 : x - 1, cy = pass ? y + 1 : y - 1;
+        for (int i = 0; i < 25; i++) {
+            int xi, yi;
+            if (radius_square(cx, cy, i, &xi, &yi)) world_alt_set(xi, yi, 4, 1);
+        }
+    }
+    for (int i = 0; i < 25; i++) {
+        int xi, yi;
+        if (!radius_square(x, y, i, &xi, &yi)) continue;
+        rocky_set(xi, yi, 0);
+        bit_set(xi, yi, MAP_RIVERBED, 0);
+        bit_set(xi, yi, MAP_FUNGUS, 0);
+        landmark_mark(xi, yi, LM_UNITY, i);
+        bit_set(xi, yi, i == 0 || i == 8 || i == 10 || i == 19 ? MAP_SUPPLY_POD : MAP_POD_TAKEN, 1);
+    }
+    new_landmark(x, y, landmark_name(LM_UNITY));
+}
+
+// Fossil Field Ridge: sea squares raised to a reef.
+void world_fossil(int x, int y) {
+    if (!on_map(x, y) && !landmark_site(&x, &y, 1)) return;
+    for (int i = 0; i < 6; i++) {
+        int xi, yi;
+        if (!radius_square(x, y, i, &xi, &yi) || !is_ocean(xi, yi)) continue;
+        world_alt_set(xi, yi, 1, 1);
+        landmark_mark(xi, yi, LM_FOSSIL, i);
+    }
+    new_landmark(x, y, landmark_name(LM_FOSSIL));
+}
+
+// Squares from a table of radius-table indices: the land is shaped for all
+// of them first, then they are marked, as in the original.
+static void shaped_landmark(int x, int y, const int32_t *squares, int n, const int8_t *alts, int n_alts, int id) {
+    for (int k = 0; k < n; k++) {
+        int xi, yi;
+        if (!radius_square(x, y, squares[k], &xi, &yi)) continue;
+        for (int a = 0; a < n_alts; a++) world_alt_set(xi, yi, alts[a], 1);
+    }
+    for (int k = 0; k < n; k++) {
+        int xi, yi;
+        if (radius_square(x, y, squares[k], &xi, &yi)) landmark_mark(xi, yi, id, squares[k]);
+    }
+    new_landmark(x, y + 2, landmark_name(id));
+}
+
+// Nessus Canyon: a winding valley. (The game never places it itself.)
+void world_canyon(int x, int y) {
+    if (!on_map(x, y) && !landmark_site(&x, &y, 0)) return;
+    static const int8_t alts[] = {4, ALT_SHORE_LINE};
+    shaped_landmark(x, y, game_canyon_squares, 12, alts, 2, LM_CANYON);
+}
+
+// Mount Planet's neighbour mesa: a plateau with a shore-level rim.
+void world_mesa(int x, int y) {
+    if (!on_map(x, y) && !landmark_site(&x, &y, 0)) return;
+    for (int i = 0; i < 49; i++) {
+        int xi, yi;
+        if (!radius_square(x, y, i, &xi, &yi)) continue;
+        world_alt_set(xi, yi, (i < 25) + ALT_SHORE_LINE, 1);
+        landmark_mark(xi, yi, LM_MESA, i);
+    }
+    new_landmark(x, y + 2, landmark_name(LM_MESA));
+}
+
+// Sunny Mesa's ridge: a line of hills.
+void world_ridge(int x, int y) {
+    if (!on_map(x, y) && !landmark_site(&x, &y, 0)) return;
+    static const int8_t alts[] = {4};
+    shaped_landmark(x, y, game_ridge_squares, 13, alts, 1, LM_RIDGE);
+}
+
+// Geothermal Shallows: shallow sea with a few gaps.
+void world_geothermal(int x, int y) {
+    if (!on_map(x, y) && !landmark_site(&x, &y, 1)) return;
+    int skipped = 0;
+    for (int i = 0; i < 25; i++) {
+        int xi, yi;
+        if (!radius_square(x, y, i, &xi, &yi) || (!is_ocean(xi, yi) && i >= 9)) continue;
+        if ((!skipped && i && !(game_rand() % 25)) || (i >= 9 && !(game_rand() % 3))) {
+            skipped = 1;
+            continue;
+        }
+        world_alt_set(xi, yi, 2, 1);
+        landmark_mark(xi, yi, LM_GEOTHERMAL, i);
+    }
+    new_landmark(x, y, landmark_name(LM_GEOTHERMAL));
+}
+
+// All the landmarks a new map gets, in the original's order; then the
+// game's own fix-ups.
+void world_landmarks(void) {
+    world_monsoon(-1, -1);
+    world_crater(-1, -1);
+    world_volcano(-1, -1, 0);
+    world_mesa(-1, -1);
+    world_ridge(-1, -1);
+    world_diamond(-1, -1);
+    world_ruin(-1, -1);
+    if (*game_expansion) world_unity(-1, -1);
+    if (*game_expansion) world_fossil(-1, -1);
+    world_temple(-1, -1);
+    world_borehole(-1, -1);
+    world_sargasso(-1, -1);
+    world_dune(-1, -1);
+    world_fresh(-1, -1);
+    world_geothermal(-1, -1);
+    game_fixup_landmarks();
+}
+
 // ---- Hooks and shadow checks ------------------------------------------------
 
 extern struct hook_module mapgen_module;
@@ -443,13 +821,34 @@ SHADOW_WRITER(MAPGEN, void, world_alt_put_detail, (int a, int b), (a, b), WRITES
 SHADOW_WRITER(MAPGEN, void, world_polar_caps, (void), (), WRITES_STATE, "%s", "")
 SHADOW_WRITER(MAPGEN, void, world_linearize_contours, (void), (), WRITES_STATE, "%s", "")
 
+#define LANDMARK_SHADOW(name) \
+    SHADOW_WRITER(MAPGEN, void, name, (int a, int b), (a, b), WRITES_STATE, "%d, %d", a, b)
+LANDMARK_SHADOW(world_crater)
+LANDMARK_SHADOW(world_monsoon)
+LANDMARK_SHADOW(world_sargasso)
+LANDMARK_SHADOW(world_ruin)
+LANDMARK_SHADOW(world_dune)
+LANDMARK_SHADOW(world_diamond)
+LANDMARK_SHADOW(world_fresh)
+LANDMARK_SHADOW(world_borehole)
+LANDMARK_SHADOW(world_temple)
+LANDMARK_SHADOW(world_unity)
+LANDMARK_SHADOW(world_fossil)
+LANDMARK_SHADOW(world_canyon)
+LANDMARK_SHADOW(world_mesa)
+LANDMARK_SHADOW(world_ridge)
+LANDMARK_SHADOW(world_geothermal)
+SHADOW_WRITER(MAPGEN, void, world_volcano, (int a, int b, int c), (a, b, c), WRITES_STATE, "%d, %d, %d", a, b, c)
+SHADOW_WRITER(MAPGEN, void, world_landmarks, (void), (), WRITES_STATE, "%s", "")
+
 // In shadow mode, the game's redraw and message pump does nothing while a
-// check runs, so the original and ours see the same state and no input is
-// handled twice. Map generation redraws less often as a result.
+// check runs or a sweep's copy of the game is in use, so the original and
+// ours see the same state and no input is handled twice or lost to a
+// rewind. Map generation redraws less often as a result.
 static void (*orig_do_all_non_input)(void);
 static struct hook_stats stats_do_all_non_input = {"(quiet pump)"};
 static void shadow_do_all_non_input(void) {
-    if (hooks_checking()) {
+    if (hooks_protecting()) {
         stats_do_all_non_input.calls++;
         return;
     }
@@ -465,7 +864,7 @@ static void mapgen_sweep(void) {
     slice++;
     if (!*game_map || *game_map_width <= 0 || *game_map_height <= 0) return;
     int w = *game_map_width, h = *game_map_height, sweeping = hooks_sweeping;
-    struct hook_writes outer = {0};
+    struct hook_writes outer = {.protect_only = 1};
     writes_state(&outer);
     hooks_writes_begin(&outer);
     hooks_sweeping = 1;
@@ -493,8 +892,35 @@ static void mapgen_sweep(void) {
     check_world_validate();
     check_world_polar_caps();
     check_world_linearize_contours();
+    // Landmarks: at a site of their own, and on a given square.
+    static void (*const landmarks[])(int, int) = {
+        check_world_crater, check_world_monsoon, check_world_sargasso, check_world_ruin, check_world_dune,
+        check_world_diamond, check_world_fresh, check_world_borehole, check_world_temple, check_world_unity,
+        check_world_fossil, check_world_canyon, check_world_mesa, check_world_ridge, check_world_geothermal,
+    };
+    int n = (int)(sizeof(landmarks) / sizeof(landmarks[0]));
+    for (int i = 0; i < n; i++) {
+        int y = (slice * 3 + i * 7) % h, x = ((slice * 17 + i * 11) % w & ~1) | (y & 1);
+        landmarks[i](-1, -1);
+        if (x < w) landmarks[i](x, y);
+    }
+    check_world_volcano(-1, -1, slice & 1);
+    if (slice % 4 == 0) check_world_landmarks();
     check_map_wipe();
     hooks_writes_abandon(&outer);
+    // Every 16th turn, the game makes a whole new map on another copy, and
+    // each pass it calls is checked as it goes, as when a game begins.
+    // (Quick Start doesn't make a map this way, so soaks need this.) It
+    // takes seconds: the shoreline pass alone checks thousands of calls.
+    if (slice % 16 == 1) {
+        struct hook_writes copy = {.protect_only = 1};
+        writes_state(&copy);
+        hooks_writes_begin(&copy);
+        *game_world_skip_territory = 1;
+        hooks_sweeping = 0;
+        game_world_build();
+        hooks_writes_abandon(&copy);
+    }
     hooks_sweeping = sweeping;
 }
 
@@ -516,6 +942,25 @@ static const struct hook mapgen_hooks[] = {
     HOOK(0x5c58c0, world_alt_put_detail, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0x58, 0xfb, 0x68, 0x00),  // mov eax, [0x68fb58]
     HOOK(0x5c58e0, world_polar_caps, 0x8b, 0x0d, 0x70, 0x98, 0x94, 0x00),                     // mov ecx, [0x949870]
     HOOK(0x5c5ae0, world_linearize_contours, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),
+    HOOK(0x5c5c70, world_crater, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53, 0x56, 0x8b, 0x75, 0x0c),  // push ecx, ebx, esi; mov esi, [ebp+12]
+    HOOK(0x5c5ef0, world_monsoon, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),
+    HOOK(0x5c6200, world_sargasso, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),
+    HOOK(0x5c64a0, world_ruin, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x45, 0x0c),
+    HOOK(0x5c6740, world_dune, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),
+    HOOK(0x5c69e0, world_diamond, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x45, 0x0c),
+    HOOK(0x5c6c40, world_fresh, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),
+    HOOK(0x5c6db0, world_volcano, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53, 0x56, 0x8b, 0x75, 0x0c),
+    HOOK(0x5c7020, world_borehole, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10),
+    HOOK(0x5c7540, world_temple, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x45, 0x0c),
+    HOOK(0x5c7750, world_unity, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),
+    HOOK(0x5c7a80, world_fossil, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x45, 0x0c),
+    HOOK(0x5c7cb0, world_canyon, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x45, 0x0c),
+    HOOK(0x5c7f40, world_mesa, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x45, 0x0c),
+    HOOK(0x5c8150, world_ridge, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53, 0x8b, 0x5d, 0x0c),
+    HOOK(0x5c83b0, world_geothermal, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),
+    // push -1; push -1; call world_monsoon
+    {0x5c8630, (const uint8_t[]){0x6a, 0xff, 0x6a, 0xff, 0xe8, 0xb7, 0xd8, 0xff, 0xff}, 9, (void *)world_landmarks,
+     (void *)shadow_world_landmarks, (void **)&orig_world_landmarks, &stats_world_landmarks, 0, 1},
     {0x5fcb20, (const uint8_t[]){0xc7, 0x05, 0x9c, 0x7b, 0x9b, 0x00, 0x20, 0x00, 0x00, 0x00}, 10,  // mov dword [0x9b7b9c], 0x20
      NULL, (void *)shadow_do_all_non_input, (void **)&orig_do_all_non_input, &stats_do_all_non_input, 1},
 };

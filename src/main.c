@@ -73,6 +73,7 @@ static void *game_thread(void *arg) {
     teb_set_image_base((uint32_t)exe->base);
     if (known_build) {
         patches_apply(exe);
+        hooks_hold_time = kernel32_hold_ticks;
         hooks_apply(exe, reimpl_mode);
     }
     // The MSVC entry point (WinMainCRTStartup) never returns; it calls ExitProcess.

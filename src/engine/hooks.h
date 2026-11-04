@@ -24,12 +24,13 @@ struct hook_stats {
 
 struct hook {
     uint32_t addr;
-    const uint8_t *prologue;  // whole instructions, at least 5 bytes, no relative jumps
+    const uint8_t *prologue;  // whole instructions, at least 5 bytes, no relative jumps (but see ends_in_call)
     uint8_t prologue_len;
     void *ours, *shadow;
     void **original;  // receives the trampoline to the original
     struct hook_stats *stats;
     int shadow_only;  // installed in shadow mode only, to keep checks quiet
+    int ends_in_call;  // the prologue's last 5 bytes are a relative call, re-aimed in the trampoline
 };
 
 // A module: its hooks, and in shadow mode a sweep that checks every one of
@@ -77,10 +78,16 @@ struct hook_writes {
         size_t size;
     } span[8];
     int n;
-    int depth;  // which save buffers, as checks can nest
+    int depth;         // which save buffers, as checks can nest
+    int protect_only;  // only saved and put back (hooks_writes_abandon), not a check
 };
 
 extern int hooks_sweeping;
+
+// Set by the host: holds the game's clock still for this thread while
+// nonzero calls outnumber zero ones. Checks of writing functions hold it, so
+// both runs read the same time.
+extern void (*hooks_hold_time)(int hold);
 
 void hooks_writes_add(struct hook_writes *w, void *p, size_t size);
 // Before the original runs.
@@ -93,6 +100,10 @@ void hooks_writes_abandon(struct hook_writes *w);
 
 // Non-zero while a writing function is being checked.
 int hooks_checking(void);
+
+// Non-zero while any saved state will be put back: a check, or a sweep's
+// protected copy of the game.
+int hooks_protecting(void);
 
 // After ours: compare with the original's writes and return value, then
 // leave the memory as described above. Returns NULL if they agree, or else

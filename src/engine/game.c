@@ -48,6 +48,8 @@ struct rules_worldbuilder *game_worldbuilder;
 int32_t *game_map_area, *game_abstract_area, *game_sea_level_council, *game_land_coverage, *game_planet_orbit;
 int32_t *game_ocean_coverage, *game_brush_total, *game_brush_land_wanted, *game_brush_stroke;
 int32_t *game_alt_natural_default, *game_base_submerged_count, *game_base_submerged_veh, *game_world_skip_territory;
+struct rules_natural *game_natural;
+int32_t *game_mount_planet_x, *game_mount_planet_y, *game_canyon_squares, *game_ridge_squares;
 uint8_t *game_data;
 size_t game_data_size;
 int32_t *game_radius_near_x, *game_radius_near_y, *game_radius_x, *game_radius_y, *game_radius_count;
@@ -69,6 +71,10 @@ void (*game_do_all_non_input)(void);
 void(__attribute__((thiscall)) * game_path_continents)(void *path);
 void *game_path;
 void (*game_draw_radius)(int x, int y, int radius, int unk);
+void (*game_world_rainfall)(void);
+void (*game_world_build)(void);
+void (*game_fixup_landmarks)(void);
+uint32_t(__attribute__((stdcall)) * game_time_get_time)(void);
 
 void game_bind(struct pe_image *exe) {
     game_tech = (struct rules_tech *)code_at(exe, 0x94f358);
@@ -135,6 +141,11 @@ void game_bind(struct pe_image *exe) {
     game_brush_total = (int32_t *)code_at(exe, 0x9b22b0);
     game_brush_land_wanted = (int32_t *)code_at(exe, 0x9b22b4);
     game_brush_stroke = (int32_t *)code_at(exe, 0x9b22b8);
+    game_natural = (struct rules_natural *)code_at(exe, 0x94ade0);
+    game_mount_planet_x = (int32_t *)code_at(exe, 0x9a6804);
+    game_mount_planet_y = (int32_t *)code_at(exe, 0x9a6808);
+    game_canyon_squares = (int32_t *)code_at(exe, 0x6858d8);
+    game_ridge_squares = (int32_t *)code_at(exe, 0x685908);
     // .data and the two small sections after it, up to the read-only .rsrc.
     game_data = code_at(exe, 0x682000);
     game_data_size = 0x9ca000 - 0x682000;
@@ -161,4 +172,8 @@ void game_bind(struct pe_image *exe) {
     game_path_continents = (void *)code_at(exe, 0x59c790);
     game_path = code_at(exe, 0x945b00);
     game_draw_radius = (void *)code_at(exe, 0x46aef0);
+    game_world_rainfall = (void *)code_at(exe, 0x5c4470);
+    game_world_build = (void *)code_at(exe, 0x5c86e0);
+    game_fixup_landmarks = (void *)code_at(exe, 0x592940);
+    game_time_get_time = *(void **)code_at(exe, 0x669368);  // filled in when imports were bound
 }

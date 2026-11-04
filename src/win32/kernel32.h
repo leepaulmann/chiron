@@ -6,6 +6,11 @@
 void kernel32_set_command_line(const char *cmdline);
 void kernel32_close_waitable(struct kobj *o);
 
+// Holds GetTickCount() (and so timeGetTime()) at its current value for the
+// calling thread, or releases it. Shadow-mode checks use it so the original
+// and Chiron's code read the same time.
+void kernel32_hold_ticks(int hold);
+
 // WIN32_FIND_DATAA.
 struct win32_find_data {
     DWORD attrs;

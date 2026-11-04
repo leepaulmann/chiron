@@ -270,6 +270,17 @@ enum {  // map_tile.bits2
     MAP2_UNK_80000000 = 0x80000000,
     MAP2_LANDMARK_CODE = 0xff000000,  // which square of its landmark this is
 };
+// The landmarks, in alphax.txt's #NATURAL order; each marks its squares
+// with bits2 bit 1 << id.
+enum {
+    LM_CRATER, LM_VOLCANO, LM_JUNGLE, LM_URANIUM, LM_SARGASSO, LM_RUINS, LM_DUNES, LM_FRESH,
+    LM_MESA, LM_CANYON, LM_GEOTHERMAL, LM_RIDGE, LM_BOREHOLE, LM_NEXUS, LM_UNITY, LM_FOSSIL, LM_COUNT
+};
+#define MAP2_LANDMARK(id) (1u << (id))
+
+struct rules_natural {
+    char *name, *name_short;
+};
 enum {  // game_draw_state bits the map setters raise
     DRAW_TERRAIN = 0x1, DRAW_LANDMARKS = 0x4,
 };
@@ -404,6 +415,10 @@ extern int32_t *game_ocean_coverage;          // the map setting: 2 - land cover
 // Brush counts while land is painted: squares since the world was begun,
 // the land wanted before continents shrink, and squares this stroke.
 extern int32_t *game_brush_total, *game_brush_land_wanted, *game_brush_stroke;
+extern struct rules_natural *game_natural;    // [LM_COUNT]
+extern int32_t *game_mount_planet_x, *game_mount_planet_y;  // where the volcano was put
+extern int32_t *game_canyon_squares;          // [12] radius-table indices the canyon covers
+extern int32_t *game_ridge_squares;           // [13] and the ridge; the last lies past the table
 // terranx.exe's writable memory: all of its game state but the heap.
 extern uint8_t *game_data;
 extern size_t game_data_size;
@@ -433,6 +448,10 @@ extern void (*game_random_reseed)(int seed);
 extern void (*game_do_all_non_input)(void);       // redraws and the message pump
 extern void(__attribute__((thiscall)) * game_path_continents)(void *path);  // finds the regions
 extern void (*game_draw_radius)(int x, int y, int radius, int unk);           // redraws squares
+extern void (*game_world_rainfall)(void);
+extern void (*game_world_build)(void);  // makes a whole new map
+extern void (*game_fixup_landmarks)(void);
+extern uint32_t(__attribute__((stdcall)) * game_time_get_time)(void);         // the game's timeGetTime import
 extern void *game_path;
 
 // Point the variables above at a loaded terranx.exe.

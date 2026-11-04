@@ -41,6 +41,13 @@ static int install(struct pe_image *exe, const struct hook *h, enum hook_mode mo
     uint8_t *t = code_stub_alloc(h->prologue_len + 5);
     if (!t) return -1;
     memcpy(t, h->prologue, h->prologue_len);
+    if (h->ends_in_call) {
+        const uint8_t *call = h->prologue + h->prologue_len - 5;
+        int32_t rel;
+        memcpy(&rel, call + 1, 4);
+        uint32_t target = h->addr + h->prologue_len + (uint32_t)rel;
+        code_put_rel32(t + h->prologue_len - 5, 0xe8, (uint32_t)(uintptr_t)code_at(exe, target));
+    }
     code_put_rel32(t + h->prologue_len, 0xe9, (uint32_t)(uintptr_t)code_at(exe, h->addr + h->prologue_len));
     *h->original = t;
     void *target = mode == HOOKS_SHADOW ? h->shadow : h->ours;
@@ -99,6 +106,7 @@ void hooks_mismatch(struct hook_stats *s, const char *fmt, ...) {
 }
 
 int hooks_sweeping;
+void (*hooks_hold_time)(int hold);
 
 // Two save buffers per nesting level: the memory before the original ran,
 // and after.
@@ -107,7 +115,7 @@ static struct {
     uint8_t *buf[2];
     size_t cap;
 } saves[WRITES_DEPTH];
-static int writes_depth;
+static int writes_depth, checking_depth;
 
 void hooks_writes_add(struct hook_writes *w, void *p, size_t size) {
     if (w->n >= (int)(sizeof(w->span) / sizeof(w->span[0]))) abort();
@@ -143,14 +151,23 @@ void hooks_writes_begin(struct hook_writes *w) {
         saves[w->depth].cap = total;
     }
     writes_copy(w, saves[w->depth].buf[0], 1);
+    if (!w->protect_only) {
+        checking_depth++;
+        if (hooks_hold_time) hooks_hold_time(1);
+    }
 }
 
 void hooks_writes_abandon(struct hook_writes *w) {
     writes_copy(w, saves[w->depth].buf[0], 0);
     writes_depth--;
+    if (!w->protect_only) {
+        checking_depth--;
+        if (hooks_hold_time) hooks_hold_time(0);
+    }
 }
 
-int hooks_checking(void) { return writes_depth > 0; }
+int hooks_checking(void) { return checking_depth > 0; }
+int hooks_protecting(void) { return writes_depth > 0; }
 
 void hooks_writes_middle(struct hook_writes *w) {
     writes_copy(w, saves[w->depth].buf[1], 1);
@@ -180,6 +197,8 @@ const char *hooks_writes_end(struct hook_writes *w, int got, int want) {
     }
     writes_copy(w, saves[w->depth].buf[hooks_sweeping ? 0 : 1], 0);
     writes_depth--;
+    checking_depth--;
+    if (hooks_hold_time) hooks_hold_time(0);
     return result;
 }
 
@@ -196,6 +215,7 @@ void hooks_summary(void) {
         return;
     }
     fprintf(stderr, "chiron: shadow summary (function, calls from the game, mismatches, sweeps)\n");
+    if (writes_depth) fprintf(stderr, "  (%d saved states still open)\n", writes_depth);
     for (size_t m = 0; m < N_MODULES; m++) {
         const struct hook_module *mod = modules[m];
         for (int i = 0; i < mod->count; i++) {
