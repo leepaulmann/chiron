@@ -297,6 +297,104 @@ int resource_yield(int type, int faction, int base, int x, int y) {
     }
 }
 
+// ---- The current base's totals ------------------------------------------------
+//
+// base_compute() works these out for *game_current_base in turn, after
+// base_support() and base_yield() have filled in its intake.
+
+// Whether the base has the facility, or (with `queue` > 0) has it among the
+// first `queue` items it is building. Secret projects never count.
+int has_fac(int facility, int base, int queue) {
+    if (facility >= FAC_SKY_HYDRO_LAB) return 0;
+    if (has_facility(base, facility)) return 1;
+    for (int i = 0; i < queue; i++)
+        if (game_bases[base].queue[i] == -facility) return 1;
+    return 0;
+}
+
+static inline int holds_project(int project, int faction) {
+    int b = game_secret_projects[project];
+    return b >= 0 && game_bases[b].faction == faction;
+}
+
+void base_nutrient(void) {
+    struct base *b = *game_current_base;
+    int faction = b->faction;
+    struct faction_data *f = &game_factions[faction];
+    *game_base_growth = f->se_pending[SE_GROWTH];
+    if (has_facility(*game_current_base_id, FAC_CHILDREN_CRECHE)) *game_base_growth += 2;
+    if (b->state & BASE_STATE_GOLDEN_AGE) *game_base_growth += 2;
+    b->intake_2[RESOURCE_NUTRIENT] += game_base_convoy_to[RESOURCE_NUTRIENT];
+    b->consumption[RESOURCE_NUTRIENT] =
+        b->pop_size * game_rules_basic->nutrient_intake_citizen + game_base_convoy_from[RESOURCE_NUTRIENT];
+    b->surplus[RESOURCE_NUTRIENT] = b->intake_2[RESOURCE_NUTRIENT] - b->consumption[RESOURCE_NUTRIENT];
+    // A base going hungry with nothing stored shows -1.
+    if (b->surplus[RESOURCE_NUTRIENT] >= 0) {
+        if (b->nutrients < 0) b->nutrients = 0;
+    } else if (!b->nutrients) {
+        b->nutrients = -1;
+    }
+    if (*game_base_upkeep_state == 1) f->nutrient_surplus_total += game_range(b->surplus[RESOURCE_NUTRIENT], 0, 99);
+}
+
+// Minerals, then the ecological damage they cause.
+void base_minerals(void) {
+    struct base *b = *game_current_base;
+    int faction = b->faction, id = *game_current_base_id;
+    const struct faction_data *f = &game_factions[faction];
+    b->intake_2[RESOURCE_MINERAL] += game_base_convoy_to[RESOURCE_MINERAL];
+    int bonus = has_fac(FAC_QUANTUM_CONVERTER, id, 0) || holds_project(SP_SINGULARITY_INDUCTOR, faction);
+    bonus += has_fac(FAC_ROBOTIC_ASSEMBLY_PLANT, id, 0) + has_fac(FAC_GENEJACK_FACTORY, id, 0) +
+             has_fac(FAC_NANOREPLICATOR, id, 0) + holds_project(SP_BULK_MATTER_TRANSMITTER, faction);
+    b->intake_2[RESOURCE_MINERAL] = b->intake_2[RESOURCE_MINERAL] * (bonus + 2) / 2;
+    b->consumption[RESOURCE_MINERAL] = *game_base_forces_upkeep + game_base_convoy_from[RESOURCE_MINERAL];
+    b->surplus[RESOURCE_MINERAL] = b->intake_2[RESOURCE_MINERAL] - b->consumption[RESOURCE_MINERAL];
+    b->inefficiency[RESOURCE_MINERAL] = 0;
+    b->surplus[RESOURCE_MINERAL] -= b->inefficiency[RESOURCE_MINERAL];
+    b->mineral_surplus_final = b->surplus[RESOURCE_MINERAL];
+
+    // Last turn's damage, an eighth kept (rounding down, as a shift), is
+    // first taken off the minerals the faction may make cleanly.
+    b->eco_damage >>= 3;
+    int clean = f->clean_minerals + 16;
+    if (b->eco_damage > 0) {
+        int used = b->eco_damage >= clean ? clean : b->eco_damage;
+        clean -= used;
+        b->eco_damage -= used;
+    }
+    int cleaner = has_fac(FAC_NANOREPLICATOR, id, 0) || holds_project(SP_SINGULARITY_INDUCTOR, faction) ? 2 : 1;
+    cleaner += has_facility(id, FAC_CENTAURI_PRESERVE) + has_facility(id, FAC_TEMPLE_OF_PLANET) +
+               holds_project(SP_PHOLUS_MUTAGEN, faction);
+    b->eco_damage += (b->intake_2[RESOURCE_MINERAL] - clean - game_range(f->satellites[RESOURCE_MINERAL], 0, b->pop_size)) / cleaner;
+    if (game_is_human(faction)) {
+        // Atrocities and tectonic payloads, each divided on its own.
+        int d = game_range(*game_sea_level, 0, 100) / game_range(game_worldbuilder->sea_level_rises, 1, 100) + cleaner;
+        b->eco_damage += f->major_atrocities * 5 / d;
+        b->eco_damage += game_tectonic_detonations[faction] * 5 / d;
+    }
+    if (b->eco_damage < 0) b->eco_damage = 0;
+    // Any Ascent to Transcendence not unbuilt, even a destroyed one.
+    if (game_secret_projects[SP_ASCENT] != -1 && (*game_rules & RULES_VICTORY_TRANSCENDENCE)) b->eco_damage *= 2;
+    if (*game_state & GAME_STATE_PERIHELION) b->eco_damage *= 2;
+    int level;
+    if (game_is_human(faction)) {
+        int diff = f->diff_level;
+        level = !diff ? 2 : diff <= 3 ? 3 : 5;
+    } else {
+        level = game_range(6 - *game_difficulty, 1, 3);
+    }
+    b->eco_damage = (f->tech_ranking - f->transcendent_techs) * (3 - game_range(f->se_pending[SE_PLANET], -3, 2)) *
+                    (*game_native_life + 1) * b->eco_damage * level / 6;
+    b->eco_damage = (b->eco_damage + 50) / 100;
+
+    if (holds_project(SP_SPACE_ELEVATOR, faction) && b->queue[0] <= -FAC_SKY_HYDRO_LAB &&
+        b->queue[0] >= -FAC_ORBITAL_DEFENSE_POD) {
+        // mineral_surplus_final keeps the figure from before.
+        b->intake_2[RESOURCE_MINERAL] *= 2;
+        b->surplus[RESOURCE_MINERAL] = b->intake_2[RESOURCE_MINERAL] - b->consumption[RESOURCE_MINERAL];
+    }
+}
+
 // ---- Hooks and shadow checks ------------------------------------------------
 
 extern struct hook_module base_module;
@@ -310,6 +408,16 @@ YIELD(crop_yield)
 YIELD(mine_yield)
 YIELD(energy_yield)
 YIELD(resource_yield)
+SHADOW3(BASE, int, has_fac, int, int, int)
+
+// The totals write the current base, the base-compute globals and the
+// base's faction.
+#define WRITES_CURRENT                                                         \
+    WRITES(*game_current_base, sizeof(struct base)),                           \
+        WRITES(game_base_globals, BASE_GLOBALS_END - BASE_GLOBALS_START),      \
+        WRITES(&game_factions[(*game_current_base)->faction], sizeof(struct faction_data))
+SHADOW_WRITER(BASE, void, base_nutrient, (void), (), WRITES_CURRENT, "%s", "")
+SHADOW_WRITER(BASE, void, base_minerals, (void), (), WRITES_CURRENT, "%s", "")
 
 static int slice;
 
@@ -342,12 +450,37 @@ static void sweep_yields(void) {
     }
 }
 
+// Every facility, with and without the queue; and the totals as if each
+// base were the one being worked on, from what its fields hold now.
+static void sweep_bases(void) {
+    struct base *current = *game_current_base;
+    int current_id = *game_current_base_id;
+    for (int b = 0; b < *game_base_count; b++) {
+        for (int fac = -1; fac <= FAC_FIRST_PROJECT + 1; fac++)
+            for (int q = 0; q <= 10; q += 5) check_has_fac(fac, b, q);
+        struct base *base = &game_bases[b], saved = *base;
+        *game_current_base = base;
+        *game_current_base_id = b;
+        check_base_nutrient();
+        check_base_minerals();
+        // Early on no base makes enough minerals to do damage, so also
+        // with more minerals, and damage left from last turn.
+        base->intake_2[RESOURCE_MINERAL] = 20 + (b * 7 + slice * 3) % 60;
+        base->eco_damage = (b * 13 + slice * 5) % 300;
+        check_base_minerals();
+        *base = saved;
+    }
+    *game_current_base = current;
+    *game_current_base_id = current_id;
+}
+
 static void base_sweep(void) {
     slice++;
     if (!*game_map || *game_map_width <= 0 || *game_map_height <= 0) return;
     int sweeping = hooks_sweeping;
     hooks_sweeping = 1;
     sweep_yields();
+    sweep_bases();
     hooks_sweeping = sweeping;
 }
 
@@ -357,5 +490,8 @@ static const struct hook base_hooks[] = {
     HOOK(0x4e7310, mine_yield, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0xf0, 0xfa, 0x68, 0x00),        // mov eax, [0x68faf0]
     HOOK(0x4e7750, energy_yield, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x18),                  // sub esp, 24
     HOOK(0x4e7dc0, resource_yield, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                // mov eax, [ebp+8]
+    HOOK(0x421670, has_fac, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x56, 0x57),                       // push ecx; push esi; push edi
+    HOOK(0x4e9b70, base_nutrient, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),                 // sub esp, 8
+    HOOK(0x4e9cb0, base_minerals, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10),                 // sub esp, 16
 };
 struct hook_module base_module = {"base", base_hooks, HOOK_COUNT(base_hooks), base_sweep, NULL, -1};

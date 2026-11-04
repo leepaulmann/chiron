@@ -66,6 +66,9 @@ struct rules_basic *game_rules_basic;
 int32_t *game_secret_projects, *game_governor_faction, *game_dust_cloud, *game_solar_flares, *game_control_upkeep_a;
 struct base **game_current_base;
 int32_t *game_terraform_reduce, *game_terraform_energy;
+int32_t *game_current_base_id, *game_base_growth, *game_base_convoy_from, *game_base_convoy_to;
+int32_t *game_base_forces_upkeep, *game_base_upkeep_state, *game_tectonic_detonations;
+uint8_t *game_base_globals;
 
 char *(__attribute__((thiscall)) * game_strings_get)(void *table, char *s);
 int (*game_climactic_battle)(void);
@@ -208,6 +211,14 @@ void game_bind(struct pe_image *exe) {
     game_current_base = (struct base **)code_at(exe, 0x90ea30);
     game_terraform_reduce = (int32_t *)code_at(exe, 0x90e998);
     game_terraform_energy = (int32_t *)code_at(exe, 0x90e914);
+    game_current_base_id = (int32_t *)code_at(exe, 0x689370);
+    game_base_growth = (int32_t *)code_at(exe, 0x90e918);
+    game_base_convoy_from = (int32_t *)code_at(exe, 0x90e904);
+    game_base_convoy_to = (int32_t *)code_at(exe, 0x90e93c);
+    game_base_forces_upkeep = (int32_t *)code_at(exe, 0x90e91c);
+    game_base_upkeep_state = (int32_t *)code_at(exe, 0x90ea34);
+    game_tectonic_detonations = (int32_t *)code_at(exe, 0x946138);
+    game_base_globals = code_at(exe, BASE_GLOBALS_START);
     game_radius_near_x = (int32_t *)code_at(exe, 0x66ef50);
     game_radius_near_y = (int32_t *)code_at(exe, 0x66ef74);
     game_radius_x = (int32_t *)code_at(exe, 0x66efbc);

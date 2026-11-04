@@ -79,7 +79,9 @@ struct faction_data {
     int32_t diff_level;  // humans' difficulty; 3 for the AI
     GAME_PAD(0x00c, 0x018);
     uint32_t diplo_status[FACTION_COUNT];  // TREATY_* towards each faction
-    GAME_PAD(0x038, 0x24c);
+    GAME_PAD(0x038, 0x1d8);
+    int32_t major_atrocities;
+    GAME_PAD(0x1dc, 0x24c);
     int32_t se_pending[SE_COUNT];
     int32_t se[SE_COUNT];
     int32_t se_2[SE_COUNT];
@@ -92,15 +94,19 @@ struct faction_data {
     int32_t tech_fungus[FUNGUS_COUNT];  // extra output from fungus squares
     GAME_PAD(0x324, 0x35c);
     int32_t tech_ranking;  // twice the techs discovered
-    int32_t unk_360;
-    GAME_PAD(0x364, 0x3d0);
+    int32_t unk_360, unk_364;
+    int32_t transcendent_techs;  // techs past the end of the tree
+    GAME_PAD(0x36c, 0x3d0);
     int32_t tech_cost;  // research cost, or negative until computed
     int32_t earned_techs_saved;
     int32_t net_random_event;
     int32_t ai_fight, ai_growth, ai_tech, ai_wealth, ai_power;  // the AI's priorities
-    GAME_PAD(0x3f0, 0x7fc);
+    GAME_PAD(0x3f0, 0x464);
+    int32_t clean_minerals;  // minerals a base makes before ecological damage
+    GAME_PAD(0x468, 0x7fc);
     int32_t unk_7fc;  // tech_val() treats it as ecological damage
-    GAME_PAD(0x800, 0x818);
+    int32_t nutrient_surplus_total, labs_total;
+    int32_t satellites[4];  // orbital nutrient, mineral and energy satellites, and defense pods
     int32_t best_weapon_value;
     GAME_PAD(0x81c, 0x82c);
     int32_t enemy_best_weapon_value;
@@ -125,6 +131,11 @@ GAME_AT(struct faction_data, tech_fungus, 0x314);
 GAME_AT(struct faction_data, tech_cost, 0x3d0);
 GAME_AT(struct faction_data, ai_fight, 0x3dc);
 GAME_AT(struct faction_data, ai_power, 0x3ec);
+GAME_AT(struct faction_data, major_atrocities, 0x1d8);
+GAME_AT(struct faction_data, transcendent_techs, 0x368);
+GAME_AT(struct faction_data, clean_minerals, 0x464);
+GAME_AT(struct faction_data, nutrient_surplus_total, 0x800);
+GAME_AT(struct faction_data, best_weapon_value, 0x818);
 
 enum {  // faction_def bonus ids
     BONUS_FUNGUS_NUTRIENT = 7, BONUS_FUNGUS_MINERALS = 8, BONUS_FUNGUS_ENERGY = 9,
@@ -227,6 +238,7 @@ _Static_assert(sizeof(struct continent) == 0x1c, "continent size");
 
 enum {  // game_rules bits
     RULES_TECH_STAGNATION = 0x20,
+    RULES_VICTORY_TRANSCENDENCE = 0x800,
     RULES_BLIND_RESEARCH = 0x200,
     RULES_NO_UNITY_SCATTERING = 0x2000,
 };
@@ -235,7 +247,7 @@ enum { FACTION_FLAG_MAP_REVEALED = 0x200 };  // faction_data.flags
 
 enum { TREATY_UNK_8000000 = 0x8000000 };  // with TREATY_COMMLINK, whose_territory() names the owner
 
-enum { GAME_STATE_OMNISCIENT = 0x80 };  // game_state bits
+enum { GAME_STATE_OMNISCIENT = 0x80, GAME_STATE_PERIHELION = 0x100000 };  // game_state bits
 enum { FACTION_FLAG_BASE_SUBMERGED = 0x80000 };  // faction_data.flags
 
 // ---- The map -------------------------------------------------------------------
@@ -318,11 +330,18 @@ _Static_assert(sizeof(struct landmark) == 0x28, "landmark size");
 enum { BASE_COUNT = 512 };
 
 enum {
-    FAC_HEADQUARTERS = 1, FAC_RECYCLING_TANKS = 3, FAC_PRESSURE_DOME = 26, FAC_AQUAFARM = 36,
-    FAC_SUBSEA_TRUNKLINE = 37, FAC_THERMOCLINE_TRANSDUCER = 38, FAC_GEOSYNC_SURVEY_POD = 41,
+    FAC_HEADQUARTERS = 1, FAC_CHILDREN_CRECHE = 2, FAC_RECYCLING_TANKS = 3, FAC_ROBOTIC_ASSEMBLY_PLANT = 19,
+    FAC_NANOREPLICATOR = 20, FAC_QUANTUM_CONVERTER = 21, FAC_GENEJACK_FACTORY = 22, FAC_PRESSURE_DOME = 26,
+    FAC_AQUAFARM = 36, FAC_SUBSEA_TRUNKLINE = 37, FAC_THERMOCLINE_TRANSDUCER = 38, FAC_GEOSYNC_SURVEY_POD = 41,
+    // Built in orbit; the Space Elevator doubles minerals for them.
+    FAC_SKY_HYDRO_LAB = 65, FAC_ORBITAL_DEFENSE_POD = 68,
+    FAC_FIRST_PROJECT = 70,
 };
 // Secret projects, as indices into game_secret_projects (facility id - 70).
-enum { SP_MERCHANT_EXCHANGE = 3, SP_MANIFOLD_HARMONICS = 33, SP_COUNT = 64 };
+enum {
+    SP_MERCHANT_EXCHANGE = 3, SP_PHOLUS_MUTAGEN = 16, SP_SPACE_ELEVATOR = 27, SP_SINGULARITY_INDUCTOR = 28,
+    SP_BULK_MATTER_TRANSMITTER = 29, SP_ASCENT = 31, SP_MANIFOLD_HARMONICS = 33, SP_COUNT = 64,
+};
 
 enum { BASE_STATE_GOLDEN_AGE = 0x4 };
 enum {  // base.event: this turn's random events
@@ -535,6 +554,18 @@ extern struct base **game_current_base; // the base being worked on, or NULL
 // Output the 2-a-square limit took off, summed over yield calls; and a base
 // square's energy.
 extern int32_t *game_terraform_reduce, *game_terraform_energy;
+// What base_compute() works out for the current base, besides the base
+// itself: its growth rating, resources sent by supply convoys from and to
+// it, and the minerals its units cost.
+extern int32_t *game_current_base_id;
+extern int32_t *game_base_growth;
+extern int32_t *game_base_convoy_from, *game_base_convoy_to;  // [RESOURCE_COUNT]
+extern int32_t *game_base_forces_upkeep;
+extern int32_t *game_base_upkeep_state;  // 1 while bases are worked through at the end of a turn
+extern int32_t *game_tectonic_detonations;  // [FACTION_COUNT]
+// The base-compute globals from game_base_convoy_from to game_current_base.
+enum { BASE_GLOBALS_START = 0x90e8fc, BASE_GLOBALS_END = 0x90ea38 };
+extern uint8_t *game_base_globals;
 
 // Game functions the reimplementations call.
 extern char *(__attribute__((thiscall)) * game_strings_get)(void *table, char *s);

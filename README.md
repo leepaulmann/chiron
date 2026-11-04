@@ -112,7 +112,9 @@ module at a time. So far:
   landmarks), the climate pass that reworks the map when the sea level
   changes, and the altitude setter, with the floods it brings to bases and
   units. Loading and saving maps are still the game's own;
-- bases, begun: what each square yields in nutrients, minerals and energy.
+- bases, begun: what each square yields in nutrients, minerals and energy,
+  facilities, and a base's nutrient and mineral totals with growth and
+  ecological damage.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once

@@ -247,6 +247,78 @@ int main(void) {
     EXPECT(reduce, 0);
     EXPECT(resource_yield(9, 1, -1, 4, 2), 0);
 
+    // has_fac: built, or in the queue when asked; projects never.
+    EXPECT(has_fac(FAC_HEADQUARTERS, 0, 0), 1);
+    EXPECT(has_fac(FAC_NANOREPLICATOR, 0, 3), 0);
+    bases[0].queue[2] = -FAC_NANOREPLICATOR;
+    EXPECT(has_fac(FAC_NANOREPLICATOR, 0, 2), 0);
+    EXPECT(has_fac(FAC_NANOREPLICATOR, 0, 3), 1);
+    give(0, FAC_FIRST_PROJECT);
+    EXPECT(has_fac(FAC_FIRST_PROJECT, 0, 0), 0);
+    bases[0].queue[2] = 0;
+
+    // The current base's nutrients.
+    int32_t growth, from[4] = {1, 2}, to[4] = {3, 4}, upkeep, upkeep_state = 1, current_id = 0, detonations[8];
+    game_base_growth = &growth, game_base_convoy_from = from, game_base_convoy_to = to;
+    game_base_forces_upkeep = &upkeep, game_base_upkeep_state = &upkeep_state;
+    game_current_base_id = &current_id, game_tectonic_detonations = detonations;
+    struct base *b = &bases[0];
+    current = b;
+    rules_basic.nutrient_intake_citizen = 2;
+    b->pop_size = 3;
+    b->intake_2[RESOURCE_NUTRIENT] = 4;
+    factions[1].se_pending[SE_GROWTH] = 1;
+    give(0, FAC_CHILDREN_CRECHE);
+    base_nutrient();
+    EXPECT(growth, 3);
+    EXPECT(b->intake_2[RESOURCE_NUTRIENT], 7);
+    EXPECT(b->consumption[RESOURCE_NUTRIENT], 7);
+    EXPECT(b->surplus[RESOURCE_NUTRIENT], 0);
+    EXPECT(factions[1].nutrient_surplus_total, 0);
+    b->intake_2[RESOURCE_NUTRIENT] = 3;
+    base_nutrient();
+    EXPECT(b->surplus[RESOURCE_NUTRIENT], -1);
+    EXPECT(b->nutrients, -1);
+    b->intake_2[RESOURCE_NUTRIENT] = 200;
+    base_nutrient();
+    EXPECT(b->nutrients, 0);
+    EXPECT(factions[1].nutrient_surplus_total, 99);
+
+    // Minerals: a robotic assembly plant adds half; a base with no
+    // damage before and a little over the clean limit.
+    static struct rules_worldbuilder wb = {.sea_level_rises = 1};
+    int32_t sea = 0, native = 0, difficulty = 3;
+    uint32_t state = 0;
+    game_worldbuilder = &wb, game_sea_level = &sea, game_native_life = &native, game_difficulty = &difficulty;
+    game_state = &state;
+    uint8_t humans = 0;
+    game_human_factions = &humans;
+    upkeep = 1;
+    b->intake_2[RESOURCE_MINERAL] = 20;
+    give(0, FAC_ROBOTIC_ASSEMBLY_PLANT);
+    factions[1].tech_ranking = 20;
+    b->eco_damage = 0;
+    base_minerals();
+    EXPECT(b->intake_2[RESOURCE_MINERAL], 36);  // (20 + 4) * 3 / 2
+    EXPECT(b->consumption[RESOURCE_MINERAL], 3);
+    EXPECT(b->surplus[RESOURCE_MINERAL], 33);
+    EXPECT(b->mineral_surplus_final, 33);
+    // (36 - 16) damage, times 20 techs, 3 for PLANET 0, 1, level 3 (6 - 3), / 6, / 100 rounded.
+    EXPECT(b->eco_damage, (20 * 20 * 3 * 1 * 3 / 6 + 50) / 100);
+    // Damage carried over uses up clean minerals first.
+    b->intake_2[RESOURCE_MINERAL] = 20;
+    b->eco_damage = 8 * 10;
+    base_minerals();
+    EXPECT(b->eco_damage, ((36 - 6) * 20 * 3 * 3 / 6 + 50) / 100);
+    // The Space Elevator doubles minerals for an orbital facility.
+    projects[SP_SPACE_ELEVATOR] = 0;
+    b->queue[0] = -FAC_SKY_HYDRO_LAB;
+    b->intake_2[RESOURCE_MINERAL] = 20;
+    base_minerals();
+    EXPECT(b->intake_2[RESOURCE_MINERAL], 72);
+    EXPECT(b->surplus[RESOURCE_MINERAL], 69);
+    EXPECT(b->mineral_surplus_final, 33);
+
     if (failures) return 1;
     printf("engine_base: all tests passed\n");
     return 0;
