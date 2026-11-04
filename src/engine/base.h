@@ -44,3 +44,7 @@ void base_energy(void);
 // The current base's talents, drones and superdrones; at the end of a
 // turn also how content it would be at each TALENT and POLICE, for the AI.
 void base_psych(void);
+
+// Works out the current base from scratch: support, squares, nutrients,
+// minerals, energy. Only when `update` is set or the base has changed.
+void base_compute(int update);

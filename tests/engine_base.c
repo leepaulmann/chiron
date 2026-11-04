@@ -758,6 +758,9 @@ int main(void) {
     base_yield();
     EXPECT(b1->worked_tiles, 1);
     EXPECT(b1->specialist_total, 3);
+    // They become doctors: psych 2 counts 6, more than the engineer's 3
+    // economy and 2 labs.
+    EXPECT(b1->specialist_types[0] & 0xfff, 0x222);
     int damage = b1->eco_damage;
     struct map_tile *mined = at((b1->x + radius_x[1]) % W, b1->y + radius_y[1]);
     uint32_t mined_bits = mined->bits;
@@ -778,6 +781,20 @@ int main(void) {
     base_yield();
     EXPECT(b1->eco_damage, 0);
     memset(b1->facilities_built, 0, sizeof(b1->facilities_built));
+
+    // base_compute: only for a new base, or when asked.
+    int32_t computed = 1;
+    game_computed_base_id = &computed;
+    b1->worked_tiles = 1, b1->surplus[RESOURCE_ENERGY] = -77;
+    base_compute(0);
+    EXPECT(b1->surplus[RESOURCE_ENERGY], -77);
+    base_compute(1);
+    EXPECT(b1->surplus[RESOURCE_ENERGY] != -77, 1);
+    EXPECT(b1->intake[RESOURCE_NUTRIENT], worked_yield(1, RESOURCE_NUTRIENT));
+    computed = 0, b1->surplus[RESOURCE_ENERGY] = -77;
+    base_compute(0);
+    EXPECT(computed, 1);
+    EXPECT(b1->surplus[RESOURCE_ENERGY] != -77, 1);
 
     if (failures) return 1;
     printf("engine_base: all tests passed\n");

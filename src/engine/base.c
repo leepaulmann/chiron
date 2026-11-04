@@ -594,14 +594,14 @@ void base_yield(void) {
     }
 
 done:
-    // Citizens left over become the specialist that gives the most psych
-    // (and, in bases big enough, economy and labs).
+    // Citizens left over become the specialist with the most psych, which
+    // counts three times, and in bases big enough economy and labs.
     for (int i = b->specialist_total; i < *game_base_workers; i++) {
         int kind = 0, most = -999;
         for (int k = 0; k < CITIZEN_KINDS; k++) {
             const struct citizen *c = &game_citizens[k];
             if (!has_tech(c->preq_tech, b->faction)) continue;
-            int v = c->psych;
+            int v = 3 * c->psych;
             if (b->pop_size >= game_rules_basic->min_base_size_specialists) v += c->econ + c->labs;
             if (v > most) most = v, kind = k;
         }
@@ -1196,6 +1196,20 @@ void base_psych(void) {
     psych_pass(b, &p, f->se_pending[SE_TALENT], f->se_pending[SE_POLICE] + 2 * has_facility(id, FAC_BROOD_PIT));
 }
 
+// ---- The whole of it -------------------------------------------------------
+
+// Works out the current base, unless it was the last one worked out and
+// `update` is clear.
+void base_compute(int update) {
+    if (!update && *game_computed_base_id == *game_current_base_id) return;
+    *game_computed_base_id = *game_current_base_id;
+    base_support();
+    base_yield();
+    base_nutrient();
+    base_minerals();
+    base_energy();
+}
+
 // ---- Hooks and shadow checks ------------------------------------------------
 
 extern struct hook_module base_module;
@@ -1220,6 +1234,8 @@ SHADOW3(BASE, int, has_fac, int, int, int)
 #define WRITES_SUPPORT WRITES_CURRENT; WRITES(game_vehs, *game_veh_count * sizeof(struct veh))
 SHADOW_WRITER(BASE, void, base_support, (void), (), WRITES_SUPPORT, "%s", "")
 SHADOW_WRITER(BASE, void, base_yield, (void), (), WRITES_CURRENT, "%s", "")
+#define WRITES_COMPUTE WRITES_SUPPORT; WRITES(game_computed_base_id, sizeof(*game_computed_base_id))
+SHADOW_WRITER(BASE, void, base_compute, (int a), (a), WRITES_COMPUTE, "%d", a)
 SHADOW_WRITER(BASE, void, farm_compute, (void), (), WRITES_CURRENT, "%s", "")
 SHADOW_WRITER(BASE, void, base_nutrient, (void), (), WRITES_CURRENT, "%s", "")
 SHADOW_WRITER(BASE, void, base_minerals, (void), (), WRITES_CURRENT, "%s", "")
@@ -1284,6 +1300,8 @@ static void sweep_bases(void) {
         struct base *base = &game_bases[b], saved = *base;
         *game_current_base = base;
         *game_current_base_id = b;
+        check_base_compute(1);
+        check_base_compute(0);
         check_farm_compute();
         check_base_yield();
         check_base_support();
@@ -1346,6 +1364,7 @@ static const struct hook base_hooks[] = {
     HOOK(0x4e7750, energy_yield, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x18),                  // sub esp, 24
     HOOK(0x4e7dc0, resource_yield, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                // mov eax, [ebp+8]
     HOOK(0x421670, has_fac, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x56, 0x57),                       // push ecx; push esi; push edi
+    HOOK(0x4ec3b0, base_compute, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                  // mov eax, [ebp+8]
     HOOK(0x4e68b0, farm_compute, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x1c),                  // sub esp, 28
     HOOK(0x4e80b0, base_yield, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x58),                    // sub esp, 88
     HOOK(0x4e9550, base_support, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x3c),                  // sub esp, 60

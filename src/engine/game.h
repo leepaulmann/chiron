@@ -619,6 +619,7 @@ extern int32_t *game_terraform_reduce, *game_terraform_energy;
 // itself: its growth rating, resources sent by supply convoys from and to
 // it, and the minerals its units cost.
 extern int32_t *game_current_base_id;
+extern int32_t *game_computed_base_id;  // the base base_compute() last worked out
 extern int32_t *game_base_growth;
 extern int32_t *game_base_convoy_from, *game_base_convoy_to;  // [RESOURCE_COUNT]
 extern int32_t *game_base_forces_upkeep;
