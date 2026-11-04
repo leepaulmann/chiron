@@ -16,8 +16,8 @@ enum hook_mode hooks_mode = HOOKS_OFF;
 int hooks_nested;
 
 // Each module defines its hooks and sweep.
-extern struct hook_module tech_module, map_module, mapgen_module;
-static struct hook_module *const modules[] = {&tech_module, &map_module, &mapgen_module};
+extern struct hook_module tech_module, map_module, mapgen_module, base_module;
+static struct hook_module *const modules[] = {&tech_module, &map_module, &mapgen_module, &base_module};
 
 #define N_MODULES (sizeof(modules) / sizeof(modules[0]))
 

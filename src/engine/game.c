@@ -61,6 +61,11 @@ void *game_world_win, *game_console;
 char **game_script_file;
 char *game_flood_texts, *game_text_climate_begin, *game_text_climate_end;
 int32_t *game_diag_x, *game_diag_y;
+struct res_info *game_res_info;
+struct rules_basic *game_rules_basic;
+int32_t *game_secret_projects, *game_governor_faction, *game_dust_cloud, *game_solar_flares, *game_control_upkeep_a;
+struct base **game_current_base;
+int32_t *game_terraform_reduce, *game_terraform_energy;
 
 char *(__attribute__((thiscall)) * game_strings_get)(void *table, char *s);
 int (*game_climactic_battle)(void);
@@ -193,6 +198,16 @@ void game_bind(struct pe_image *exe) {
     // .data and the two small sections after it, up to the read-only .rsrc.
     game_data = code_at(exe, 0x682000);
     game_data_size = 0x9ca000 - 0x682000;
+    game_res_info = (struct res_info *)code_at(exe, 0x945f50);
+    game_rules_basic = (struct rules_basic *)code_at(exe, 0x949738);
+    game_secret_projects = (int32_t *)code_at(exe, 0x9a6514);
+    game_governor_faction = (int32_t *)code_at(exe, 0x9a6614);
+    game_dust_cloud = (int32_t *)code_at(exe, 0x9a680c);
+    game_solar_flares = (int32_t *)code_at(exe, 0x9a6818);
+    game_control_upkeep_a = (int32_t *)code_at(exe, 0x93a934);
+    game_current_base = (struct base **)code_at(exe, 0x90ea30);
+    game_terraform_reduce = (int32_t *)code_at(exe, 0x90e998);
+    game_terraform_energy = (int32_t *)code_at(exe, 0x90e914);
     game_radius_near_x = (int32_t *)code_at(exe, 0x66ef50);
     game_radius_near_y = (int32_t *)code_at(exe, 0x66ef74);
     game_radius_x = (int32_t *)code_at(exe, 0x66efbc);

@@ -264,13 +264,15 @@ enum {  // map_tile.bits
     MAP_UNITY_POD = 0xc000000,  // either bit, without unity scattering
     MAP_SUPPLY_POD = 0x10000000, MAP_NUTRIENT_RESOURCE = 0x20000000, MAP_SENSOR = 0x80000000,
     MAP_FUNGUS = 0x20, MAP_UNK_4000 = 0x4000, MAP_THERMAL_BORE = 0x1000000, MAP_UNK_40000000 = 0x40000000,
+    MAP_ROAD = 0x4, MAP_MINE = 0x10, MAP_SOLAR = 0x40, MAP_FARM = 0x8000, MAP_SOIL_ENRICHER = 0x80000,
+    MAP_ECHELON_MIRROR = 0x800000,
 };
 enum {  // map_tile.bits2
     MAP2_CRATER = 0x1,
     MAP2_NEXUS = 0x2000,          // the Manifold Nexus
     MAP2_CHANGED = 0x400000,      // rainfall or rockiness set since the map was made
     MAP2_RIVER_PATH = 0x800000,   // world_rivers() marks the river it is laying
-    MAP2_UNK_80000000 = 0x80000000,
+    MAP2_UNK_80000000 = 0x80000000,  // the square's landmark is switched off
     MAP2_LANDMARK_CODE = 0xff000000,  // which square of its landmark this is
 };
 // The landmarks, in alphax.txt's #NATURAL order; each marks its squares
@@ -315,25 +317,87 @@ _Static_assert(sizeof(struct landmark) == 0x28, "landmark size");
 
 enum { BASE_COUNT = 512 };
 
-enum { FAC_PRESSURE_DOME = 26, FAC_GEOSYNC_SURVEY_POD = 41 };
+enum {
+    FAC_HEADQUARTERS = 1, FAC_RECYCLING_TANKS = 3, FAC_PRESSURE_DOME = 26, FAC_AQUAFARM = 36,
+    FAC_SUBSEA_TRUNKLINE = 37, FAC_THERMOCLINE_TRANSDUCER = 38, FAC_GEOSYNC_SURVEY_POD = 41,
+};
+// Secret projects, as indices into game_secret_projects (facility id - 70).
+enum { SP_MERCHANT_EXCHANGE = 3, SP_MANIFOLD_HARMONICS = 33, SP_COUNT = 64 };
+
+enum { BASE_STATE_GOLDEN_AGE = 0x4 };
+enum {  // base.event: this turn's random events
+    BASE_EVENT_BUMPER = 0x200, BASE_EVENT_FAMINE = 0x400,        // nutrients +1 / -1 a square
+    BASE_EVENT_INDUSTRY = 0x800, BASE_EVENT_BUST = 0x1000,       // minerals
+    BASE_EVENT_HEAT_WAVE = 0x2000, BASE_EVENT_CLOUD_COVER = 0x4000,  // energy
+};
+enum { RESOURCE_NUTRIENT, RESOURCE_MINERAL, RESOURCE_ENERGY, RESOURCE_UNUSED, RESOURCE_COUNT };
 
 struct base {
     int16_t x, y;
     uint8_t faction;
     uint8_t faction_former;
     int8_t pop_size;
-    GAME_PAD(0x07, 0x0a);
+    uint8_t assimilation_turns, nerve_staple_turns, ai_plan;
     uint8_t visibility;  // bit per faction that can see it
-    GAME_PAD(0x0b, 0x13);
+    int8_t pop_seen[FACTION_COUNT];  // the size each faction last saw
     char name[25];
-    GAME_PAD(0x2c, 0x8c);
+    int16_t terraform_x, terraform_y;
+    uint32_t state;   // BASE_STATE_*
+    uint32_t event;   // BASE_EVENT_*
+    uint32_t governor;
+    int32_t nutrients, minerals;  // stored
+    int32_t production_last, eco_damage;
+    int32_t queue_size;
+    int32_t queue[10];
+    uint32_t worked_tiles;  // bit per square of the radius table
+    int32_t specialist_total, specialist_adjust;
+    uint32_t specialist_types[2];
     uint8_t facilities_built[12];  // bit per facility, below the secret projects
-    GAME_PAD(0x98, 0x134);
+    int32_t mineral_surplus_final, minerals_2;
+    int32_t unused_a0[4];
+    int32_t intake[RESOURCE_COUNT], intake_2[RESOURCE_COUNT], surplus[RESOURCE_COUNT];
+    int32_t inefficiency[RESOURCE_COUNT], consumption[RESOURCE_COUNT];
+    int32_t economy_total, psych_total, labs_total, unk_total;
+    int16_t autoforward[3], pad_116;
+    int32_t talent_total, drone_total, superdrone_total;
+    int32_t random_event_turns, nerve_staple_count;
+    int32_t unused_12c[2];
 };
 _Static_assert(sizeof(struct base) == 0x134, "base size");
 GAME_AT(struct base, visibility, 0x0a);
 GAME_AT(struct base, name, 0x13);
+GAME_AT(struct base, state, 0x30);
+GAME_AT(struct base, queue, 0x50);
 GAME_AT(struct base, facilities_built, 0x8c);
+GAME_AT(struct base, intake, 0xb0);
+GAME_AT(struct base, economy_total, 0x100);
+GAME_AT(struct base, talent_total, 0x118);
+
+// What each kind of square yields (Thinker's CResourceInfo), from alphax.txt.
+struct res_value {
+    int32_t nutrient, mineral, energy, unused;
+};
+struct res_info {
+    struct res_value ocean, base, bonus, forest, recycling, improved_land, improved_sea, monolith, borehole;
+};
+_Static_assert(sizeof(struct res_info) == 0x90, "res_info size");
+
+// alphax.txt's #RULES, the part Chiron reads.
+struct rules_basic {
+    int32_t move_rate_roads, nutrient_intake_citizen, max_airdrop_range, artillery_max_range;
+    int32_t artillery_damage_num, artillery_damage_den, nutrient_cost_multi, mineral_cost_multi;
+    int32_t tech_discovery_rate, mine_road_limit, nutrient_effect_mine, min_base_size_specialists;
+    int32_t drones_genejack, pop_limit_hab_complex, pop_limit_hab_dome;
+    int32_t tech_improve_fungus, tech_ease_fungus_move, tech_road_fungus, tech_two_special;
+    int32_t tech_three_nutrients, tech_three_minerals, tech_three_energy;
+    GAME_PAD(0x58, 0xa4);
+    int32_t tech_mining_platform_bonus;
+};
+GAME_AT(struct rules_basic, mine_road_limit, 0x24);
+GAME_AT(struct rules_basic, tech_three_nutrients, 0x4c);
+GAME_AT(struct rules_basic, tech_mining_platform_bonus, 0xa4);
+
+enum { RULE_FLAG_AQUATIC = 0x100 };  // faction_def.rule_flags
 
 static inline int game_has_facility(const struct base *b, int facility) {
     return (b->facilities_built[facility / 8] & (1 << (facility % 8))) != 0;
@@ -459,6 +523,18 @@ extern size_t game_data_size;
 extern int32_t *game_radius_near_x, *game_radius_near_y;  // [9]
 extern int32_t *game_radius_x, *game_radius_y;            // [RADIUS_SQUARES]
 extern int32_t *game_radius_count;                        // [9]
+
+extern struct res_info *game_res_info;
+extern struct rules_basic *game_rules_basic;
+extern int32_t *game_secret_projects;   // [SP_COUNT] the base holding each, or negative
+extern int32_t *game_governor_faction;  // the Planetary Governor, or 0
+extern int32_t *game_dust_cloud;        // turns left of a dust cloud: energy -1 a square
+extern int32_t *game_solar_flares;      // bits: energy tripled
+extern int32_t *game_control_upkeep_a;  // non-zero: game_solar_flares bit 1 counts, not bit 0
+extern struct base **game_current_base; // the base being worked on, or NULL
+// Output the 2-a-square limit took off, summed over yield calls; and a base
+// square's energy.
+extern int32_t *game_terraform_reduce, *game_terraform_energy;
 
 // Game functions the reimplementations call.
 extern char *(__attribute__((thiscall)) * game_strings_get)(void *table, char *s);

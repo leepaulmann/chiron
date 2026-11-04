@@ -111,7 +111,8 @@ module at a time. So far:
   shorelines, temperature, rivers, rainfall, fungus, rockiness and all 16
   landmarks), the climate pass that reworks the map when the sea level
   changes, and the altitude setter, with the floods it brings to bases and
-  units. Loading and saving maps are still the game's own.
+  units. Loading and saving maps are still the game's own;
+- bases, begun: what each square yields in nutrients, minerals and energy.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once
