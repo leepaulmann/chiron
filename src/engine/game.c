@@ -71,6 +71,7 @@ int32_t *game_base_forces_upkeep, *game_base_upkeep_state, *game_tectonic_detona
 uint8_t *game_base_globals;
 int32_t *game_base_commerce_import, *game_base_commerce_export, *game_tech_commerce_count, *game_proposal_passes;
 struct citizen *game_citizens;
+int32_t *game_base_forces_supported, *game_base_forces_paid;
 int32_t *game_psych_talents, *game_psych_drones, *game_psych_superdrones, *game_base_pacifism;
 
 char *(__attribute__((thiscall)) * game_strings_get)(void *table, char *s);
@@ -233,6 +234,8 @@ void game_bind(struct pe_image *exe) {
     game_psych_drones = (int32_t *)code_at(exe, 0x90e920);
     game_psych_superdrones = (int32_t *)code_at(exe, 0x90e94c);
     game_base_pacifism = (int32_t *)code_at(exe, 0x90e980);
+    game_base_forces_supported = (int32_t *)code_at(exe, 0x90e8fc);
+    game_base_forces_paid = (int32_t *)code_at(exe, 0x90ea08);
     game_radius_near_x = (int32_t *)code_at(exe, 0x66ef50);
     game_radius_near_y = (int32_t *)code_at(exe, 0x66ef74);
     game_radius_x = (int32_t *)code_at(exe, 0x66efbc);

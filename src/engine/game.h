@@ -66,7 +66,8 @@ enum {  // diplo_status bits
 enum { FUNGUS_NUTRIENT, FUNGUS_MINERALS, FUNGUS_ENERGY, FUNGUS_UNUSED, FUNGUS_COUNT };
 
 enum {  // region_base_plan values that tech_val() looks at
-    PLAN_OFFENSIVE = 0, PLAN_DEFENSIVE = 2, PLAN_RECON = 3, PLAN_NAVAL_TRANSPORT = 7,
+    PLAN_OFFENSIVE = 0, PLAN_COMBAT = 1, PLAN_DEFENSIVE = 2, PLAN_RECON = 3, PLAN_AIR_SUPERIORITY = 4,
+    PLAN_PLANET_BUSTER = 5, PLAN_NAVAL_TRANSPORT = 7, PLAN_SUPPLY = 10,
 };
 
 enum { REGION_COUNT = 128, LAND_REGION_COUNT = 64 };
@@ -108,12 +109,15 @@ struct faction_data {
     int32_t ai_fight, ai_growth, ai_tech, ai_wealth, ai_power;  // the AI's priorities
     GAME_PAD(0x3f0, 0x464);
     int32_t clean_minerals;  // minerals a base makes before ecological damage
-    GAME_PAD(0x468, 0x6b0);
+    GAME_PAD(0x468, 0x690);
+    // Units costing support at each SUPPORT from -4, added up for the AI.
+    int32_t social_support[8];
     // How content bases would be at each TALENT from -3 and POLICE from -5,
     // added up for the AI.
     int32_t social_psych[8][9];
     int32_t social_effic[9];  // energy lost this turn at each EFFICIENCY from 4 down, for the AI
-    GAME_PAD(0x7f4, 0x7fc);
+    int32_t unk_7f4;
+    int32_t armed_units;  // armed units, offensive ones twice, added up over the turn
     int32_t unk_7fc;  // tech_val() treats it as ecological damage
     int32_t nutrient_surplus_total, labs_total;
     int32_t satellites[4];  // orbital nutrient, mineral and energy satellites, and defense pods
@@ -149,7 +153,9 @@ GAME_AT(struct faction_data, sanction_turns, 0xc0);
 GAME_AT(struct faction_data, se_models_pending, 0x228);
 GAME_AT(struct faction_data, energy_surplus_total, 0x2fc);
 GAME_AT(struct faction_data, alloc_psych, 0x324);
+GAME_AT(struct faction_data, social_support, 0x690);
 GAME_AT(struct faction_data, social_psych, 0x6b0);
+GAME_AT(struct faction_data, armed_units, 0x7f8);
 GAME_AT(struct faction_data, social_effic, 0x7d0);
 GAME_AT(struct faction_data, base_count, 0x105c);
 GAME_AT(struct faction_data, best_weapon_value, 0x818);
@@ -447,7 +453,12 @@ GAME_AT(struct rules_basic, tech_mining_platform_bonus, 0xa4);
 
 enum { RULE_FLAG_WORM_POLICE = 0x40, RULE_FLAG_ALIEN = 0x80, RULE_FLAG_AQUATIC = 0x100 };  // faction_def.rule_flags
 enum { ECONOMICS_FREE_MARKET = 1, ECONOMICS_PLANNED = 2 };  // faction_data.se_models_pending[1]
-enum { ABILITY_POLICE_2X = 0x400000 };  // unit_proto.abilities
+enum { ABILITY_CLEAN_REACTOR = 0x10000, ABILITY_POLICE_2X = 0x400000 };  // unit_proto.abilities
+enum { ORDER_CONVOY = 3 };
+enum {  // veh.state bits base_support() sets
+    VEH_STATE_SUPPORTED = 0x10,         // costs its base minerals
+    VEH_STATE_PACIFISM_DRONE = 0x200000, VEH_STATE_PACIFISM_FREE = 0x400000,
+};
 
 // A kind of specialist (Thinker's CCitizen), from alphax.txt.
 struct citizen {
@@ -474,13 +485,17 @@ struct veh {
     int16_t proto;
     int16_t unk_c;
     uint8_t faction;
-    GAME_PAD(0x0f, 0x27);
+    GAME_PAD(0x0f, 0x11);
+    uint8_t order;  // ORDER_*
+    GAME_PAD(0x12, 0x26);
+    uint8_t order_auto_type;  // for a convoy, the RESOURCE_* it carries
     uint8_t visibility;  // bit per other faction that can see it
     GAME_PAD(0x28, 0x2e);
     int16_t home_base;
     int16_t next_in_stack, prev_in_stack;  // -1 at the ends
 };
 _Static_assert(sizeof(struct veh) == 0x34, "veh size");
+GAME_AT(struct veh, order, 0x11);
 GAME_AT(struct veh, visibility, 0x27);
 GAME_AT(struct veh, home_base, 0x2e);
 
@@ -614,6 +629,8 @@ enum { PROPOSAL_GLOBAL_TRADE_PACT = 3, PROPOSAL_REPEAL_GLOBAL_TRADE_PACT = 4 };
 // anything, psych energy, facilities, police, projects.
 extern int32_t *game_psych_talents, *game_psych_drones, *game_psych_superdrones;  // [5]
 extern int32_t *game_base_pacifism;  // military units away from home, as POLICE counts them
+// Units the current base supports, and how many of them cost minerals.
+extern int32_t *game_base_forces_supported, *game_base_forces_paid;
 // The base-compute globals from game_base_convoy_from to game_current_base.
 enum { BASE_GLOBALS_START = 0x90e8fc, BASE_GLOBALS_END = 0x90ea38 };
 extern uint8_t *game_base_globals;

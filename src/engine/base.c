@@ -318,6 +318,84 @@ static inline int holds_project(int project, int faction) {
     return b >= 0 && game_bases[b].faction == faction;
 }
 
+// The current base's units: what its supply convoys bring in or carry out,
+// the minerals its units cost beyond those SUPPORT keeps free, and its
+// armed units away from home, which make drones under a low POLICE.
+void base_support(void) {
+    struct base *b = *game_current_base;
+    int faction = b->faction, id = *game_current_base_id;
+    struct faction_data *f = &game_factions[faction];
+    for (int i = 0; i < RESOURCE_COUNT; i++) game_base_convoy_to[i] = game_base_convoy_from[i] = 0;
+    *game_base_pacifism = *game_base_forces_paid = *game_base_forces_supported = *game_base_forces_upkeep = 0;
+    // Units supported free at each SUPPORT from -4 to 3.
+    int free_units[8];
+    for (int s = -4; s <= 3; s++)
+        free_units[s + 4] = s >= 3 ? (b->pop_size > 4 ? b->pop_size : 4) : s < -2 ? 0 : s == -2 ? 1 : s + 2;
+    for (int v = 0; v < *game_veh_count; v++) {
+        struct veh *veh = &game_vehs[v];
+        if (veh->faction != faction) continue;
+        int proto = veh->proto;
+        const struct unit_proto *u = &game_protos[proto];
+        const struct map_tile *t = tile(veh->x, veh->y);
+        if (veh->home_base != id) {
+            // Another base's convoy, standing here, brings in 1.
+            if (u->plan == PLAN_SUPPLY && veh->x == b->x && veh->y == b->y && veh->order == ORDER_CONVOY &&
+                veh->home_base >= 0)
+                game_base_convoy_to[veh->order_auto_type]++;
+            continue;
+        }
+        // This base's convoys bring in what their square yields, or, at
+        // a base, carry 1 away.
+        if (u->plan == PLAN_SUPPLY && !is_base_square(t) && veh->order == ORDER_CONVOY) {
+            int type = veh->order_auto_type, value = 0;
+            if (type == RESOURCE_NUTRIENT) value = crop_yield(faction, id, veh->x, veh->y, 0);
+            else if (type == RESOURCE_MINERAL) value = mine_yield(faction, id, veh->x, veh->y, 0);
+            else if (type == RESOURCE_ENERGY) value = energy_yield(faction, id, veh->x, veh->y, 0);
+            else if (type == RESOURCE_UNUSED) *game_terraform_reduce = 0;
+            if (type <= RESOURCE_UNUSED) game_base_convoy_to[type] += value;
+        }
+        int offense = game_weapons[u->weapon].offense;
+        if (offense && (offense > 0 || proto >= 64) && u->plan != PLAN_RECON && u->plan != PLAN_PLANET_BUSTER)
+            f->armed_units += u->plan == PLAN_OFFENSIVE || u->plan == PLAN_COMBAT ? 2 : 1;
+        veh->state &= ~(uint32_t)(VEH_STATE_SUPPORTED | VEH_STATE_PACIFISM_DRONE | VEH_STATE_PACIFISM_FREE);
+        if (u->plan == PLAN_SUPPLY && veh->order == ORDER_CONVOY && is_base_square(t))
+            game_base_convoy_from[veh->order_auto_type]++;
+        if (u->plan >= PLAN_SUPPLY) continue;  // convoys and the plans after them cost nothing
+
+        // Clean reactors cost nothing; nor do native psi units (and id 15)
+        // on fungus above the deep ocean, though the AI's tally still sees
+        // them.
+        if (!game_has_abil(proto, ABILITY_CLEAN_REACTOR)) {
+            int native = proto < 64 && (offense < 0 || proto == 15) && (t->bits & MAP_FUNGUS) && alt_of(t) >= 2;
+            int support = f->se_pending[SE_SUPPORT];
+            if (!native && ++*game_base_forces_supported > free_units[game_range(support + 4, 0, 7)]) {
+                veh->state |= VEH_STATE_SUPPORTED;
+                ++*game_base_forces_paid;
+                *game_base_forces_upkeep += support <= -4 ? 2 : 1;
+            }
+            // What the units would cost at each SUPPORT, weighed against
+            // the base's minerals.
+            if (*game_base_upkeep_state == 1)
+                for (int s = -4; s <= 3; s++)
+                    if (*game_base_forces_supported > free_units[s + 4]) {
+                        int cost = s <= -4 ? 2 : 1, half = b->intake_2[RESOURCE_MINERAL] / 2;
+                        if (cost >= b->intake_2[RESOURCE_MINERAL]) cost += 2 * (cost - half);
+                        else if (cost > half) cost = 2 * cost - half;
+                        f->social_support[s + 4] += cost;
+                    }
+        }
+        // Away: outside the faction's territory, or an aircraft that isn't
+        // an interceptor.
+        if (offense && ((!is_base_square(t) && whose_territory(faction, veh->x, veh->y, NULL, 0) != faction) ||
+                        (game_chassis[u->chassis].triad == TRIAD_AIR && u->plan != PLAN_AIR_SUPERIORITY))) {
+            ++*game_base_pacifism;
+            int police = f->se_pending[SE_POLICE] + 2 * has_facility(id, FAC_BROOD_PIT);
+            if (police == -3) veh->state |= *game_base_pacifism == 1 ? VEH_STATE_PACIFISM_FREE : VEH_STATE_PACIFISM_DRONE;
+            else if (police < -3) veh->state |= VEH_STATE_PACIFISM_DRONE;
+        }
+    }
+}
+
 void base_nutrient(void) {
     struct base *b = *game_current_base;
     int faction = b->faction;
@@ -829,6 +907,8 @@ SHADOW3(BASE, int, has_fac, int, int, int)
     WRITES(*game_current_base, sizeof(struct base));                           \
         WRITES(game_base_globals, BASE_GLOBALS_END - BASE_GLOBALS_START);      \
         WRITES(&game_factions[(*game_current_base)->faction], sizeof(struct faction_data))
+#define WRITES_SUPPORT WRITES_CURRENT; WRITES(game_vehs, *game_veh_count * sizeof(struct veh))
+SHADOW_WRITER(BASE, void, base_support, (void), (), WRITES_SUPPORT, "%s", "")
 SHADOW_WRITER(BASE, void, base_nutrient, (void), (), WRITES_CURRENT, "%s", "")
 SHADOW_WRITER(BASE, void, base_minerals, (void), (), WRITES_CURRENT, "%s", "")
 SHADOW_WRITER(BASE, int, black_market, (int a), (a), WRITES_CURRENT, "%d", a)
@@ -892,6 +972,7 @@ static void sweep_bases(void) {
         struct base *base = &game_bases[b], saved = *base;
         *game_current_base = base;
         *game_current_base_id = b;
+        check_base_support();
         check_base_nutrient();
         check_base_minerals();
         check_base_energy();
@@ -911,6 +992,7 @@ static void sweep_bases(void) {
         base->specialist_types[0] = (uint32_t)(b * 0x9e3779b9u + slice);
         f->alloc_psych = (b + slice) % 4;
         f->alloc_labs = (b * 3 + slice) % (11 - f->alloc_psych);
+        check_base_support();
         check_base_energy();
         check_base_psych();
         *game_base_upkeep_state = upkeep_state;
@@ -943,6 +1025,7 @@ static const struct hook base_hooks[] = {
     HOOK(0x4e7750, energy_yield, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x18),                  // sub esp, 24
     HOOK(0x4e7dc0, resource_yield, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                // mov eax, [ebp+8]
     HOOK(0x421670, has_fac, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x56, 0x57),                       // push ecx; push esi; push edi
+    HOOK(0x4e9550, base_support, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x3c),                  // sub esp, 60
     HOOK(0x4e9b70, base_nutrient, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),                 // sub esp, 8
     HOOK(0x4e9cb0, base_minerals, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10),                 // sub esp, 16
     HOOK(0x4ea1f0, black_market, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x1c),                  // sub esp, 28

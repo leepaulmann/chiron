@@ -16,6 +16,8 @@ int resource_yield(int type, int faction, int base, int x, int y);
 // Whether the base has the facility, or has it among the first `queue`
 // items of its production queue.
 int has_fac(int facility, int base, int queue);
+// The current base's supply convoys, unit upkeep and units away from home.
+void base_support(void);
 // The current base's nutrients and growth rating, and its minerals and
 // ecological damage, from the intake base_yield() found.
 void base_nutrient(void);

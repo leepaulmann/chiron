@@ -57,8 +57,8 @@ static void put(int x, int y, int alt, int rain, int rocky, uint32_t bits) {
 
 static int best_specialist_stub(void) { return 2; }
 // One unit can stand on base 1's square, as veh 0.
-static struct veh vehs[1];
-static struct unit_proto protos[2];
+static struct veh vehs[6];
+static struct unit_proto protos[3];
 static struct rules_weapon weapons[2];
 static struct rules_chassis chassis[2];
 static int unit_here;
@@ -341,6 +341,9 @@ int main(void) {
     game_psych_talents = talents, game_psych_drones = drones, game_psych_superdrones = superdrones;
     game_base_pacifism = &pacifism;
     game_vehs = vehs, game_protos = protos, game_weapons = weapons, game_chassis = chassis;
+    int32_t veh_count = 1, supported = 0, paid = 0;
+    game_veh_count = &veh_count, game_base_forces_supported = &supported, game_base_forces_paid = &paid;
+    vehs[0].faction = 7;
     game_veh_at = veh_at_stub, game_stack_fix = stack_fix_stub, game_has_abil = has_abil_stub;
     vehs[0].next_in_stack = -1;
     for (int i = 0; i < CITIZEN_KINDS; i++) citizens[i].preq_tech = citizens[i].obsol_tech = TECH_DISABLED;
@@ -591,6 +594,72 @@ int main(void) {
     EXPECT(factions[1].social_psych[3][5], -14);
     EXPECT(factions[1].social_psych[7][5], 1);
     EXPECT(b1->drone_total, 2);
+
+    // Support: three armed units at base 1, two free at SUPPORT 0, so the
+    // third costs a mineral; all three cost 2 at SUPPORT -4.
+    upkeep_state = 0;
+    put(6, 4, 3, 1, 0, MAP_BASE);
+    at(6, 4)->owner_site = 1, at(6, 4)->territory = 1;
+    weapons[1].offense = 1;
+    protos[1].weapon = 1, protos[1].plan = PLAN_OFFENSIVE;
+    protos[2].plan = PLAN_SUPPLY;
+    for (int v = 1; v <= 3; v++) vehs[v].x = 6, vehs[v].y = 4, vehs[v].faction = 1, vehs[v].home_base = 1, vehs[v].proto = 1;
+    veh_count = 4;
+    factions[1].armed_units = 0;
+    base_support();
+    EXPECT(supported, 3);
+    EXPECT(paid, 1);
+    EXPECT(upkeep, 1);
+    EXPECT(vehs[2].state & VEH_STATE_SUPPORTED, 0);
+    EXPECT(vehs[3].state & VEH_STATE_SUPPORTED, VEH_STATE_SUPPORTED);
+    EXPECT(factions[1].armed_units, 6);  // offensive units count twice
+    factions[1].se_pending[SE_SUPPORT] = -4;
+    base_support();
+    EXPECT(paid, 3);
+    EXPECT(upkeep, 6);
+    factions[1].se_pending[SE_SUPPORT] = 0;
+    // At the end of a turn, the cost at each SUPPORT.
+    upkeep_state = 1;
+    b1->intake_2[RESOURCE_MINERAL] = 10;
+    memset(factions[1].social_support, 0, sizeof(factions[1].social_support));
+    base_support();
+    EXPECT(factions[1].social_support[0], 6);
+    EXPECT(factions[1].social_support[4], 1);
+    EXPECT(factions[1].social_support[7], 0);
+    // With few minerals a cost weighs more: 1 against 1 mineral counts 3.
+    b1->intake_2[RESOURCE_MINERAL] = 1;
+    memset(factions[1].social_support, 0, sizeof(factions[1].social_support));
+    base_support();
+    EXPECT(factions[1].social_support[4], 3);
+    upkeep_state = 0;
+    // Two units outside the faction's territory: at POLICE -3 the first is
+    // let off, the second makes a drone.
+    at(0, 0)->territory = -1;
+    vehs[2].x = vehs[3].x = 0, vehs[2].y = vehs[3].y = 0;
+    factions[1].se_pending[SE_POLICE] = -3;
+    base_support();
+    EXPECT(pacifism, 2);
+    EXPECT(vehs[2].state & (VEH_STATE_PACIFISM_FREE | VEH_STATE_PACIFISM_DRONE), VEH_STATE_PACIFISM_FREE);
+    EXPECT(vehs[3].state & (VEH_STATE_PACIFISM_FREE | VEH_STATE_PACIFISM_DRONE), VEH_STATE_PACIFISM_DRONE);
+    factions[1].se_pending[SE_POLICE] = 0;
+    base_support();
+    EXPECT(vehs[3].state & VEH_STATE_PACIFISM_DRONE, 0);
+    // Convoys: this base's brings in its square's nutrients; another
+    // base's, standing here, brings in 1.
+    vehs[4] = (struct veh){.x = 4, .y = 2, .faction = 1, .home_base = 1, .proto = 2, .order = ORDER_CONVOY,
+                           .order_auto_type = RESOURCE_NUTRIENT, .next_in_stack = -1};
+    vehs[5] = (struct veh){.x = 6, .y = 4, .faction = 1, .home_base = 0, .proto = 2, .order = ORDER_CONVOY,
+                           .order_auto_type = RESOURCE_ENERGY, .next_in_stack = -1};
+    veh_count = 6;
+    base_support();
+    EXPECT(to[RESOURCE_NUTRIENT], crop_yield(1, 1, 4, 2, 0));
+    EXPECT(to[RESOURCE_ENERGY], 1);
+    EXPECT(from[RESOURCE_NUTRIENT], 0);
+    vehs[4].x = 6, vehs[4].y = 4;
+    base_support();
+    EXPECT(to[RESOURCE_NUTRIENT], 0);
+    EXPECT(from[RESOURCE_NUTRIENT], 1);
+    veh_count = 1;
 
     if (failures) return 1;
     printf("engine_base: all tests passed\n");
