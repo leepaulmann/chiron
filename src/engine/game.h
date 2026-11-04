@@ -213,16 +213,72 @@ struct rules_facility {
 };
 _Static_assert(sizeof(struct rules_facility) == 0x30, "rules_facility size");
 
+// A region: a continent, an island or a body of water.
 struct continent {
     int32_t tile_count;
-    GAME_PAD(0x04, 0x1c);
+    GAME_PAD(0x04, 0x14);
+    uint8_t sea_coasts[8];  // bit per land region its shore touches
 };
 _Static_assert(sizeof(struct continent) == 0x1c, "continent size");
 
 enum {  // game_rules bits
     RULES_TECH_STAGNATION = 0x20,
     RULES_BLIND_RESEARCH = 0x200,
+    RULES_NO_UNITY_SCATTERING = 0x2000,
 };
+
+enum { FACTION_FLAG_MAP_REVEALED = 0x200 };  // faction_data.flags
+
+// ---- The map -------------------------------------------------------------------
+
+// Squares are stored for x + y even only, so a row holds width / 2 of them.
+struct map_tile {
+    uint8_t climate;     // altitude << 5 | rainfall << 3 | temperature
+    uint8_t contour;     // detailed altitude
+    uint8_t owner_site;  // site << 4 | the faction with a unit or base here (0xf for none)
+    uint8_t region;
+    uint8_t visibility;  // bit per faction that has seen the square
+    uint8_t rocky_lock;  // rockiness << 6 | locking faction << 3 | using faction
+    uint8_t unk_6;
+    int8_t territory;    // owning faction, or -1
+    uint32_t bits;       // MAP_* below
+    uint32_t bits2;      // landmark sequence << 24 | MAP2_* landmarks
+    uint32_t bits_seen[7];  // what each faction last saw of `bits`
+};
+_Static_assert(sizeof(struct map_tile) == 0x2c, "map_tile size");
+
+enum {  // map_tile.bits
+    MAP_BASE = 0x1, MAP_UNIT = 0x2, MAP_RESOURCE = 0x400, MAP_MONOLITH = 0x2000,
+    MAP_ENERGY_RESOURCE = 0x10000, MAP_MINERAL_RESOURCE = 0x20000, MAP_POD_TAKEN = 0x100000,
+    MAP_UNITY_POD = 0xc000000,  // either bit, without unity scattering
+    MAP_SUPPLY_POD = 0x10000000, MAP_NUTRIENT_RESOURCE = 0x20000000,
+};
+enum { MAP2_LANDMARK_CODE = 0xff000000 };  // map_tile.bits2
+
+enum {  // map_tile.climate >> 5
+    ALT_SHORE_LINE = 3,  // the lowest land
+};
+
+enum { LANDMARK_COUNT = 64 };
+
+struct landmark {
+    int32_t x, y;
+    char name[32];
+};
+_Static_assert(sizeof(struct landmark) == 0x28, "landmark size");
+
+// ---- Bases ---------------------------------------------------------------------
+
+enum { BASE_COUNT = 512 };
+
+struct base {
+    int16_t x, y;
+    uint8_t faction;
+    GAME_PAD(0x05, 0x134);
+};
+_Static_assert(sizeof(struct base) == 0x134, "base size");
+
+enum { RADIUS_SQUARES = 289 };
 
 // ---- The game's data ----------------------------------------------------------
 
@@ -251,6 +307,28 @@ extern int32_t *game_parse_gender, *game_parse_plural;  // grammar for the next 
 extern char ***game_labels;                   // the strings of labels.txt
 extern void *game_strings;                    // the string table
 extern char *game_tech_name_buffer;           // what tech_name() returns
+
+extern struct map_tile **game_map;            // the squares, row by row
+extern int32_t *game_map_width, *game_map_height;
+extern int32_t *game_map_half_width;          // squares in a row
+extern uint32_t *game_map_flat;               // bit 0: the map doesn't wrap east to west
+extern int32_t *game_map_seed;                // places resources and pods
+extern int32_t *game_sea_level;
+extern int32_t *game_elev_detail;             // [11] contour where each altitude starts, for elevation
+extern int32_t *game_alt_natural;             // [11] contour above sea level where each altitude starts
+extern int32_t *game_goody_mult;              // [2] how pods are spread
+extern uint8_t **game_abstract_map;           // the coarse map the AI plans on
+extern int32_t *game_abstract_width, *game_abstract_height;
+extern int32_t *game_landmark_count;
+extern struct landmark *game_landmarks;       // [LANDMARK_COUNT]
+extern struct base *game_bases;               // [BASE_COUNT]
+extern int32_t *game_base_count;
+// Square offsets: the 8 neighbours clockwise from north-east, then the
+// square itself; and every square within each radius, nearest first, with
+// game_radius_count[r] the number within radius r.
+extern int32_t *game_radius_near_x, *game_radius_near_y;  // [9]
+extern int32_t *game_radius_x, *game_radius_y;            // [RADIUS_SQUARES]
+extern int32_t *game_radius_count;                        // [9]
 
 // Game functions the reimplementations call.
 extern char *(__attribute__((thiscall)) * game_strings_get)(void *table, char *s);

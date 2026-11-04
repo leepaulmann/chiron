@@ -28,6 +28,18 @@ char ***game_labels;
 void *game_strings;
 char *game_tech_name_buffer;
 
+struct map_tile **game_map;
+int32_t *game_map_width, *game_map_height, *game_map_half_width;
+uint32_t *game_map_flat;
+int32_t *game_map_seed, *game_sea_level, *game_elev_detail, *game_alt_natural, *game_goody_mult;
+uint8_t **game_abstract_map;
+int32_t *game_abstract_width, *game_abstract_height;
+int32_t *game_landmark_count;
+struct landmark *game_landmarks;
+struct base *game_bases;
+int32_t *game_base_count;
+int32_t *game_radius_near_x, *game_radius_near_y, *game_radius_x, *game_radius_y, *game_radius_count;
+
 char *(__attribute__((thiscall)) * game_strings_get)(void *table, char *s);
 int (*game_climactic_battle)(void);
 int (*game_weapon_budget)(int faction, int condition, int check_mode);
@@ -60,6 +72,29 @@ void game_bind(struct pe_image *exe) {
     game_labels = (char ***)code_at(exe, 0x9b90f8);
     game_strings = code_at(exe, 0x9b90d8);
     game_tech_name_buffer = (char *)code_at(exe, 0x945e80);
+
+    game_map = (struct map_tile **)code_at(exe, 0x94a30c);
+    game_map_width = (int32_t *)code_at(exe, 0x949870);
+    game_map_height = (int32_t *)code_at(exe, 0x949874);
+    game_map_half_width = (int32_t *)code_at(exe, 0x68faf0);
+    game_map_flat = (uint32_t *)code_at(exe, 0x94988c);
+    game_map_seed = (int32_t *)code_at(exe, 0x949878);
+    game_sea_level = (int32_t *)code_at(exe, 0x94987c);
+    game_elev_detail = (int32_t *)code_at(exe, 0x68fb20);
+    game_alt_natural = (int32_t *)code_at(exe, 0x68fb4c);
+    game_goody_mult = (int32_t *)code_at(exe, 0x68fb78);
+    game_abstract_map = (uint8_t **)code_at(exe, 0x94a310);
+    game_abstract_width = (int32_t *)code_at(exe, 0x94a294);
+    game_abstract_height = (int32_t *)code_at(exe, 0x94a298);
+    game_landmark_count = (int32_t *)code_at(exe, 0x949890);
+    game_landmarks = (struct landmark *)code_at(exe, 0x949894);
+    game_bases = (struct base *)code_at(exe, 0x97d040);
+    game_base_count = (int32_t *)code_at(exe, 0x9a64cc);
+    game_radius_near_x = (int32_t *)code_at(exe, 0x66ef50);
+    game_radius_near_y = (int32_t *)code_at(exe, 0x66ef74);
+    game_radius_x = (int32_t *)code_at(exe, 0x66efbc);
+    game_radius_y = (int32_t *)code_at(exe, 0x66f440);
+    game_radius_count = (int32_t *)code_at(exe, 0x66f8c4);
 
     game_strings_get = (void *)code_at(exe, 0x6169a0);
     game_climactic_battle = (void *)code_at(exe, 0x539e40);

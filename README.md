@@ -96,9 +96,14 @@ CHIRON_SOAK=ai CHIRON_SCRIPT="30 click 835 362; 40 every 1 key Return" ./build/c
 ## Reimplemented code
 
 Chiron replaces the game's own functions with open reimplementations, one
-module at a time. So far: the technology module (whether a faction has or
-can research a tech, tech levels, categories and prerequisites, tech names,
-research cost, the AI's valuation of techs, and the bonuses techs give).
+module at a time. So far:
+
+- technology: whether a faction has or can research a tech, tech levels,
+  categories and prerequisites, tech names, research cost, the AI's
+  valuation of techs, and the bonuses techs give;
+- map queries: coordinates and distances, what a square holds (altitude,
+  region, units and bases, resources, pods, elevation), zones of control,
+  landmarks, and how bases, coasts and seas connect.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once

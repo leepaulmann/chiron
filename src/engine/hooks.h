@@ -19,7 +19,6 @@ enum hook_mode { HOOKS_OFF, HOOKS_ON, HOOKS_SHADOW };
 struct hook_stats {
     const char *name;
     unsigned long long calls, mismatches;
-    unsigned sweeps;  // shadow mode: full input sweeps run
 };
 
 struct hook {
@@ -29,6 +28,19 @@ struct hook {
     void *ours, *shadow;
     void **original;  // receives the trampoline to the original
     struct hook_stats *stats;
+};
+
+// A module: its hooks, and in shadow mode a sweep that checks every one of
+// its functions over their whole input range on the current game state.
+struct hook_module {
+    const char *name;
+    const struct hook *hooks;
+    int count;
+    void (*sweep)(void);
+    // Shadow mode bookkeeping.
+    int32_t last_turn;
+    unsigned sweeps;
+    double sweep_ms_total, sweep_ms_max;
 };
 
 extern enum hook_mode hooks_mode;
@@ -43,10 +55,9 @@ enum hook_mode hooks_mode_from_env(void);
 // Install every module's hooks for a recognised terranx.exe.
 void hooks_apply(struct pe_image *exe, enum hook_mode mode);
 
-// Shadow mode: called on entry to every shadowed function. Once per game
-// turn it sweeps every module's functions over their whole input range,
-// comparing with the originals on the current game state.
-void hooks_shadow_tick(void);
+// Shadow mode: called on entry to a shadowed function. The first call of
+// each game turn runs the module's sweep.
+void hooks_shadow_tick(struct hook_module *m);
 
 // Shadow mode: record a mismatch; the first few are printed.
 void hooks_mismatch(struct hook_stats *s, const char *fmt, ...) __attribute__((format(printf, 2, 3)));

@@ -9,7 +9,7 @@
 #include <string.h>
 
 #include "game.h"
-#include "hooks.h"
+#include "shadow.h"
 
 static const struct rules_tech *tech_entry(uint32_t tech) { return &game_tech[tech]; }
 
@@ -359,68 +359,21 @@ int tech_val(int tech, int faction, int simple) {
 
 // ---- Hooks and shadow checks ------------------------------------------------
 
-// For each function: a pointer to the original, its statistics, a check that
-// runs both and compares, and the shadow entry point the game calls.
-#define SHADOW_ENTRY(name, params, call_args)                \
-    static int shadow_##name params {                        \
-        if (hooks_nested) return orig_##name call_args;      \
-        stats_##name.calls++;                                \
-        hooks_shadow_tick();                                 \
-        return check_##name call_args;                       \
-    }
+extern struct hook_module tech_module;
+#define TECH (&tech_module)
 
-#define DECLARE(name, params)                       \
-    static int (*orig_##name) params;               \
-    static struct hook_stats stats_##name = {#name};
-
-#define SHADOW1(name, t1)                                       \
-    DECLARE(name, (t1))                                         \
-    static int check_##name(t1 a) {                             \
-        hooks_nested++;                                         \
-        int want = orig_##name(a);                              \
-        hooks_nested--;                                         \
-        int got = name(a);                                      \
-        if (got != want) hooks_mismatch(&stats_##name, "(%d) = %d, original %d", (int)a, got, want); \
-        return want;                                            \
-    }                                                           \
-    SHADOW_ENTRY(name, (t1 a), (a))
-
-#define SHADOW2(name, t1, t2)                                   \
-    DECLARE(name, (t1, t2))                                     \
-    static int check_##name(t1 a, t2 b) {                       \
-        hooks_nested++;                                         \
-        int want = orig_##name(a, b);                           \
-        hooks_nested--;                                         \
-        int got = name(a, b);                                   \
-        if (got != want) hooks_mismatch(&stats_##name, "(%d, %d) = %d, original %d", (int)a, (int)b, got, want); \
-        return want;                                            \
-    }                                                           \
-    SHADOW_ENTRY(name, (t1 a, t2 b), (a, b))
-
-#define SHADOW3(name, t1, t2, t3)                               \
-    DECLARE(name, (t1, t2, t3))                                 \
-    static int check_##name(t1 a, t2 b, t3 c) {                 \
-        hooks_nested++;                                         \
-        int want = orig_##name(a, b, c);                        \
-        hooks_nested--;                                         \
-        int got = name(a, b, c);                                \
-        if (got != want) hooks_mismatch(&stats_##name, "(%d, %d, %d) = %d, original %d", (int)a, (int)b, (int)c, got, want); \
-        return want;                                            \
-    }                                                           \
-    SHADOW_ENTRY(name, (t1 a, t2 b, t3 c), (a, b, c))
-
-SHADOW2(has_tech, int, int)
-SHADOW2(tech_recurse, int, int)
-SHADOW1(tech_category, uint32_t)
-SHADOW2(tech_avail, uint32_t, int)
-SHADOW3(tech_is_preq, int, int, uint32_t)
-SHADOW1(tech_mil, int)
-SHADOW1(tech_tech, int)
-SHADOW1(tech_infra, int)
-SHADOW1(tech_colonize, int)
-SHADOW2(valid_tech_leap, int, int)
-SHADOW1(tech_rate, int)
-SHADOW3(tech_val, int, int, int)
+SHADOW2(TECH, int, has_tech, int, int)
+SHADOW2(TECH, int, tech_recurse, int, int)
+SHADOW1(TECH, int, tech_category, uint32_t)
+SHADOW2(TECH, int, tech_avail, uint32_t, int)
+SHADOW3(TECH, int, tech_is_preq, int, int, uint32_t)
+SHADOW1(TECH, int, tech_mil, int)
+SHADOW1(TECH, int, tech_tech, int)
+SHADOW1(TECH, int, tech_infra, int)
+SHADOW1(TECH, int, tech_colonize, int)
+SHADOW2(TECH, int, valid_tech_leap, int, int)
+SHADOW1(TECH, int, tech_rate, int)
+SHADOW3(TECH, int, tech_val, int, int, int)
 
 // The functions below write instead of returning a value. Each check runs
 // the original on a copy of what it writes, runs ours on another, compares,
@@ -459,7 +412,7 @@ static void shadow_say_tech(char *out, int tech, int category) {
         return;
     }
     stats_say_tech.calls++;
-    hooks_shadow_tick();
+    hooks_shadow_tick(TECH);
     check_say_tech(out, tech, category);
 }
 
@@ -482,7 +435,7 @@ static char *check_tech_name(int tech, int category) {
 static char *shadow_tech_name(int tech, int category) {
     if (hooks_nested) return orig_tech_name(tech, category);
     stats_tech_name.calls++;
-    hooks_shadow_tick();
+    hooks_shadow_tick(TECH);
     return check_tech_name(tech, category);
 }
 
@@ -514,7 +467,7 @@ static void shadow_tech_effects(int faction) {
         return;
     }
     stats_tech_effects.calls++;
-    hooks_shadow_tick();
+    hooks_shadow_tick(TECH);
     check_tech_effects(faction);
 }
 
@@ -596,7 +549,7 @@ static void sweep_tech_effects(void) {
     for (int f = 0; f < FACTION_COUNT; f++) check_tech_effects(f);
 }
 
-void tech_sweep(void) {
+static void tech_sweep(void) {
     sweep_has_tech();
     sweep_tech_recurse();
     sweep_tech_category();
@@ -614,12 +567,8 @@ void tech_sweep(void) {
     sweep_tech_effects();
 }
 
-#define HOOK(addr, name, ...)                                                                   \
-    {addr, (const uint8_t[]){__VA_ARGS__}, sizeof((const uint8_t[]){__VA_ARGS__}), (void *)name, \
-     (void *)shadow_##name, (void **)&orig_##name, &stats_##name}
-
 // The first bytes of each original: whole instructions, no relative jumps.
-const struct hook tech_hooks[] = {
+static const struct hook tech_hooks[] = {
     HOOK(0x5b9f20, has_tech, 0x55, 0x8b, 0xec, 0x56, 0x57),                       // push ebp; mov ebp, esp; push esi; push edi
     HOOK(0x5b9f90, tech_recurse, 0x55, 0x8b, 0xec, 0x8b, 0x45, 0x08),             // ...; mov eax, [ebp+8]
     HOOK(0x5b9fe0, tech_category, 0x55, 0x8b, 0xec, 0x8b, 0x4d, 0x08),            // ...; mov ecx, [ebp+8]
@@ -636,4 +585,4 @@ const struct hook tech_hooks[] = {
     HOOK(0x5bcbe0, tech_val, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x20),                 // ...; sub esp, 0x20
     HOOK(0x5be6b0, tech_rate, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x10),                // ...; sub esp, 0x10
 };
-const int tech_hook_count = sizeof(tech_hooks) / sizeof(tech_hooks[0]);
+struct hook_module tech_module = {"technology", tech_hooks, HOOK_COUNT(tech_hooks), tech_sweep, -1};

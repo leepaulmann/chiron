@@ -1,7 +1,10 @@
 # Reimplemented game functions, tested on made-up data.
-add_executable(engine_tech engine_tech.c ${CMAKE_SOURCE_DIR}/src/engine/tech.c ${CMAKE_SOURCE_DIR}/src/engine/hooks.c
-               ${CMAKE_SOURCE_DIR}/src/engine/code.c ${CMAKE_SOURCE_DIR}/src/engine/game.c)
-add_test(NAME engine_tech COMMAND engine_tech)
+set(ENGINE_SOURCES ${CMAKE_SOURCE_DIR}/src/engine/tech.c ${CMAKE_SOURCE_DIR}/src/engine/map.c
+    ${CMAKE_SOURCE_DIR}/src/engine/hooks.c ${CMAKE_SOURCE_DIR}/src/engine/code.c ${CMAKE_SOURCE_DIR}/src/engine/game.c)
+foreach(name tech map)
+  add_executable(engine_${name} engine_${name}.c ${ENGINE_SOURCES})
+  add_test(NAME engine_${name} COMMAND engine_${name})
+endforeach()
 
 # Loader tests use a small Win32 program built with mingw, so they run without
 # any game files.

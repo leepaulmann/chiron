@@ -15,23 +15,11 @@
 enum hook_mode hooks_mode = HOOKS_OFF;
 int hooks_nested;
 
-// Each module lists its hooks.
-extern const struct hook tech_hooks[];
-extern const int tech_hook_count;
-void tech_sweep(void);
-
-static const struct {
-    const char *name;
-    const struct hook *hooks;
-    const int *count;
-    void (*sweep)(void);  // shadow mode: check every function over its inputs
-} modules[] = {
-    {"technology", tech_hooks, &tech_hook_count, tech_sweep},
-};
+// Each module defines its hooks and sweep.
+extern struct hook_module tech_module, map_module;
+static struct hook_module *const modules[] = {&tech_module, &map_module};
 
 #define N_MODULES (sizeof(modules) / sizeof(modules[0]))
-
-static double sweep_ms_total[N_MODULES], sweep_ms_max[N_MODULES];
 
 static double now_ms(void) {
     struct timespec ts;
@@ -72,8 +60,8 @@ void hooks_apply(struct pe_image *exe, enum hook_mode mode) {
     game_bind(exe);
     int installed = 0, total = 0;
     for (size_t m = 0; m < N_MODULES; m++)
-        for (int i = 0; i < *modules[m].count; i++) {
-            const struct hook *h = &modules[m].hooks[i];
+        for (int i = 0; i < modules[m]->count; i++) {
+            const struct hook *h = &modules[m]->hooks[i];
             total++;
             if (install(exe, h, mode) == 0) installed++;
             else fprintf(stderr, "chiron: %s (0x%x) not replaced: unexpected code\n", h->stats->name, h->addr);
@@ -87,18 +75,15 @@ void hooks_apply(struct pe_image *exe, enum hook_mode mode) {
     }
 }
 
-void hooks_shadow_tick(void) {
-    static int32_t last_turn = -1;
-    if (hooks_nested || *game_turn == last_turn) return;
-    last_turn = *game_turn;
-    for (size_t m = 0; m < N_MODULES; m++) {
-        for (int i = 0; i < *modules[m].count; i++) modules[m].hooks[i].stats->sweeps++;
-        double start = now_ms();
-        modules[m].sweep();
-        double ms = now_ms() - start;
-        sweep_ms_total[m] += ms;
-        if (ms > sweep_ms_max[m]) sweep_ms_max[m] = ms;
-    }
+void hooks_shadow_tick(struct hook_module *m) {
+    if (hooks_nested || *game_turn == m->last_turn) return;
+    m->last_turn = *game_turn;
+    m->sweeps++;
+    double start = now_ms();
+    m->sweep();
+    double ms = now_ms() - start;
+    m->sweep_ms_total += ms;
+    if (ms > m->sweep_ms_max) m->sweep_ms_max = ms;
 }
 
 void hooks_mismatch(struct hook_stats *s, const char *fmt, ...) {
@@ -117,14 +102,13 @@ void hooks_summary(void) {
     done = 1;
     fprintf(stderr, "chiron: shadow summary (function, calls from the game, mismatches, sweeps)\n");
     for (size_t m = 0; m < N_MODULES; m++) {
-        unsigned sweeps = 0;
-        for (int i = 0; i < *modules[m].count; i++) {
-            const struct hook_stats *s = modules[m].hooks[i].stats;
-            fprintf(stderr, "  %-16s %12llu %6llu %6u\n", s->name, s->calls, s->mismatches, s->sweeps);
-            sweeps = s->sweeps;
+        const struct hook_module *mod = modules[m];
+        for (int i = 0; i < mod->count; i++) {
+            const struct hook_stats *s = mod->hooks[i].stats;
+            fprintf(stderr, "  %-16s %12llu %6llu %6u\n", s->name, s->calls, s->mismatches, mod->sweeps);
         }
-        if (sweeps)
-            fprintf(stderr, "  (%s sweeps took %.1f ms on average, %.1f at most)\n", modules[m].name,
-                    sweep_ms_total[m] / sweeps, sweep_ms_max[m]);
+        if (mod->sweeps)
+            fprintf(stderr, "  (%s sweeps took %.1f ms on average, %.1f at most)\n", mod->name,
+                    mod->sweep_ms_total / mod->sweeps, mod->sweep_ms_max);
     }
 }
