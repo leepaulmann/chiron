@@ -16,6 +16,9 @@ int resource_yield(int type, int faction, int base, int x, int y);
 // Whether the base has the facility, or has it among the first `queue`
 // items of its production queue.
 int has_fac(int facility, int base, int queue);
+// The squares of the current base's radius it may not work, into
+// game_base_reserved.
+void farm_compute(void);
 // Places the current base's citizens on squares or as specialists, and
 // sets its intake and terraforming damage.
 void base_yield(void);

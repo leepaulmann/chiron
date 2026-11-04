@@ -354,6 +354,76 @@ static void work_square(struct base *b, int i, int sign) {
 
 static int popcount(uint32_t v) { return __builtin_popcount(v); }
 
+// Finds the squares of the current base's radius it may not work, with
+// the reasons in game_base_square_flags and the squares in
+// game_base_reserved. At the end of a turn, supply pods on land become
+// goals for the AI.
+void farm_compute(void) {
+    const struct base *b = *game_current_base;
+    int faction = b->faction;
+    const struct faction_data *f = &game_factions[faction];
+    int32_t *flags = game_base_square_flags;
+    for (int i = 0; i < 25; i++) {
+        int x, y;
+        if (i >= BASE_RADIUS_SQUARES) {
+            flags[i] = SQUARE_OUTSIDE;
+            continue;
+        }
+        if (!radius_square(b, i, &x, &y)) {
+            flags[i] = SQUARE_UNSEEN;
+            continue;
+        }
+        const struct map_tile *t = tile(x, y);
+        if (*game_base_upkeep_state == 1 && goody_at(x, y) && alt_of(t) >= ALT_SHORE_LINE) {
+            game_add_goal(faction, 3, 1, x, y, -1);
+            game_add_goal(faction, 2, 1, x, y, -1);
+            game_add_goal(faction, 0, 1, x, y, -1);
+        }
+        if (!(f->flags & FACTION_FLAG_MAP_REVEALED) && !(t->visibility & (1u << faction))) {
+            flags[i] = SQUARE_UNSEEN;
+            continue;
+        }
+        flags[i] = is_base_square(t) ? SQUARE_BASE : 0;
+        // Units: by stack_check()'s test, or any the faction can see of a
+        // faction it has neither pact nor treaty with.
+        int v = game_stack_fix(game_veh_at(x, y));
+        if (v >= 0) {
+            if (game_stack_check(v, 9, 3, -1, -1)) flags[i] |= SQUARE_HOSTILE;
+            while (game_vehs[v].prev_in_stack >= 0) v = game_vehs[v].prev_in_stack;
+            for (; v >= 0; v = game_vehs[v].next_in_stack) {
+                int owner = game_vehs[v].faction;
+                if (owner == faction || !(game_vehs[v].visibility & (1u << faction))) continue;
+                if (!(f->diplo_status[owner] & (TREATY_PACT | TREATY_TREATY))) flags[i] |= SQUARE_HOSTILE;
+            }
+        }
+        // The original also looks at the faction's pact or treaty with the
+        // owner, but both ways come out the same.
+        int owner = whose_territory(faction, x, y, NULL, 0);
+        if (owner >= 0 && owner != faction) flags[i] |= SQUARE_FOREIGN;
+    }
+    // Squares within 2 of the base that a base within 5 works: any of its
+    // own faction's, only ocean squares of another's.
+    for (int j = 0; j < *game_base_count; j++) {
+        const struct base *o = &game_bases[j];
+        if (j == *game_current_base_id || vector_dist(o->x, o->y, b->x, b->y) > 5) continue;
+        for (int k = 0; k < BASE_RADIUS_SQUARES; k++) {
+            int x, y;
+            if ((k && !(o->worked_tiles & (1u << k))) || !radius_square(o, k, &x, &y)) continue;
+            if (o->faction != faction && alt_of(tile(x, y)) >= ALT_SHORE_LINE) continue;
+            if (vector_dist(b->x, b->y, x, y) > 2) continue;
+            for (int m = 0; m < BASE_RADIUS_SQUARES; m++) {
+                int mx = b->x + game_radius_x[m], w = *game_map_width;
+                if (!(*game_map_flat & 1)) mx = mx < 0 ? mx + w : mx >= w ? mx - w : mx;
+                if (mx == x && b->y + game_radius_y[m] == y) flags[m] |= SQUARE_NEIGHBOUR;
+            }
+        }
+    }
+    uint32_t reserved = 0;
+    for (int i = 0; i < BASE_RADIUS_SQUARES; i++)
+        if (flags[i]) reserved |= 1u << i;
+    *game_base_reserved = (int32_t)reserved;
+}
+
 // How the square choice weighs each resource: the AI's priorities, a human
 // governor's, or none.
 struct priorities {
@@ -413,7 +483,7 @@ static int square_score(const struct base *b, const struct priorities *p, int x,
 // best free one. The rest become specialists. Then the intake, and the
 // damage the terraforming in the radius does.
 void base_yield(void) {
-    game_farm_compute();
+    farm_compute();
     struct base *b = *game_current_base;
     int faction = b->faction, id = *game_current_base_id;
     const struct faction_data *f = &game_factions[faction];
@@ -1150,6 +1220,7 @@ SHADOW3(BASE, int, has_fac, int, int, int)
 #define WRITES_SUPPORT WRITES_CURRENT; WRITES(game_vehs, *game_veh_count * sizeof(struct veh))
 SHADOW_WRITER(BASE, void, base_support, (void), (), WRITES_SUPPORT, "%s", "")
 SHADOW_WRITER(BASE, void, base_yield, (void), (), WRITES_CURRENT, "%s", "")
+SHADOW_WRITER(BASE, void, farm_compute, (void), (), WRITES_CURRENT, "%s", "")
 SHADOW_WRITER(BASE, void, base_nutrient, (void), (), WRITES_CURRENT, "%s", "")
 SHADOW_WRITER(BASE, void, base_minerals, (void), (), WRITES_CURRENT, "%s", "")
 SHADOW_WRITER(BASE, int, black_market, (int a), (a), WRITES_CURRENT, "%d", a)
@@ -1213,6 +1284,7 @@ static void sweep_bases(void) {
         struct base *base = &game_bases[b], saved = *base;
         *game_current_base = base;
         *game_current_base_id = b;
+        check_farm_compute();
         check_base_yield();
         check_base_support();
         check_base_nutrient();
@@ -1274,6 +1346,7 @@ static const struct hook base_hooks[] = {
     HOOK(0x4e7750, energy_yield, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x18),                  // sub esp, 24
     HOOK(0x4e7dc0, resource_yield, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                // mov eax, [ebp+8]
     HOOK(0x421670, has_fac, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x56, 0x57),                       // push ecx; push esi; push edi
+    HOOK(0x4e68b0, farm_compute, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x1c),                  // sub esp, 28
     HOOK(0x4e80b0, base_yield, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x58),                    // sub esp, 88
     HOOK(0x4e9550, base_support, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x3c),                  // sub esp, 60
     HOOK(0x4e9b70, base_nutrient, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),                 // sub esp, 8

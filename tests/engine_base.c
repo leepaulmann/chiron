@@ -56,9 +56,16 @@ static void put(int x, int y, int alt, int rain, int rocky, uint32_t bits) {
 }
 
 static int best_specialist_stub(void) { return 2; }
-static int32_t reserved;
-static int farm_calls;
-static void farm_compute_stub(void) { farm_calls++; }
+static int32_t reserved, square_flags[25];
+static int goals, hostile;
+static void add_goal_stub(int faction, int type, int priority, int x, int y, int base) {
+    (void)faction, (void)type, (void)priority, (void)x, (void)y, (void)base;
+    goals++;
+}
+static int stack_check_stub(int veh, int type, int c1, int c2, int c3) {
+    (void)veh, (void)type, (void)c1, (void)c2, (void)c3;
+    return hostile;
+}
 // A made-up radius table: the base square, the 8 around it, 12 more.
 static int32_t radius_x[21] = {0, 1, 2, 1, 0, -1, -2, -1, 0, 2, 3, 2, -2, -3, -2, 0, 4, 0, -4, 1, -1};
 static int32_t radius_y[21] = {0, -1, 0, 1, 2, 1, 0, -1, -2, -2, -1, 2, 2, 1, -2, 4, 0, -4, 0, 3, -3};
@@ -363,7 +370,7 @@ int main(void) {
     game_veh_count = &veh_count, game_base_forces_supported = &supported, game_base_forces_paid = &paid;
     vehs[0].faction = 7;
     game_veh_at = veh_at_stub, game_stack_fix = stack_fix_stub, game_has_abil = has_abil_stub;
-    vehs[0].next_in_stack = -1;
+    vehs[0].next_in_stack = vehs[0].prev_in_stack = -1;
     for (int i = 0; i < CITIZEN_KINDS; i++) citizens[i].preq_tech = citizens[i].obsol_tech = TECH_DISABLED;
     base_count = 3;
     struct base *b1 = &bases[1];
@@ -665,9 +672,9 @@ int main(void) {
     // Convoys: this base's brings in its square's nutrients; another
     // base's, standing here, brings in 1.
     vehs[4] = (struct veh){.x = 4, .y = 2, .faction = 1, .home_base = 1, .proto = 2, .order = ORDER_CONVOY,
-                           .order_auto_type = RESOURCE_NUTRIENT, .next_in_stack = -1};
+                           .order_auto_type = RESOURCE_NUTRIENT, .next_in_stack = -1, .prev_in_stack = -1};
     vehs[5] = (struct veh){.x = 6, .y = 4, .faction = 1, .home_base = 0, .proto = 2, .order = ORDER_CONVOY,
-                           .order_auto_type = RESOURCE_ENERGY, .next_in_stack = -1};
+                           .order_auto_type = RESOURCE_ENERGY, .next_in_stack = -1, .prev_in_stack = -1};
     veh_count = 6;
     base_support();
     EXPECT(to[RESOURCE_NUTRIENT], crop_yield(1, 1, 4, 2, 0));
@@ -684,7 +691,9 @@ int main(void) {
     // worked squares yield.
     int32_t workers = 0, food_ok = 0, turn = 1;
     game_base_workers = &workers, game_base_reserved = &reserved, game_base_food_ok = &food_ok;
-    game_current_turn = &turn, game_farm_compute = farm_compute_stub;
+    game_current_turn = &turn, game_base_square_flags = square_flags;
+    game_add_goal = add_goal_stub, game_stack_check = stack_check_stub;
+    factions[1].flags |= FACTION_FLAG_MAP_REVEALED;
     game_radius_x = radius_x, game_radius_y = radius_y;
     for (int x = 0; x < W; x++)
         for (int y = 0; y < H; y++)
@@ -694,7 +703,6 @@ int main(void) {
     b1->x = 6, b1->y = 4, b1->faction = 1, b1->pop_size = 3;
     current = b1, current_id = 1;
     base_yield();
-    EXPECT(farm_calls, 1);
     EXPECT(b1->worked_tiles & 1, 1);
     EXPECT(__builtin_popcount(b1->worked_tiles) + b1->specialist_total, 4);
     for (int r = 0; r < RESOURCE_UNUSED; r++) {
@@ -705,13 +713,33 @@ int main(void) {
     uint32_t chosen = b1->worked_tiles;
     base_yield();
     EXPECT(b1->worked_tiles, chosen);
-    // A square another base has taken is let go and not chosen.
+    // A square in another faction's territory is let go and not chosen.
     int taken = __builtin_ctz(chosen & ~1u);
-    reserved = 1 << taken;
+    struct map_tile *foreign = at((b1->x + radius_x[taken] + W) % W, b1->y + radius_y[taken]);
+    foreign->territory = 2;
+    factions[1].diplo_status[2] |= TREATY_COMMLINK | TREATY_UNK_8000000;  // known as faction 2's
     base_yield();
+    EXPECT(square_flags[taken], SQUARE_FOREIGN);
     EXPECT(b1->worked_tiles & (1u << taken), 0);
     EXPECT(__builtin_popcount(b1->worked_tiles) + b1->specialist_total, 4);
-    reserved = 0;
+    foreign->territory = -1;
+    factions[1].diplo_status[2] = 0;
+    // The other reasons: off the map, the base itself, past the radius, a
+    // nearby base working the square, units stack_check() objects to.
+    bases[0].worked_tiles = 1 << 2;  // (4, 2), radius entry 14 of base 1
+    hostile = 1, unit_here = 1;
+    farm_compute();
+    EXPECT(square_flags[15], SQUARE_UNSEEN);  // y 8
+    EXPECT(square_flags[0], SQUARE_BASE | SQUARE_HOSTILE);
+    EXPECT(square_flags[22], SQUARE_OUTSIDE);
+    EXPECT(square_flags[14], SQUARE_NEIGHBOUR);
+    EXPECT(reserved & (1 << 14 | 1 << 15 | 1), 1 << 14 | 1 << 15 | 1);
+    bases[0].worked_tiles = 0, hostile = 0, unit_here = 0;
+    // Unseen squares are kept from the base too.
+    factions[1].flags &= ~(uint32_t)FACTION_FLAG_MAP_REVEALED;
+    farm_compute();
+    EXPECT(reserved, (1 << 21) - 1);
+    factions[1].flags |= FACTION_FLAG_MAP_REVEALED;
     // Satellites add up to one a citizen, halved without an Aerospace
     // Complex.
     projects[SP_SPACE_ELEVATOR] = -1;
@@ -724,8 +752,8 @@ int main(void) {
     EXPECT(b1->intake[RESOURCE_MINERAL], 2 + worked_yield(1, RESOURCE_MINERAL));
     factions[1].satellites[RESOURCE_MINERAL] = 0;
     // Terraforming damage: a mine counts once, twice on a worked square.
-    // With every other square taken, only the base square is worked.
-    reserved = ~1;
+    // With every square unseen, only the base square is worked.
+    factions[1].flags &= ~(uint32_t)FACTION_FLAG_MAP_REVEALED;
     b1->worked_tiles = 1;
     base_yield();
     EXPECT(b1->worked_tiles, 1);
@@ -744,7 +772,7 @@ int main(void) {
     EXPECT(b1->eco_damage, damage + 3);
     at(6, 4)->bits &= ~(uint32_t)MAP_MINE;
     mined->bits = mined_bits;
-    reserved = 0;
+    factions[1].flags |= FACTION_FLAG_MAP_REVEALED;
     give(1, FAC_TREE_FARM);
     give(1, FAC_HYBRID_FOREST);
     base_yield();

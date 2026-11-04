@@ -73,7 +73,9 @@ int32_t *game_base_commerce_import, *game_base_commerce_export, *game_tech_comme
 struct citizen *game_citizens;
 int32_t *game_base_forces_supported, *game_base_forces_paid;
 int32_t *game_base_workers, *game_base_reserved, *game_base_food_ok, *game_current_turn;
-void (*game_farm_compute)(void);
+int32_t *game_base_square_flags;
+void (*game_add_goal)(int faction, int type, int priority, int x, int y, int base);
+int (*game_stack_check)(int veh, int type, int cond1, int cond2, int cond3);
 int32_t *game_psych_talents, *game_psych_drones, *game_psych_superdrones, *game_base_pacifism;
 
 char *(__attribute__((thiscall)) * game_strings_get)(void *table, char *s);
@@ -242,7 +244,9 @@ void game_bind(struct pe_image *exe) {
     game_base_reserved = (int32_t *)code_at(exe, 0x90ea00);
     game_base_food_ok = (int32_t *)code_at(exe, 0x90e900);
     game_current_turn = (int32_t *)code_at(exe, 0x9a64d4);
-    game_farm_compute = (void *)code_at(exe, 0x4e68b0);
+    game_base_square_flags = (int32_t *)code_at(exe, 0x90e99c);
+    game_add_goal = (void *)code_at(exe, 0x579a30);
+    game_stack_check = (void *)code_at(exe, 0x5b9580);
     game_radius_near_x = (int32_t *)code_at(exe, 0x66ef50);
     game_radius_near_y = (int32_t *)code_at(exe, 0x66ef74);
     game_radius_x = (int32_t *)code_at(exe, 0x66efbc);

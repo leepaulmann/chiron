@@ -639,6 +639,15 @@ extern int32_t *game_base_pacifism;  // military units away from home, as POLICE
 // taken (farm_compute() works them out), and whether a square was weighed
 // with food to spare.
 extern int32_t *game_base_workers, *game_base_reserved, *game_base_food_ok;
+// Why farm_compute() keeps each radius square from the base: SQUARE_*.
+extern int32_t *game_base_square_flags;  // [25]
+enum {
+    SQUARE_OUTSIDE = 0x1,   // past the base's 21 squares
+    SQUARE_UNSEEN = 0x2,    // off the map, or not yet seen by the faction
+    SQUARE_BASE = 0x4, SQUARE_HOSTILE = 0x8,
+    SQUARE_NEIGHBOUR = 0x10,  // worked by a nearby base
+    SQUARE_FOREIGN = 0x20,    // another faction's territory
+};
 extern int32_t *game_current_turn;
 // Units the current base supports, and how many of them cost minerals.
 extern int32_t *game_base_forces_supported, *game_base_forces_paid;
@@ -664,7 +673,8 @@ extern void (*game_random_reseed)(int seed);
 extern void (*game_do_all_non_input)(void);       // redraws and the message pump
 extern int (*game_best_specialist)(void);         // for the current base
 extern int (*game_has_abil)(int proto, uint32_t ability);
-extern void (*game_farm_compute)(void);  // fills game_base_reserved for the current base
+extern void (*game_add_goal)(int faction, int type, int priority, int x, int y, int base);
+extern int (*game_stack_check)(int veh, int type, int cond1, int cond2, int cond3);
 extern void(__attribute__((thiscall)) * game_path_continents)(void *path);  // finds the regions
 extern void (*game_draw_radius)(int x, int y, int radius, int unk);           // redraws squares
 extern int (*game_base_find2)(int x, int y, int faction);  // the nearest base of the faction, or -1
