@@ -151,6 +151,24 @@ static void help_stub(int project) {}
 static int reactor = 2, researched = -1;
 static int best_reactor_stub(int faction) { return reactor; }
 static void tech_research_stub(int faction, int labs) { researched = labs; }
+// A faction file: land names, then sea names; the shared list is empty.
+static const char *file_lines[2][4] = {{"Alpha", "Beta", "Gamma", ""}, {"Reef", "#END", "", ""}};
+static int file_section = -1, file_line;
+static char file_buffer[32], *file_ptr = file_buffer;
+static int text_open_stub(char *file, char *label) {
+    file_section = strcmp(file, "x") ? -1 : label[0] == 's' ? 1 : 0;
+    file_line = 0;
+    return file_section < 0;
+}
+static void text_get_stub(void) { strcpy(file_buffer, file_line < 4 ? file_lines[file_section][file_line++] : ""); }
+static char *text_item_stub(void) { return file_buffer; }
+static void text_close_stub(void) { file_section = -1; }
+static int can_terraform_value = 1, connects;
+static int can_terraform_stub(int faction, int x, int y, int unk, int base) { return can_terraform_value; }
+static void base_connect_stub(int level) { connects++; }
+static int terrain_avail_stub(int terraform, int sea, int faction) { return 0; }
+static int abil_index_stub(uint32_t flag) { return 0; }
+static int base_find_stub(int x, int y) { return 1; }
 static int rand_value, rand_calls, replays, spotted, proposed, centred, territory;
 static int rand_stub(void) { return rand_calls++, rand_value; }
 static uint32_t __attribute__((stdcall)) time_stub(void) { return 1234; }
@@ -1437,6 +1455,71 @@ int main(void) {
     memcpy(tiles, eco_tiles, sizeof tiles);
     game_radius_x = radius_x, game_radius_y = radius_y;
     factions[1] = saved_f1;
+    *b1 = saved_b1;
+
+    // Base names: the next land name, the first one first; sea names while
+    // they last; past the end, the noun and a number.
+    game_text_open = text_open_stub, game_text_get = text_get_stub, game_text_item = text_item_stub;
+    game_text_close = text_close_stub, game_text_line = &file_ptr;
+    strcpy(faction_defs[2].filename, "x"), strcpy(faction_defs[2].noun, "Gaian");
+    for (uint32_t a = 0x6893b0; a < 0x6893fc; a += 4) image[a - 0x400000] = 'l';
+    image[0x6893b0 - 0x400000] = 's', image[0x6893ec - 0x400000] = 'y';  // the sea section; the shared file
+    strcpy((char *)&image[0x6893bc - 0x400000], "#END");
+    image[0x682820 - 0x400000] = ' ';
+    int32_t map_seed = 0, gender = 0, plural = 0;
+    game_map_seed = &map_seed, game_parse_gender = &gender, game_parse_plural = &plural;
+    char name[25];
+    factions[2].base_name_offset = 0, factions[2].base_sea_name_offset = 0;
+    name_base(2, name, 1, 0);
+    EXPECT(strcmp(name, "Alpha"), 0);
+    EXPECT(factions[2].base_name_offset, 1);
+    name_base(2, name, 0, 1);
+    EXPECT(strcmp(name, "Reef"), 0);
+    name_base(2, name, 1, 1);
+    EXPECT(factions[2].base_sea_name_offset, 1);
+    name_base(2, name, 1, 1);  // no more sea names: the land list, shuffled from the second on
+    EXPECT(strcmp(name, "Beta") && strcmp(name, "Gamma"), 0);
+    EXPECT(factions[2].base_name_offset, 2);
+    factions[2].base_name_offset = 5;
+    name_base(2, name, 1, 0);
+    EXPECT(strcmp(name, "Gaian 6"), 0);
+    EXPECT(factions[2].base_name_offset, 5);
+
+    // The AI's terraforming, on land it owns: at size 3 with no priorities
+    // the base wants minerals (4) more than energy (3); goals are set and
+    // roads planned.
+    static struct continent regions[4];
+    static struct rules_ability abilities[1] = {{.preq_tech = TECH_NONE}};
+    static int32_t counts[9] = {1, 9, 21, 21, 21, 21, 21, 21, 21};
+    int32_t cloud = 0, area = W / 2 * H;
+    static struct map_tile t_tiles[W / 2 * H];
+    memcpy(t_tiles, tiles, sizeof tiles);
+    game_continents = regions, game_abilities = abilities, game_radius_count = counts, game_cloud_cover = &cloud;
+    game_map_area = &area, game_terraform = terraform;
+    game_can_terraform = can_terraform_stub, game_base_connect = base_connect_stub;
+    game_terrain_avail = terrain_avail_stub, game_abil_index = abil_index_stub, game_base_find = base_find_stub;
+    for (int y = 0; y < H; y++)
+        for (int x = y & 1; x < W; x += 2) put(x, y, 3, 1, 0, 0), at(x, y)->territory = 1;
+    at(6, 4)->bits = MAP_BASE, at(6, 4)->owner_site = 1;
+    saved_b1 = *b1;
+    b1->pop_size = 3, b1->state = BASE_STATE_GOLDEN_AGE, b1->worked_tiles = 0, b1->terraform_x = 5;
+    memset(b1->intake, 0, sizeof b1->intake), memset(b1->surplus, 0, sizeof b1->surplus);
+    factions[1].ai_tech = factions[1].ai_wealth = factions[1].ai_power = 0;
+    humans = 0, goals = 0, connects = 0, terraform_energy = 0;
+    base_terraform(0);
+    EXPECT(b1->state & 0x7000, 0x2000);
+    EXPECT(b1->state & BASE_STATE_GOLDEN_AGE, BASE_STATE_GOLDEN_AGE);
+    EXPECT(goals > 0, 1);
+    EXPECT(connects, 1);
+    EXPECT(b1->terraform_x, 6);  // wet: the square 8 west, here the base's own column
+    // A sea shelf square that can't be terraformed ends it there.
+    put(7, 3, 2, 0, 0, 0);
+    can_terraform_value = 0, goals = 0, connects = 0, b1->terraform_x = 5;
+    base_terraform(0);
+    EXPECT(connects, 0);
+    EXPECT(b1->terraform_x, 5);
+    can_terraform_value = 1;
+    memcpy(tiles, t_tiles, sizeof tiles);
     *b1 = saved_b1;
 
     if (failures) return 1;

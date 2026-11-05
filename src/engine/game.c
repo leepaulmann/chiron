@@ -204,6 +204,16 @@ int32_t *game_climate_level, *game_climate_change, *game_climate_shown;
 void (*game_clock_wait)(int ms);
 void (*game_boom)(int x, int y, int flags);
 int (*game_pop2)(char *label, char *picture, int base);
+int (*game_text_open)(char *file, char *label);
+void (*game_text_get)(void);
+char *(*game_text_item)(void);
+void (*game_text_close)(void);
+char **game_text_line;
+struct rules_ability *game_abilities;
+int (*game_abil_index)(uint32_t flag);
+int (*game_can_terraform)(int faction, int x, int y, int unk, int base);
+int (*game_terrain_avail)(int terraform, int sea, int faction);
+void (*game_base_connect)(int level);
 
 void game_bind(struct pe_image *exe) {
     game_tech = (struct rules_tech *)code_at(exe, 0x94f358);
@@ -477,4 +487,14 @@ void game_bind(struct pe_image *exe) {
     game_clock_wait = (void *)code_at(exe, 0x50dd90);
     game_boom = (void *)code_at(exe, 0x504aa0);
     game_pop2 = (void *)code_at(exe, 0x405140);
+    game_text_open = (void *)code_at(exe, 0x5fd550);
+    game_text_get = (void *)code_at(exe, 0x5fd570);
+    game_text_item = (void *)code_at(exe, 0x5fd670);
+    game_text_close = (void *)code_at(exe, 0x5fd530);
+    game_text_line = (char **)code_at(exe, 0x9b7d00);
+    game_abilities = (struct rules_ability *)code_at(exe, 0x9ab538);
+    game_abil_index = (void *)code_at(exe, 0x581170);
+    game_can_terraform = (void *)code_at(exe, 0x565320);
+    game_terrain_avail = (void *)code_at(exe, 0x5bab40);
+    game_base_connect = (void *)code_at(exe, 0x4ec3f0);
 }

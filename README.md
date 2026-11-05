@@ -125,8 +125,9 @@ module at a time. So far:
   its research, facility upkeep, energy convoys, golden ages and riots
   (facilities lost, and a human's bases defecting to another faction);
   doctors in riots, disbanding the units it can't support, and the AI
-  rushing production with its energy reserves; and its ecological damage:
-  fungus, native life, global warming and the volcano.
+  rushing production with its energy reserves; its ecological damage:
+  fungus, native life, global warming and the volcano; the AI's
+  terraforming plans; and new bases' names.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once

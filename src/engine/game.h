@@ -78,7 +78,7 @@ struct faction_data {
     uint32_t flags;
     int32_t ranking;     // 0 (lowest) to 7
     int32_t diff_level;  // humans' difficulty; 3 for the AI
-    GAME_PAD(0x00c, 0x014);
+    int32_t base_name_offset, base_sea_name_offset;  // base names used from the faction's file
     int32_t last_base_turn;  // when it last gained a base
     uint32_t diplo_status[FACTION_COUNT];  // TREATY_* towards each faction
     GAME_PAD(0x038, 0x0c0);
@@ -149,6 +149,7 @@ struct faction_data {
 _Static_assert(sizeof(struct faction_data) == 0x20cc, "faction_data size");
 GAME_AT(struct faction_data, diplo_status, 0x18);
 GAME_AT(struct faction_data, last_base_turn, 0x14);
+GAME_AT(struct faction_data, base_sea_name_offset, 0x10);
 GAME_AT(struct faction_data, attack_target_base, 0x468);
 GAME_AT(struct faction_data, se_pending, 0x24c);
 GAME_AT(struct faction_data, se_base, 0x2d0);
@@ -835,7 +836,7 @@ extern void(__attribute__((thiscall)) * game_map_win_set_center)(void *win, int 
 // Ecological damage: fungus, native life, warming and volcanoes.
 struct rules_terraform {
     char *name, *name_sea;
-    GAME_PAD(0x08, 0x10);
+    int32_t preq_tech, preq_tech_sea;
     uint32_t bit;  // the map_tile.bits it makes
     GAME_PAD(0x14, 0x20);
 };
@@ -848,6 +849,29 @@ extern int32_t *game_climate_shown;            // [3] what the planet monitor sh
 extern void (*game_clock_wait)(int ms);        // waits, drawing
 extern void (*game_boom)(int x, int y, int flags);  // an explosion on the map
 extern int (*game_pop2)(char *label, char *picture, int base);  // a message with a picture
+
+// The game's reader of its text files: a section opened by label (0 when
+// found), its lines one by one into *game_text_line, and the next item of a
+// line.
+extern int (*game_text_open)(char *file, char *label);
+extern void (*game_text_get)(void);
+extern char *(*game_text_item)(void);
+extern void (*game_text_close)(void);
+extern char **game_text_line;
+
+// The AI's terraforming.
+struct rules_ability {
+    char *name, *description, *abbreviation;
+    int32_t cost, unk_10;
+    uint32_t flags;
+    int16_t preq_tech, pad;
+};
+_Static_assert(sizeof(struct rules_ability) == 0x1c, "rules_ability size");
+extern struct rules_ability *game_abilities;
+extern int (*game_abil_index)(uint32_t flag);
+extern int (*game_can_terraform)(int faction, int x, int y, int unk, int base);
+extern int (*game_terrain_avail)(int terraform, int sea, int faction);
+extern void (*game_base_connect)(int level);  // roads to the faction's other bases
 extern void *game_path;
 
 // Point the variables above at a loaded terranx.exe.

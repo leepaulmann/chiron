@@ -71,3 +71,7 @@ void base_check_support(void);
 void base_hurry(void);
 // Ecological damage: fungus, native life, warming and volcanoes.
 void base_ecology(void);
+// A new base's name, from its faction's file.
+void name_base(int faction, char *name, int save, int sea);
+// The AI's terraforming plans for the current base.
+void base_terraform(int instant);

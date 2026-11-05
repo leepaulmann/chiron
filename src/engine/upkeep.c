@@ -955,6 +955,527 @@ void base_ecology(void) {
     if (f->clean_minerals >= 10 && !(*game_state & GAME_STATE_VOLCANO)) volcano();
 }
 
+// ---- Base names -------------------------------------------------------------
+
+#include <stdio.h>
+#include <strings.h>
+
+// Counts the section's lines, up to `want`, stopping at an empty line or
+// the one that ends it.
+static int count_lines(int n, int want, uint32_t end) {
+    while (n < want) {
+        game_text_get();
+        if (!strlen(*game_text_line) || !strncasecmp(*game_text_line, text(end), 4)) break;
+        n++;
+    }
+    return n;
+}
+
+static void take_name(char *name) {
+    strncpy(name, game_text_item(), 24);
+    name[23] = 0;
+}
+
+// A new base's name from its faction's file: for a sea base the next of its
+// sea names, while they last; otherwise the next of its land names (after
+// the first, in an order shuffled by the map's seed), then the shared list,
+// and failing those its noun and a number. `save` counts the name as used.
+// As the original has it, a section that runs out leaves the file open.
+void name_base(int faction, char *name, int save, int sea) {
+    struct faction_data *f = &game_factions[faction];
+    struct faction_def *d = &game_faction_defs[faction];
+    if (sea && !game_text_open(d->filename, text(0x6893b0))) {
+        int want = f->base_sea_name_offset + 1;
+        if (count_lines(0, want, 0x6893bc) == want) {
+            take_name(name);
+            if (save) f->base_sea_name_offset = want;
+            game_text_close();
+            return;
+        }
+    }
+    int used = f->base_name_offset + 1;
+    name[0] = 0;
+    *game_parse_gender = d->noun_gender;
+    *game_parse_plural = d->noun_plural;
+    strcat(name, d->noun);
+    strcat(name, text(0x682820));
+    char number[16];
+    snprintf(number, sizeof number, "%d", used);
+    strcat(name, number);
+    if (game_text_open(d->filename, text(0x6893c4))) return;
+    int total = count_lines(0, 0x7fffffff, 0x6893cc), want = used;
+    if (used > 1 && used <= total) {
+        int v = ((*game_map_seed + faction) & 0xfe) | 1;
+        for (int i = 1; i != used; i++) {
+            do {
+                if (v & 1) v ^= 0x170;
+                v >>= 1;
+            } while (v >= total);
+        }
+        want = v + 1;
+    }
+    if (game_text_open(d->filename, text(0x6893d4))) return;
+    int n = count_lines(0, want, 0x6893dc);
+    if (n != want) {
+        if (game_text_open(text(0x6893ec), text(0x6893e4))) return;
+        for (; n < want; n++) {
+            game_text_get();
+            if (!strlen(*game_text_line) || !strncasecmp(*game_text_line, text(0x6893f8), 4)) return;
+        }
+    }
+    take_name(name);
+    if (save) f->base_name_offset = used;
+    game_text_close();
+}
+
+// ---- The AI's terraforming plans --------------------------------------------
+
+enum {
+    BASE_STATE_WANTS_ENERGY = 0x1000, BASE_STATE_WANTS_MINERALS = 0x2000, BASE_STATE_WANTS_NUTRIENTS = 0x4000,
+    MAP_SPECIAL = 0x1c00000,
+    MAP_IMPROVED = 0x1e00050, MAP_BOREHOLE = 0x1000000, MAP_MONOLITH_ = 0x2000,
+    GOAL_TERRAFORM = 9, GOAL_RAISE_LAND = 0x29, GOAL_CONDENSER = 0x49, GOAL_BOREHOLE = 0x69, GOAL_FOREST = 0x79,
+    GOAL_SEA = 25, TERRAFORM_ROAD_TECH = 1, TERRAFORM_LEVEL_TECH = 6, TERRAFORM_FUNGUS_TECH = 10,
+};
+
+static int rockiness(const struct map_tile *t) { return t->rocky_lock >> 6; }
+static int rainfall(const struct map_tile *t) { return (t->climate >> 3) & 3; }
+static int clamp(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+// How much a square suits a borehole or condenser goal: dry, rocky, or flat
+// and not wet.
+static int dry_or_rocky(const struct map_tile *t) {
+    int rocky = t->rocky_lock & 0xc0, rain = t->climate & 0x18;
+    return !rain + (rocky == 0x80) + (!rocky && rain < 0x10);
+}
+
+// For the AI (and a human's governor): what the base needs most, energy,
+// minerals or nutrients, from its priorities and size; then the squares it
+// works or could, each scored for a forest, a farm, a mine, a solar
+// collector or removing fungus, with goals set for its formers (and, when
+// `instant`, the improvement made at once); a raised square, a borehole or
+// a condenser where they would help most; and roads to its other bases.
+//
+// As the original has it: a sea shelf square that can't be terraformed ends
+// it at once; the scores share one variable, which a mine on rockiness 3
+// takes as it was left; and nothing comes of what follows the target set
+// last (the original jumps over it always).
+void base_terraform(int instant) {
+    struct base *b = B;
+    int faction = b->faction, human = is_human(faction);
+    struct faction_data *f = &game_factions[faction];
+    int aquatic = (game_faction_defs[faction].rule_flags & RULE_FLAG_AQUATIC) != 0;
+    int tech = 0, wealth = 0, power = 0;
+    if (human) {
+        uint32_t g = b->governor;
+        if (g & GOVERNOR_EXPLORE) {
+        } else if (g & GOVERNOR_DISCOVER) {
+            tech = 1;
+        } else if (g & GOVERNOR_BUILD) {
+            wealth = 1;
+        } else if (g & GOVERNOR_CONQUER) {
+            power = 1;
+        }
+    } else {
+        tech = f->ai_tech, wealth = f->ai_wealth, power = f->ai_power;
+    }
+    int pop = b->pop_size;
+    int need_e = clamp(((wealth - power + tech + 4) * pop + 3) / 5 - b->intake[RESOURCE_ENERGY] + *game_terraform_energy, 0, 99);
+    int need_m = clamp(2 * power - b->intake[RESOURCE_MINERAL] + pop + 1, 0, 99);
+    if (need_e && need_e + 1 > need_m) b->state |= BASE_STATE_WANTS_ENERGY;
+    else b->state &= ~(uint32_t)BASE_STATE_WANTS_ENERGY;
+    if (need_m && need_m + 1 > need_e) b->state |= BASE_STATE_WANTS_MINERALS;
+    else b->state &= ~(uint32_t)BASE_STATE_WANTS_MINERALS;
+    int food = 0;
+    if (b->surplus[RESOURCE_NUTRIENT] < clamp(3 - clamp(need_e, 0, 2) - clamp(need_m, 0, 2), 0, 3)) {
+        b->state |= BASE_STATE_WANTS_NUTRIENTS;
+        food = b->surplus[RESOURCE_NUTRIENT] < 0 ? 2 : 1;
+    } else {
+        b->state &= ~(uint32_t)BASE_STATE_WANTS_NUTRIENTS;
+    }
+
+    // Its own land: sensors, the squares it works that could yield well,
+    // and good ones no base of the faction works.
+    int sensors = 0, open_rich = 0, worked_good = 0, open = 0;
+    for (int i = 0; i < BASE_RADIUS_SQUARES; i++) {
+        int x = xrange(b->x + game_radius_x[i]), y = b->y + game_radius_y[i];
+        if (!on_map(x, y) || altitude(tile(x, y)) < ALT_LAND) continue;
+        if (whose_territory(faction, x, y, 0, 0) != faction) continue;
+        if (is_sensor(x, y)) sensors++;
+        const struct map_tile *t = tile(x, y);
+        uint32_t bits = t->bits;
+        if ((bits & MAP_FOREST) || is_fungus(t)) continue;
+        if (b->worked_tiles & (1u << i)) {
+            if ((bits & MAP_FARM) || rockiness(t) >= 2) continue;
+            if ((t->climate & 0x18) >= 0x10 && !has_tech(game_rules_basic->tech_three_nutrients, faction) &&
+                bonus_at(x, y, 0) != 1)
+                continue;
+            worked_good++;
+            continue;
+        }
+        if (rainfall(t) + (int)(bits >> 15 & 1) < 2) continue;
+        int free = 1;
+        for (int j = 0; j < *game_base_count; j++) {
+            const struct base *o = &game_bases[j];
+            if (o->faction != faction || vector_dist_offset(x_dist(x, o->x), abs(y - o->y)) > 2) continue;
+            if (o->worked_tiles & (1u << (radius_move(o->x, o->y, x, y, 21) & 31))) free = 0;
+        }
+        if (!free) continue;
+        open++;
+        if ((t->rocky_lock & 0xc0) || bonus_at(x, y, 0)) open_rich++;
+    }
+
+    // The sea: a shelf square to work, in the biggest sea region about it.
+    int s = 0, seas = 0, best = 0, bx = -1, by = -1, sea_region = -1;
+    for (int i = 0; i < BASE_RADIUS_SQUARES; i++) {
+        int x = xrange(b->x + game_radius_x[i]), y = b->y + game_radius_y[i];
+        if (!on_map(x, y)) continue;
+        const struct map_tile *t = tile(x, y);
+        int a = altitude(t);
+        if (a >= ALT_LAND) continue;
+        seas++;
+        if (!i) continue;
+        int r = t->region;
+        if (sea_region < 0) {
+            sea_region = r;
+        } else if (r != sea_region) {
+            if (game_continents[r].tile_count <= game_continents[sea_region].tile_count) continue;
+            sea_region = r;
+        }
+        if (a != ALT_SHELF) continue;
+        if (!game_can_terraform(faction, x, y, 1, ID)) return;
+        s = 21 - i + (bonus_at(x, y, 0) ? 21 : 0);
+        if (s > best) best = s, bx = x, by = y;
+    }
+    if (on_map(bx, by) && tile(bx, by)->region == sea_region) game_add_goal(faction, GOAL_SEA, 2, bx, by, ID);
+
+    // How good its land is: squares that could yield well, those improved
+    // already (or, with enough fungus bonuses, fungus), and the rain.
+    b->terraform_x = b->terraform_y = -1;
+    int sat = f->tech_fungus[0] + f->tech_fungus[1] + f->tech_fungus[2];
+    int good = 0, improvable = 0, good_worked = 0, improved_worked = 0, special = 0, rains = 0;
+    for (int i = 0; i < BASE_RADIUS_SQUARES; i++) {
+        int x = xrange(b->x + game_radius_x[i]), y = b->y + game_radius_y[i];
+        if (!on_map(x, y)) {
+            rains++;
+            continue;
+        }
+        const struct map_tile *t = tile(x, y);
+        int a = altitude(t);
+        if (a < ALT_LAND && (!instant || !aquatic)) continue;
+        int rocky = rockiness(t), rain = rainfall(t), alt2 = (t->climate >> 5) - 2;
+        alt2 = alt2 < 0 ? 0 : alt2;
+        uint32_t bits = t->bits;
+        int forest = bits & MAP_FOREST, fungus = (bits & MAP_FUNGUS) && a >= ALT_SHELF;
+        if (bits & MAP_SPECIAL) special++;
+        if (i && (alt2 + rocky + rain >= 4 || forest || (fungus && sat >= 4))) {
+            good++;
+            int w = (b->worked_tiles >> i) & 1;
+            good_worked += w;
+            if (fungus) {
+                if (sat >= 4) improvable++;
+                else if (!has_tech(game_terraform[TERRAFORM_FUNGUS_TECH].preq_tech, faction)) good--;
+            } else if (forest || (((bits & MAP_FARM) || (rocky > 1 && (bits & MAP_MINE))) &&
+                                  (rocky > 1 || (bits & MAP_SOLAR) || ((bits & MAP_MINE) && (bits & MAP_FARM))))) {
+                improvable++;
+                improved_worked += w;
+            }
+        }
+        rains += rain;
+    }
+    if (!human && b->pop_size >= 4) good--;
+    int wet = (rains >= 15) + (rains > 25);
+
+    // Each square of the base's land region, scored for each improvement.
+    int home = tile(b->x, b->y)->region;
+    int bsq = -1, bact = 0, highs = 0, has_bore = 0, has_cond = 0;
+    int raise_best = -1, raise_x = -1, raise_y = -1, bore_best = -1, bore_x = 0, bore_y = 0;
+    int cond_best = -1, cond_x = 0, cond_y = 0;
+    best = 0;
+    for (int i = 0; i < BASE_RADIUS_SQUARES; i++) {
+        int x = xrange(b->x + game_radius_x[i]), y = b->y + game_radius_y[i];
+        if (!on_map(x, y)) continue;
+        const struct map_tile *t = tile(x, y);
+        uint32_t bits = t->bits;
+        if (bits & MAP_MONOLITH_) continue;
+        if (bits & MAP_BOREHOLE) has_bore = 1;
+        if (bits & MAP_CONDENSER) has_cond = 1;
+        if (!i) continue;
+        if (is_fungus(t) && !has_tech(game_terraform[TERRAFORM_FUNGUS_TECH].preq_tech, faction)) continue;
+        if (altitude(t) < ALT_LAND && (!instant || !aquatic)) continue;
+        if (t->region != home) continue;
+        int z = zoc_move(x, y, faction);
+        if (z >= 0) {
+            if (z == 1 || (f->diplo_status[z - 1] & 0xc30) || owner_with(tile(x, y), MAP_BASE | MAP_UNIT) >= 0) continue;
+        }
+        int owner = whose_territory(faction, x, y, 0, 0);
+        if (owner >= 0 && owner != faction) continue;
+        t = tile(x, y);
+        bits = t->bits;
+        int altlev = t->climate >> 5, farmed = bits & MAP_FARM;
+        int solared = (bits & MAP_SOLAR) || (bits & MAP_BOREHOLE), mined = (bits & MAP_MINE) || (bits & MAP_BOREHOLE);
+        uint32_t impr = bits & MAP_IMPROVED;
+        int crop = crop_yield(faction, -1, x, y, 1);
+        int rocky = rockiness(tile(x, y));
+        int bonus = bonus_at(x, y, 0);
+        int rain = rainfall(tile(x, y));
+        int sensor = is_sensor(x, y);
+        t = tile(x, y);
+        bits = t->bits;
+        int cond = (bits & MAP_SPECIAL) != 0, forest = bits & MAP_FOREST, fung = is_fungus(t) ? 4 : 0;
+        int worked = (B->worked_tiles & (1u << i)) != 0;
+        int alt2 = altlev - 2 < 0 ? 0 : altlev - 2;
+        if (!worked && improved_worked == good_worked && !open_rich) {
+            if (forest) goto forest_check;
+            if (fung) goto fungus_check;
+            if (rain && rocky < 2) worked = 1;
+            goto plant_forest;
+        }
+        if (!forest) goto fungus_maybe;
+    forest_check:
+        s = (sensor ? -1 : 1) + alt2 + rocky + rain;
+        if (has_tech(game_terraform[TERRAFORM_ROAD_TECH].preq_tech, faction)) s++;
+        if (has_facility(ID, FAC_TREE_FARM)) s--;
+        if (has_facility(ID, FAC_HYBRID_FOREST)) s--;
+        if (s > 4) forest = 0;
+    fungus_maybe:
+        if (!fung) goto plant_forest;
+    fungus_check: {
+        int v = !sensor + alt2 + rocky + rain;
+        if (v < sat) continue;
+        if (v == sat) fung = 1;
+    }
+    plant_forest:
+        if (!sensors && !sensor && !bonus && !(impr && B->pop_size < 8) && !(human && !(*game_more_preferences & 0x20)) &&
+            !(open_rich && worked_good < B->pop_size - 1 && B->pop_size < 2) &&
+            !(fung && !has_tech(game_rules_basic->tech_improve_fungus, faction)) &&
+            !(rocky <= 1 && !forest && rain && (!fung || !has_tech(game_rules_basic->tech_improve_fungus, faction)))) {
+            s = (B->pop_size + 2 * f->ai_fight + 2) * 4;
+            if (forest || fung || !rain) s *= 2;
+            int n = 1, k;
+            for (k = 1; k < BASE_RADIUS_SQUARES; k++, n++) {
+                int x2 = xrange(x + game_radius_x[k]), y2 = y + game_radius_y[k];
+                if (on_map(x2, y2) && altitude(tile(x2, y2)) < ALT_LAND) break;
+            }
+            if (k == BASE_RADIUS_SQUARES || !n || n >= 9) s *= 2;
+            if (s > best) best = s, bsq = i, bact = 9;
+        }
+        // Energy: a solar collector (or a farm).
+        if ((need_e || (B->state & 0x8000)) && !forest && !cond && !(sensor && sensors <= (worked ? 1 : 2)) &&
+            !(mined && (need_m || alt2 < 2)) && crop >= (farmed ? 1 : 0) + 1 - (need_e > 1 && alt2 > 1) && alt2) {
+            s = alt2 * 3;
+            if (bonus == 2 || rocky == 1) s += 2;
+            if (bonus == 1) s += 2;
+            else if (bonus == 3) s += farmed ? -1 : 1;
+            if (farmed) s++;
+            if (rocky == 2) s -= 3;
+            if (tile(x, y)->bits & MAP_FOREST) s /= 2;
+            s *= clamp(2 * need_e, 1, 99);
+            if (worked) s *= 2;
+            if (fung) s += B->eco_damage * fung * 2;
+            if (worked || need_e > 1) {
+                if (!farmed && (bonus == 3 || !need_e || food) && rocky < 2) {
+                    if (food) s *= 2;
+                    if (s > best) best = s, bsq = i, bact = 0;
+                } else if (!solared) {
+                    if (s > best) best = s, bsq = i, bact = 3;
+                } else if (!farmed && crop < 3 && rocky < 2 && s > best) {
+                    best = s, bsq = i, bact = 0;
+                }
+            }
+        }
+        // Raising the land, where it would help the most squares nearby, away
+        // from bases' own squares, while the land isn't high or wet already.
+        if (altlev >= 5 && ++highs > 1) raise_best = -99999;
+        if (!wet && raise_best > -99999 && (raise_best > -9999 || bonus == 1)) {
+            s = game_radius_x[i] * game_radius_x[i] * 2;
+            if (altlev == 3) {
+                if (rocky == 1) s += 3;
+                if (bonus == 1) s += 6;
+            } else {
+                if (bonus != 1) s -= 3 * crop;
+                if (rocky == 1) s -= 4;
+            }
+            int left = seas;
+            for (int j = 1, level = altlev; j < altlev + 1; j++, level--) {
+                int found = 0;
+                for (int k = game_radius_count[j - 1]; k < game_radius_count[j]; k++) {
+                    int x2 = xrange(x + game_radius_x[k]), y2 = y + game_radius_y[k];
+                    if (!on_map(x2, y2) || tile(x2, y2)->climate >> 5 >= level) continue;
+                    found = 1;
+                    int d = vector_dist_offset(x_dist(x2, B->x), abs(y2 - B->y));
+                    if (d > 2) continue;
+                    s++;
+                    if (d <= 1 && altitude(tile(x2, y2)) == ALT_SHELF) left--;
+                }
+                if (!found) break;
+            }
+            if (!seas || left > 0) {
+                if (mined) s -= 4;
+                if (solared) s += 2;
+                if (bonus == 1) s += 8;
+                if (i < 8) s /= 2;
+                if (s > raise_best) raise_best = s, raise_x = x, raise_y = y;
+            }
+        }
+        // Minerals: a mine (or a road, or a solar collector).
+        if (!need_m && ((rain < 1 - game_rules_basic->nutrient_effect_mine && rain) || rocky)) goto farm_entry;
+        if ((sensor && sensors <= (worked ? 1 : 2)) || (solared && (need_e || alt2 >= 2)) || food || forest ||
+            (rocky == 1 && alt2 >= 2 && need_m <= 1) || (crop + mined < (farmed ? 1 : 0) + 2 && rocky == 1))
+            goto farm_entry;
+        if (rocky == 0) s = crop + 1;
+        else if (rocky == 1) s = 3 - crop;
+        else if (rocky == 2) s = 6;
+        if (bonus == 1) s += 4;
+        else if (bonus == 2) s *= 2;
+        else if (bonus == 3) s += 2;
+        if (farmed) s++;
+        bits = tile(x, y)->bits;
+        if (bits & MAP_ROAD) s++;
+        if (bits & MAP_FOREST) s--;
+        s = s * need_m * 3;
+        if (worked) s *= 2;
+        if (fung) s += B->eco_damage * fung * 2;
+        if (!worked && need_m <= 1 && (!rain || rocky)) goto farm_entry;
+        if (!mined && !cond) {
+            if (s > best) best = s, bsq = i, bact = 2;
+            goto farm_entry;
+        }
+        if (!(bits & MAP_ROAD)) {
+            if (!mined && !(bits & MAP_BOREHOLE)) goto farm_entry;
+            if (!human || !(*game_more_preferences & 0x400000)) {
+                if (s > best) best = s, bsq = i, bact = 5;
+                goto farm_entry;
+            }
+        }
+        if (!mined || cond) goto farm_entry;
+        if (farmed || rocky >= 2) goto fungus_removal;
+        if (((tile(x, y)->climate & 0x18) || bonus == 1) && s > best) best = s, bsq = i, bact = 0;
+        goto farm;
+    farm_entry:
+        if (farmed) goto fungus_removal;
+    farm:
+        // Nutrients: a farm.
+        if (rocky >= 2 || forest) goto fungus_removal;
+        if (food <= 1 && ((rocky && crop) ? open_rich : open) && !worked) goto fungus_removal;
+        if (!food && !(need_m && rocky && crop) &&
+            (!rain || !(rocky == 1 || rain == 2 || mined || solared)))
+            goto fungus_removal;
+        s = crop * 3 + 3 + (bonus > 1 ? 3 : 0);
+        bits = tile(x, y)->bits;
+        if (bits & MAP_RIVER) s += need_e + 1;
+        if (rocky == 1) s += need_m + 1;
+        if (bits & MAP_FOREST) s--;
+        s = clamp(food + 1, 1, 99) * s * 2;
+        if (need_m && rocky) s *= 2;
+        if (worked) s *= 2;
+        if (rain > 1 && !has_tech(game_rules_basic->tech_three_nutrients, faction)) s /= 3;
+        if (fung) s = s / 2 + B->eco_damage * fung * 2;
+        if (s > best) best = s, bsq = i, bact = 0;
+    fungus_removal:
+        if (is_fungus(tile(x, y))) {
+            s = B->eco_damage * fung * 2;
+            if (s > best) best = s, bsq = i, bact = 10;
+        }
+        // A borehole: rocky or dry, far out, unimproved, not below its
+        // neighbours nor beside another; a condenser: dry and rocky,
+        // unimproved, twice as wanted on a planet without clouds.
+        if (!has_bore) {
+            s = 21 - i + (rocky == 2 ? 12 : 0) + (rocky == 2 || !rain ? 12 : 0);
+            if (impr) s -= 8;
+            for (int k = 0; k < 8; k++) {
+                int x2 = xrange(x + game_radius_near_x[k]), y2 = y + game_radius_near_y[k];
+                if (!on_map(x2, y2) || altitude(tile(x2, y2)) < ALT_LAND) continue;
+                if (tile(x2, y2)->climate >> 5 < altlev) s = -1;
+                if (tile(x2, y2)->bits & MAP_BOREHOLE) s = -1;
+            }
+            if (s > bore_best) bore_best = s, bore_x = x, bore_y = y;
+        }
+        if (!has_cond) {
+            s = 21 - i + (!impr ? 8 : 0) + (!farmed ? 2 : 0) + ((2 - rain) * (2 - rain) + rocky * 2) * 2;
+            if (!*game_cloud_cover && rain < 2) s *= 2;
+            if (s > cond_best) cond_best = s, cond_x = x, cond_y = y;
+        }
+    }
+
+    // Goals for the best square, and roads.
+    int level = has_tech(game_terraform[TERRAFORM_LEVEL_TECH].preq_tech, faction) ? 2 : 1;
+    int connect = !human || !(*game_more_preferences & 0x400000);
+    if (bsq > 0) {
+        int x = xrange(B->x + game_radius_x[bsq]), y = B->y + game_radius_y[bsq];
+        if (bact == 9) game_add_goal(faction, GOAL_FOREST, 2, x, y, ID);
+        else if (bact != 5 && !game_can_terraform(faction, x, y, 1, ID)) level = 2;
+        else game_add_goal(faction, GOAL_TERRAFORM, 2, x, y, ID);
+        if (connect) game_base_connect(level);
+        if (instant) {
+            struct map_tile *t = tile(x, y);
+            t->bits &= ~(uint32_t)MAP_FUNGUS;
+            int v = game_can_terraform(faction, x, y, 1, ID);
+            if (*game_expansion && aquatic) {
+                int r = ((int)game_time_get_time() + ID + y + x) & 3;
+                v = r ? r + 5 : 4;
+            }
+            t = tile(x, y);
+            switch ((unsigned)(v - 4)) {
+            case 0:
+                t->bits |= MAP_FARM | MAP_ROAD;
+                t->bits |= (t->climate & 7) || altitude(t) > ALT_LAND ? MAP_SOLAR : MAP_MINE;
+                break;
+            case 2:
+                t->bits |= MAP_MINE | MAP_ROAD;
+                if ((t->rocky_lock & 0xc0) < 0x80) t->bits |= MAP_FARM;
+                break;
+            case 3:
+                t->bits |= MAP_SOLAR | MAP_ROAD;
+                break;
+            case 4:
+                t->bits |= MAP_FOREST;
+                break;
+            }
+        }
+    } else if (connect) {
+        game_base_connect(2);
+    }
+
+    // Then one of a borehole, a condenser or raised land, for a base whose
+    // good squares are mostly improved.
+    int pop_now = B->pop_size;
+    int none = improvable < pop_now + 1 && good > improvable;
+    if (!none) {
+        if (!has_bore && bore_best > 0 && !B->eco_damage && dry_or_rocky(tile(bore_x, bore_y)) >= 1 &&
+            (pop_now >= 8 || need_e > 1 ||
+             has_tech(game_abilities[game_abil_index(1)].preq_tech, faction) || *game_current_turn > 200) &&
+            game_terrain_avail(0xe, 0, faction) &&
+            (!human || (faction == *game_current_faction && (*game_preferences & 0x2000000)))) {
+            game_add_goal(faction, GOAL_BOREHOLE, 1, bore_x, bore_y, ID);
+            goto target;
+        }
+        if (!has_cond && cond_best > 0 && !B->eco_damage) {
+            int ok = !wet;
+            if (wet == 1 && !special)
+                ok = food || (dry_or_rocky(tile(cond_x, cond_y)) >= 1 &&
+                              (has_tech(game_abilities[game_abil_index(1)].preq_tech, faction) || *game_current_turn > 200));
+            if (ok && game_terrain_avail(0xc, 0, faction) &&
+                (!human || (faction == *game_current_faction && (*game_preferences & 0x2000000)))) {
+                game_add_goal(faction, GOAL_CONDENSER, 1, cond_x, cond_y, ID);
+                goto target;
+            }
+        }
+    }
+    if (!(wet && need_e <= 2) && raise_best > 0 && !none &&
+        (!human || (faction == *game_current_faction && (*game_preferences & 0x20000))) &&
+        game_terrain_avail(0x10, 0, faction))
+        game_add_goal(faction, GOAL_RAISE_LAND, 1, raise_x, raise_y, ID);
+target: {
+    // A square 8 west of the base: its terraforming target while wet.
+    int x = xrange(B->x - 8), y = B->y;
+    if (on_map(x, y) && altitude(tile(x, y)) >= ALT_LAND && wet && altitude(tile(x, y)) < 0xc0)
+        B->terraform_x = (int16_t)x, B->terraform_y = (int16_t)y;
+    else
+        B->terraform_x = B->terraform_y = -1;
+}
+}
+
 // ---- Hooks and shadow checks ------------------------------------------------
 
 extern struct hook_module upkeep_module;
@@ -981,6 +1502,54 @@ SHADOW_WRITER(UPKEEP, void, base_doctors, (void), (), WRITES_DOCTORS, "%s", "")
     else WRITES(B, sizeof(struct base))
 SHADOW_WRITER(UPKEEP, void, base_check_support, (void), (), WRITES_SUPPORT_CHECK, "%s", "")
 SHADOW_WRITER(UPKEEP, void, base_hurry, (void), (), WRITES_BASE, "%s", "")
+// Naming reads a file, and the C runtime's file buffers come from the heap,
+// which a check can't put back. But all it writes is the name and the
+// faction's two counters, so its check runs both with those alone kept
+// apart, unprotected.
+static void (*orig_name_base)(int faction, char *name, int save, int sea);
+static struct hook_stats stats_name_base = {"name_base"};
+static void check_name_base(int faction, char *name, int save, int sea) {
+    struct faction_data *f = &game_factions[faction];
+    int32_t land = f->base_name_offset, seas = f->base_sea_name_offset;
+    char want[25], got[25];
+    memcpy(want, name, sizeof want);
+    memcpy(got, name, sizeof got);
+    hooks_nested++;
+    orig_name_base(faction, want, save, sea);
+    hooks_nested--;
+    int32_t want_land = f->base_name_offset, want_seas = f->base_sea_name_offset;
+    f->base_name_offset = land, f->base_sea_name_offset = seas;
+    name_base(faction, got, save, sea);
+    if (memcmp(want, got, sizeof want) || f->base_name_offset != want_land || f->base_sea_name_offset != want_seas)
+        hooks_mismatch(&stats_name_base, "(%d, %d, %d) = \"%.24s\" %d %d, original \"%.24s\" %d %d", faction, save, sea,
+                       got, f->base_name_offset, f->base_sea_name_offset, want, want_land, want_seas);
+    f->base_name_offset = want_land, f->base_sea_name_offset = want_seas;
+    memcpy(name, want, sizeof want);
+}
+static void shadow_name_base(int faction, char *name, int save, int sea) {
+    if (hooks_nested) {
+        orig_name_base(faction, name, save, sea);
+        return;
+    }
+    if (shadow_bypass()) {
+        name_base(faction, name, save, sea);
+        return;
+    }
+    stats_name_base.calls++;
+    shadow_tick(UPKEEP);
+    check_name_base(faction, name, save, sea);
+}
+// Goals, roads and (instantly) the map: all of the game's state, and the
+// tables of the game's path finder (from the heap, sized by the map), which
+// base_connect() leaves its last search in and reads again.
+static void writes_path(struct hook_writes *w) {
+    struct { int32_t *map; int16_t *x, *y; } *p = game_path;
+    size_t area = (size_t)*game_map_area;
+    if (p->map) hooks_writes_add(w, p->map, area * 4);
+    if (p->x) hooks_writes_add(w, p->x, area * 2);
+    if (p->y) hooks_writes_add(w, p->y, area * 2);
+}
+SHADOW_WRITER(UPKEEP, void, base_terraform, (int a), (a), (hooks_writes_game(&w_), writes_path(&w_)), "%d", a)
 // Fungus, native life, the sea and volcanoes write widely.
 SHADOW_WRITER(UPKEEP, void, base_ecology, (void), (), hooks_writes_game(&w_), "%s", "")
 
@@ -1062,6 +1631,18 @@ static void upkeep_sweep(void) {
     int current_id = ID;
     for (int f = 0; f < FACTION_COUNT; f++)
         for (int fac = 0; fac <= FAC_STOCKPILE_ENERGY; fac++) check_fac_maint(fac, f);
+    // Names for each faction, land and sea, the next and some way down
+    // the lists (and past their end).
+    for (int f = 1; f < FACTION_COUNT; f++) {
+        struct faction_data *fd = &game_factions[f];
+        int32_t land = fd->base_name_offset, seas = fd->base_sea_name_offset;
+        char name[25] = {0};
+        for (int k = 0; k < 4; k++) {
+            if (k >= 2) fd->base_name_offset = land + 7 * k + slice % 40, fd->base_sea_name_offset = seas + k + slice % 12;
+            check_name_base(f, name, k & 1, (k + slice) & 1);
+        }
+        fd->base_name_offset = land, fd->base_sea_name_offset = seas;
+    }
     for (int b = 0; b < *game_base_count; b++) {
         struct base *base = &game_bases[b], saved = *base;
         struct faction_data *f = &game_factions[base->faction], saved_f = *f;
@@ -1124,6 +1705,19 @@ static void upkeep_sweep(void) {
         }
         if ((b + slice) % 6 == 0) sweep_riot(b, saved);
         if ((b + slice) % 5 == 0) sweep_ecology(b, saved);
+        // Terraforming plans, for a human's governor too, and made at once.
+        if ((b + slice) % 4 == 0) {
+            uint8_t human = *game_human_factions;
+            int32_t prefs = *game_preferences, more = *game_more_preferences;
+            check_base_terraform(0);
+            check_base_terraform(1);
+            *game_human_factions |= (uint8_t)(1 << base->faction);
+            base->governor = (base->governor & ~0x0f000000u) | (0x1000000u << (slice % 5)) | GOVERNOR_ACTIVE;
+            *game_preferences ^= 0x2020000 * (slice & 1), *game_more_preferences ^= 0x400020 * ((slice >> 1) & 1);
+            check_base_terraform(0);
+            *game_human_factions = human, *game_preferences = prefs, *game_more_preferences = more;
+            *base = saved;
+        }
     }
     B = current;
     ID = current_id;
@@ -1142,5 +1736,7 @@ static const struct hook upkeep_hooks[] = {
     HOOK(0x4f4830, base_check_support, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x20),    // sub esp, 32
     HOOK(0x4f3fe0, base_hurry, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x1c),            // sub esp, 28
     HOOK(0x4f67f0, base_ecology, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x3c),          // sub esp, 60
+    HOOK(0x4e4090, name_base, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x54),             // sub esp, 84
+    HOOK(0x4ecbf0, base_terraform, PUSH_EBP_MOV_EBP_ESP, 0x81, 0xec, 0x04, 0x01, 0x00, 0x00),  // sub esp, 0x104
 };
 struct hook_module upkeep_module = {"upkeep", upkeep_hooks, HOOK_COUNT(upkeep_hooks), upkeep_sweep, NULL, -1};
