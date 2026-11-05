@@ -13,6 +13,8 @@
 // shown once the check is over. The text a message fills in (parse_say and
 // the like) is held with it, in order, as checks don't put back the game's
 // text variables either.
+#include <stdio.h>
+
 #include "game.h"
 #include "shadow.h"
 
@@ -137,6 +139,15 @@ QUIET_THIS(void, base_pop_init, (void)0, (void *pop, int a, int b), (pop, a, b))
 QUIET_THIS(void, base_pop_set_width, (void)0, (void *pop, int w), (pop, w))
 QUIET_THIS(void, base_pop_string, (void)0, (void *pop, char *s), (pop, s))
 QUIET_THIS(int, base_pop_exec_3, 0, (void *pop, int a, int b), (pop, a, b))
+// A picture for such a dialog: reported missing, as loading it would
+// allocate from the game's heap.
+static int (*orig_pcx_dimensions)(char *file, int *w, int *h);
+static struct hook_stats stats_pcx_dimensions = {"(quiet pcx_dimensions)"};
+static int shadow_pcx_dimensions(char *file, int *w, int *h) {
+    if (!hooks_protecting()) return orig_pcx_dimensions(file, w, h);
+    stats_pcx_dimensions.calls++;
+    return 1;
+}
 
 // Calls on one of the game's own objects, held like the others: the object
 // is kept in arg[4].
@@ -200,6 +211,38 @@ HELD(void, tech_advance, (void)0, (int faction), (faction), (c_.arg[0] = faction
 HELD(void, tech_research, (void)0, (int faction, int labs), (faction, labs), (c_.arg[0] = faction, c_.arg[1] = labs),
      orig_tech_research(a_[0], a_[1]))
 
+// The heap guard: nothing may allocate from the game's heap, or free to
+// it, while state is protected, as a check puts back the heap's
+// bookkeeping but not the memory it hands out. Any that does counts as a
+// mismatch, and the first few say where they were called from.
+void modules_scan_stack(uint32_t esp) __attribute__((weak));
+void *orig_heap_malloc, *orig_heap_free;
+static struct hook_stats stats_heap_malloc = {"(heap guard: malloc)"}, stats_heap_free = {"(heap guard: free)"};
+void heap_guard(int is_free, uint32_t esp);
+void heap_guard(int is_free, uint32_t esp) {
+    if (!hooks_protecting()) return;
+    struct hook_stats *s = is_free ? &stats_heap_free : &stats_heap_malloc;
+    s->calls++;
+    if (++s->mismatches > 3) return;
+    fprintf(stderr, "chiron: shadow mismatch: game heap %s while state is protected\n", is_free ? "free" : "malloc");
+    if (modules_scan_stack) modules_scan_stack(esp);
+}
+// Entered in place of malloc and free: registers kept, then on to them.
+void shadow_heap_malloc(void), shadow_heap_free(void);
+#define HEAP_STUB(name, n)                   \
+    __asm__(".text\n"                        \
+            "shadow_" #name ":\n"            \
+            "    pushal\n"                   \
+            "    leal 32(%esp), %eax\n"      \
+            "    pushl %eax\n"               \
+            "    pushl $" #n "\n"            \
+            "    call heap_guard\n"          \
+            "    addl $8, %esp\n"            \
+            "    popal\n"                    \
+            "    jmp *orig_" #name "\n")
+HEAP_STUB(heap_malloc, 0);
+HEAP_STUB(heap_free, 1);
+
 #define PUSH_EBP_MOV_EBP_ESP 0x55, 0x8b, 0xec
 #define QUIET_HOOK(addr, name, ...)                                                                     \
     {addr, (const uint8_t[]){__VA_ARGS__}, sizeof((const uint8_t[]){__VA_ARGS__}), NULL, (void *)shadow_##name, \
@@ -226,6 +269,11 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x6015b0, base_pop_init, 0x53, 0x55, 0x56, 0x57, 0x8b, 0xf1),                    // push ebx, ebp, esi, edi; mov esi, ecx
     QUIET_HOOK(0x601b20, base_pop_set_width, 0x8b, 0x81, 0x14, 0x0a, 0x00, 0x00),               // mov eax, [ecx+0xa14]
     QUIET_HOOK(0x601980, base_pop_string, 0x8b, 0x44, 0x24, 0x04, 0x33, 0xd2),                  // mov eax, [esp+4]; xor edx, edx
+    {0x6470a6, (const uint8_t[]){0xff, 0x35, 0xa8, 0x06, 0x9c, 0x00}, 6, NULL, (void *)shadow_heap_malloc,
+     (void **)&orig_heap_malloc, &stats_heap_malloc, 1},  // malloc: push dword [0x9c06a8]
+    {0x644ef2, (const uint8_t[]){0x56, 0x8b, 0x74, 0x24, 0x08}, 5, NULL, (void *)shadow_heap_free, (void **)&orig_heap_free,
+     &stats_heap_free, 1},  // free: push esi; mov esi, [esp+8]
+    QUIET_HOOK(0x5e2480, pcx_dimensions, 0x6a, 0xff, 0x68, 0x1c, 0x2c, 0x66, 0x00),             // push -1; push 0x662c1c
     QUIET_HOOK(0x602600, base_pop_exec_3, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),                  // mov eax, fs:0
     QUIET_HOOK(0x5d5a70, graphic_win_redraw, 0xa1, 0x28, 0x7b, 0x9b, 0x00),                     // mov eax, [0x9b7b28]
     QUIET_HOOK(0x4c6ea0, wave_unload, 0x56, 0x8b, 0xf1, 0x57, 0x33, 0xff),                      // push esi; mov esi, ecx; push edi; xor edi, edi

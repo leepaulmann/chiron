@@ -132,7 +132,9 @@ struct faction_data {
     uint8_t units_active[512], units_queue[512];  // per prototype (PROTO_COUNT): its units, and those being built
     GAME_PAD(0xc58, 0x105c);
     int32_t base_count;
-    GAME_PAD(0x1060, 0x117c);
+    GAME_PAD(0x1060, 0x1070);
+    int32_t planet_busters;
+    GAME_PAD(0x1074, 0x117c);
     uint8_t region_total_bases[REGION_COUNT];
     GAME_PAD(0x11fc, 0x157c);
     uint16_t region_visible_tiles[REGION_COUNT];
@@ -725,6 +727,12 @@ extern void (*game_wave_it)(int sound);
 extern int (*game_best_reactor)(int faction);
 extern void (*game_tech_research)(int faction, int labs);
 extern void (*game_drone_riot)(void);
+extern int (*game_kill)(int veh);                    // disbands a unit
+extern int (*game_at_goal)(int faction, int type, int x, int y);
+extern int (*game_planet_buster2)(int proto);
+extern int (*game_at_climax)(int faction);
+extern int32_t *game_sunspot_duration;
+extern int32_t *game_ranked_faction;  // a faction base_hurry() looks at the ranking of
 // For base_production().
 extern void (*game_base_reset)(int base, int unk);       // the AI (or governor) picks what to build next
 extern int (*game_ascending)(int faction);                 // may it build the Ascent to Transcendence

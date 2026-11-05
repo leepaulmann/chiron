@@ -123,7 +123,8 @@ module at a time. So far:
   finishing units, facilities, satellites and secret projects (with their
   effects, the Ascent to Transcendence included), and moving its queue on;
   its research, facility upkeep, energy convoys, golden ages and the end
-  of riots.
+  of riots; doctors in riots, disbanding the units it can't support, and
+  the AI rushing production with its energy reserves.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once

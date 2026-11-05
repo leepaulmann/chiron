@@ -151,6 +151,15 @@ static int reactor = 2, researched = -1, riots;
 static int best_reactor_stub(int faction) { return reactor; }
 static void tech_research_stub(int faction, int labs) { researched = labs; }
 static void drone_riot_stub(void) { riots++; }
+static int killed_veh = -1;
+static int kill_stub(int veh) {
+    killed_veh = veh;
+    vehs[veh].state &= ~(uint32_t)VEH_STATE_SUPPORTED;
+    return 0;
+}
+static int no_goal(int faction, int type, int x, int y) { return 0; }
+static int no_buster(int proto) { return 0; }
+static int no_climax(int faction) { return 0; }
 static int popps;
 static int popp_stub(char *file, char *label, int flags, char *picture, int unk) { return popps++, 0; }
 
@@ -1273,6 +1282,43 @@ int main(void) {
     base_drones();
     EXPECT(b1->state & 2, 0);
     EXPECT(resets, 1);
+    // Rushing a headquarters: a tenth of the reserves, at most what is left
+    // to build (50 of 100), scaled by the rows left; a little given back.
+    int32_t sunspots = 0, ranked = 0;
+    game_kill = kill_stub, game_at_goal = no_goal, game_planet_buster2 = no_buster, game_at_climax = no_climax;
+    game_sunspot_duration = &sunspots, game_ranked_faction = &ranked;
+    prod_rules[FAC_HEADQUARTERS].cost = 10;
+    faction_defs[1].rule_hurry = 100;
+    strcpy((char *)&faction_defs[1] + 4, "X");
+    projects[SP_VOICE_OF_PLANET] = -1;
+    humans = 0, difficulty = 3;
+    b1->queue[0] = -FAC_HEADQUARTERS, b1->minerals = 50, b1->state = 0;
+    factions[1].energy_credits = 1000;
+    base_hurry();
+    EXPECT(b1->minerals, 61);  // 50 + 50 * 50 / (50 * 50 / 20 + 100)
+    EXPECT(factions[1].energy_credits, 951);  // 50 spent, 3 * 50 / 80 back
+    b1->minerals = 0;
+    base_hurry();
+    EXPECT(b1->minerals, 0);  // nothing started, nothing rushed
+    // Upkeep beyond the base's minerals: the supported unit furthest away
+    // is disbanded.
+    struct veh saved_vs[2] = {vehs[0], vehs[1]};
+    memset(vehs, 0, 2 * sizeof(vehs[0]));
+    for (int v = 0; v < 2; v++) {
+        vehs[v].faction = 1, vehs[v].home_base = 1, vehs[v].proto = 1, vehs[v].state = VEH_STATE_SUPPORTED;
+        vehs[v].prev_in_stack = vehs[v].next_in_stack = -1;
+    }
+    vehs[0].x = 6, vehs[0].y = 4, vehs[1].x = 2, vehs[1].y = 2;
+    veh_count = 2, upkeep = 3;
+    b1->intake_2[RESOURCE_MINERAL] = 2;
+    factions[1].se_pending[SE_SUPPORT] = 0;
+    base_check_support();
+    EXPECT(killed_veh, 1);
+    EXPECT(upkeep, 2);
+    killed_veh = -1;
+    base_check_support();
+    EXPECT(killed_veh, -1);  // paid for now
+    vehs[0] = saved_vs[0], vehs[1] = saved_vs[1], veh_count = 1;
     factions[1] = saved_f1;
     *b1 = saved_b1;
 
