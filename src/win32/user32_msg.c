@@ -10,6 +10,7 @@
 #include "../loader/modules.h"
 #include "../loader/teb.h"
 #include "gdi.h"
+#include "kernel32.h"
 #include "user32.h"
 
 typedef struct {
@@ -219,7 +220,12 @@ void user32_timers_destroyed(HWND hwnd) {
 // removes exactly that message and dispatches its MSG buffer without checking
 // the result, so a timer consumed by the first peek made it dispatch
 // uninitialised memory.
+//
+// While the clock is held (a shadow check runs the original and Chiron's
+// code from the same state) no timer comes due: one firing in only one of
+// the two runs would set the game's timer flags differently.
 static int fire_timer(MSG *out, HWND hwnd, int remove) {
+    if (kernel32_ticks_held()) return -1;
     uint32_t now = SDL_GetTicks();
     int wait = -1;
     for (struct timer *t = timers; t; t = t->next) {

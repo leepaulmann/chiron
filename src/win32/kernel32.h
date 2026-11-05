@@ -10,6 +10,8 @@ void kernel32_close_waitable(struct kobj *o);
 // calling thread, or releases it. Shadow-mode checks use it so the original
 // and Chiron's code read the same time.
 void kernel32_hold_ticks(int hold);
+// Whether the clock is held: timers don't come due meanwhile.
+int kernel32_ticks_held(void);
 
 // WIN32_FIND_DATAA.
 struct win32_find_data {

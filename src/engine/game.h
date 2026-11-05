@@ -90,7 +90,8 @@ struct faction_data {
     GAME_PAD(0x1dc, 0x220);
     int32_t energy_credits, hurry_cost_total;
     int32_t se_models_pending[4];  // politics, economics, values, future
-    GAME_PAD(0x238, 0x24c);
+    int32_t se_models[4];          // as they stand this turn
+    int32_t se_upheaval_paid;  // energy paid this turn to change social models
     int32_t se_pending[SE_COUNT];
     int32_t se[SE_COUNT];
     int32_t se_2[SE_COUNT];
@@ -176,6 +177,8 @@ GAME_AT(struct faction_data, alloc_labs, 0x328);
 GAME_AT(struct faction_data, region_total_bases, 0x117c);
 GAME_AT(struct faction_data, region_base_plan, 0x197c);
 GAME_AT(struct faction_data, se_models_pending, 0x228);
+GAME_AT(struct faction_data, se_models, 0x238);
+GAME_AT(struct faction_data, se_upheaval_paid, 0x248);
 GAME_AT(struct faction_data, energy_surplus_total, 0x2fc);
 GAME_AT(struct faction_data, alloc_psych, 0x324);
 GAME_AT(struct faction_data, social_support, 0x690);
@@ -192,6 +195,9 @@ enum {  // faction_def bonus ids
     BONUS_FACILITY = 2,  // a free facility at each base
     BONUS_FREEFAC = 12,  // the same, once its tech is known
     BONUS_REVOLT = 13,   // percent more chance that another faction's revolting bases join it
+    // Social engineering: a model's penalties cancelled or doubled; an
+    // effect kept from going negative, or its negative halved.
+    BONUS_IMMUNITY = 4, BONUS_IMPUNITY = 5, BONUS_PENALTY = 6, BONUS_ROBUST = 10,
 };
 
 // A faction as its faction file defines it (Thinker's MFaction, OpenSMACX's
@@ -868,6 +874,11 @@ extern int32_t *game_skip_tech_screen;
 extern void (*game_log_say5)(char *a, char *b, int n1, int n2, int n3);
 // The faction's SOCIAL screen.
 extern void (*game_social_select)(int faction);
+// The social engineering table: each category's models (0x2c bytes, their
+// SE_COUNT effects), 0xd4 bytes a category, from the first category's
+// first model's effects.
+enum { SOCIAL_CATEGORIES = 4, SOCIAL_MODELS = 4, SOCIAL_CATEGORY_SIZE = 0xd4, SOCIAL_MODEL_SIZE = 0x2c };
+extern uint8_t *game_social_effects;
 // Repairs: whether a unit carries others, and whether a base breeds native
 // life for its faction.
 extern int (*game_veh_cargo)(int veh);

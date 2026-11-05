@@ -497,6 +497,8 @@ void kernel32_hold_ticks(int hold) {
     if (!hold && ticks_held) ticks_held--;
 }
 
+int kernel32_ticks_held(void) { return ticks_held > 0; }
+
 void WINAPI Sleep(DWORD ms) {
     if (!ms) {
         sched_yield();

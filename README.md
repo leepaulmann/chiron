@@ -133,7 +133,9 @@ module at a time. So far:
   loans, the AI's maintenance discount, interest, the first turn's free
   techs and the end of sanctions; the AI's split of energy into economy,
   psych and labs (and the player's warning of falling reserves); and
-  units' repairs, moves and orders at the start of a faction's turn.
+  units' repairs, moves and orders at the start of a faction's turn;
+- social engineering: the effects of a faction's choices, with its
+  projects, temples and faction rules, and their taking effect each turn.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once

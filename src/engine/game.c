@@ -206,6 +206,7 @@ void (*game_draw_tiles)(int x, int y, int unk);
 int32_t *game_turn_start_credits, *game_skip_tech_screen;
 void (*game_log_say5)(char *a, char *b, int n1, int n2, int n3);
 void (*game_social_select)(int faction);
+uint8_t *game_social_effects;
 int (*game_veh_cargo)(int veh);
 int (*game_breed_mod)(int base, int faction);
 void (*game_do_all_draws)(void);
@@ -499,6 +500,7 @@ void game_bind(struct pe_image *exe) {
     game_skip_tech_screen = (int32_t *)code_at(exe, 0x945f40);
     game_log_say5 = (void *)code_at(exe, 0x626250);
     game_social_select = (void *)code_at(exe, 0x5b5620);
+    game_social_effects = (uint8_t *)code_at(exe, 0x94b024);
     game_veh_cargo = (void *)code_at(exe, 0x5c1760);
     game_breed_mod = (void *)code_at(exe, 0x4e65c0);
     game_do_all_draws = (void *)code_at(exe, 0x5fcbb0);
