@@ -147,6 +147,10 @@ static int __attribute__((thiscall)) pop_exec_stub(void *pop, int a, int b) { re
 static int pcx_stub(char *file, int *w, int *h) { return 1; }
 static void interlude_stub(int id, char *text, int a, int b) {}
 static void help_stub(int project) {}
+static int reactor = 2, researched = -1, riots;
+static int best_reactor_stub(int faction) { return reactor; }
+static void tech_research_stub(int faction, int labs) { researched = labs; }
+static void drone_riot_stub(void) { riots++; }
 static int popps;
 static int popp_stub(char *file, char *label, int flags, char *picture, int unk) { return popps++, 0; }
 
@@ -1169,6 +1173,106 @@ int main(void) {
     EXPECT(news, 1);  // the player is shown it
     projects[5] = -1;
     at(6, 4)->bits = garrison_bits, at(6, 4)->owner_site = garrison_owner;
+    factions[1] = saved_f1;
+    *b1 = saved_b1;
+
+    // Facility upkeep: as the rules say, none for a free one, and the
+    // command center's by reactor, at most half the difficulty.
+    game_best_reactor = best_reactor_stub, game_tech_research = tech_research_stub, game_drone_riot = drone_riot_stub;
+    prod_rules[FAC_RECYCLING_TANKS].maint = 1, prod_rules[27].maint = 9;
+    EXPECT(fac_maint(FAC_RECYCLING_TANKS, 1), 1);
+    factions[1].diff_level = 3;
+    EXPECT(fac_maint(27, 1), 2);
+    factions[1].diff_level = 1, reactor = 3;
+    EXPECT(fac_maint(27, 1), 1);
+    reactor = -1;
+    EXPECT(fac_maint(27, 1), 0);
+    faction_defs[1].bonus_count = 1, faction_defs[1].bonus_id[0] = BONUS_FACILITY;
+    faction_defs[1].bonus_val1[0] = FAC_RECYCLING_TANKS;
+    EXPECT(fac_maint(FAC_RECYCLING_TANKS, 1), 0);
+    faction_defs[1].bonus_count = 0;
+    // Paid from reserves; halved by the Self-Aware Colony, odd units let
+    // off every other time.
+    saved_b1 = *b1, saved_f1 = factions[1];
+    current = b1, current_id = 1;
+    memset(b1->facilities_built, 0, sizeof(b1->facilities_built));
+    give(1, FAC_RECYCLING_TANKS);
+    factions[1].energy_credits = 10, factions[1].facility_maint_total = 0;
+    base_maint();
+    EXPECT(factions[1].energy_credits, 9);
+    EXPECT(factions[1].facility_maint_total, 1);
+    projects[25] = 1;
+    base_maint();
+    EXPECT(factions[1].energy_credits, 9);
+    base_maint();
+    EXPECT(factions[1].energy_credits, 8);
+    projects[25] = -1;
+    // Unpaid: at difficulty 3 the tanks are sold for their price; at 1 the
+    // debt is forgiven.
+    factions[1].diff_level = 3, factions[1].energy_credits = 0, popb_count = 0;
+    base_maint();
+    EXPECT(has_fac(FAC_RECYCLING_TANKS, 1, 0), 0);
+    EXPECT(factions[1].energy_credits, 40);
+    EXPECT(popb_count, 1);
+    give(1, FAC_RECYCLING_TANKS);
+    factions[1].diff_level = 1, factions[1].energy_credits = 0;
+    base_maint();
+    EXPECT(has_fac(FAC_RECYCLING_TANKS, 1, 0), 1);
+    EXPECT(factions[1].energy_credits, 0);
+    // Research: 7 labs at RESEARCH 0 are 700 hundredths; 33 left over make
+    // a whole one with 70 more.
+    factions[1].diff_level = 3, factions[1].se_pending[SE_RESEARCH] = 0, factions[1].labs_total = 0;
+    factions[1].net_random_event = 33, b1->labs_total = 7, turn = 20;
+    base_research();
+    EXPECT(researched, 7);
+    EXPECT(factions[1].labs_total, 7);
+    factions[1].se_pending[SE_RESEARCH] = 2;  // 12 tenths: 840 hundredths
+    factions[1].net_random_event = 70;
+    base_research();
+    EXPECT(researched, 9);
+    EXPECT(factions[1].net_random_event, 10);
+    factions[1].se_pending[SE_RESEARCH] = -5, turn = 20;  // none before turn 25
+    base_research();
+    EXPECT(researched, 0);
+    // Energy in deficit stops energy convoys sitting in bases.
+    struct veh saved_v0 = vehs[0];
+    vehs[0].faction = 1, vehs[0].x = 6, vehs[0].y = 4, vehs[0].proto = 2, vehs[0].order = ORDER_CONVOY;
+    vehs[0].order_auto_type = RESOURCE_ENERGY;
+    protos[2].plan = PLAN_SUPPLY;
+    at(6, 4)->bits |= MAP_BASE, at(6, 4)->owner_site = 1;
+    veh_count = 1;
+    b1->surplus[RESOURCE_ENERGY] = 0;
+    base_energy_costs();
+    EXPECT(vehs[0].order, ORDER_CONVOY);
+    b1->surplus[RESOURCE_ENERGY] = -1;
+    base_energy_costs();
+    EXPECT(vehs[0].order, 0);
+    vehs[0] = saved_v0, protos[2].plan = plan;
+    at(6, 4)->bits = garrison_bits, at(6, 4)->owner_site = garrison_owner;
+    // Golden ages: no drones, size 3, half talents.
+    b1->pop_size = 4, b1->drone_total = 0, b1->talent_total = 2, b1->state = 0, popb_count = 0;
+    base_drones();
+    EXPECT(b1->state & BASE_STATE_GOLDEN_AGE, BASE_STATE_GOLDEN_AGE);
+    EXPECT(popb_count, 1);
+    base_drones();
+    EXPECT(popb_count, 1);  // said once
+    b1->talent_total = 1;
+    base_drones();
+    EXPECT(b1->state & BASE_STATE_GOLDEN_AGE, 0);
+    EXPECT(popb_count, 2);
+    // Riots while drones outnumber talents, unless nerve stapled.
+    b1->drone_total = 2, riots = 0;
+    base_drones();
+    EXPECT(riots, 1);
+    b1->nerve_staple_turns = 3;
+    base_drones();
+    EXPECT(riots, 1);
+    b1->nerve_staple_turns = 0;
+    // Riots over: the AI chooses again.
+    b1->drone_total = 0, b1->state = 2, resets = 0;
+    base_drones();
+    EXPECT(b1->state & 2, 0);
+    EXPECT(resets, 1);
     factions[1] = saved_f1;
     *b1 = saved_b1;
 

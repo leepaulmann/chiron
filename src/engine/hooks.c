@@ -16,9 +16,9 @@ enum hook_mode hooks_mode = HOOKS_OFF;
 int hooks_nested;
 
 // Each module defines its hooks and sweep.
-extern struct hook_module tech_module, map_module, mapgen_module, base_module, production_module, quiet_module;
+extern struct hook_module tech_module, map_module, mapgen_module, base_module, production_module, upkeep_module, quiet_module;
 static struct hook_module *const modules[] = {&tech_module, &map_module, &mapgen_module, &base_module, &production_module,
-                                              &quiet_module};
+                                              &upkeep_module, &quiet_module};
 
 #define N_MODULES (sizeof(modules) / sizeof(modules[0]))
 
@@ -138,12 +138,18 @@ void hooks_ui_text(struct hook_ui_call *c, int i, const char *s) {
 void hooks_ui_release(void) {
     if (writes_depth) return;
     // Calls made here may start checks of their own, which hold and
-    // release theirs.
+    // release theirs, so each release replays from a copy of its own.
     int n = ui_n < UI_MAX ? ui_n : UI_MAX;
-    static struct hook_ui_call pending[UI_MAX];
-    memcpy(pending, ui_log, n * sizeof(pending[0]));
+    if (!n) {
+        ui_n = 0;
+        return;
+    }
+    struct hook_ui_call *pending = malloc((size_t)n * sizeof(*pending));
+    if (!pending) abort();
+    memcpy(pending, ui_log, (size_t)n * sizeof(*pending));
     ui_n = 0;
     for (int i = 0; i < n; i++) pending[i].replay(&pending[i]);
+    free(pending);
 }
 
 static int ui_same(const struct hook_ui_call *a, const struct hook_ui_call *b) {

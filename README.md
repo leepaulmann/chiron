@@ -121,7 +121,9 @@ module at a time. So far:
   growth and building; its growth and starvation at the end of a turn,
   with the advice the game gives when stores run low; and its production:
   finishing units, facilities, satellites and secret projects (with their
-  effects, the Ascent to Transcendence included), and moving its queue on.
+  effects, the Ascent to Transcendence included), and moving its queue on;
+  its research, facility upkeep, energy convoys, golden ages and the end
+  of riots.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once

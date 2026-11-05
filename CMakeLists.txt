@@ -60,6 +60,7 @@ add_executable(chiron
   src/engine/patches.c
   src/engine/production.c
   src/engine/quiet.c
+  src/engine/upkeep.c
   src/engine/soak.c
   src/engine/tech.c
   src/loader/pe.c

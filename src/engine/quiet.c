@@ -196,6 +196,9 @@ HELD(void, mon_winning_trans, (void)0, (int faction, int other), (faction, other
 // A tech given away (by a secret project), with its announcement and the
 // window that shows it, which allocates as the monuments do.
 HELD(void, tech_advance, (void)0, (int faction), (faction), (c_.arg[0] = faction), orig_tech_advance(a_[0]))
+// Research paid in, which may discover a tech in the same way.
+HELD(void, tech_research, (void)0, (int faction, int labs), (faction, labs), (c_.arg[0] = faction, c_.arg[1] = labs),
+     orig_tech_research(a_[0], a_[1]))
 
 #define PUSH_EBP_MOV_EBP_ESP 0x55, 0x8b, 0xec
 #define QUIET_HOOK(addr, name, ...)                                                                     \
@@ -246,6 +249,7 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x4b9ea0, status_win_redraw, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10),           // sub esp, 16
     QUIET_HOOK(0x514880, console_update_data, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),         // mov eax, [ebp+8]
     QUIET_HOOK(0x515400, console_center, 0xa1, 0xb8, 0x92, 0x93, 0x00),                       // mov eax, [0x9392b8]
+    QUIET_HOOK(0x5be940, tech_research, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x0c),             // mov eax, [ebp+12]
     QUIET_HOOK(0x5be530, tech_advance, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x8b, 0x75, 0x08),  // push ebx; push esi; mov esi, [ebp+8]
     QUIET_HOOK(0x44c9e0, help_project, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                // mov eax, [ebp+8]
 };

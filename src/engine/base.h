@@ -59,3 +59,8 @@ int cost_factor(int faction, int type, int base);
 int base_growth(void);
 int base_queue(int base);
 void base_production(void);
+void base_energy_costs(void);
+void base_research(void);
+int fac_maint(int facility, int faction);
+void base_maint(void);
+void base_drones(void);

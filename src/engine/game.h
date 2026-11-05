@@ -84,7 +84,8 @@ struct faction_data {
     int32_t sanction_turns;  // economic sanctions: no commerce while above 0
     GAME_PAD(0x0c4, 0x1d8);
     int32_t major_atrocities;
-    GAME_PAD(0x1dc, 0x228);
+    GAME_PAD(0x1dc, 0x220);
+    int32_t energy_credits, hurry_cost_total;
     int32_t se_models_pending[4];  // politics, economics, values, future
     GAME_PAD(0x238, 0x24c);
     int32_t se_pending[SE_COUNT];
@@ -105,7 +106,7 @@ struct faction_data {
     GAME_PAD(0x36c, 0x3d0);
     int32_t tech_cost;  // research cost, or negative until computed
     int32_t earned_techs_saved;
-    int32_t net_random_event;
+    int32_t net_random_event;  // base_research() keeps the hundredths of a lab left over here
     int32_t ai_fight, ai_growth, ai_tech, ai_wealth, ai_power;  // the AI's priorities
     GAME_PAD(0x3f0, 0x3f8);
     int32_t best_mineral_output;  // the most a base of the faction has made, its surplus counted twice
@@ -145,6 +146,9 @@ _Static_assert(sizeof(struct faction_data) == 0x20cc, "faction_data size");
 GAME_AT(struct faction_data, diplo_status, 0x18);
 GAME_AT(struct faction_data, se_pending, 0x24c);
 GAME_AT(struct faction_data, se_base, 0x2d0);
+GAME_AT(struct faction_data, energy_credits, 0x220);
+GAME_AT(struct faction_data, facility_maint_total, 0x300);
+GAME_AT(struct faction_data, net_random_event, 0x3d8);
 GAME_AT(struct faction_data, tech_commerce_bonus, 0x304);
 GAME_AT(struct faction_data, tech_fungus, 0x314);
 GAME_AT(struct faction_data, tech_cost, 0x3d0);
@@ -169,6 +173,8 @@ GAME_AT(struct faction_data, best_weapon_value, 0x818);
 enum {  // faction_def bonus ids
     BONUS_FUNGUS_NUTRIENT = 7, BONUS_FUNGUS_MINERALS = 8, BONUS_FUNGUS_ENERGY = 9,
     BONUS_NODRONE = 14,  // drones made content at each base
+    BONUS_FACILITY = 2,  // a free facility at each base
+    BONUS_FREEFAC = 12,  // the same, once its tech is known
 };
 
 // A faction as its faction file defines it (Thinker's MFaction, OpenSMACX's
@@ -262,7 +268,7 @@ struct rules_facility {
     char *name;
     GAME_PAD(0x04, 0x0c);
     int32_t cost;  // in rows of minerals
-    GAME_PAD(0x10, 0x14);
+    int32_t maint;  // energy a turn
     int32_t preq_tech;
     GAME_PAD(0x18, 0x30);
 };
@@ -284,7 +290,7 @@ enum {  // game_rules bits
     RULES_NO_UNITY_SCATTERING = 0x2000,
 };
 
-enum { FACTION_FLAG_MAP_REVEALED = 0x200 };  // faction_data.flags
+enum { FACTION_FLAG_MAP_REVEALED = 0x200, FACTION_FLAG_MAINT_HALF = 0x20 };  // faction_data.flags
 
 enum { TREATY_UNK_8000000 = 0x8000000 };  // with TREATY_COMMLINK, whose_territory() names the owner
 
@@ -715,6 +721,10 @@ extern int (*game_eliminate_player)(int faction, int by);
 extern int (*game_veh_avail)(int proto, int faction, int base);  // whether the base may build the unit
 extern int (*game_facility_avail)(int facility, int faction, int base, int queue);
 extern void (*game_wave_it)(int sound);
+// For the end of a base's turn.
+extern int (*game_best_reactor)(int faction);
+extern void (*game_tech_research)(int faction, int labs);
+extern void (*game_drone_riot)(void);
 // For base_production().
 extern void (*game_base_reset)(int base, int unk);       // the AI (or governor) picks what to build next
 extern int (*game_ascending)(int faction);                 // may it build the Ascent to Transcendence
