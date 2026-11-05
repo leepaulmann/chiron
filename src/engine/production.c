@@ -829,7 +829,12 @@ static void production_sweep(void) {
             int cost = item >= 0 ? cost_factor(base->faction, 1, -1) * game_veh_cost(item, b, 0)
                                  : cost_factor(base->faction, 1, -1) * game_facilities[-item].cost;
             base->minerals = cost + (slice + k) % 3 - base->surplus[RESOURCE_MINERAL] * ((k & 1) == 0);
+            // Every other turn, as the first of a new prototype, which
+            // retires older ones and upgrades units.
+            uint16_t flags = item >= 64 ? game_protos[item].flags : 0;
+            if (item >= 64 && (slice & 1)) game_protos[item].flags &= (uint16_t)~PROTO_FLAG_BUILT;
             check_base_production();
+            if (item >= 64) game_protos[item].flags = flags;
             *base = saved;
         }
     }

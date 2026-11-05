@@ -41,6 +41,17 @@ static void __attribute__((thiscall)) shadow_map_win_clear_terrain(void *win) {
     orig_map_win_clear_terrain(win);
 }
 
+QUIET(draw_tiles, "(quiet draw_tiles)", (int x, int y, int unk), (x, y, unk))
+static void(__attribute__((thiscall)) * orig_status_win_redraw)(void *win);
+static struct hook_stats stats_status_win_redraw = {"(quiet StatusWin_redraw)"};
+static void __attribute__((thiscall)) shadow_status_win_redraw(void *win) {
+    if (hooks_protecting()) {
+        stats_status_win_redraw.calls++;
+        return;
+    }
+    orig_status_win_redraw(win);
+}
+
 // A held call: `fill` puts the arguments in c, `replay` makes the call from
 // them. Returns `quiet` while held.
 #define HELD(ret, fn, quiet, params, args, fill, replay_call)                \
@@ -149,6 +160,10 @@ QUIET_THIS(int, base_pop_exec_3, 0, (void *pop, int a, int b), (pop, a, b))
         hooks_ui_hold(&c_);                                                       \
     }
 #define SELF ((void *)(intptr_t)a_[4])
+// The console's refresh after a unit is upgraded (the info and status
+// windows), and its centring on a lost base.
+HELD_THIS(console_update_data, (void *self, int unk), (self, unk), c_.arg[0] = unk, orig_console_update_data(SELF, a_[0]))
+HELD_THIS(console_center, (void *self), (self), (void)0, orig_console_center(SELF))
 HELD_THIS(graphic_win_redraw, (void *self), (self), (void)0, orig_graphic_win_redraw(SELF))
 HELD_THIS(wave_unload, (void *self), (self), (void)0, orig_wave_unload(SELF))
 HELD_THIS(wave_load, (void *self, char *file), (self, file), hooks_ui_text(&c_, 0, file), orig_wave_load(SELF, TEXT(0)))
@@ -227,6 +242,10 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x477840, mon_built_preserve, MON_PROLOGUE),
     QUIET_HOOK(0x477100, mon_secret_project, MON_PROLOGUE),
     QUIET_HOOK(0x4779d0, mon_winning_trans, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0xd4, 0x64, 0x9a, 0x00),
+    QUIET_HOOK(0x46b140, draw_tiles, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x8b, 0x5d, 0x0c),            // push ebx; mov ebx, [ebp+12]
+    QUIET_HOOK(0x4b9ea0, status_win_redraw, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10),           // sub esp, 16
+    QUIET_HOOK(0x514880, console_update_data, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),         // mov eax, [ebp+8]
+    QUIET_HOOK(0x515400, console_center, 0xa1, 0xb8, 0x92, 0x93, 0x00),                       // mov eax, [0x9392b8]
     QUIET_HOOK(0x5be530, tech_advance, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x8b, 0x75, 0x08),  // push ebx; push esi; mov esi, [ebp+8]
     QUIET_HOOK(0x44c9e0, help_project, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                // mov eax, [ebp+8]
 };
