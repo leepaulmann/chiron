@@ -196,6 +196,10 @@ static int __attribute__((thiscall)) focus_stub(void *console, int x, int y, int
 static void __attribute__((thiscall)) redraw_stub(void *win) { redrawn++; }
 static void __attribute__((thiscall)) zoom_stub(void *win, int base, int unk) { zoomed = base + 1; }
 static void log_say_stub(char *text, int a, int b, int c) {}
+static void log_say5_stub(char *a, char *b, int n1, int n2, int n3) {}
+static int pumps, advances;
+static void pump_stub(void) { pumps++; }
+static void advance_stub(int faction) { advances++; }
 
 int main(void) {
     game_map = &tiles_ptr;
@@ -1575,6 +1579,47 @@ int main(void) {
     EXPECT(b1->state & 0x10080, 0x80);
     EXPECT(popps, 1);
     *b1 = saved_b1, factions[1] = saved_f1, factions[3] = saved_f3;
+
+    // A faction's turn: loans paid (all of it while it has enough, the debt
+    // growing at war), the AI's discount on maintenance, one energy a base
+    // for INTEREST 0, and the first turn's free techs.
+    uint8_t alive = 0xff;
+    int32_t start_credits = 0, skip_tech = 0;
+    game_factions_alive = &alive, game_turn_start_credits = &start_credits, game_skip_tech_screen = &skip_tech;
+    game_log_say5 = log_say5_stub, game_do_all_non_input = pump_stub, game_tech_advance = advance_stub;
+    saved_b1 = *b1, saved_f1 = factions[1];
+    struct faction_data saved_f2b = factions[2];
+    saved_f3 = factions[3];
+    struct faction_def saved_d1 = faction_defs[1];
+    turn = 1, humans = 0, difficulty = 4, pumps = advances = 0;
+    factions[1].energy_credits = 100, factions[2].energy_credits = 0, factions[2].sanction_turns = 0;
+    factions[1].loan_balance[2] = 30, factions[1].loan_payment[2] = 10;
+    factions[1].loan_balance[3] = 30, factions[1].loan_payment[3] = 10, factions[1].diplo_status[3] = TREATY_VENDETTA;
+    factions[1].sanction_turns = 0;
+    faction_defs[1].rule_flags = RULE_FLAG_INTEREST, faction_defs[1].rule_interest = 0, faction_defs[1].rule_tech_selected = 2;
+    int owned = 0;
+    for (int i = 0; i < base_count; i++) owned += bases[i].faction == 1;
+    production_phase(1);
+    EXPECT(start_credits, 90);
+    EXPECT(factions[2].energy_credits, 10);
+    EXPECT(factions[1].loan_balance[2], 20);
+    EXPECT(factions[1].loan_balance[3], 40);
+    EXPECT(pumps, owned);
+    EXPECT(advances, 2);
+    EXPECT(skip_tech, 0);
+    EXPECT(factions[1].unk_310, factions[1].energy_surplus_total);
+    EXPECT(factions[1].unk_30c, factions[1].turn_commerce_income - factions[1].facility_maint_total +
+                                    factions[1].energy_surplus_total);
+    // Short of the payment: what it has goes, the rest is added back.
+    *b1 = saved_b1, factions[1] = saved_f1, factions[2] = saved_f2b, factions[3] = saved_f3, faction_defs[1] = saved_d1;
+    factions[1].energy_credits = 4, factions[2].energy_credits = 0, factions[2].sanction_turns = 0;
+    factions[1].loan_balance[2] = 30, factions[1].loan_payment[2] = 10, turn = 2;
+    for (int i = 3; i < FACTION_COUNT; i++) factions[1].loan_balance[i] = 0;
+    production_phase(1);
+    EXPECT(factions[2].energy_credits, 4);
+    EXPECT(factions[1].loan_balance[2], 32);
+    *b1 = saved_b1, factions[1] = saved_f1, factions[2] = saved_f2b, factions[3] = saved_f3, faction_defs[1] = saved_d1;
+    difficulty = 3;
 
     if (failures) return 1;
     printf("engine_base: all tests passed\n");

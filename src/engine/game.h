@@ -83,7 +83,9 @@ struct faction_data {
     uint32_t diplo_status[FACTION_COUNT];  // TREATY_* towards each faction
     GAME_PAD(0x038, 0x0c0);
     int32_t sanction_turns;  // economic sanctions: no commerce while above 0
-    GAME_PAD(0x0c4, 0x1d8);
+    int32_t loan_balance[FACTION_COUNT];  // energy owed to each faction
+    int32_t loan_payment[FACTION_COUNT];  // and paid to it each turn
+    GAME_PAD(0x104, 0x1d8);
     int32_t major_atrocities;
     GAME_PAD(0x1dc, 0x220);
     int32_t energy_credits, hurry_cost_total;
@@ -166,6 +168,8 @@ GAME_AT(struct faction_data, transcendent_techs, 0x368);
 GAME_AT(struct faction_data, clean_minerals, 0x464);
 GAME_AT(struct faction_data, nutrient_surplus_total, 0x800);
 GAME_AT(struct faction_data, sanction_turns, 0xc0);
+GAME_AT(struct faction_data, loan_payment, 0xe4);
+GAME_AT(struct faction_data, unk_310, 0x310);
 GAME_AT(struct faction_data, se_models_pending, 0x228);
 GAME_AT(struct faction_data, energy_surplus_total, 0x2fc);
 GAME_AT(struct faction_data, alloc_psych, 0x324);
@@ -197,7 +201,9 @@ struct faction_def {
     int32_t noun_gender;
     int32_t noun_plural;
     char adjective[128];  // the name as an adjective, such as "Gaian"
-    GAME_PAD(0x384, 0x4dc);
+    GAME_PAD(0x384, 0x4d4);
+    int32_t rule_tech_selected;  // free techs at the start
+    int32_t rule_morale;
     int32_t rule_research, rule_drone, rule_talent, rule_energy, rule_interest;
     int32_t rule_population, rule_hurry, rule_techcost, rule_psi, rule_sharetech, rule_commerce, rule_flags;
     int32_t bonus_count;
@@ -208,6 +214,8 @@ _Static_assert(sizeof(struct faction_def) == 0x59c, "faction_def size");
 GAME_AT(struct faction_def, noun, 0x2e4);
 GAME_AT(struct faction_def, adjective, 0x304);
 GAME_AT(struct faction_def, rule_flags, 0x508);
+GAME_AT(struct faction_def, rule_tech_selected, 0x4d4);
+GAME_AT(struct faction_def, rule_interest, 0x4ec);
 GAME_AT(struct faction_def, leader_title, 0x4c);
 GAME_AT(struct faction_def, rule_research, 0x4dc);
 GAME_AT(struct faction_def, rule_techcost, 0x4f8);
@@ -496,7 +504,7 @@ GAME_AT(struct rules_basic, mine_road_limit, 0x24);
 GAME_AT(struct rules_basic, tech_three_nutrients, 0x4c);
 GAME_AT(struct rules_basic, tech_mining_platform_bonus, 0xa4);
 
-enum { RULE_FLAG_WORM_POLICE = 0x40, RULE_FLAG_ALIEN = 0x80, RULE_FLAG_AQUATIC = 0x100 };  // faction_def.rule_flags
+enum { RULE_FLAG_WORM_POLICE = 0x40, RULE_FLAG_ALIEN = 0x80, RULE_FLAG_AQUATIC = 0x100, RULE_FLAG_INTEREST = 0x4000 };  // faction_def.rule_flags
 enum { ECONOMICS_FREE_MARKET = 1, ECONOMICS_PLANNED = 2 };  // faction_data.se_models_pending[1]
 enum { ABILITY_CLEAN_REACTOR = 0x10000, ABILITY_POLICE_2X = 0x400000 };  // unit_proto.abilities
 enum { ORDER_CONVOY = 3 };
@@ -841,6 +849,11 @@ extern int32_t *game_base_win_redraw_base;
 extern void(__attribute__((thiscall)) * game_base_win_on_redraw)(void *win);
 extern void(__attribute__((thiscall)) * game_base_win_zoom)(void *win, int base, int unk);
 extern void (*game_draw_tiles)(int x, int y, int unk);
+// A faction's turn: its reserves at the start, whether the New Tech
+// windows are skipped, and the debug log's five-part line.
+extern int32_t *game_turn_start_credits;
+extern int32_t *game_skip_tech_screen;
+extern void (*game_log_say5)(char *a, char *b, int n1, int n2, int n3);
 
 // Ecological damage: fungus, native life, warming and volcanoes.
 struct rules_terraform {

@@ -203,6 +203,8 @@ int32_t *game_base_win_redraw_base;
 void(__attribute__((thiscall)) * game_base_win_on_redraw)(void *win);
 void(__attribute__((thiscall)) * game_base_win_zoom)(void *win, int base, int unk);
 void (*game_draw_tiles)(int x, int y, int unk);
+int32_t *game_turn_start_credits, *game_skip_tech_screen;
+void (*game_log_say5)(char *a, char *b, int n1, int n2, int n3);
 int16_t(__attribute__((stdcall)) * game_get_async_key_state)(int key);
 struct rules_terraform *game_terraform;
 int32_t *game_climate_level, *game_climate_change, *game_climate_shown;
@@ -489,6 +491,9 @@ void game_bind(struct pe_image *exe) {
     game_base_win_on_redraw = (void *)code_at(exe, 0x41e790);
     game_base_win_zoom = (void *)code_at(exe, 0x41a920);
     game_draw_tiles = (void *)code_at(exe, 0x46b140);
+    game_turn_start_credits = (int32_t *)code_at(exe, 0x93a958);
+    game_skip_tech_screen = (int32_t *)code_at(exe, 0x945f40);
+    game_log_say5 = (void *)code_at(exe, 0x626250);
     game_get_async_key_state = *(void **)code_at(exe, 0x669330);  // filled in when imports were bound
     game_terraform = (struct rules_terraform *)code_at(exe, 0x691878);
     game_climate_level = (int32_t *)code_at(exe, 0x9a6824);

@@ -1598,6 +1598,88 @@ int base_upkeep(int base) {
     return 0;
 }
 
+// ---- A faction's turn --------------------------------------------------------
+
+enum { FACTION_FLAG_SELF_AWARE_MAINT = 0x20, DIFF_THINKER = 4 };
+
+// A faction's loans: each of the other factions in the game, not under
+// sanctions, that it owes gets the payment, or what it has of it; what is
+// short (all of it, at war) is added to the debt. Unlike Thinker, a
+// faction in debt pays a negative amount.
+static void pay_loans(int faction) {
+    struct faction_data *f = &game_factions[faction];
+    for (int i = 1; i < FACTION_COUNT; i++) {
+        if (i == faction || !((*game_factions_alive >> i) & 1) || !((*game_factions_alive >> faction) & 1)) continue;
+        if (!f->loan_balance[i] || game_factions[i].sanction_turns) continue;
+        if (f->diplo_status[i] & TREATY_VENDETTA) {
+            f->loan_balance[i] += f->loan_payment[i];
+            continue;
+        }
+        int pay = f->loan_payment[i] < f->energy_credits ? f->loan_payment[i] : f->energy_credits;
+        game_factions[i].energy_credits += pay;
+        f->loan_balance[i] -= pay;
+        f->energy_credits -= pay;
+        if (pay < f->loan_payment[i]) f->loan_balance[i] += f->loan_payment[i] - pay;
+    }
+}
+
+// A faction's turn for its bases: the totals they add up reset, loans
+// paid, each base's turn (the next base taken from where one was lost),
+// the AI's discount on maintenance above Specialist (a third, or two
+// thirds above Thinker), interest on the reserves (or one energy a base),
+// the turn's balance, the faction's free techs on the first turn, and the
+// end of sanctions (the player told).
+void production_phase(int faction) {
+    struct faction_data *f = &game_factions[faction];
+    const struct faction_def *d = &game_faction_defs[faction];
+    f->best_mineral_output = 0;
+    f->energy_surplus_total = 0;
+    f->facility_maint_total = 0;
+    f->turn_commerce_income = 0;
+    tech_effects(faction);
+    pay_loans(faction);
+    f->flags &= ~(uint32_t)FACTION_FLAG_SELF_AWARE_MAINT;
+    *game_turn_start_credits = f->energy_credits;
+    memset(f->social_effic, 0, sizeof f->social_effic);
+    memset(f->social_support, 0, sizeof f->social_support);
+    memset(f->social_psych, 0, sizeof f->social_psych);
+    f->unk_7f4 = f->armed_units = f->eco_damage_total = f->nutrient_surplus_total = f->labs_total = 0;
+    for (int b = 0; b < *game_base_count; b++) {
+        if (game_bases[b].faction != faction) continue;
+        if (base_upkeep(b)) b--;
+        game_do_all_non_input();
+    }
+    if (!is_human(faction) && *game_difficulty > 3 && f->facility_maint_total) {
+        int off = *game_difficulty == DIFF_THINKER ? f->facility_maint_total / 3 : f->facility_maint_total * 2 / 3;
+        f->energy_credits += off;
+        f->facility_maint_total -= off;
+    }
+    if (d->rule_flags & RULE_FLAG_INTEREST) {
+        if (d->rule_interest) {
+            f->energy_credits += f->energy_credits * d->rule_interest / 100;
+        } else {
+            for (int b = 0; b < *game_base_count; b++)
+                if (game_bases[b].faction == faction) f->energy_credits++, f->energy_surplus_total++;
+        }
+    }
+    f->unk_310 = f->energy_surplus_total;
+    f->unk_30c = f->turn_commerce_income - f->facility_maint_total + f->energy_surplus_total;
+    if (*game_current_turn == 1) {
+        *game_skip_tech_screen = 1;
+        for (int i = 0; i < d->rule_tech_selected; i++) {
+            game_log_say5(text(0x68b9d8), (char *)d->leader_name, faction, 0, 0);
+            game_tech_advance(faction);
+        }
+        *game_skip_tech_screen = 0;
+    }
+    if (((*game_state & GAME_STATE_DONE) && !(*game_state & GAME_STATE_FINAL_SCORE_DONE)) || !f->sanction_turns) return;
+    if (--f->sanction_turns || faction != *game_current_faction) return;
+    if (is_alien(faction))
+        game_popp(*game_script_file, text(0x68b9f4), 0, text(0x68b9e8), 0);
+    else
+        game_popp(*game_script_file, text(0x68ba18), 0, text(0x68ba08), 0);
+}
+
 // ---- Hooks and shadow checks ------------------------------------------------
 
 extern struct hook_module upkeep_module;
@@ -1690,6 +1772,31 @@ static int shadow_base_upkeep(int a) {
     const struct base *b = &game_bases[a];
     if (is_human(b->faction) || (b->state & BASE_STATE_RENAME)) return orig_base_upkeep(a);
     return check_base_upkeep(a);
+}
+// A faction's turn: the same, for all its bases. A human's runs the
+// original unchecked, and so does one with a base about to be renamed.
+// Its check covers base_upkeep() for AI bases, which the sweep also checks
+// on its own.
+static int renames_base(int faction) {
+    for (int b = 0; b < *game_base_count; b++)
+        if (game_bases[b].faction == faction && (game_bases[b].state & BASE_STATE_RENAME)) return 1;
+    return 0;
+}
+SHADOW_WRITER_CHECK(void, production_phase, (int a), (a), orig_production_phase(a),
+                    (hooks_writes_game(&w_), writes_path(&w_)), "%d", a)
+static void shadow_production_phase(int a) {
+    if (hooks_nested) {
+        orig_production_phase(a);
+        return;
+    }
+    if (shadow_bypass()) {
+        production_phase(a);
+        return;
+    }
+    stats_production_phase.calls++;
+    shadow_tick(UPKEEP);
+    if (is_human(a) || renames_base(a)) orig_production_phase(a);
+    else check_production_phase(a);
 }
 
 static int slice;
@@ -1844,6 +1951,13 @@ static void upkeep_sweep(void) {
         }
         if ((b + slice) % 6 == 0) sweep_riot(b, saved);
         if ((b + slice) % 5 == 0) sweep_ecology(b, saved);
+        // A whole base's turn, for a few AI bases a turn: the game's calls
+        // are checked as part of their faction's.
+        if ((b + slice) % 16 == 0 && !is_human(base->faction) && !(base->state & BASE_STATE_RENAME)) {
+            check_base_upkeep(b);
+            *base = saved;
+            *f = saved_f;
+        }
         // Terraforming plans, for a human's governor too, and made at once.
         if ((b + slice) % 4 == 0) {
             uint8_t human = *game_human_factions;
@@ -1878,6 +1992,7 @@ static const struct hook upkeep_hooks[] = {
     HOOK(0x4e4090, name_base, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x54),             // sub esp, 84
     HOOK(0x4ecbf0, base_terraform, PUSH_EBP_MOV_EBP_ESP, 0x81, 0xec, 0x04, 0x01, 0x00, 0x00),  // sub esp, 0x104
     HOOK(0x4f79c0, base_upkeep, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),           // sub esp, 12
+    HOOK(0x526e70, production_phase, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53, 0x8b, 0x5d, 0x08),  // push ecx; push ebx; mov ebx, [ebp+8]
 };
 // The game calls base_production() only from base_upkeep(), whose check
 // covers it, so for AI bases it is never checked on its own: its sweep
