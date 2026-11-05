@@ -64,6 +64,10 @@ void base_research(void);
 int fac_maint(int facility, int faction);
 void base_maint(void);
 void base_drones(void);
+// A riot's turn: warnings, a facility lost, or a human's base defecting.
+void drone_riot(void);
 void base_doctors(void);
 void base_check_support(void);
 void base_hurry(void);
+// Ecological damage: fungus, native life, warming and volcanoes.
+void base_ecology(void);

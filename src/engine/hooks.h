@@ -114,6 +114,20 @@ int hooks_protecting(void);
 // what differs.
 const char *hooks_writes_end(struct hook_writes *w, int got, int want);
 
+// Stale stack. Some originals read locals they never set, and so act on
+// what earlier calls left below the stack pointer. A check of such a
+// function gives both runs the same HOOK_STALE_SIZE bytes below their entry
+// stack pointer (where the return address is): those the game left where it
+// made the call.
+#define HOOK_STALE_SIZE 0x100
+struct hook_stale {
+    uint32_t w[HOOK_STALE_SIZE / 4];
+};
+// The word `below` bytes under the entry stack pointer.
+#define HOOK_STALE_AT(s, below) ((s)->w[(HOOK_STALE_SIZE - (below)) / 4])
+// Calls fn() with *s below its entry stack pointer.
+void hooks_stale_call(void (*fn)(void), const struct hook_stale *s);
+
 // Shadow mode: messages, sounds and movies held back while state is
 // protected. A quiet hook on such a function (quiet.c) records the call
 // instead of making it. A check compares what the original and ours would

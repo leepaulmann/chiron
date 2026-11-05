@@ -105,6 +105,14 @@ HELD(void, wave_it, (void)0, (int sound), (sound), (c_.arg[0] = sound), orig_wav
 HELD(void, interlude, (void)0, (int id, char *text, int unk1, int unk2), (id, text, unk1, unk2),
      (hooks_ui_text(&c_, 0, text), c_.arg[0] = id, c_.arg[1] = unk1, c_.arg[2] = unk2),
      orig_interlude(a_[0], TEXT(0), a_[1], a_[2]))
+// Ecological damage: a message, an explosion and a pause, the last of
+// which, waiting on the clock a check holds still, would never end.
+HELD(int, pop2, 0, (char *label, char *picture, int base), (label, picture, base),
+     (hooks_ui_text(&c_, 0, label), hooks_ui_text(&c_, 1, picture), c_.arg[0] = base),
+     orig_pop2(TEXT(0), TEXT(1), a_[0]))
+HELD(void, boom, (void)0, (int x, int y, int flags), (x, y, flags), (c_.arg[0] = x, c_.arg[1] = y, c_.arg[2] = flags),
+     orig_boom(a_[0], a_[1], a_[2]))
+HELD(void, clock_wait, (void)0, (int ms), (ms), (c_.arg[0] = ms), orig_clock_wait(a_[0]))
 
 // Moving the map to a square.
 static void(__attribute__((thiscall)) * orig_console_focus)(void *console, int x, int y, int faction);
@@ -175,6 +183,9 @@ static int shadow_pcx_dimensions(char *file, int *w, int *h) {
 // windows), and its centring on a lost base.
 HELD_THIS(console_update_data, (void *self, int unk), (self, unk), c_.arg[0] = unk, orig_console_update_data(SELF, a_[0]))
 HELD_THIS(console_center, (void *self), (self), (void)0, orig_console_center(SELF))
+// Centring the map on a base that changed hands.
+HELD_THIS(map_win_set_center, (void *self, int x, int y, int unk), (self, x, y, unk),
+          (c_.arg[0] = x, c_.arg[1] = y, c_.arg[2] = unk), orig_map_win_set_center(SELF, a_[0], a_[1], a_[2]))
 HELD_THIS(graphic_win_redraw, (void *self), (self), (void)0, orig_graphic_win_redraw(SELF))
 HELD_THIS(wave_unload, (void *self), (self), (void)0, orig_wave_unload(SELF))
 HELD_THIS(wave_load, (void *self, char *file), (self, file), hooks_ui_text(&c_, 0, file), orig_wave_load(SELF, TEXT(0)))
@@ -297,8 +308,12 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x4b9ea0, status_win_redraw, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10),           // sub esp, 16
     QUIET_HOOK(0x514880, console_update_data, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),         // mov eax, [ebp+8]
     QUIET_HOOK(0x515400, console_center, 0xa1, 0xb8, 0x92, 0x93, 0x00),                       // mov eax, [0x9392b8]
+    QUIET_HOOK(0x46b1f0, map_win_set_center, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53, 0x56, 0x8b, 0xf1),  // push ecx, ebx, esi; mov esi, ecx
     QUIET_HOOK(0x5be940, tech_research, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x0c),             // mov eax, [ebp+12]
     QUIET_HOOK(0x5be530, tech_advance, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x8b, 0x75, 0x08),  // push ebx; push esi; mov esi, [ebp+8]
     QUIET_HOOK(0x44c9e0, help_project, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                // mov eax, [ebp+8]
+    QUIET_HOOK(0x405140, pop2, SEH_PROLOGUE),
+    QUIET_HOOK(0x504aa0, boom, PUSH_EBP_MOV_EBP_ESP, 0x81, 0xec, 0x44, 0x01, 0x00, 0x00),   // sub esp, 0x144
+    QUIET_HOOK(0x50dd90, clock_wait, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x8b, 0x35, 0x68, 0x93, 0x66, 0x00),  // push ebx; push esi; mov esi, [0x669368]
 };
 struct hook_module quiet_module = {"quiet", quiet_hooks, HOOK_COUNT(quiet_hooks), NULL, NULL, -1};

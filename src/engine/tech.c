@@ -303,7 +303,7 @@ int tech_val(int tech, int faction, int simple) {
         if (tech_is_preq(tech, fusion, 9999)) value++;
         if (tech_is_preq(tech, fusion, 1) && !(*game_rules & RULES_BLIND_RESEARCH)) value *= 2;
     }
-    int damage = fd->unk_7fc / game_range(bases, 1, 9999);
+    int damage = fd->eco_damage_total / game_range(bases, 1, 9999);
     if (damage > fd->ai_power &&
         (tech_is_preq(tech, fac[FAC_HYBRID_FOREST].preq_tech, 9999) ||
          tech_is_preq(tech, fac[FAC_TREE_FARM].preq_tech, 9999) ||

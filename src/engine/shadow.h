@@ -121,6 +121,49 @@ static inline int shadow_bypass(void) { return hooks_sweeping || hooks_checking(
         SHADOW_TAIL_##ret(check_##name args);                \
     }
 
+// The same for a void(void) function whose original reads stale stack (see
+// hook_stale). shadow_name is an assembly entry that keeps the bytes below
+// the game's call, and every path runs the function with them. check_name
+// takes them, so a sweep can make them up.
+#define SHADOW_WRITER_STALE(module, name, writes)                                \
+    SHADOW_DECLARE(void, name, (void))                                           \
+    static void check_##name(const struct hook_stale *s) {                       \
+        struct hook_writes w_ = {0};                                             \
+        writes;                                                                  \
+        hooks_writes_begin(&w_);                                                 \
+        hooks_nested++;                                                          \
+        hooks_stale_call(orig_##name, s);                                        \
+        hooks_nested--;                                                          \
+        hooks_writes_middle(&w_);                                                \
+        hooks_stale_call(name, s);                                               \
+        const char *diff_ = hooks_writes_end(&w_, 0, 0);                         \
+        if (diff_) hooks_mismatch(&stats_##name, "() %s", diff_);                \
+        hooks_ui_release();                                                      \
+    }                                                                            \
+    void shadow_##name##_in(const struct hook_stale *s);                         \
+    void shadow_##name##_in(const struct hook_stale *s) {                        \
+        if (hooks_nested) {                                                      \
+            hooks_stale_call(orig_##name, s);                                    \
+            return;                                                              \
+        }                                                                        \
+        if (shadow_bypass()) {                                                   \
+            hooks_stale_call(name, s);                                           \
+            return;                                                              \
+        }                                                                        \
+        stats_##name.calls++;                                                    \
+        shadow_tick(module);                                                     \
+        check_##name(s);                                                         \
+    }                                                                            \
+    void shadow_##name(void);                                                    \
+    __asm__(".text\n"                                                            \
+            ".globl shadow_" #name "\n"                                          \
+            "shadow_" #name ":\n"                                                \
+            "    subl $0x100, %esp\n" /* HOOK_STALE_SIZE: the bytes stay put */ \
+            "    pushl %esp\n"                                                   \
+            "    call shadow_" #name "_in\n"                                     \
+            "    addl $0x104, %esp\n"                                            \
+            "    ret\n");
+
 // A hook table entry: the original's address, our function, and the first
 // bytes of the original (whole instructions, no relative jumps).
 #define HOOK(addr, name, ...)                                                                   \

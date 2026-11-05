@@ -53,6 +53,7 @@ int32_t *game_mount_planet_x, *game_mount_planet_y, *game_canyon_squares, *game_
 uint8_t *game_data;
 size_t game_data_size;
 int32_t *game_radius_near_x, *game_radius_near_y, *game_radius_x, *game_radius_y, *game_radius_count;
+int32_t *game_adjacent_x, *game_adjacent_y;
 int32_t *game_map_settings, *game_erosive_forces, *game_native_life, *game_world_add_temperature, *game_halted;
 int32_t *game_current_faction, *game_control_turn, *game_battle_state, *game_rain_base, *game_rain_faction;
 uint32_t *game_fungus_clears;
@@ -113,7 +114,6 @@ int (*game_facility_avail)(int facility, int faction, int base, int queue);
 void (*game_wave_it)(int sound);
 int (*game_best_reactor)(int faction);
 void (*game_tech_research)(int faction, int labs);
-void (*game_drone_riot)(void);
 int (*game_kill)(int veh);
 int (*game_at_goal)(int faction, int type, int x, int y);
 int (*game_planet_buster2)(int proto);
@@ -193,6 +193,17 @@ void (*game_log_say)(char *text, int a, int b, int c);
 void (*game_reset_territory)(void);
 void (*game_fixup_landmarks)(void);
 uint32_t(__attribute__((stdcall)) * game_time_get_time)(void);
+void (*game_replay_base)(int event, int x, int y, int faction);
+void (*game_spot_base)(int base, int faction);
+int (*game_propose_proto)(int faction, int chassis, int weapon, int armor, uint32_t abilities, int reactor, int plan,
+                          char *name);
+void(__attribute__((thiscall)) * game_map_win_set_center)(void *win, int x, int y, int unk);
+int16_t(__attribute__((stdcall)) * game_get_async_key_state)(int key);
+struct rules_terraform *game_terraform;
+int32_t *game_climate_level, *game_climate_change, *game_climate_shown;
+void (*game_clock_wait)(int ms);
+void (*game_boom)(int x, int y, int flags);
+int (*game_pop2)(char *label, char *picture, int base);
 
 void game_bind(struct pe_image *exe) {
     game_tech = (struct rules_tech *)code_at(exe, 0x94f358);
@@ -330,6 +341,8 @@ void game_bind(struct pe_image *exe) {
     game_stack_check = (void *)code_at(exe, 0x5b9580);
     game_radius_near_x = (int32_t *)code_at(exe, 0x66ef50);
     game_radius_near_y = (int32_t *)code_at(exe, 0x66ef74);
+    game_adjacent_x = (int32_t *)code_at(exe, 0x66ef28);
+    game_adjacent_y = (int32_t *)code_at(exe, 0x66ef3c);
     game_radius_x = (int32_t *)code_at(exe, 0x66efbc);
     game_radius_y = (int32_t *)code_at(exe, 0x66f440);
     game_radius_count = (int32_t *)code_at(exe, 0x66f8c4);
@@ -367,7 +380,6 @@ void game_bind(struct pe_image *exe) {
     game_wave_it = (void *)code_at(exe, 0x4455f0);
     game_best_reactor = (void *)code_at(exe, 0x57efa0);
     game_tech_research = (void *)code_at(exe, 0x5be940);
-    game_drone_riot = (void *)code_at(exe, 0x4f4fb0);
     game_kill = (void *)code_at(exe, 0x5c0b00);
     game_at_goal = (void *)code_at(exe, 0x579cc0);
     game_planet_buster2 = (void *)code_at(exe, 0x5004f0);
@@ -453,4 +465,16 @@ void game_bind(struct pe_image *exe) {
     game_reset_territory = (void *)code_at(exe, 0x523dd0);
     game_fixup_landmarks = (void *)code_at(exe, 0x592940);
     game_time_get_time = *(void **)code_at(exe, 0x669368);  // filled in when imports were bound
+    game_replay_base = (void *)code_at(exe, 0x5ade80);
+    game_spot_base = (void *)code_at(exe, 0x5b57d0);
+    game_propose_proto = (void *)code_at(exe, 0x580860);
+    game_map_win_set_center = (void *)code_at(exe, 0x46b1f0);
+    game_get_async_key_state = *(void **)code_at(exe, 0x669330);  // filled in when imports were bound
+    game_terraform = (struct rules_terraform *)code_at(exe, 0x691878);
+    game_climate_level = (int32_t *)code_at(exe, 0x9a6824);
+    game_climate_change = (int32_t *)code_at(exe, 0x9a67d8);
+    game_climate_shown = (int32_t *)code_at(exe, 0x9a67cc);
+    game_clock_wait = (void *)code_at(exe, 0x50dd90);
+    game_boom = (void *)code_at(exe, 0x504aa0);
+    game_pop2 = (void *)code_at(exe, 0x405140);
 }

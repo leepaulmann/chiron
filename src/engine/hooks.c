@@ -234,6 +234,26 @@ void hooks_writes_abandon(struct hook_writes *w) {
 
 int hooks_checking(void) { return checking_depth > 0; }
 
+// The bytes go below where fn's entry stack pointer will be (this one less
+// the return address the call pushes), and nothing writes there until fn
+// does.
+_Static_assert(HOOK_STALE_SIZE == 0x100, "hooks_stale_call copies 0x40 words");
+__asm__(".text\n"
+        ".globl hooks_stale_call\n"
+        "hooks_stale_call:\n"
+        "    pushl %esi\n"
+        "    pushl %edi\n"
+        "    movl 12(%esp), %eax\n"  // fn
+        "    movl 16(%esp), %esi\n"  // s
+        "    leal -0x104(%esp), %edi\n"
+        "    movl $0x40, %ecx\n"
+        "    cld\n"
+        "    rep movsl\n"
+        "    call *%eax\n"
+        "    popl %edi\n"
+        "    popl %esi\n"
+        "    ret\n");
+
 void hooks_writes_game(struct hook_writes *w) {
     hooks_writes_add(w, game_data, game_data_size);
     if (*game_map)

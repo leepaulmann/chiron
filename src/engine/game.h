@@ -78,7 +78,8 @@ struct faction_data {
     uint32_t flags;
     int32_t ranking;     // 0 (lowest) to 7
     int32_t diff_level;  // humans' difficulty; 3 for the AI
-    GAME_PAD(0x00c, 0x018);
+    GAME_PAD(0x00c, 0x014);
+    int32_t last_base_turn;  // when it last gained a base
     uint32_t diplo_status[FACTION_COUNT];  // TREATY_* towards each faction
     GAME_PAD(0x038, 0x0c0);
     int32_t sanction_turns;  // economic sanctions: no commerce while above 0
@@ -113,7 +114,8 @@ struct faction_data {
     GAME_PAD(0x3fc, 0x458);
     uint8_t facility_announced[12];  // bit per facility the player has been shown
     int32_t clean_minerals;  // minerals a base makes before ecological damage
-    GAME_PAD(0x468, 0x690);
+    int32_t attack_target_base;  // the AI's, or -1
+    GAME_PAD(0x46c, 0x690);
     // Units costing support at each SUPPORT from -4, added up for the AI.
     int32_t social_support[8];
     // How content bases would be at each TALENT from -3 and POLICE from -5,
@@ -122,7 +124,7 @@ struct faction_data {
     int32_t social_effic[9];  // energy lost this turn at each EFFICIENCY from 4 down, for the AI
     int32_t unk_7f4;
     int32_t armed_units;  // armed units, offensive ones twice, added up over the turn
-    int32_t unk_7fc;  // tech_val() treats it as ecological damage
+    int32_t eco_damage_total;  // ecological damage over the game, weighed by PLANET
     int32_t nutrient_surplus_total, labs_total;
     int32_t satellites[4];  // orbital nutrient, mineral and energy satellites, and defense pods
     int32_t best_weapon_value;
@@ -146,6 +148,8 @@ struct faction_data {
 };
 _Static_assert(sizeof(struct faction_data) == 0x20cc, "faction_data size");
 GAME_AT(struct faction_data, diplo_status, 0x18);
+GAME_AT(struct faction_data, last_base_turn, 0x14);
+GAME_AT(struct faction_data, attack_target_base, 0x468);
 GAME_AT(struct faction_data, se_pending, 0x24c);
 GAME_AT(struct faction_data, se_base, 0x2d0);
 GAME_AT(struct faction_data, energy_credits, 0x220);
@@ -177,12 +181,17 @@ enum {  // faction_def bonus ids
     BONUS_NODRONE = 14,  // drones made content at each base
     BONUS_FACILITY = 2,  // a free facility at each base
     BONUS_FREEFAC = 12,  // the same, once its tech is known
+    BONUS_REVOLT = 13,   // percent more chance that another faction's revolting bases join it
 };
 
 // A faction as its faction file defines it (Thinker's MFaction, OpenSMACX's
 // Player).
 struct faction_def {
-    GAME_PAD(0x000, 0x2e4);
+    int32_t leader_female;
+    char filename[24];
+    char search_key[24];
+    char leader_name[24], leader_title[24];
+    GAME_PAD(0x064, 0x2e4);
     char noun[24];
     int32_t noun_gender;
     int32_t noun_plural;
@@ -196,6 +205,7 @@ struct faction_def {
 };
 _Static_assert(sizeof(struct faction_def) == 0x59c, "faction_def size");
 GAME_AT(struct faction_def, adjective, 0x304);
+GAME_AT(struct faction_def, leader_title, 0x4c);
 GAME_AT(struct faction_def, rule_research, 0x4dc);
 GAME_AT(struct faction_def, rule_techcost, 0x4f8);
 GAME_AT(struct faction_def, bonus_count, 0x50c);
@@ -261,7 +271,8 @@ struct rules_chassis {
     GAME_PAD(0x00, 0x48);
     uint8_t speed;
     uint8_t triad;  // TRIAD_*
-    GAME_PAD(0x4a, 0x8e);
+    uint8_t range;  // turns aloft for air units, else 0
+    GAME_PAD(0x4b, 0x8e);
     int16_t preq_tech;
 };
 _Static_assert(sizeof(struct rules_chassis) == 0x90, "rules_chassis size");
@@ -292,11 +303,11 @@ enum {  // game_rules bits
     RULES_NO_UNITY_SCATTERING = 0x2000,
 };
 
-enum { FACTION_FLAG_MAP_REVEALED = 0x200, FACTION_FLAG_MAINT_HALF = 0x20 };  // faction_data.flags
+enum { FACTION_FLAG_MAP_REVEALED = 0x200, FACTION_FLAG_MAINT_HALF = 0x20, FACTION_FLAG_ECO_SPARED = 0x4000 };  // faction_data.flags
 
 enum { TREATY_UNK_8000000 = 0x8000000 };  // with TREATY_COMMLINK, whose_territory() names the owner
 
-enum { GAME_STATE_DONE = 0x1, GAME_STATE_FINAL_SCORE_DONE = 0x8, GAME_STATE_OMNISCIENT = 0x80, GAME_STATE_PERIHELION = 0x100000 };  // game_state bits
+enum { GAME_STATE_DONE = 0x1, GAME_STATE_FINAL_SCORE_DONE = 0x8, GAME_STATE_OMNISCIENT = 0x80, GAME_STATE_VOLCANO = 0x20000, GAME_STATE_PERIHELION = 0x100000 };  // game_state bits
 enum { FACTION_FLAG_BASE_SUBMERGED = 0x80000 };  // faction_data.flags
 
 // ---- The map -------------------------------------------------------------------
@@ -474,7 +485,10 @@ struct rules_basic {
     int32_t tech_mining_platform_bonus;
     GAME_PAD(0xa8, 0xf8);
     int32_t retool_exemption;  // the most minerals a human's base carries over after building
+    GAME_PAD(0xfc, 0x114);
+    int32_t warming_num, warming_den;  // how fast ecological damage warms the planet
 };
+GAME_AT(struct rules_basic, warming_num, 0x114);
 GAME_AT(struct rules_basic, mine_road_limit, 0x24);
 GAME_AT(struct rules_basic, tech_three_nutrients, 0x4c);
 GAME_AT(struct rules_basic, tech_mining_platform_bonus, 0xa4);
@@ -630,6 +644,7 @@ extern size_t game_data_size;
 // square itself; and every square within each radius, nearest first, with
 // game_radius_count[r] the number within radius r.
 extern int32_t *game_radius_near_x, *game_radius_near_y;  // [9]
+extern int32_t *game_adjacent_x, *game_adjacent_y;        // [4] the squares sharing a side
 extern int32_t *game_radius_x, *game_radius_y;            // [RADIUS_SQUARES]
 extern int32_t *game_radius_count;                        // [9]
 
@@ -726,7 +741,6 @@ extern void (*game_wave_it)(int sound);
 // For the end of a base's turn.
 extern int (*game_best_reactor)(int faction);
 extern void (*game_tech_research)(int faction, int labs);
-extern void (*game_drone_riot)(void);
 extern int (*game_kill)(int veh);                    // disbands a unit
 extern int (*game_at_goal)(int faction, int type, int x, int y);
 extern int (*game_planet_buster2)(int proto);
@@ -809,6 +823,31 @@ extern void (*game_log_say)(char *text, int a, int b, int c);
 extern void (*game_reset_territory)(void);
 extern void (*game_fixup_landmarks)(void);
 extern uint32_t(__attribute__((stdcall)) * game_time_get_time)(void);         // the game's timeGetTime import
+extern int16_t(__attribute__((stdcall)) * game_get_async_key_state)(int key);  // and GetAsyncKeyState
+// For a base that changes hands: the replay's record of it, what its old
+// owner knows of it, and a prototype like one of the old owner's for the new.
+extern void (*game_replay_base)(int event, int x, int y, int faction);
+extern void (*game_spot_base)(int base, int faction);
+extern int (*game_propose_proto)(int faction, int chassis, int weapon, int armor, uint32_t abilities, int reactor,
+                                 int plan, char *name);
+extern void(__attribute__((thiscall)) * game_map_win_set_center)(void *win, int x, int y, int unk);
+
+// Ecological damage: fungus, native life, warming and volcanoes.
+struct rules_terraform {
+    char *name, *name_sea;
+    GAME_PAD(0x08, 0x10);
+    uint32_t bit;  // the map_tile.bits it makes
+    GAME_PAD(0x14, 0x20);
+};
+_Static_assert(sizeof(struct rules_terraform) == 0x20, "rules_terraform size");
+enum { TERRAFORM_COUNT = 19 };
+extern struct rules_terraform *game_terraform;  // [TERRAFORM_COUNT]
+extern int32_t *game_climate_level;            // warming from ecological damage, towards the next sea rise
+extern int32_t *game_climate_change;           // the sea's coming change, from warming
+extern int32_t *game_climate_shown;            // [3] what the planet monitor shows of it
+extern void (*game_clock_wait)(int ms);        // waits, drawing
+extern void (*game_boom)(int x, int y, int flags);  // an explosion on the map
+extern int (*game_pop2)(char *label, char *picture, int base);  // a message with a picture
 extern void *game_path;
 
 // Point the variables above at a loaded terranx.exe.

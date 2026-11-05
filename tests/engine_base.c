@@ -5,6 +5,7 @@
 
 #include "../src/engine/base.h"
 #include "../src/engine/game.h"
+#include "../src/engine/hooks.h"
 
 enum { W = 8, H = 6 };
 
@@ -147,10 +148,20 @@ static int __attribute__((thiscall)) pop_exec_stub(void *pop, int a, int b) { re
 static int pcx_stub(char *file, int *w, int *h) { return 1; }
 static void interlude_stub(int id, char *text, int a, int b) {}
 static void help_stub(int project) {}
-static int reactor = 2, researched = -1, riots;
+static int reactor = 2, researched = -1;
 static int best_reactor_stub(int faction) { return reactor; }
 static void tech_research_stub(int faction, int labs) { researched = labs; }
-static void drone_riot_stub(void) { riots++; }
+static int rand_value, rand_calls, replays, spotted, proposed, centred, territory;
+static int rand_stub(void) { return rand_calls++, rand_value; }
+static uint32_t __attribute__((stdcall)) time_stub(void) { return 1234; }
+static void replay_stub(int event, int x, int y, int faction) { replays++; }
+static void spot_stub(int base, int faction) { spotted++; }
+static int propose_stub(int faction, int chassis, int weapon, int armor, uint32_t abilities, int reactor, int plan,
+                        char *name) {
+    return proposed++, -1;
+}
+static void __attribute__((thiscall)) centre_stub(void *win, int x, int y, int unk) { centred++; }
+static void territory_stub(void) { territory++; }
 static int killed_veh = -1;
 static int kill_stub(int veh) {
     killed_veh = veh;
@@ -1187,7 +1198,7 @@ int main(void) {
 
     // Facility upkeep: as the rules say, none for a free one, and the
     // command center's by reactor, at most half the difficulty.
-    game_best_reactor = best_reactor_stub, game_tech_research = tech_research_stub, game_drone_riot = drone_riot_stub;
+    game_best_reactor = best_reactor_stub, game_tech_research = tech_research_stub;
     prod_rules[FAC_RECYCLING_TANKS].maint = 1, prod_rules[27].maint = 9;
     EXPECT(fac_maint(FAC_RECYCLING_TANKS, 1), 1);
     factions[1].diff_level = 3;
@@ -1269,13 +1280,16 @@ int main(void) {
     base_drones();
     EXPECT(b1->state & BASE_STATE_GOLDEN_AGE, 0);
     EXPECT(popb_count, 2);
-    // Riots while drones outnumber talents, unless nerve stapled.
-    b1->drone_total = 2, riots = 0;
+    // Riots while drones outnumber talents, unless nerve stapled: the first
+    // turn warns, and the AI chooses again.
+    b1->drone_total = 2, b1->state = 0, resets = 0, popb_count = 0;
     base_drones();
-    EXPECT(riots, 1);
-    b1->nerve_staple_turns = 3;
+    EXPECT(b1->state & 2, 2);
+    EXPECT(resets, 1);
+    EXPECT(popb_count, 1);
+    b1->nerve_staple_turns = 3, b1->state = 0;
     base_drones();
-    EXPECT(riots, 1);
+    EXPECT(b1->state & 2, 0);
     b1->nerve_staple_turns = 0;
     // Riots over: the AI chooses again.
     b1->drone_total = 0, b1->state = 2, resets = 0;
@@ -1319,6 +1333,109 @@ int main(void) {
     base_check_support();
     EXPECT(killed_veh, -1);  // paid for now
     vehs[0] = saved_vs[0], vehs[1] = saved_vs[1], veh_count = 1;
+    factions[1] = saved_f1;
+    *b1 = saved_b1;
+
+    // A later riot turn under POLICE -6, at a base of size 4 of a faction
+    // with others: it loses the facility the dice pick, the skunkworks.
+    static void *map_wins[8];
+    game_rand = rand_stub, game_time_get_time = time_stub, game_replay_base = replay_stub, game_spot_base = spot_stub;
+    game_propose_proto = propose_stub, game_map_win_set_center = centre_stub, game_reset_territory = territory_stub;
+    game_map_wins = map_wins;
+    struct faction_data saved_f2 = factions[2], saved_f3 = factions[3];
+    factions[1].se_pending[SE_POLICE] = -6, factions[1].base_count = 2, factions[1].diff_level = 1;
+    factions[2].base_count = factions[3].base_count = 1;
+    b1->pop_size = 4, b1->assimilation_turns = 0, b1->state = 2, b1->faction_former = 1;
+    memset(b1->facilities_built, 0, sizeof b1->facilities_built);
+    b1->facilities_built[10 / 8] = 1 << (10 % 8);
+    rand_value = 10, rand_calls = 0, popb_count = 0;
+    struct hook_stale stale = {{0}};
+    for (int k = 0; k < 7; k++) HOOK_STALE_AT(&stale, 0x5c - 4 * k) = (uint32_t)-1;
+    HOOK_STALE_AT(&stale, 0x5c) = 200;  // no REVOLT anywhere: a chance that takes no pick
+    hooks_stale_call(drone_riot, &stale);
+    EXPECT(b1->facilities_built[1], 0);
+    EXPECT(popb_count, 2);
+    EXPECT(rand_calls, 1);
+    EXPECT(b1->faction, 1);
+    // With nothing left to lose, an AI base stays (after the 24 tries: size
+    // 4, difficulty 1, ranking 0)...
+    rand_calls = 0;
+    hooks_stale_call(drone_riot, &stale);
+    EXPECT(rand_calls, 24);
+    EXPECT(b1->faction, 1);
+    // ...but a human's defects: to the faction that founded it,
+    b1->faction_former = 3, humans = 1 << 1, b1->queue_size = 0, b1->queue[0] = -FAC_HEADQUARTERS;
+    hooks_stale_call(drone_riot, &stale);
+    EXPECT(b1->faction, 3);
+    EXPECT(factions[1].base_count, 1);
+    EXPECT(factions[3].base_count, 2);
+    EXPECT(factions[3].last_base_turn, *game_current_turn);
+    EXPECT(b1->queue[0], -FAC_STOCKPILE_ENERGY);
+    EXPECT(b1->assimilation_turns, 0);
+    EXPECT(replays, 1);
+    EXPECT(territory, 1);
+    // or else to the nearest other faction's base (base 2's), to be
+    // assimilated.
+    EXPECT(b1->state & 2, 0);  // the riot is over
+    b1->faction = 1, b1->faction_former = 1, factions[1].base_count = 2, b1->state = 2;
+    hooks_stale_call(drone_riot, &stale);
+    EXPECT(b1->faction, 2);
+    EXPECT(b1->assimilation_turns, 50);
+    EXPECT(factions[2].base_count, 2);
+    // Under POLICE -2 it doesn't.
+    b1->faction = 1, factions[1].base_count = 2, factions[1].se_pending[SE_POLICE] = -2, rand_value = 0, b1->state = 2;
+    hooks_stale_call(drone_riot, &stale);
+    EXPECT(b1->faction, 1);
+    humans = 0;
+    factions[1] = saved_f1, factions[2] = saved_f2, factions[3] = saved_f3;
+    *b1 = saved_b1;
+
+    // Ecological damage, on land everywhere: fungus at (7, 3) spreads to the
+    // first square beside it that the dice favour, (8, 4), which wraps to
+    // (0, 4). Damage weighs a quarter at PLANET 0.
+    static int32_t eco_x[49], eco_y[49], adjacent_x[4] = {1, 1, -1, -1}, adjacent_y[4] = {-1, 1, 1, -1};
+    static struct rules_terraform terraform[TERRAFORM_COUNT];
+    static struct map_tile eco_tiles[W / 2 * H];
+    memcpy(eco_tiles, tiles, sizeof tiles);
+    for (int i = 0; i < 49; i++) eco_x[i] = i < 21 ? radius_x[i] : 0, eco_y[i] = i < 21 ? radius_y[i] : 100;
+    uint32_t clears = 0;
+    int32_t find_dist = 0;
+    game_base_find_dist = &find_dist;
+    game_radius_x = eco_x, game_radius_y = eco_y, game_adjacent_x = adjacent_x, game_adjacent_y = adjacent_y;
+    game_terraform = terraform, game_fungus_clears = &clears;
+    for (int y = 0; y < H; y++)
+        for (int x = y & 1; x < W; x += 2) put(x, y, 3, 1, 0, 0);
+    at(6, 4)->bits = MAP_BASE, at(6, 4)->owner_site = 1;
+    at(2, 2)->bits = MAP_BASE, at(2, 2)->owner_site = 1;
+    at(0, 0)->bits = MAP_BASE, at(0, 0)->owner_site = 2;
+    at(7, 3)->bits = MAP_FUNGUS;
+    b1->eco_damage = 50, b1->pop_size = 3, rand_value = 5, state = 0, humans = 0;
+    factions[1].clean_minerals = 0, factions[1].eco_damage_total = 0, factions[1].base_count = 2;
+    projects[SP_VOICE_OF_PLANET] = -1;
+    base_ecology();
+    EXPECT(at(0, 4)->bits & MAP_FUNGUS, MAP_FUNGUS);
+    EXPECT(factions[1].clean_minerals, 1);
+    EXPECT(factions[1].eco_damage_total, 50);
+    // After enough damage, native life: here two locusts (a third of it,
+    // under the base's size) on the fungus it grew, at (7, 5) this time,
+    // the first open square beside fungus.
+    factions[1].clean_minerals = 7, vehs_made = 0;
+    base_ecology();
+    EXPECT(at(7, 5)->bits & MAP_FUNGUS, MAP_FUNGUS);
+    EXPECT(vehs_made, 2);
+    EXPECT(vehs[5].proto, 10);
+    EXPECT(vehs[5].x * 10 + vehs[5].y, 75);
+    // The faction spared this turn gets no native life.
+    factions[1].clean_minerals = 7, factions[1].flags |= FACTION_FLAG_ECO_SPARED, vehs_made = 0;
+    base_ecology();
+    EXPECT(vehs_made, 0);
+    EXPECT(factions[1].flags & FACTION_FLAG_ECO_SPARED, 0);
+    // Too little damage: nothing.
+    b1->eco_damage = 5, factions[1].clean_minerals = 0;
+    base_ecology();
+    EXPECT(factions[1].clean_minerals, 0);
+    memcpy(tiles, eco_tiles, sizeof tiles);
+    game_radius_x = radius_x, game_radius_y = radius_y;
     factions[1] = saved_f1;
     *b1 = saved_b1;
 
