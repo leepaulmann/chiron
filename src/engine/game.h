@@ -106,7 +106,8 @@ struct faction_data {
     int32_t tech_ranking;  // twice the techs discovered
     int32_t unk_360, unk_364;
     int32_t transcendent_techs;  // techs past the end of the tree
-    GAME_PAD(0x36c, 0x3d0);
+    GAME_PAD(0x36c, 0x3cc);
+    int32_t tech_research_id;  // the tech being researched, or negative
     int32_t tech_cost;  // research cost, or negative until computed
     int32_t earned_techs_saved;
     int32_t net_random_event;  // base_research() keeps the hundredths of a lab left over here
@@ -170,6 +171,10 @@ GAME_AT(struct faction_data, nutrient_surplus_total, 0x800);
 GAME_AT(struct faction_data, sanction_turns, 0xc0);
 GAME_AT(struct faction_data, loan_payment, 0xe4);
 GAME_AT(struct faction_data, unk_310, 0x310);
+GAME_AT(struct faction_data, tech_research_id, 0x3cc);
+GAME_AT(struct faction_data, alloc_labs, 0x328);
+GAME_AT(struct faction_data, region_total_bases, 0x117c);
+GAME_AT(struct faction_data, region_base_plan, 0x197c);
 GAME_AT(struct faction_data, se_models_pending, 0x228);
 GAME_AT(struct faction_data, energy_surplus_total, 0x2fc);
 GAME_AT(struct faction_data, alloc_psych, 0x324);
@@ -216,9 +221,9 @@ GAME_AT(struct faction_def, adjective, 0x304);
 GAME_AT(struct faction_def, rule_flags, 0x508);
 GAME_AT(struct faction_def, rule_tech_selected, 0x4d4);
 GAME_AT(struct faction_def, rule_interest, 0x4ec);
+GAME_AT(struct faction_def, rule_techcost, 0x4f8);
 GAME_AT(struct faction_def, leader_title, 0x4c);
 GAME_AT(struct faction_def, rule_research, 0x4dc);
-GAME_AT(struct faction_def, rule_techcost, 0x4f8);
 GAME_AT(struct faction_def, bonus_count, 0x50c);
 GAME_AT(struct faction_def, bonus_val1, 0x530);
 
@@ -538,19 +543,26 @@ struct veh {
     int16_t proto;
     int16_t unk_c;
     uint8_t faction;
-    GAME_PAD(0x0f, 0x11);
+    GAME_PAD(0x0f, 0x10);
+    uint8_t damage;
     uint8_t order;  // ORDER_*
-    GAME_PAD(0x12, 0x24);
+    GAME_PAD(0x12, 0x1c);
+    int16_t order_turns;  // turns left on sentry or hold, or 0 for no end
+    GAME_PAD(0x1e, 0x24);
     uint8_t morale;
     uint8_t unk_25;
     uint8_t order_auto_type;  // for a convoy, the RESOURCE_* it carries
     uint8_t visibility;  // bit per other faction that can see it
-    GAME_PAD(0x28, 0x2e);
+    uint8_t iter_count, unk_29, moves_spent;
+    GAME_PAD(0x2b, 0x2e);
     int16_t home_base;
     int16_t next_in_stack, prev_in_stack;  // -1 at the ends
 };
 _Static_assert(sizeof(struct veh) == 0x34, "veh size");
+GAME_AT(struct veh, damage, 0x10);
 GAME_AT(struct veh, order, 0x11);
+GAME_AT(struct veh, order_turns, 0x1c);
+GAME_AT(struct veh, moves_spent, 0x2a);
 GAME_AT(struct veh, visibility, 0x27);
 GAME_AT(struct veh, home_base, 0x2e);
 
@@ -854,6 +866,13 @@ extern void (*game_draw_tiles)(int x, int y, int unk);
 extern int32_t *game_turn_start_credits;
 extern int32_t *game_skip_tech_screen;
 extern void (*game_log_say5)(char *a, char *b, int n1, int n2, int n3);
+// The faction's SOCIAL screen.
+extern void (*game_social_select)(int faction);
+// Repairs: whether a unit carries others, and whether a base breeds native
+// life for its faction.
+extern int (*game_veh_cargo)(int veh);
+extern int (*game_breed_mod)(int base, int faction);
+extern void (*game_do_all_draws)(void);
 
 // Ecological damage: fungus, native life, warming and volcanoes.
 struct rules_terraform {

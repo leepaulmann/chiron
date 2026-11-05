@@ -1680,6 +1680,235 @@ void production_phase(int faction) {
         game_popp(*game_script_file, text(0x68ba18), 0, text(0x68ba08), 0);
 }
 
+// ---- Energy allocation ------------------------------------------------------
+
+enum { TECH_TRANSCENDENT_THOUGHT = 88 };
+
+// The most of a faction's energy, in tenths, that may go to economy alone
+// over labs and psych: all of it, in this version.
+int energy_limit(int faction) {
+    (void)faction;
+    return 10;
+}
+
+// The player warned of a falling energy reserve at a higher difficulty:
+// with half or more going to economy, every fifth turn once formers are
+// known, to build infrastructure; otherwise asked whether to open the
+// SOCIAL screen.
+static void warn_energy(int faction) {
+    const struct faction_data *f = &game_factions[faction];
+    if (f->diff_level <= 1 || faction != *game_current_faction || f->base_count <= 1) return;
+    if (f->energy_credits >= 100 || f->energy_credits * 11 - *game_turn_start_credits * 10 >= 0) return;
+    if (10 - f->alloc_labs - f->alloc_psych < 5) {
+        if (game_popp(*game_script_file, text(0x68b9a4), 0, text(0x68b990), 0)) game_social_select(faction);
+        return;
+    }
+    if (has_tech(game_protos[PROTO_FORMERS].preq_tech, faction) && *game_current_turn % 5 == 0)
+        game_popp(*game_script_file, text(0x68b9c8), 0, text(0x68b9b4), 0);
+}
+
+// The AI's psych allocation, from its POLICE. With a base in riots it is
+// raised by one, and under POLICE -3 or worse once more for each base that
+// riots when worked out again, starting over after each. Otherwise it may
+// fall, unless the current base (not each of the faction's: a quirk of the
+// original) has specialists to spare.
+static void allocate_psych(int faction) {
+    struct faction_data *f = &game_factions[faction];
+    int police = f->se_pending[SE_POLICE];
+    int want = police < -2 ? 4 : police == -2 ? 2 : police <= 1;
+    int calm = 1, riot = 0;
+    for (int b = 0; b < *game_base_count && !riot; b++) {
+        if (game_bases[b].faction != faction) continue;
+        if (B->state & BASE_STATE_RIOTS) riot = 1;
+        else if (B->specialist_total > B->specialist_adjust) calm = 0;
+    }
+    if (!riot) {
+        if (calm && f->alloc_psych > want / 2) f->alloc_psych--;
+        return;
+    }
+    if (f->alloc_psych >= want || ++f->alloc_psych >= want) return;
+    for (int b = 0; police < -2 && b < *game_base_count; b++) {
+        if (game_bases[b].faction != faction) continue;
+        ID = b;
+        B = &game_bases[b];
+        base_compute(1);
+        if (B->talent_total < B->drone_total && (B->state & BASE_STATE_RIOTS)) {
+            if (++f->alloc_psych >= want) return;
+            b = -1;
+        }
+    }
+}
+
+// What a faction spends its energy on, for the AI (the player is only
+// warned): psych as above, kept from 0 (2 under POLICE -2 or worse) to 4,
+// none with the Telepathic Matrix; labs by its priorities, more early on
+// and with reserves to spare, less with regions to defend or attack, then
+// moved against economy by the bases' takings less their maintenance, one
+// less while researching Transcendent Thought; then kept within the
+// limits, and economy kept within EFFICIENCY's reach of labs.
+void allocate_energy(int faction) {
+    if (is_human(faction)) {
+        warn_energy(faction);
+        return;
+    }
+    struct faction_data *f = &game_factions[faction];
+    const struct faction_def *d = &game_faction_defs[faction];
+    int economy = 10 - f->alloc_psych - f->alloc_labs;
+    allocate_psych(faction);
+    int police = f->se_pending[SE_POLICE];
+    f->alloc_psych = game_range(f->alloc_psych, police >= -1 ? 0 : 2, 4);
+    if (holds_project(SP_TELEPATHIC_MATRIX, faction)) f->alloc_psych = 0;
+    f->alloc_labs = (f->ai_tech - f->ai_power - f->alloc_psych + 11) / 2 - f->ai_wealth;
+    if (*game_current_turn < (f->ai_tech - f->ai_power - f->ai_wealth + 3) * 25) f->alloc_labs++;
+    f->alloc_labs += f->energy_credits / (2 * (d->rule_techcost * (f->ai_power + f->ai_wealth + 1) + *game_current_turn));
+    int r = 1;
+    for (; r < REGION_COUNT; r++) {
+        if (!f->region_total_bases[r]) continue;
+        if (f->region_base_plan[r] == PLAN_DEFENSIVE) {
+            f->alloc_labs--;
+            break;
+        }
+        if (f->region_base_plan[r] == PLAN_OFFENSIVE && (f->ai_wealth || f->ai_power)) f->alloc_labs--;
+    }
+    if (f->ai_tech && !f->ai_wealth && !f->ai_power && r >= REGION_COUNT) f->alloc_labs++;
+    if (economy && 10 - f->alloc_labs - f->alloc_psych >= economy) {
+        int sum = 0;
+        for (int b = 0; b < *game_base_count; b++) {
+            const struct base *base = &game_bases[b];
+            if (base->faction != faction) continue;
+            sum += base->unk_total;
+            for (int fac = 0; fac <= FAC_SKY_HYDRO_LAB - 1; fac++)
+                if ((base->facilities_built[fac / 8] >> (fac % 8)) & 1) sum -= fac_maint(fac, faction);
+        }
+        int enough = (f->ai_wealth * 2 + 4 - f->ai_tech) * f->base_count / 4;
+        if (sum > enough) {
+            while (10 - f->alloc_labs - f->alloc_psych >= economy) f->alloc_labs++;
+        } else if (sum < enough / 2) {
+            f->alloc_labs--;
+        }
+    }
+    if (f->tech_research_id == TECH_TRANSCENDENT_THOUGHT) f->alloc_labs--;
+    int most = 10 - f->alloc_psych < energy_limit(faction) ? 10 - f->alloc_psych : energy_limit(faction);
+    f->alloc_labs = f->alloc_labs < 0 || most < 0 ? 0 : f->alloc_labs > most ? most : f->alloc_labs;
+    while (10 - f->alloc_labs - f->alloc_psych > energy_limit(faction)) f->alloc_labs++;
+    int effic = game_range(f->se_2[SE_EFFIC], 0, 99) + game_range(3 - f->base_count, 0, 3) + 1;
+    f->alloc_labs = game_range(f->alloc_labs, 0, 10);
+    while (f->alloc_labs > effic - f->alloc_psych - f->alloc_labs + 10) f->alloc_labs--;
+    while (10 - f->alloc_labs - f->alloc_psych > f->alloc_labs + effic) f->alloc_labs++;
+}
+
+// ---- Repairs ----------------------------------------------------------------
+
+enum {
+    PROTO_BATTLE_OGRE_MK1 = 16, PROTO_BATTLE_OGRE_MK3 = 18, PROTO_FUNGAL_TOWER = 19, PROTO_FIRST_CUSTOM = 64,
+    VEH_STATE_HAS_MOVED = 0x4, VEH_STATE_AWAY = 0x8, ORDER_SENTRY = 1, ORDER_HOLD = 2,
+    MAP_BUNKER = 0x800, MAP_AIRBASE = 0x40000, ABILITY_REPAIR = 0x200000, FAC_NAVAL_YARD = 28,
+    SP_COMMAND_NEXUS = 1, SP_XENOEMPATHY_DOME = 8, SP_MARITIME_CONTROL_CENTER = 10, SP_NANO_FACTORY = 22,
+};
+
+static int has_base(const struct map_tile *t) { return (t->bits & MAP_BASE) && (t->owner_site & 0xf) < 8; }
+static int proto_triad(int proto) { return game_chassis[game_protos[proto].chassis].triad; }
+// Native life: a psi unit of the game's own.
+static int is_native(int proto) { return game_weapons[game_protos[proto].weapon].offense < 0 && proto < PROTO_FIRST_CUSTOM; }
+
+// One unit's repair, from a value of 1 a turn by its reactor: 2 for native
+// life in fungus; 1 more in its faction's territory, at an airbase (air)
+// or bunker (land); 1 more at a base not in riots, where the right
+// facility or project (Command Center or Nexus, Naval Yard or Maritime
+// Control Center, Aerospace Complex or Cloudbase Academy, for its
+// faction), or a base that breeds native life for native units, repairs
+// all of it. A land unit carrying others that is on sentry or at sea
+// heals twice as fast with a repair unit in its stack; the Nano Factory
+// repairs all. Away from bases a unit of a faction stays at twice its
+// reactor's damage, unless it is native life in fungus or the faction has
+// the Xenoempathy Dome (which repairs a reactor more). A human's unit on
+// sentry wakes when fully repaired, unless it is a land unit at sea.
+//
+// Thinker adds fixed amounts where the original repairs fully.
+static void repair_veh(int faction, int v) {
+    struct veh *u = &game_vehs[v];
+    int x = u->x, y = u->y, damage = u->damage;
+    u->moves_spent = 0;
+    u->iter_count = 0;
+    u->state &= 0xfbffdffdu;
+    u->flags &= (uint16_t)~0x1000;
+    if (!((*game_current_turn + v) & 3)) {
+        u->state &= ~0x800u;
+        u->flags &= (uint16_t)~(u->flags & 2 ? 2 : 1);
+    }
+    if ((u->order == ORDER_SENTRY || u->order == ORDER_HOLD) && u->order_turns && !--u->order_turns) u->order = 0;
+    const struct map_tile *t = tile(x, y);
+    if (u->state & VEH_STATE_AWAY) {
+        int triad = proto_triad(u->proto);
+        if (has_base(t) || (triad == TRIAD_LAND && (t->bits & MAP_BUNKER)) || (triad == TRIAD_AIR && (t->bits & MAP_AIRBASE)))
+            u->state &= ~(uint32_t)VEH_STATE_AWAY;
+    }
+    if (u->proto == PROTO_FUNGAL_TOWER) u->faction = 0;
+    int p = u->proto;
+    if (p >= PROTO_BATTLE_OGRE_MK1 && p <= PROTO_BATTLE_OGRE_MK3) return;
+    if (p != PROTO_FUNGAL_TOWER && (u->state & VEH_STATE_HAS_MOVED)) return;
+    if (!u->damage) return;
+    int value = 1;
+    if (p != PROTO_FUNGAL_TOWER) {
+        if (is_native(p) && (t->bits & MAP_FUNGUS) && altitude(t) >= ALT_SHELF) value = 2;
+        if (whose_territory(faction, x, y, NULL, 0) == faction) value++;
+        int triad = proto_triad(p);
+        if (triad == TRIAD_AIR && (t->bits & MAP_AIRBASE)) value++;
+        if (triad == TRIAD_LAND && (t->bits & MAP_BUNKER)) value++;
+    }
+    int base = game_base_at(x, y);
+    if (base >= 0 && !(game_bases[base].state & BASE_STATE_RIOTS)) {
+        value++;
+        if (is_native(p)) {
+            if (game_breed_mod(base, game_bases[base].faction)) value = u->damage;
+        } else {
+            int triad = proto_triad(p);
+            int fac = triad == TRIAD_SEA ? FAC_NAVAL_YARD : triad == TRIAD_AIR ? FAC_AEROSPACE_COMPLEX : FAC_COMMAND_CENTER;
+            int sp = triad == TRIAD_SEA ? SP_MARITIME_CONTROL_CENTER : triad == TRIAD_AIR ? SP_CLOUDBASE_ACADEMY : SP_COMMAND_NEXUS;
+            if (has_facility(base, fac) || holds_project(sp, faction)) value = u->damage;
+        }
+    }
+    int repair_unit = 0;
+    if (proto_triad(p) == TRIAD_LAND && game_veh_cargo(v) && (u->order == ORDER_SENTRY || altitude(t) < ALT_LAND)) {
+        int top = v;
+        while (game_vehs[top].prev_in_stack >= 0) top = game_vehs[top].prev_in_stack;
+        for (int j = top; j >= 0; j = game_vehs[j].next_in_stack)
+            if (j != v && game_has_abil(game_vehs[j].proto, ABILITY_REPAIR)) repair_unit = 1;
+        if (repair_unit) value *= 2;
+    }
+    if (holds_project(SP_NANO_FACTORY, faction)) value = u->damage;
+    int reactor = game_protos[p].reactor, repair = reactor * value, floor = 0;
+    if (faction && !repair_unit && base < 0 && !holds_project(SP_NANO_FACTORY, faction)) {
+        floor = reactor * 2;
+        if (floor && (t->bits & MAP_FUNGUS) && altitude(t) >= ALT_SHELF) {
+            if (is_native(p)) floor = 0;
+            if (holds_project(SP_XENOEMPATHY_DOME, faction)) repair += reactor, floor = 0;
+        }
+    }
+    int left = game_range(u->damage - repair, floor, 999);
+    if (left >= u->damage) left = u->damage;
+    u->damage = (uint8_t)left;
+    left &= 0xff;
+    if (left > floor || !is_human(faction) || u->order != ORDER_SENTRY || left == damage) return;
+    if (proto_triad(p) != TRIAD_LAND || altitude(t) >= ALT_LAND) u->order = 0;
+}
+
+// A faction's units at the start of its turn: moves restored, some orders
+// run down, and repairs; then the player's view of the units it can see
+// outside bases redrawn.
+void repair_phase(int faction) {
+    game_factions[faction].unk_364 = 0;
+    for (int v = 0; v < *game_veh_count; v++)
+        if (game_vehs[v].faction == faction) repair_veh(faction, v);
+    for (int v = 0; v < *game_veh_count; v++) {
+        const struct veh *u = &game_vehs[v];
+        if (u->faction != faction || has_base(tile(u->x, u->y))) continue;
+        int player = *game_current_faction;
+        if (u->faction == player || ((u->visibility >> player) & 1)) game_draw_tile(u->x, u->y, -1);
+    }
+    game_do_all_draws();
+}
+
 // ---- Hooks and shadow checks ------------------------------------------------
 
 extern struct hook_module upkeep_module;
@@ -1777,6 +2006,27 @@ static int shadow_base_upkeep(int a) {
 // original unchecked, and so does one with a base about to be renamed.
 // Its check covers base_upkeep() for AI bases, which the sweep also checks
 // on its own.
+// Energy allocation: the AI's writes the faction and, with bases in riots,
+// works them out again. The player's warning uses the answer to a popup,
+// so a human's runs the original unchecked.
+SHADOW1(UPKEEP, int, energy_limit, int)
+SHADOW_WRITER_CHECK(void, allocate_energy, (int a), (a), orig_allocate_energy(a), hooks_writes_game(&w_), "%d", a)
+static void shadow_allocate_energy(int a) {
+    if (hooks_nested) {
+        orig_allocate_energy(a);
+        return;
+    }
+    if (shadow_bypass()) {
+        allocate_energy(a);
+        return;
+    }
+    stats_allocate_energy.calls++;
+    shadow_tick(UPKEEP);
+    if (is_human(a)) orig_allocate_energy(a);
+    else check_allocate_energy(a);
+}
+// Repairs write the faction's units.
+SHADOW_WRITER(UPKEEP, void, repair_phase, (int a), (a), hooks_writes_game(&w_), "%d", a)
 static int renames_base(int faction) {
     for (int b = 0; b < *game_base_count; b++)
         if (game_bases[b].faction == faction && (game_bases[b].state & BASE_STATE_RENAME)) return 1;
@@ -1889,6 +2139,54 @@ static void upkeep_sweep(void) {
         }
         fd->base_name_offset = land, fd->base_sea_name_offset = seas;
     }
+    // Each AI faction's energy allocation under made-up POLICE, allocations
+    // and priorities, with a base in riots at times; and each faction's
+    // repairs with made-up damage, orders and moves.
+    for (int i = 1; i < FACTION_COUNT; i++) {
+        struct faction_data *fd = &game_factions[i], saved_f = *fd;
+        if (!fd->base_count) continue;
+        // The original reads the current base as it loops over the
+        // faction's; in the game production_phase() has set one.
+        for (int b = 0; b < *game_base_count; b++)
+            if (game_bases[b].faction == i) B = &game_bases[b], ID = b;
+        if (!is_human(i) && B) {
+            check_allocate_energy(i);
+            for (int k = 0; k < 3; k++) {
+                fd->se_pending[SE_POLICE] = (i + slice + k) % 7 - 4;
+                fd->alloc_psych = (i + k + slice) % 5, fd->alloc_labs = (i * 3 + k + slice) % 7;
+                fd->ai_tech = (k + slice) & 1, fd->ai_wealth = (i + k) % 3 == 0, fd->ai_power = (i + slice + k) % 4 == 0;
+                fd->energy_credits = (i * 131 + slice * 17 + k * 400) % 1500;
+                fd->tech_research_id = k == 2 ? 88 : fd->tech_research_id;
+                int riot = -1;
+                for (int b = 0; b < *game_base_count && k == 1; b++)
+                    if (game_bases[b].faction == i) riot = b;
+                uint32_t state = riot >= 0 ? game_bases[riot].state : 0;
+                if (riot >= 0) game_bases[riot].state |= BASE_STATE_RIOTS;
+                check_allocate_energy(i);
+                if (riot >= 0) game_bases[riot].state = state;
+                *fd = saved_f;
+            }
+        }
+        check_repair_phase(i);
+        size_t vehs_size = (size_t)*game_veh_count * sizeof(struct veh);
+        struct veh *saved_vehs = malloc(vehs_size);
+        if (!saved_vehs) continue;
+        memcpy(saved_vehs, game_vehs, vehs_size);
+        for (int v = 0; v < *game_veh_count; v++) {
+            struct veh *u = &game_vehs[v];
+            if (u->faction != i) continue;
+            u->damage = (uint8_t)((v * 7 + slice * 3) % 30);
+            if ((v + slice) % 3 == 0) u->state ^= VEH_STATE_HAS_MOVED;
+            if ((v + slice) % 4 == 0) u->order = ORDER_SENTRY, u->order_turns = (int16_t)((v + slice) % 3);
+            if ((v + slice) % 5 == 0) u->state |= VEH_STATE_AWAY;
+        }
+        uint8_t human = *game_human_factions;
+        if (slice & 1) *game_human_factions |= (uint8_t)(1 << i);
+        check_repair_phase(i);
+        *game_human_factions = human;
+        memcpy(game_vehs, saved_vehs, vehs_size);
+        free(saved_vehs);
+    }
     for (int b = 0; b < *game_base_count; b++) {
         struct base *base = &game_bases[b], saved = *base;
         struct faction_data *f = &game_factions[base->faction], saved_f = *f;
@@ -1993,6 +2291,9 @@ static const struct hook upkeep_hooks[] = {
     HOOK(0x4ecbf0, base_terraform, PUSH_EBP_MOV_EBP_ESP, 0x81, 0xec, 0x04, 0x01, 0x00, 0x00),  // sub esp, 0x104
     HOOK(0x4f79c0, base_upkeep, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),           // sub esp, 12
     HOOK(0x526e70, production_phase, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53, 0x8b, 0x5d, 0x08),  // push ecx; push ebx; mov ebx, [ebp+8]
+    HOOK(0x445440, energy_limit, 0xb8, 0x0a, 0x00, 0x00, 0x00),                    // mov eax, 10
+    HOOK(0x5267b0, allocate_energy, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x18),       // sub esp, 24
+    HOOK(0x526030, repair_phase, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x28),          // sub esp, 40
 };
 // The game calls base_production() only from base_upkeep(), whose check
 // covers it, so for AI bases it is never checked on its own: its sweep

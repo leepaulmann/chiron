@@ -205,6 +205,10 @@ void(__attribute__((thiscall)) * game_base_win_zoom)(void *win, int base, int un
 void (*game_draw_tiles)(int x, int y, int unk);
 int32_t *game_turn_start_credits, *game_skip_tech_screen;
 void (*game_log_say5)(char *a, char *b, int n1, int n2, int n3);
+void (*game_social_select)(int faction);
+int (*game_veh_cargo)(int veh);
+int (*game_breed_mod)(int base, int faction);
+void (*game_do_all_draws)(void);
 int16_t(__attribute__((stdcall)) * game_get_async_key_state)(int key);
 struct rules_terraform *game_terraform;
 int32_t *game_climate_level, *game_climate_change, *game_climate_shown;
@@ -494,6 +498,10 @@ void game_bind(struct pe_image *exe) {
     game_turn_start_credits = (int32_t *)code_at(exe, 0x93a958);
     game_skip_tech_screen = (int32_t *)code_at(exe, 0x945f40);
     game_log_say5 = (void *)code_at(exe, 0x626250);
+    game_social_select = (void *)code_at(exe, 0x5b5620);
+    game_veh_cargo = (void *)code_at(exe, 0x5c1760);
+    game_breed_mod = (void *)code_at(exe, 0x4e65c0);
+    game_do_all_draws = (void *)code_at(exe, 0x5fcbb0);
     game_get_async_key_state = *(void **)code_at(exe, 0x669330);  // filled in when imports were bound
     game_terraform = (struct rules_terraform *)code_at(exe, 0x691878);
     game_climate_level = (int32_t *)code_at(exe, 0x9a6824);

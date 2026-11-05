@@ -79,3 +79,8 @@ void base_terraform(int instant);
 int base_upkeep(int base);
 // A faction's turn for its bases, loans and reserves.
 void production_phase(int faction);
+// What the faction's energy goes to, for the AI; the player is warned.
+int energy_limit(int faction);
+void allocate_energy(int faction);
+// A faction's units at the start of its turn: moves, orders and repairs.
+void repair_phase(int faction);

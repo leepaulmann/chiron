@@ -200,6 +200,11 @@ static void log_say5_stub(char *a, char *b, int n1, int n2, int n3) {}
 static int pumps, advances;
 static void pump_stub(void) { pumps++; }
 static void advance_stub(int faction) { advances++; }
+static int base_at_value = -1, breeds;
+static int base_at_test_stub(int x, int y) { return base_at_value; }
+static int cargo_stub(int veh) { return 0; }
+static int breed_stub(int base, int faction) { return breeds; }
+static void draws_stub(void) {}
 
 int main(void) {
     game_map = &tiles_ptr;
@@ -1620,6 +1625,60 @@ int main(void) {
     EXPECT(factions[1].loan_balance[2], 32);
     *b1 = saved_b1, factions[1] = saved_f1, factions[2] = saved_f2b, factions[3] = saved_f3, faction_defs[1] = saved_d1;
     difficulty = 3;
+
+    // The AI's energy: psych down a step with no riots and no specialists
+    // to spare, labs from its priorities, then pulled back so economy stays
+    // within EFFICIENCY's reach.
+    saved_f1 = factions[1];
+    struct base *was_current = current;
+    current = b1;
+    b1->specialist_total = 0, b1->specialist_adjust = 0, b1->state = 0;
+    factions[1].se_pending[SE_POLICE] = 0, factions[1].alloc_psych = 2, factions[1].alloc_labs = 3;
+    factions[1].ai_tech = 1, factions[1].ai_wealth = factions[1].ai_power = 0, factions[1].ai_fight = 0;
+    factions[1].energy_credits = 0, factions[1].base_count = 3, factions[1].se_2[SE_EFFIC] = 0;
+    factions[1].tech_research_id = 5;
+    memset(factions[1].region_total_bases, 0, sizeof factions[1].region_total_bases);
+    turn = 200, humans = 0, projects[30] = -1;  // the Telepathic Matrix
+    allocate_energy(1);
+    EXPECT(factions[1].alloc_psych, 1);
+    EXPECT(factions[1].alloc_labs, 5);
+    // The Telepathic Matrix: no psych.
+    factions[1].alloc_psych = 2, projects[30] = 1;
+    allocate_energy(1);
+    EXPECT(factions[1].alloc_psych, 0);
+    projects[30] = -1;
+    factions[1] = saved_f1, current = was_current, *b1 = saved_b1;
+
+    // Repairs: a unit away from bases and territory heals 1 a turn by its
+    // reactor, down to twice its reactor; at a base with a Command Center,
+    // all of it; it wakes from sentry when done, for a human.
+    game_base_at = base_at_test_stub, game_veh_cargo = cargo_stub, game_breed_mod = breed_stub;
+    game_do_all_draws = draws_stub;
+    struct veh kept_v0 = vehs[0];
+    int32_t kept_count = veh_count;
+    veh_count = 1, turn = 5;
+    memset(&vehs[0], 0, sizeof vehs[0]);
+    vehs[0].x = 4, vehs[0].y = 2, vehs[0].faction = 1, vehs[0].proto = 0, vehs[0].damage = 10;
+    vehs[0].prev_in_stack = vehs[0].next_in_stack = -1;
+    protos[0].reactor = 1, protos[0].weapon = 0, weapons[0].offense = 1;
+    at(4, 2)->bits = 0, at(4, 2)->territory = -1;
+    repair_phase(1);
+    EXPECT(vehs[0].damage, 9);
+    vehs[0].damage = 2;
+    repair_phase(1);
+    EXPECT(vehs[0].damage, 2);
+    base_at_value = 1, b1->state = 0, give(1, 27);
+    vehs[0].damage = 8, vehs[0].order = 1, humans = 1 << 1;
+    repair_phase(1);
+    EXPECT(vehs[0].damage, 0);
+    EXPECT(vehs[0].order, 0);
+    // Units that have moved are not repaired; moves are restored.
+    vehs[0].damage = 8, vehs[0].state = 0x4, vehs[0].moves_spent = 3;
+    repair_phase(1);
+    EXPECT(vehs[0].damage, 8);
+    EXPECT(vehs[0].moves_spent, 0);
+    base_at_value = -1, humans = 0, *b1 = saved_b1;
+    vehs[0] = kept_v0, veh_count = kept_count;
 
     if (failures) return 1;
     printf("engine_base: all tests passed\n");

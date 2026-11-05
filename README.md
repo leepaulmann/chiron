@@ -131,7 +131,9 @@ module at a time. So far:
   the base's turn that runs all of these, with its energy and trade
   going into the faction's reserves; and the faction's turn around them:
   loans, the AI's maintenance discount, interest, the first turn's free
-  techs and the end of sanctions.
+  techs and the end of sanctions; the AI's split of energy into economy,
+  psych and labs (and the player's warning of falling reserves); and
+  units' repairs, moves and orders at the start of a faction's turn.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once
