@@ -12,6 +12,8 @@ void kernel32_close_waitable(struct kobj *o);
 void kernel32_hold_ticks(int hold);
 // Whether the clock is held: timers don't come due meanwhile.
 int kernel32_ticks_held(void);
+// Whether any thread holds its clock.
+int kernel32_ticks_held_anywhere(void);
 
 // WIN32_FIND_DATAA.
 struct win32_find_data {

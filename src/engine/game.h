@@ -87,7 +87,8 @@ struct faction_data {
     int32_t loan_payment[FACTION_COUNT];  // and paid to it each turn
     GAME_PAD(0x104, 0x1d8);
     int32_t major_atrocities;
-    GAME_PAD(0x1dc, 0x220);
+    int32_t mind_control_total;  // bases mind-controlled (4 each) and units subverted by its probes
+    GAME_PAD(0x1e0, 0x220);
     int32_t energy_credits, hurry_cost_total;
     int32_t se_models_pending[4];  // politics, economics, values, future
     int32_t se_models[4];          // as they stand this turn
@@ -166,6 +167,7 @@ GAME_AT(struct faction_data, tech_cost, 0x3d0);
 GAME_AT(struct faction_data, ai_fight, 0x3dc);
 GAME_AT(struct faction_data, ai_power, 0x3ec);
 GAME_AT(struct faction_data, major_atrocities, 0x1d8);
+GAME_AT(struct faction_data, mind_control_total, 0x1dc);
 GAME_AT(struct faction_data, transcendent_techs, 0x368);
 GAME_AT(struct faction_data, clean_minerals, 0x464);
 GAME_AT(struct faction_data, nutrient_surplus_total, 0x800);
@@ -890,12 +892,10 @@ extern int (*game_veh_cargo)(int veh);
 extern int (*game_breed_mod)(int base, int faction);
 extern void (*game_do_all_draws)(void);
 // The rest of a faction's turn: the AI's diplomacy, strategy and social
-// engineering, the cost of cornering the energy market, the Planetary
-// Council, and the autosave.
+// engineering, the Planetary Council, and the autosave.
 extern void (*game_enemy_diplomacy)(int faction);
 extern void (*game_enemy_strategy)(int faction);
 extern int (*game_social_ai)(int faction, int a, int b, int c, int d, int e);
-extern int (*game_corner_market)(int faction);
 extern int (*game_can_call_council)(int faction, int unk);
 extern void (*game_call_council)(int faction);
 extern void (*game_auto_save)(void);

@@ -213,7 +213,6 @@ void (*game_do_all_draws)(void);
 void (*game_enemy_diplomacy)(int faction);
 void (*game_enemy_strategy)(int faction);
 int (*game_social_ai)(int faction, int a, int b, int c, int d, int e);
-int (*game_corner_market)(int faction);
 int (*game_can_call_council)(int faction, int unk);
 void (*game_call_council)(int faction);
 void (*game_auto_save)(void);
@@ -514,7 +513,6 @@ void game_bind(struct pe_image *exe) {
     game_enemy_diplomacy = (void *)code_at(exe, 0x55f930);
     game_enemy_strategy = (void *)code_at(exe, 0x561080);
     game_social_ai = (void *)code_at(exe, 0x5b4790);
-    game_corner_market = (void *)code_at(exe, 0x59ee50);
     game_can_call_council = (void *)code_at(exe, 0x52c670);
     game_call_council = (void *)code_at(exe, 0x52c880);
     game_auto_save = (void *)code_at(exe, 0x5abd20);

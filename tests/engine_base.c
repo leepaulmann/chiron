@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "../src/engine/base.h"
+#include "../src/engine/faction.h"
 #include "../src/engine/game.h"
 #include "../src/engine/hooks.h"
 
@@ -196,11 +197,10 @@ static int __attribute__((thiscall)) focus_stub(void *console, int x, int y, int
 static void __attribute__((thiscall)) redraw_stub(void *win) { redrawn++; }
 static void __attribute__((thiscall)) zoom_stub(void *win, int base, int unk) { zoomed = base + 1; }
 static void log_say_stub(char *text, int a, int b, int c) {}
-static int fu_calls[8], market_cost = 50, council_open = 1;
+static int fu_calls[8], council_open = 1;
 static void diplomacy_stub(int faction) { fu_calls[0]++; }
 static void strategy_stub(int faction) { fu_calls[1]++; }
 static int social_ai_stub(int faction, int a, int b, int c, int d, int e) { return fu_calls[2]++, 0; }
-static int market_stub(int faction) { return fu_calls[3]++, market_cost; }
 static int can_council_stub(int faction, int unk) { return council_open; }
 static void call_council_stub(int faction) { fu_calls[4]++; }
 static void auto_save_stub(void) { fu_calls[5]++; }
@@ -1698,14 +1698,14 @@ int main(void) {
     static int32_t path_table[16];
     game_social_effects = social_table, game_path = path_table;
     game_enemy_diplomacy = diplomacy_stub, game_enemy_strategy = strategy_stub, game_social_ai = social_ai_stub;
-    game_corner_market = market_stub, game_can_call_council = can_council_stub, game_call_council = call_council_stub;
+    game_can_call_council = can_council_stub, game_call_council = call_council_stub;
     game_auto_save = auto_save_stub, game_game_year = year_stub;
     saved_b1 = *b1, saved_f1 = factions[1];
     saved_d1 = faction_defs[1];
     uint32_t saved_rules = rules;
     turn = 10, humans = 0, state = 0, player = 7, prefs = 0, mp = 0, popps = 0, eliminated = 0;
     rules |= 0x4, rules_basic.turns_corner_market = 20, rules_basic.tech_economic_victory = -1;
-    factions[1].energy_credits = 200, factions[1].hurry_cost_total = 0;
+    factions[1].energy_credits = 5000, factions[1].hurry_cost_total = 0;
     factions[1].corner_market_turn = 0, factions[1].corner_market_cost = 0;
     b1->state = 0x40000001;
     path_table[6] = path_table[7] = 5;
@@ -1713,11 +1713,11 @@ int main(void) {
     EXPECT(fu_calls[0], 1);
     EXPECT(fu_calls[1], 1);
     EXPECT(fu_calls[2], 1);
-    EXPECT(fu_calls[3], 3);
     EXPECT(fu_calls[4], 1);
     EXPECT(fu_calls[5], 0);
     EXPECT(factions[1].corner_market_turn, 30);
-    EXPECT(factions[1].corner_market_cost, 50);
+    EXPECT(factions[1].corner_market_cost, corner_market(1));
+    EXPECT(factions[1].corner_market_cost >= 1000, 1);
     EXPECT(popps, 1);
     EXPECT(b1->state & 0x40000001, 0);
     EXPECT(path_table[6], -1);
@@ -1731,7 +1731,7 @@ int main(void) {
     humans = 1 << 1, player = 1, prefs = 0x2, popps = 0;
     factions[1].energy_credits = 5, factions[1].hurry_cost_total = 9;
     faction_upkeep(1);
-    EXPECT(fu_calls[3], 0);
+    EXPECT(factions[1].corner_market_cost, saved_f1.corner_market_cost);
     EXPECT(fu_calls[4], 0);
     EXPECT(fu_calls[5], 1);
     EXPECT(factions[1].energy_credits, 0);

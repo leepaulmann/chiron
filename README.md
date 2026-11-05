@@ -138,7 +138,9 @@ module at a time. So far:
   AI cornering the energy market, the Planetary Council, a faction with
   nothing left put out of the game, and the autosave;
 - social engineering: the effects of a faction's choices, with its
-  projects, temples and faction rules, and their taking effect each turn.
+  projects, temples and faction rules, and their taking effect each turn;
+- factions: what it costs to take a base over by mind control, and to
+  corner the energy market.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once

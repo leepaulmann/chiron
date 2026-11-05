@@ -9,6 +9,7 @@
 
 #include "../loader/modules.h"
 #include "../loader/teb.h"
+#include "kernel32.h"
 #include "win32.h"
 
 #define MMSYSERR_NOERROR 0
@@ -60,6 +61,13 @@ static void *mmtimer_thread(void *arg) {
         next.tv_nsec += (long)t->delay * 1000000L;
         while (next.tv_nsec >= 1000000000L) next.tv_sec++, next.tv_nsec -= 1000000000L;
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+        // A callback is game code, which marks its timer object as fired:
+        // while a shadow check holds the game's clock, it waits, as
+        // SetTimer's timers do.
+        while (t->kind == 0 && !t->stop && kernel32_ticks_held_anywhere()) {
+            struct timespec ms = {0, 1000000L};
+            nanosleep(&ms, NULL);
+        }
         if (t->stop) break;
         if (t->kind == 0) {
             ((TIMECALLBACK)t->target)(t->id, 0, t->user, 0, 0);

@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "base.h"
+#include "faction.h"
 #include "game.h"
 #include "map.h"
 #include "mapgen.h"
@@ -1927,13 +1928,13 @@ static int full_turn(uint32_t state) { return !(state & GAME_STATE_DONE) || (sta
 // rules' number of turns later, and every faction is told. Unlike Thinker,
 // the original neither waits for an earlier attempt to end nor checks that
 // the game is still undecided.
-static void corner_market(int faction) {
+static void corner_energy_market(int faction) {
     struct faction_data *f = &game_factions[faction];
-    if (f->energy_credits <= game_corner_market(faction)) return;
+    if (f->energy_credits <= corner_market(faction)) return;
     if (!has_tech(game_rules_basic->tech_economic_victory, faction) || !(*game_rules & RULES_VICTORY_ECONOMIC)) return;
     f->corner_market_turn = *game_current_turn + game_rules_basic->turns_corner_market;
-    f->corner_market_cost = game_corner_market(faction);
-    f->energy_credits -= game_corner_market(faction);
+    f->corner_market_cost = corner_market(faction);
+    f->energy_credits -= corner_market(faction);
     struct faction_def *d = &game_faction_defs[faction];
     *game_parse_gender = d->leader_female, *game_parse_plural = 0;
     game_parse_says(0, d->leader_title, -1, -1);
@@ -1971,7 +1972,7 @@ void faction_upkeep(int faction) {
         game_do_all_non_input();
         game_social_ai(faction, -1, -1, -1, -1, 0);
         game_do_all_non_input();
-        if (!is_human(faction)) corner_market(faction);
+        if (!is_human(faction)) corner_energy_market(faction);
     }
     for (int b = 0; b < *game_base_count; b++)
         if (game_bases[b].faction == faction) game_bases[b].state &= ~(uint32_t)(BASE_STATE_HURRY_ | BASE_STATE_UNK_1);

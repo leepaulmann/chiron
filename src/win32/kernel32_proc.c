@@ -492,12 +492,16 @@ static DWORD ticks_now(void) {
 
 DWORD WINAPI GetTickCount(void) { return ticks_held ? ticks_held_at : ticks_now(); }
 
+// Threads holding their clock, for timer threads to wait on.
+static volatile int ticks_holders;
+
 void kernel32_hold_ticks(int hold) {
-    if (hold && !ticks_held++) ticks_held_at = ticks_now();
-    if (!hold && ticks_held) ticks_held--;
+    if (hold && !ticks_held++) ticks_held_at = ticks_now(), __atomic_add_fetch(&ticks_holders, 1, __ATOMIC_SEQ_CST);
+    if (!hold && ticks_held && !--ticks_held) __atomic_sub_fetch(&ticks_holders, 1, __ATOMIC_SEQ_CST);
 }
 
 int kernel32_ticks_held(void) { return ticks_held > 0; }
+int kernel32_ticks_held_anywhere(void) { return __atomic_load_n(&ticks_holders, __ATOMIC_SEQ_CST) > 0; }
 
 void WINAPI Sleep(DWORD ms) {
     if (!ms) {

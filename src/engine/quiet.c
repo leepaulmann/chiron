@@ -220,6 +220,10 @@ HELD(void, mon_winning_trans, (void)0, (int faction, int other), (faction, other
 // A tech given away (by a secret project), with its announcement and the
 // window that shows it, which allocates as the monuments do.
 HELD(void, tech_advance, (void)0, (int faction), (faction), (c_.arg[0] = faction), orig_tech_advance(a_[0]))
+// A tech gained some other way, as by the AI's trades in diplomacy.
+HELD(void, tech_achieved, (void)0, (int faction, int tech, int from, int steal), (faction, tech, from, steal),
+     (c_.arg[0] = faction, c_.arg[1] = tech, c_.arg[2] = from, c_.arg[3] = steal),
+     orig_tech_achieved(a_[0], a_[1], a_[2], a_[3]))
 // Research paid in, which may discover a tech in the same way.
 HELD(void, tech_research, (void)0, (int faction, int labs), (faction, labs), (c_.arg[0] = faction, c_.arg[1] = labs),
      orig_tech_research(a_[0], a_[1]))
@@ -318,6 +322,7 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x515400, console_center, 0xa1, 0xb8, 0x92, 0x93, 0x00),                       // mov eax, [0x9392b8]
     QUIET_HOOK(0x46b1f0, map_win_set_center, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53, 0x56, 0x8b, 0xf1),  // push ecx, ebx, esi; mov esi, ecx
     QUIET_HOOK(0x5be940, tech_research, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x0c),             // mov eax, [ebp+12]
+    QUIET_HOOK(0x5bb000, tech_achieved, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),  // mov eax, fs:[0]
     QUIET_HOOK(0x5be530, tech_advance, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x8b, 0x75, 0x08),  // push ebx; push esi; mov esi, [ebp+8]
     QUIET_HOOK(0x44c9e0, help_project, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                // mov eax, [ebp+8]
     QUIET_HOOK(0x405140, pop2, SEH_PROLOGUE),
