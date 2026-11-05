@@ -191,6 +191,11 @@ static int no_buster(int proto) { return 0; }
 static int no_climax(int faction) { return 0; }
 static int popps;
 static int popp_stub(char *file, char *label, int flags, char *picture, int unk) { return popps++, 0; }
+static int focused, redrawn, zoomed;
+static int __attribute__((thiscall)) focus_stub(void *console, int x, int y, int faction) { return focused++, 0; }
+static void __attribute__((thiscall)) redraw_stub(void *win) { redrawn++; }
+static void __attribute__((thiscall)) zoom_stub(void *win, int base, int unk) { zoomed = base + 1; }
+static void log_say_stub(char *text, int a, int b, int c) {}
 
 int main(void) {
     game_map = &tiles_ptr;
@@ -1521,6 +1526,55 @@ int main(void) {
     can_terraform_value = 1;
     memcpy(tiles, t_tiles, sizeof tiles);
     *b1 = saved_b1;
+
+    // A base's turn, the first: no drones, research or maintenance yet. Its
+    // energy goes into the reserves, and its trade with each faction not
+    // under sanctions; the countdowns run, assimilation twice as fast with
+    // the base back with its old owner; some state bits are cleared.
+    int32_t upkeep_flag = 0, redraw_base = 1;
+    game_upkeep_flag = &upkeep_flag, game_base_win_redraw_base = &redraw_base;
+    game_draw_tiles = draw_tile_stub, game_console_focus = focus_stub, game_base_win_on_redraw = redraw_stub;
+    game_base_win_zoom = zoom_stub, game_log_say = log_say_stub;
+    saved_b1 = *b1, saved_f1 = factions[1];
+    saved_f3 = factions[3];
+    turn = 1, upkeep_state = 0, state = 0, net = 0, prefs = 0;
+    b1->assimilation_turns = 3, b1->faction_former = b1->faction, b1->nerve_staple_turns = 2;
+    b1->state = 0x20200208;
+    factions[3].sanction_turns = 2;
+    factions[1].turn_commerce_income = 0, factions[1].sanction_turns = 0;
+    int32_t credits = factions[1].energy_credits;
+    EXPECT(base_upkeep(1), 0);
+    EXPECT(factions[1].energy_credits - credits, b1->economy_total);
+    int trade = 0;
+    for (int i = 2; i < FACTION_COUNT; i++) trade += i != 3 ? import[i] : 0;  // base_energy() works them out
+    EXPECT(factions[1].turn_commerce_income, trade);
+    EXPECT(b1->assimilation_turns, 1);
+    EXPECT(b1->nerve_staple_turns, 1);
+    EXPECT(b1->state & 0x20200208, 0);
+    EXPECT(computed, -1);
+    EXPECT(upkeep_state, 0);
+    EXPECT(redrawn, 1);
+    // Under sanctions, no trade. The Progenitors trade with no one but have
+    // their energy grid: a facility each, five a secret project, halved.
+    factions[1].sanction_turns = 3, factions[1].turn_commerce_income = 0;
+    EXPECT(base_upkeep(1), 0);
+    EXPECT(factions[1].turn_commerce_income, 0);
+    EXPECT(b1->faction_former, b1->faction);
+    factions[1].sanction_turns = 0, faction_defs[1].rule_flags |= RULE_FLAG_ALIEN;
+    memset(b1->facilities_built, 0, sizeof b1->facilities_built);
+    give(1, 3), give(1, 12), projects[SP_VIRTUAL_WORLD] = 1;
+    EXPECT(base_upkeep(1), 0);
+    EXPECT(factions[1].turn_commerce_income, (2 + 5) / 2);
+    faction_defs[1].rule_flags &= ~RULE_FLAG_ALIEN, projects[SP_VIRTUAL_WORLD] = -1;
+    // A captured base renamed, a third of the time, by its new owner, who is
+    // told; and the base window opened on it when production asked for it.
+    strcpy(faction_defs[1].filename, "x"), factions[1].base_name_offset = 0;
+    b1->state = 0x10000, rand_value = 3, popps = 0, player = 1, upkeep_flag = 0;
+    EXPECT(base_upkeep(1), 0);
+    EXPECT(strcmp(b1->name, "Alpha"), 0);
+    EXPECT(b1->state & 0x10080, 0x80);
+    EXPECT(popps, 1);
+    *b1 = saved_b1, factions[1] = saved_f1, factions[3] = saved_f3;
 
     if (failures) return 1;
     printf("engine_base: all tests passed\n");

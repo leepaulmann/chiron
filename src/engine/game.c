@@ -103,7 +103,7 @@ int (*game_base_find2)(int x, int y, int faction);
 void (*game_delete_landmark)(int x, int y);
 void (*game_set_fac)(int facility, int base, int on);
 int (*game_is_objective)(int base);
-void(__attribute__((thiscall)) * game_console_focus)(void *console, int x, int y, int faction);
+int(__attribute__((thiscall)) * game_console_focus)(void *console, int x, int y, int faction);
 int (*game_parse_says)(int slot, char *text, int gender, int plural);
 int (*game_parse_say)(int slot, int text, int gender, int plural);
 int (*game_parse_num)(int slot, int value);
@@ -198,6 +198,11 @@ void (*game_spot_base)(int base, int faction);
 int (*game_propose_proto)(int faction, int chassis, int weapon, int armor, uint32_t abilities, int reactor, int plan,
                           char *name);
 void(__attribute__((thiscall)) * game_map_win_set_center)(void *win, int x, int y, int unk);
+void *game_base_win;
+int32_t *game_base_win_redraw_base;
+void(__attribute__((thiscall)) * game_base_win_on_redraw)(void *win);
+void(__attribute__((thiscall)) * game_base_win_zoom)(void *win, int base, int unk);
+void (*game_draw_tiles)(int x, int y, int unk);
 int16_t(__attribute__((stdcall)) * game_get_async_key_state)(int key);
 struct rules_terraform *game_terraform;
 int32_t *game_climate_level, *game_climate_change, *game_climate_shown;
@@ -479,6 +484,11 @@ void game_bind(struct pe_image *exe) {
     game_spot_base = (void *)code_at(exe, 0x5b57d0);
     game_propose_proto = (void *)code_at(exe, 0x580860);
     game_map_win_set_center = (void *)code_at(exe, 0x46b1f0);
+    game_base_win = code_at(exe, 0x6a7628);
+    game_base_win_redraw_base = (int32_t *)code_at(exe, 0x6e8134);
+    game_base_win_on_redraw = (void *)code_at(exe, 0x41e790);
+    game_base_win_zoom = (void *)code_at(exe, 0x41a920);
+    game_draw_tiles = (void *)code_at(exe, 0x46b140);
     game_get_async_key_state = *(void **)code_at(exe, 0x669330);  // filled in when imports were bound
     game_terraform = (struct rules_terraform *)code_at(exe, 0x691878);
     game_climate_level = (int32_t *)code_at(exe, 0x9a6824);

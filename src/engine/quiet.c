@@ -114,20 +114,18 @@ HELD(void, boom, (void)0, (int x, int y, int flags), (x, y, flags), (c_.arg[0] =
      orig_boom(a_[0], a_[1], a_[2]))
 HELD(void, clock_wait, (void)0, (int ms), (ms), (c_.arg[0] = ms), orig_clock_wait(a_[0]))
 
-// Moving the map to a square.
-static void(__attribute__((thiscall)) * orig_console_focus)(void *console, int x, int y, int faction);
+// Moving the map to a square: held, it answers 0 (not already in view).
+static int(__attribute__((thiscall)) * orig_console_focus)(void *console, int x, int y, int faction);
 static struct hook_stats stats_console_focus = {"(held console_focus)"};
 static void replay_console_focus(const struct hook_ui_call *c) {
     orig_console_focus((void *)(intptr_t)c->arg[3], c->arg[0], c->arg[1], c->arg[2]);
 }
-static void __attribute__((thiscall)) shadow_console_focus(void *console, int x, int y, int faction) {
-    if (!hooks_protecting()) {
-        orig_console_focus(console, x, y, faction);
-        return;
-    }
+static int __attribute__((thiscall)) shadow_console_focus(void *console, int x, int y, int faction) {
+    if (!hooks_protecting()) return orig_console_focus(console, x, y, faction);
     stats_console_focus.calls++;
     struct hook_ui_call c = {.name = "console_focus", .replay = replay_console_focus, .arg = {x, y, faction, (int)(intptr_t)console}};
     hooks_ui_hold(&c);
+    return 0;
 }
 
 // The popup base_production() keeps on its stack: while state is protected
@@ -191,6 +189,10 @@ HELD_THIS(wave_unload, (void *self), (self), (void)0, orig_wave_unload(SELF))
 HELD_THIS(wave_load, (void *self, char *file), (self, file), hooks_ui_text(&c_, 0, file), orig_wave_load(SELF, TEXT(0)))
 HELD_THIS(wave_play, (void *self), (self), (void)0, orig_wave_play(SELF))
 HELD_THIS(sound_fade, (void *self, int ms), (self, ms), c_.arg[0] = ms, orig_sound_fade(SELF, a_[0]))
+// The base window after a base's upkeep: redrawn, or opened on the base.
+HELD_THIS(base_win_on_redraw, (void *self), (self), (void)0, orig_base_win_on_redraw(SELF))
+HELD_THIS(base_win_zoom, (void *self, int base, int unk), (self, base, unk), (c_.arg[0] = base, c_.arg[1] = unk),
+          orig_base_win_zoom(SELF, a_[0], a_[1]))
 // Movies and help for secret projects.
 HELD(void, amovie_project, (void)0, (int project), (project), (c_.arg[0] = project), orig_amovie_project(a_[0]))
 HELD(void, amovie_project_2, (void)0, (char *name), (name), (hooks_ui_text(&c_, 0, name)), orig_amovie_project_2(TEXT(0)))
@@ -315,5 +317,7 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x405140, pop2, SEH_PROLOGUE),
     QUIET_HOOK(0x504aa0, boom, PUSH_EBP_MOV_EBP_ESP, 0x81, 0xec, 0x44, 0x01, 0x00, 0x00),   // sub esp, 0x144
     QUIET_HOOK(0x50dd90, clock_wait, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x8b, 0x35, 0x68, 0x93, 0x66, 0x00),  // push ebx; push esi; mov esi, [0x669368]
+    QUIET_HOOK(0x41e790, base_win_on_redraw, 0xa1, 0x2c, 0x39, 0x7d, 0x00, 0x56, 0x8b, 0xf1),  // mov eax, [0x7d392c]; push esi; mov esi, ecx
+    QUIET_HOOK(0x41a920, base_win_zoom, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10, 0x53, 0x56),  // sub esp, 16; push ebx; push esi
 };
 struct hook_module quiet_module = {"quiet", quiet_hooks, HOOK_COUNT(quiet_hooks), NULL, NULL, -1};

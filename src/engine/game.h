@@ -205,7 +205,9 @@ struct faction_def {
     GAME_PAD(0x570, 0x59c);
 };
 _Static_assert(sizeof(struct faction_def) == 0x59c, "faction_def size");
+GAME_AT(struct faction_def, noun, 0x2e4);
 GAME_AT(struct faction_def, adjective, 0x304);
+GAME_AT(struct faction_def, rule_flags, 0x508);
 GAME_AT(struct faction_def, leader_title, 0x4c);
 GAME_AT(struct faction_def, rule_research, 0x4dc);
 GAME_AT(struct faction_def, rule_techcost, 0x4f8);
@@ -730,7 +732,7 @@ extern int (*game_base_find2)(int x, int y, int faction);  // the nearest base o
 extern void (*game_delete_landmark)(int x, int y);
 extern void (*game_set_fac)(int facility, int base, int on);
 extern int (*game_is_objective)(int base);
-extern void(__attribute__((thiscall)) * game_console_focus)(void *console, int x, int y, int faction);
+extern int(__attribute__((thiscall)) * game_console_focus)(void *console, int x, int y, int faction);
 extern int (*game_parse_says)(int slot, char *text, int gender, int plural);
 extern int (*game_parse_say)(int slot, int text, int gender, int plural);
 extern int (*game_parse_num)(int slot, int value);  // text from the string table
@@ -832,6 +834,13 @@ extern void (*game_spot_base)(int base, int faction);
 extern int (*game_propose_proto)(int faction, int chassis, int weapon, int armor, uint32_t abilities, int reactor,
                                  int plan, char *name);
 extern void(__attribute__((thiscall)) * game_map_win_set_center)(void *win, int x, int y, int unk);
+// The base window, and a base it is redrawn for after the base's upkeep
+// (Thinker's BaseUpkeepDrawID); its redraw, and opening it on a base.
+extern void *game_base_win;
+extern int32_t *game_base_win_redraw_base;
+extern void(__attribute__((thiscall)) * game_base_win_on_redraw)(void *win);
+extern void(__attribute__((thiscall)) * game_base_win_zoom)(void *win, int base, int unk);
+extern void (*game_draw_tiles)(int x, int y, int unk);
 
 // Ecological damage: fungus, native life, warming and volcanoes.
 struct rules_terraform {

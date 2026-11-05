@@ -112,7 +112,7 @@ module at a time. So far:
   landmarks), the climate pass that reworks the map when the sea level
   changes, and the altitude setter, with the floods it brings to bases and
   units. Loading and saving maps are still the game's own;
-- bases, begun: what each square yields in nutrients, minerals and energy,
+- bases: what each square yields in nutrients, minerals and energy,
   facilities, and a base's nutrient and mineral totals with growth and
   ecological damage; which squares its citizens work and which become
   specialists; unit upkeep and supply convoys; its energy with trade,
@@ -127,7 +127,9 @@ module at a time. So far:
   doctors in riots, disbanding the units it can't support, and the AI
   rushing production with its energy reserves; its ecological damage:
   fungus, native life, global warming and the volcano; the AI's
-  terraforming plans; and new bases' names.
+  terraforming plans; new bases' names, and captured bases renamed; and
+  the base's turn that runs all of these, with its energy and trade
+  going into the faction's reserves.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once

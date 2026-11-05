@@ -1476,6 +1476,128 @@ target: {
 }
 }
 
+// ---- A base's turn ----------------------------------------------------------
+
+enum { BASE_STATE_RENAME = 0x10000, BASE_STATE_RENAMED = 0x80, PREF_TUTORIAL_MESSAGES = 0x20 };
+
+// A captured base that hasn't been renamed: a third of the time, until the
+// game is over, its new owner names it, and the player is told if it is
+// theirs or they can see it (Thinker has its former owner).
+static void rename_base(int faction) {
+    if (!(B->state & BASE_STATE_RENAME)) return;
+    if (game_rand() % 3 || (*game_state & GAME_STATE_DONE)) return;
+    const struct base *b = &game_bases[ID];
+    int player = *game_current_faction;
+    if ((b->faction == player || ((b->visibility >> player) & 1)) &&
+        !game_console_focus(game_console, B->x, B->y, player))
+        game_draw_tiles(B->x, B->y, 2);
+    game_parse_says(1, B->name, -1, -1);
+    const struct faction_def *d = &game_faction_defs[faction];
+    *game_parse_gender = d->noun_gender;
+    *game_parse_plural = d->noun_plural;
+    game_parse_says(0, (char *)d->noun, -1, -1);
+    name_base(faction, B->name, 1, (tile(B->x, B->y)->climate & 0xe0) < ALT_LAND);
+    game_parse_says(2, B->name, -1, -1);
+    player = *game_current_faction;
+    b = &game_bases[ID];
+    if (b->faction == player || ((b->visibility >> player) & 1)) {
+        game_draw_map(1);
+        if (is_alien(faction))
+            game_popp(*game_script_file, text(0x689eb4), 0, text(0x689ea4), 0);
+        else
+            game_popp(*game_script_file, text(0x689ed0), 0, text(0x689ec0), 0);
+    }
+    B->state &= ~(uint32_t)BASE_STATE_RENAME;
+    B->state |= BASE_STATE_RENAMED;
+}
+
+// A base's turn, at the end of its faction's: production, rushing,
+// growth, support, drones, research, ecology, its energy and trade into
+// the faction's reserves, maintenance and the AI's terraforming; then the
+// countdowns. Returns 1 if the base was lost (to growth's starvation or a
+// revolt) part way.
+//
+// The original works out the base again by calling base_compute()'s five
+// parts itself. Unlike Thinker, it clears only two state bits at the start
+// and starts drones and research from the second turn on, not the first.
+int base_upkeep(int base) {
+    struct base *start = &game_bases[base];
+    ID = base;
+    B = start;
+    int faction = start->faction;
+    *game_upkeep_flag = 0;
+    start->state &= 0xdffffdffu;
+    base_compute(1);
+    base_production();
+    base_hurry();
+    B->minerals_2 = B->minerals;
+    B->production_last = B->queue[0];
+    if (base_growth()) return 1;
+    if (*game_current_turn > 1) base_check_support();
+    *game_base_upkeep_state = 1;
+    *game_computed_base_id = ID;
+    base_support();
+    base_yield();
+    base_nutrient();
+    base_minerals();
+    base_energy();
+    // The AI's count of worked squares, weighted by its plan for the
+    // base's region.
+    struct faction_data *f = &game_factions[faction];
+    int plan = f->region_base_plan[tile(B->x, B->y)->region];
+    int weight = plan == PLAN_NAVAL_TRANSPORT && f->ai_fight <= 0 ? 4 : (plan != PLAN_DEFENSIVE) + 1;
+    f->unk_7f4 += bit_count(B->worked_tiles) * weight;
+    *game_base_upkeep_state = 2;
+    if (*game_current_turn > 1) {
+        base_drones();
+        base_doctors();
+        if (B->faction != faction) return 1;
+        base_energy_costs();
+        if (*game_current_turn > 5 || *game_net_multiplayer || !(*game_preferences & PREF_TUTORIAL_MESSAGES))
+            base_research();
+    }
+    ID = base;
+    B = start;
+    base_compute(0);
+    base_ecology();
+    f->energy_credits += B->economy_total;
+    // Trade with each other faction neither under sanctions, and for the
+    // Progenitors their energy grid: one for each facility, five for each
+    // secret project, halved.
+    const struct faction_data *other = &game_factions[1];
+    for (int i = 1; i < FACTION_COUNT; i++, other++) {
+        if (i == faction || is_alien(faction) || is_alien(i)) continue;
+        f->turn_commerce_income += !f->sanction_turns && !other->sanction_turns ? game_base_commerce_import[i] : 0;
+    }
+    if (is_alien(faction)) {
+        int grid = 0;
+        for (int i = 0; i < FAC_FIRST_PROJECT; i++) grid += (B->facilities_built[i / 8] >> (i % 8)) & 1;
+        for (int i = 0; i < SP_COUNT; i++)
+            if (game_secret_projects[i] == base) grid += 5;
+        f->turn_commerce_income += f->sanction_turns ? 0 : grid / 2;
+    }
+    if (*game_current_turn > 1) base_maint();
+    base_terraform(0);
+    rename_base(faction);
+    *game_computed_base_id = -1;
+    if (ID == *game_base_win_redraw_base) game_base_win_on_redraw(game_base_win);
+    if (*game_upkeep_flag && (!(*game_state & GAME_STATE_DONE) || (*game_state & GAME_STATE_FINAL_SCORE_DONE))) {
+        game_log_say(text(0x689edc), base, 0, 0);
+        game_base_win_zoom(game_base_win, base, 1);
+        game_log_say(text(0x689ef0), base, 0, 0);
+    }
+    *game_base_upkeep_state = 0;
+    if (B->assimilation_turns) {
+        B->assimilation_turns--;
+        if (B->faction_former == B->faction && B->assimilation_turns) B->assimilation_turns--;
+        if (!B->assimilation_turns) B->faction_former = B->faction;
+    }
+    if (B->nerve_staple_turns) B->nerve_staple_turns--;
+    B->state &= 0xffdffff7u;
+    if (!((*game_current_turn + ID) & 7)) B->state &= ~0x100000u;
+    return 0;
+}
+
 // ---- Hooks and shadow checks ------------------------------------------------
 
 extern struct hook_module upkeep_module;
@@ -1552,6 +1674,23 @@ static void writes_path(struct hook_writes *w) {
 SHADOW_WRITER(UPKEEP, void, base_terraform, (int a), (a), (hooks_writes_game(&w_), writes_path(&w_)), "%d", a)
 // Fungus, native life, the sea and volcanoes write widely.
 SHADOW_WRITER(UPKEEP, void, base_ecology, (void), (), hooks_writes_game(&w_), "%s", "")
+// A base's turn writes all over the game, the path finder's tables too
+// (base_terraform). A human's base runs the original unchecked, as its
+// production may ask the player (see base_production), and so does a base
+// about to be renamed, as naming reads a file (see name_base). Only a
+// human's base can revolt, so a check never reaches drone_riot's stale
+// revolt chances, which would differ between the two runs.
+SHADOW_WRITER_CHECK(int, base_upkeep, (int a), (a), orig_base_upkeep(a), (hooks_writes_game(&w_), writes_path(&w_)),
+                    "%d", a)
+static int shadow_base_upkeep(int a) {
+    if (hooks_nested) return orig_base_upkeep(a);
+    if (shadow_bypass()) return base_upkeep(a);
+    stats_base_upkeep.calls++;
+    shadow_tick(UPKEEP);
+    const struct base *b = &game_bases[a];
+    if (is_human(b->faction) || (b->state & BASE_STATE_RENAME)) return orig_base_upkeep(a);
+    return check_base_upkeep(a);
+}
 
 static int slice;
 
@@ -1738,5 +1877,10 @@ static const struct hook upkeep_hooks[] = {
     HOOK(0x4f67f0, base_ecology, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x3c),          // sub esp, 60
     HOOK(0x4e4090, name_base, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x54),             // sub esp, 84
     HOOK(0x4ecbf0, base_terraform, PUSH_EBP_MOV_EBP_ESP, 0x81, 0xec, 0x04, 0x01, 0x00, 0x00),  // sub esp, 0x104
+    HOOK(0x4f79c0, base_upkeep, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),           // sub esp, 12
 };
-struct hook_module upkeep_module = {"upkeep", upkeep_hooks, HOOK_COUNT(upkeep_hooks), upkeep_sweep, NULL, -1};
+// The game calls base_production() only from base_upkeep(), whose check
+// covers it, so for AI bases it is never checked on its own: its sweep
+// runs with this one.
+extern struct hook_module production_module;
+struct hook_module upkeep_module = {"upkeep", upkeep_hooks, HOOK_COUNT(upkeep_hooks), upkeep_sweep, &production_module, -1};

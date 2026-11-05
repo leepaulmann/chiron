@@ -75,3 +75,5 @@ void base_ecology(void);
 void name_base(int faction, char *name, int save, int sea);
 // The AI's terraforming plans for the current base.
 void base_terraform(int instant);
+// A base's turn at the end of its faction's; 1 if the base was lost.
+int base_upkeep(int base);
