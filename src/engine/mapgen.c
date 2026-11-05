@@ -1527,38 +1527,6 @@ LANDMARK_SHADOW(world_geothermal)
 SHADOW_WRITER(MAPGEN, void, world_volcano, (int a, int b, int c), (a, b, c), WRITES_STATE, "%d, %d, %d", a, b, c)
 SHADOW_WRITER(MAPGEN, void, world_landmarks, (void), (), WRITES_STATE, "%s", "")
 
-// In shadow mode, the game's message pump and drawing do nothing while a
-// check runs or a sweep's copy of the game is in use, so the original and
-// ours see the same state, no input is handled twice or lost to a rewind,
-// and neither run paints over what the other left in the windows, on the
-// heap, which checks don't put back. (Placing a unit, such as a fungal
-// tower, reveals and repaints the squares around it at once.) Map
-// generation redraws less often as a result.
-#define QUIET(name, label, params, args)                   \
-    static void (*orig_##name) params;                     \
-    static struct hook_stats stats_##name = {label};       \
-    static void shadow_##name params {                     \
-        if (hooks_protecting()) {                          \
-            stats_##name.calls++;                          \
-            return;                                        \
-        }                                                  \
-        orig_##name args;                                  \
-    }
-QUIET(do_all_non_input, "(quiet pump)", (void), ())
-QUIET(do_all_draws, "(quiet paint)", (void), ())
-QUIET(draw_radius, "(quiet draw_radius)", (int x, int y, int radius, int unk), (x, y, radius, unk))
-QUIET(draw_tile, "(quiet draw_tile)", (int x, int y, int unk), (x, y, unk))
-QUIET(draw_map, "(quiet draw_map)", (int unk), (unk))
-static void(__attribute__((thiscall)) * orig_map_win_clear_terrain)(void *win);
-static struct hook_stats stats_map_win_clear_terrain = {"(quiet MapWin_clear_terrain)"};
-static void __attribute__((thiscall)) shadow_map_win_clear_terrain(void *win) {
-    if (hooks_protecting()) {
-        stats_map_win_clear_terrain.calls++;
-        return;
-    }
-    orig_map_win_clear_terrain(win);
-}
-
 // Once a turn, on a protected copy of the game: bases and units hidden so
 // alt_set() only shapes terrain, then each pass run on the live map and put
 // back.
@@ -1687,15 +1655,5 @@ static const struct hook mapgen_hooks[] = {
     {0x5c8630, (const uint8_t[]){0x6a, 0xff, 0x6a, 0xff, 0xe8, 0xb7, 0xd8, 0xff, 0xff}, 9, (void *)world_landmarks,
      (void *)shadow_world_landmarks, (void **)&orig_world_landmarks, &stats_world_landmarks, 0, 1},
     HOOK(0x5c86e0, world_build, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53, 0x33, 0xdb),  // push ecx; push ebx; xor ebx, ebx
-    // Shadow mode only: the quiet pump and drawing.
-#define QUIET_HOOK(addr, name, ...)                                                                     \
-    {addr, (const uint8_t[]){__VA_ARGS__}, sizeof((const uint8_t[]){__VA_ARGS__}), NULL, (void *)shadow_##name, \
-     (void **)&orig_##name, &stats_##name, 1}
-    QUIET_HOOK(0x5fcb20, do_all_non_input, 0xc7, 0x05, 0x9c, 0x7b, 0x9b, 0x00, 0x20, 0x00, 0x00, 0x00),  // mov dword [0x9b7b9c], 0x20
-    QUIET_HOOK(0x5fcbb0, do_all_draws, 0x83, 0xec, 0x1c, 0xc7, 0x05, 0x9c, 0x7b, 0x9b, 0x00, 0x01, 0x00, 0x00, 0x00),
-    QUIET_HOOK(0x46aef0, draw_radius, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x8b, 0x5d, 0x10),  // push ebx; mov ebx, [ebp+16]
-    QUIET_HOOK(0x46af40, draw_tile, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x8b, 0x5d, 0x0c),
-    QUIET_HOOK(0x46b190, draw_map, PUSH_EBP_MOV_EBP_ESP, 0x56, 0x57),                   // push esi; push edi
-    QUIET_HOOK(0x46fd90, map_win_clear_terrain, 0x8b, 0x41, 0x04, 0x53, 0x56),          // mov eax, [ecx+4]; push ebx; push esi
 };
 struct hook_module mapgen_module = {"map generation", mapgen_hooks, HOOK_COUNT(mapgen_hooks), mapgen_sweep, NULL, -1};

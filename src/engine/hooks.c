@@ -16,8 +16,8 @@ enum hook_mode hooks_mode = HOOKS_OFF;
 int hooks_nested;
 
 // Each module defines its hooks and sweep.
-extern struct hook_module tech_module, map_module, mapgen_module, base_module;
-static struct hook_module *const modules[] = {&tech_module, &map_module, &mapgen_module, &base_module};
+extern struct hook_module tech_module, map_module, mapgen_module, base_module, quiet_module;
+static struct hook_module *const modules[] = {&tech_module, &map_module, &mapgen_module, &base_module, &quiet_module};
 
 #define N_MODULES (sizeof(modules) / sizeof(modules[0]))
 
@@ -114,8 +114,64 @@ enum { WRITES_DEPTH = 8 };
 static struct {
     uint8_t *buf[2];
     size_t cap;
+    int ui_start, ui_mid;  // the held UI calls before the original ran, and after
 } saves[WRITES_DEPTH];
 static int writes_depth, checking_depth;
+
+// Held UI calls. ui_n counts them all; only the first UI_MAX are kept.
+enum { UI_MAX = 64 };
+static struct hook_ui_call ui_log[UI_MAX];
+static int ui_n;
+
+void hooks_ui_hold(const struct hook_ui_call *c) {
+    if (ui_n < UI_MAX) ui_log[ui_n] = *c;
+    ui_n++;
+}
+
+void hooks_ui_text(struct hook_ui_call *c, int i, const char *s) {
+    if (!s) return;
+    c->has_text |= 1u << i;
+    snprintf(c->text[i], sizeof(c->text[i]), "%s", s);
+}
+
+void hooks_ui_release(void) {
+    if (writes_depth) return;
+    // Calls made here may start checks of their own, which hold and
+    // release theirs.
+    int n = ui_n < UI_MAX ? ui_n : UI_MAX;
+    static struct hook_ui_call pending[UI_MAX];
+    memcpy(pending, ui_log, n * sizeof(pending[0]));
+    ui_n = 0;
+    for (int i = 0; i < n; i++) pending[i].replay(&pending[i]);
+}
+
+static int ui_same(const struct hook_ui_call *a, const struct hook_ui_call *b) {
+    if (a->name != b->name || memcmp(a->arg, b->arg, sizeof(a->arg)) || a->has_text != b->has_text) return 0;
+    for (int i = 0; i < HOOK_UI_TEXTS; i++)
+        if ((a->has_text >> i & 1) && strcmp(a->text[i], b->text[i])) return 0;
+    return 1;
+}
+
+static const char *ui_text(const struct hook_ui_call *c) { return c->has_text & 1 ? c->text[0] : c->has_text & 2 ? c->text[1] : ""; }
+
+// The held calls of the original, [start, mid), against ours, [mid, ui_n).
+static const char *ui_compare(int start, int mid, char *diff, size_t size) {
+    int want = mid - start, got = ui_n - mid;
+    for (int i = 0; i < want && i < got; i++) {
+        if (mid + i >= UI_MAX) break;
+        const struct hook_ui_call *o = &ui_log[start + i], *c = &ui_log[mid + i];
+        if (!ui_same(c, o)) {
+            snprintf(diff, size, "call %d to the UI: %s \"%s\" (%d, %d), original %s \"%s\" (%d, %d)", i + 1, c->name,
+                     ui_text(c), c->arg[0], c->arg[1], o->name, ui_text(o), o->arg[0], o->arg[1]);
+            return diff;
+        }
+    }
+    if (got != want) {
+        snprintf(diff, size, "made %d calls to the UI, original %d", got, want);
+        return diff;
+    }
+    return NULL;
+}
 
 void hooks_writes_add(struct hook_writes *w, void *p, size_t size) {
     if (w->n >= (int)(sizeof(w->span) / sizeof(w->span[0]))) abort();
@@ -140,7 +196,9 @@ static void writes_copy(const struct hook_writes *w, uint8_t *buf, int save) {
 
 void hooks_writes_begin(struct hook_writes *w) {
     if (writes_depth >= WRITES_DEPTH) abort();
+    if (!writes_depth && ui_n) hooks_ui_release();
     w->depth = writes_depth++;
+    saves[w->depth].ui_start = ui_n;
     size_t total = writes_total(w);
     if (total > saves[w->depth].cap) {
         for (int i = 0; i < 2; i++) {
@@ -159,6 +217,7 @@ void hooks_writes_begin(struct hook_writes *w) {
 
 void hooks_writes_abandon(struct hook_writes *w) {
     writes_copy(w, saves[w->depth].buf[0], 0);
+    ui_n = saves[w->depth].ui_start;
     writes_depth--;
     if (!w->protect_only) {
         checking_depth--;
@@ -170,12 +229,13 @@ int hooks_checking(void) { return checking_depth > 0; }
 int hooks_protecting(void) { return writes_depth > 0; }
 
 void hooks_writes_middle(struct hook_writes *w) {
+    saves[w->depth].ui_mid = ui_n;
     writes_copy(w, saves[w->depth].buf[1], 1);
     writes_copy(w, saves[w->depth].buf[0], 0);
 }
 
 const char *hooks_writes_end(struct hook_writes *w, int got, int want) {
-    static char diff[96];
+    static char diff[640];
     const char *result = NULL;
     const uint8_t *orig = saves[w->depth].buf[1];
     // CHIRON_SHADOW_DIFFS=1 lists every range that differs, not just the first.
@@ -204,6 +264,9 @@ const char *hooks_writes_end(struct hook_writes *w, int got, int want) {
         snprintf(diff, sizeof(diff), "= %d, original %d", got, want);
         result = diff;
     }
+    if (!result) result = ui_compare(saves[w->depth].ui_start, saves[w->depth].ui_mid, diff, sizeof(diff));
+    // Keep the original's held calls, for an outer check or for release.
+    ui_n = hooks_sweeping ? saves[w->depth].ui_start : saves[w->depth].ui_mid;
     writes_copy(w, saves[w->depth].buf[hooks_sweeping ? 0 : 1], 0);
     writes_depth--;
     checking_depth--;

@@ -56,3 +56,5 @@ int pop_goal_fac(int base);
 // The faction's cost of growth (type 0) or building (1), in tenths; base
 // may be -1.
 int cost_factor(int faction, int type, int base);
+int base_growth(void);
+int base_queue(int base);

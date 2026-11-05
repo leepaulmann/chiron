@@ -124,7 +124,9 @@ struct faction_data {
     int32_t best_weapon_value;
     GAME_PAD(0x81c, 0x82c);
     int32_t enemy_best_weapon_value;
-    GAME_PAD(0x830, 0x105c);
+    GAME_PAD(0x830, 0x858);
+    uint8_t units_active[512], units_queue[512];  // per prototype (PROTO_COUNT): its units, and those being built
+    GAME_PAD(0xc58, 0x105c);
     int32_t base_count;
     GAME_PAD(0x1060, 0x117c);
     uint8_t region_total_bases[REGION_COUNT];
@@ -158,6 +160,7 @@ GAME_AT(struct faction_data, social_psych, 0x6b0);
 GAME_AT(struct faction_data, armed_units, 0x7f8);
 GAME_AT(struct faction_data, social_effic, 0x7d0);
 GAME_AT(struct faction_data, base_count, 0x105c);
+GAME_AT(struct faction_data, units_queue, 0xa58);
 GAME_AT(struct faction_data, best_weapon_value, 0x818);
 
 enum {  // faction_def bonus ids
@@ -250,7 +253,8 @@ struct rules_chassis {
 _Static_assert(sizeof(struct rules_chassis) == 0x90, "rules_chassis size");
 
 struct rules_facility {
-    GAME_PAD(0x00, 0x14);
+    char *name;
+    GAME_PAD(0x04, 0x14);
     int32_t preq_tech;
     GAME_PAD(0x18, 0x30);
 };
@@ -276,7 +280,7 @@ enum { FACTION_FLAG_MAP_REVEALED = 0x200 };  // faction_data.flags
 
 enum { TREATY_UNK_8000000 = 0x8000000 };  // with TREATY_COMMLINK, whose_territory() names the owner
 
-enum { GAME_STATE_OMNISCIENT = 0x80, GAME_STATE_PERIHELION = 0x100000 };  // game_state bits
+enum { GAME_STATE_DONE = 0x1, GAME_STATE_FINAL_SCORE_DONE = 0x8, GAME_STATE_OMNISCIENT = 0x80, GAME_STATE_PERIHELION = 0x100000 };  // game_state bits
 enum { FACTION_FLAG_BASE_SUBMERGED = 0x80000 };  // faction_data.flags
 
 // ---- The map -------------------------------------------------------------------
@@ -374,7 +378,7 @@ enum {
 enum {
     SP_HUMAN_GENOME_PROJECT = 0, SP_MERCHANT_EXCHANGE = 3, SP_VIRTUAL_WORLD = 6, SP_PLANETARY_TRANSIT_SYSTEM = 7, SP_SUPERCOLLIDER = 12, SP_LONGEVITY_VACCINE = 14,
     SP_ASCETIC_VIRTUES = 13, SP_PHOLUS_MUTAGEN = 16, SP_THEORY_OF_EVERYTHING = 18, SP_NETWORK_BACKBONE = 21, SP_SPACE_ELEVATOR = 27, SP_SINGULARITY_INDUCTOR = 28,
-    SP_BULK_MATTER_TRANSMITTER = 29, SP_ASCENT = 31, SP_SELF_AWARE_COLONY = 25,
+    SP_BULK_MATTER_TRANSMITTER = 29, SP_ASCENT = 31, SP_SELF_AWARE_COLONY = 25, SP_CLONING_VATS = 24,
     SP_CLINICAL_IMMORTALITY = 26, SP_MANIFOLD_HARMONICS = 33,
     SP_CLOUDBASE_ACADEMY = 35, SP_PLANETARY_ENERGY_GRID = 36, SP_COUNT = 64,
 };
@@ -584,6 +588,11 @@ extern void **game_map_wins;                  // [8] the map windows
 extern void *game_world_win, *game_console;
 extern char **game_script_file;               // script.txt, for popups
 extern char *game_flood_texts;                // [8][16] popup labels and pictures when a base floods
+// base_growth()'s popup labels and pictures, from GROWTH_TEXTS in the
+// image; game_growth_text(addr) is the one at addr.
+enum { GROWTH_TEXTS = 0x6894a0 };
+extern char *game_growth_texts;
+static inline char *game_growth_text(uint32_t addr) { return game_growth_texts + (addr - GROWTH_TEXTS); }
 extern char *game_text_climate_begin, *game_text_climate_end;
 // The four diagonal neighbours, north-east clockwise, then the square.
 extern int32_t *game_diag_x, *game_diag_y;    // [5]
@@ -687,6 +696,12 @@ extern void (*game_set_fac)(int facility, int base, int on);
 extern int (*game_is_objective)(int base);
 extern void(__attribute__((thiscall)) * game_console_focus)(void *console, int x, int y, int faction);
 extern int (*game_parse_says)(int slot, char *text, int gender, int plural);
+extern int (*game_parse_say)(int slot, int text, int gender, int plural);  // text from the string table
+extern int (*game_popb)(char *label, int flags, int sound, char *picture, void *sprite);
+extern int (*game_eliminate_player)(int faction, int by);
+extern int (*game_veh_avail)(int proto, int faction, int base);  // whether the base may build the unit
+extern int (*game_facility_avail)(int facility, int faction, int base, int queue);
+extern void (*game_wave_it)(int sound);
 extern int (*game_popp)(char *file, char *label, int flags, char *picture, int unk);
 extern int (*game_x_pop2)(char *label, char *picture, int unk);
 extern void (*game_base_kill)(int base);

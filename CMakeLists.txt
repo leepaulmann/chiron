@@ -58,6 +58,7 @@ add_executable(chiron
   src/engine/hooks.c
   src/engine/map.c src/engine/mapgen.c
   src/engine/patches.c
+  src/engine/quiet.c
   src/engine/soak.c
   src/engine/tech.c
   src/loader/pe.c

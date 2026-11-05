@@ -110,5 +110,26 @@ int hooks_protecting(void);
 // what differs.
 const char *hooks_writes_end(struct hook_writes *w, int got, int want);
 
+// Shadow mode: messages, sounds and movies held back while state is
+// protected. A quiet hook on such a function (quiet.c) records the call
+// instead of making it. A check compares what the original and ours would
+// have shown, as part of their result. When the outermost check of a call
+// from the game is over, the original's are made for real, in order, so a
+// player sees each message once; a sweep's are dropped.
+enum { HOOK_UI_TEXTS = 3, HOOK_UI_TEXT_LEN = 256 };
+struct hook_ui_call {
+    const char *name;
+    void (*replay)(const struct hook_ui_call *c);
+    int arg[5];
+    unsigned has_text;  // bit i: text[i] holds a string argument (else it was NULL)
+    char text[HOOK_UI_TEXTS][HOOK_UI_TEXT_LEN];
+};
+void hooks_ui_hold(const struct hook_ui_call *c);
+// Copy a string argument into c->text[i].
+void hooks_ui_text(struct hook_ui_call *c, int i, const char *s);
+// After a check has reported: make the held calls, if no state is still
+// protected.
+void hooks_ui_release(void);
+
 // Shadow mode: print calls and mismatches per function.
 void hooks_summary(void);

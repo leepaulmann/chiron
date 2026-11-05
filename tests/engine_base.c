@@ -98,6 +98,30 @@ static int has_abil_stub(int proto, uint32_t ability) { return (protos[proto].ab
 
 static void give(int base, int facility) { bases[base].facilities_built[facility / 8] |= (uint8_t)(1 << (facility % 8)); }
 
+// Growth's messages and what it calls when a base is lost.
+static char growth_texts[0x200];
+static char *popb_label, *say_text;
+static int popb_flags, popb_count, objective, killed, eliminated;
+static int popb_stub(char *label, int flags, int sound, char *picture, void *sprite) {
+    popb_label = label, popb_flags = flags, popb_count++;
+    return 0;
+}
+static int parse_say_stub(int slot, int text, int gender, int plural) {
+    say_text = (char *)(intptr_t)text;
+    return 0;
+}
+static int is_objective_stub(int base) { return objective; }
+static void base_kill_stub(int base) { killed = base + 1; }
+static int eliminate_stub(int faction, int by) { return eliminated = faction; }
+static void draw_tile_stub(int x, int y, int unk) {}
+static void draw_map_stub(int unk) {}
+// The queue: units 5 and up and facility 9 can't be built.
+static int sound;
+static int veh_avail_stub(int proto, int faction, int base) { return proto < 5; }
+static int facility_avail_stub(int facility, int faction, int base, int queue) { return facility != 9; }
+static void wave_stub(int id) { sound = id; }
+static void draw_radius_stub(int x, int y, int radius, int unk) {}
+
 int main(void) {
     game_map = &tiles_ptr;
     game_map_width = &width, game_map_height = &height, game_map_half_width = &half_width;
@@ -857,6 +881,154 @@ int main(void) {
     EXPECT(cost_factor(1, 1, -1), 15);
     EXPECT(cost_factor(1, 2, -1), 15);  // any other type: the factor alone
     rules_basic.mineral_cost_multi = 10;
+
+    // Growth. A citizen costs 10 nutrients here, so base 1 of size 3 grows
+    // with 40 stored, into a store emptied and refilled by its surplus.
+    static struct rules_facility facility_rules[FACILITY_COUNT] = {[FAC_HAB_COMPLEX] = {.name = "complex"}};
+    game_facilities = facility_rules;
+    game_growth_texts = growth_texts;
+    game_popb = popb_stub, game_parse_say = parse_say_stub, game_is_objective = is_objective_stub;
+    game_base_kill = base_kill_stub, game_eliminate_player = eliminate_stub;
+    game_draw_tile = draw_tile_stub, game_draw_map = draw_map_stub;
+    struct base saved_b1 = *b1;
+    current = b1, current_id = 1, growth = 0;
+    b1->pop_size = 3, b1->nutrients = 10, b1->surplus[RESOURCE_NUTRIENT] = 5;
+    EXPECT(base_growth(), 0);
+    EXPECT(b1->nutrients, 15);
+    EXPECT(b1->pop_size, 3);
+    b1->nutrients = 40;
+    EXPECT(base_growth(), 0);
+    EXPECT(b1->pop_size, 4);
+    EXPECT(popb_count, 0);
+    // At the habitation limit (7) it keeps half the store, and says what
+    // it needs.
+    b1->pop_size = 7, b1->nutrients = 80, b1->surplus[RESOURCE_NUTRIENT] = 1;
+    base_growth();
+    EXPECT(b1->pop_size, 7);
+    EXPECT(b1->nutrients, 41);
+    EXPECT(popb_label == game_growth_text(0x6894fc), 1);
+    EXPECT(say_text == facility_rules[FAC_HAB_COMPLEX].name, 1);
+    faction_defs[1].rule_flags |= RULE_FLAG_ALIEN;
+    b1->nutrients = 80;
+    base_growth();
+    EXPECT(popb_label == game_growth_text(0x6894e0), 1);
+    faction_defs[1].rule_flags &= ~RULE_FLAG_ALIEN;
+    // In stagnation the store stays full.
+    growth = -3, b1->pop_size = 3, b1->nutrients = 45;
+    base_growth();
+    EXPECT(b1->nutrients, 40);
+    EXPECT(b1->pop_size, 3);
+    // In a boom it grows on a surplus of a citizen's food, with the store
+    // held to a citizen's cost.
+    growth = 6, b1->nutrients = 50, b1->surplus[RESOURCE_NUTRIENT] = 2;
+    base_growth();
+    EXPECT(b1->pop_size, 4);
+    EXPECT(b1->nutrients, 40);
+    growth = 0;
+
+    // Starving: a citizen lost and the store started again; nutrient
+    // convoys in a base stop.
+    struct veh saved_veh = vehs[0];
+    int32_t saved_count = veh_count;
+    veh_count = 1;
+    memset(&vehs[0], 0, sizeof(vehs[0]));
+    vehs[0].x = 6, vehs[0].y = 4, vehs[0].home_base = 1, vehs[0].order = ORDER_CONVOY, vehs[0].prev_in_stack = -1;
+    vehs[0].next_in_stack = -1, vehs[0].proto = 2;
+    uint8_t plan = protos[2].plan;
+    protos[2].plan = PLAN_SUPPLY;
+    uint32_t base_bits = at(6, 4)->bits;
+    uint8_t owner = at(6, 4)->owner_site;
+    at(6, 4)->bits |= MAP_BASE, at(6, 4)->owner_site = 1;
+    popb_count = 0, from[RESOURCE_NUTRIENT] = 1;
+    b1->pop_size = 3, b1->nutrients = -2, b1->surplus[RESOURCE_NUTRIENT] = -2;
+    EXPECT(base_growth(), 0);
+    EXPECT(b1->pop_size, 2);
+    EXPECT(b1->nutrients, -2);
+    EXPECT(vehs[0].order, 0);
+    EXPECT(popb_label == game_growth_text(0x6894c8) && popb_flags == 0x4000, 1);
+    // Not in a finished game, though.
+    state = GAME_STATE_DONE, b1->nutrients = -1;
+    base_growth();
+    EXPECT(b1->pop_size, 2);
+    EXPECT(popb_count, 1);
+    state = 0;
+    // A last objective of size 1 is kept; any other base is lost.
+    b1->pop_size = 1, b1->nutrients = -1, objective = 1;
+    EXPECT(base_growth(), 0);
+    EXPECT(b1->pop_size, 1);
+    EXPECT(killed, 0);
+    objective = 0, b1->nutrients = -1;
+    EXPECT(base_growth(), 1);
+    EXPECT(killed, 2);
+    EXPECT(eliminated, 1);
+    protos[2].plan = plan;
+    at(6, 4)->bits = base_bits, at(6, 4)->owner_site = owner;
+    vehs[0] = saved_veh, veh_count = saved_count;
+
+    // Stores that will run out within five turns: advice. With moist
+    // land to farm, to build farms (with formers) or formers; or else a
+    // warning. The only land in reach is one moist square.
+    static struct map_tile saved_tiles[W / 2 * H];
+    memcpy(saved_tiles, tiles, sizeof(tiles));
+    for (int i = 0; i < W / 2 * H; i++) tiles[i].climate = 0;
+    at(7, 3)->climate = 3 << 5 | 1 << 3, at(7, 3)->bits = 0;
+    protos[1].preq_tech = -1;
+    b1->pop_size = 3, b1->nutrients = 2, b1->surplus[RESOURCE_NUTRIENT] = -1, b1->worked_tiles = 1;
+    base_growth();
+    EXPECT(b1->nutrients, 1);
+    EXPECT(popb_label == game_growth_text(0x6895ec), 1);
+    factions[1].units_active[PROTO_FORMERS] = 1;
+    b1->nutrients = 2;
+    base_growth();
+    EXPECT(popb_label == game_growth_text(0x6895c8), 1);
+    factions[1].units_active[PROTO_FORMERS] = 0;
+    // Worked rocky land is no farmland.
+    at(7, 3)->rocky_lock = 0x80, b1->worked_tiles = 1 | 1 << 1;
+    b1->nutrients = 2, b1->specialist_total = 0;
+    base_growth();
+    EXPECT(popb_label == game_growth_text(0x689658) && popb_flags == 0x80, 1);
+    b1->nutrients = 2, b1->specialist_total = 2, drones[0] = 1;
+    base_growth();
+    EXPECT(popb_label == game_growth_text(0x689610), 1);
+    // Not while there are six turns to go, nor for a governor placing
+    // citizens.
+    popb_count = 0;
+    b1->nutrients = 7;
+    base_growth();
+    b1->nutrients = 2, b1->governor = GOVERNOR_ACTIVE | GOVERNOR_CITIZENS;
+    base_growth();
+    EXPECT(popb_count, 0);
+    drones[0] = 0;
+    memcpy(tiles, saved_tiles, sizeof(tiles));
+    *b1 = saved_b1;
+
+    // The queue moves up past what can no longer be built.
+    game_veh_avail = veh_avail_stub, game_facility_avail = facility_avail_stub, game_wave_it = wave_stub;
+    game_draw_radius = draw_radius_stub;
+    saved_b1 = *b1;
+    b1->queue_size = 4;
+    b1->queue[0] = 2, b1->queue[1] = 7, b1->queue[2] = -9, b1->queue[3] = -(FAC_FIRST_PROJECT + 3);
+    factions[1].units_queue[2] = 1, factions[1].units_queue[7] = 1;
+    EXPECT(base_queue(1), 1);
+    EXPECT(b1->queue_size, 1);
+    EXPECT(b1->queue[0], -(FAC_FIRST_PROJECT + 3));
+    EXPECT(factions[1].units_queue[2], 0);
+    EXPECT(factions[1].units_queue[7], 0);
+    EXPECT(sound, 36);
+    // Emptied, it still tries what is left past the end: here unit 0.
+    b1->queue[1] = 0;
+    EXPECT(base_queue(1), 1);
+    EXPECT(b1->queue_size, 0);
+    b1->queue[1] = 7;
+    b1->queue_size = 1;
+    EXPECT(base_queue(1), 0);
+    // A full queue moves up the word after it, the worked squares.
+    b1->queue_size = 10, b1->worked_tiles = 3;
+    for (int i = 0; i < 10; i++) b1->queue[i] = -9;
+    EXPECT(base_queue(1), 1);
+    EXPECT(b1->queue_size, 0);
+    EXPECT(b1->queue[0], 3);
+    *b1 = saved_b1;
 
     if (failures) return 1;
     printf("engine_base: all tests passed\n");

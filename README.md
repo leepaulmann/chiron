@@ -117,14 +117,18 @@ module at a time. So far:
   ecological damage; which squares its citizens work and which become
   specialists; unit upkeep and supply convoys; its energy with trade,
   losses to inefficiency and the split into economy, psych and labs; its
-  talents and drones; its population goal; and the cost factors for
-  growth and building.
+  talents and drones; its population goal and the cost factors for
+  growth and building; its growth and starvation at the end of a turn,
+  with the advice the game gives when stores run low; and moving its
+  production queue on.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once
 a game turn it also checks every function over its whole input range.
 Functions that write to memory run on copies, and the original's result is
-kept; while they run, the game's message pump and drawing are held off.
+kept; while they run, the game's message pump and drawing are held off,
+and its messages, sounds and movies are held back, compared between the
+two runs, and then shown once.
 A mismatch names the first byte that differs (`CHIRON_SHADOW_DIFFS=1`
 lists every range). It prints a summary of calls, mismatches and sweep
 times at exit:

@@ -11,6 +11,9 @@
 // before the base table, and the faction indexes the faction tables as given.
 #include "base.h"
 
+#include <stddef.h>
+#include <string.h>
+
 #include "game.h"
 #include "map.h"
 #include "shadow.h"
@@ -1282,6 +1285,177 @@ void base_compute(int update) {
     base_energy();
 }
 
+// ---- Growing and starving -----------------------------------------------------
+
+// base_growth()'s messages, as image addresses of each label and picture:
+// for most factions, then for the Progenitors.
+struct growth_message {
+    uint32_t label, picture;
+};
+static const struct growth_message msg_starve[2] = {{0x6894c8, 0x6894b8}, {0x6894b0, 0x6894a0}};
+static const struct growth_message msg_pop_limit[2] = {{0x6894fc, 0x6894f0}, {0x6894e0, 0x6894d0}};
+// Short of nutrients: with farmland to improve, with and without formers;
+// with specialists, with and without drones; and otherwise.
+static const struct growth_message msg_farms[2] = {{0x6895c8, 0x6895b8}, {0x68951c, 0x68950c}};
+static const struct growth_message msg_formers[2] = {{0x6895ec, 0x6895dc}, {0x689540, 0x689530}};
+static const struct growth_message msg_specialists_drones[2] = {{0x689610, 0x689600}, {0x689564, 0x689554}};
+static const struct growth_message msg_specialists[2] = {{0x689634, 0x689624}, {0x689588, 0x689578}};
+static const struct growth_message msg_low_nutrient[2] = {{0x689658, 0x689648}, {0x6895ac, 0x68959c}};
+
+static void growth_popb(const struct growth_message *m, int faction, int flags, int sound) {
+    const struct growth_message *which = &m[(game_faction_defs[faction].rule_flags & RULE_FLAG_ALIEN) != 0];
+    game_popb(game_growth_text(which->label), flags, sound, game_growth_text(which->picture), 0);
+}
+
+// The current base starves. Unless it is its faction's last objective of
+// size 1, it loses a citizen, and with none left is lost. Its nutrient
+// convoys sitting in bases stop. Returns whether it was lost.
+static int starve(struct base *b, int id, int faction) {
+    if (game_base_convoy_from[RESOURCE_NUTRIENT])
+        for (int v = 0; v < *game_veh_count; v++) {
+            struct veh *u = &game_vehs[v];
+            if (u->home_base != id || game_protos[u->proto].plan != PLAN_SUPPLY || u->order != ORDER_CONVOY ||
+                u->order_auto_type != RESOURCE_NUTRIENT)
+                continue;
+            const struct map_tile *t = tile(u->x, u->y);
+            if ((t->bits & MAP_BASE) && (t->owner_site & 0xf) < 8) u->order = 0;
+        }
+    growth_popb(msg_starve, faction, 0x4000, 14);
+    if (!game_is_objective(id) || b->pop_size > 1) {
+        b->pop_size--;
+        if (b->pop_size <= 0) {
+            game_base_kill(id);
+            game_draw_map(1);
+            game_eliminate_player(faction, 0);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// The tutorial's advice when the current base's stores will run out within
+// five turns: improve farmland (with formers or without), turn specialists
+// back into workers, or just a warning. Farmland is unimproved land, not
+// forest with a tree farm or fungus the faction farms well, that is moist,
+// or rainy with the tech for three nutrients, and not worked already as
+// fungus, forest, rocky or arid land. (The original also counts the worked
+// squares left out, and unfarmed ocean, but makes no use of the count.)
+static void low_nutrient_advice(const struct base *b, int id, int faction) {
+    int farmland = 0;
+    for (int i = 1; i < BASE_RADIUS_SQUARES; i++) {
+        int x, y;
+        if (!radius_square(b, i, &x, &y)) continue;
+        const struct map_tile *t = tile(x, y);
+        int worked = (b->worked_tiles >> i & 1) != 0;
+        if (alt_of(t) < ALT_SHORE_LINE || (t->bits & MAP_FARM)) continue;
+        if ((t->bits & MAP_FOREST) && has_facility(id, FAC_TREE_FARM)) continue;
+        int fungus = (t->bits & MAP_FUNGUS) != 0;
+        if (fungus && game_factions[faction].tech_fungus[FUNGUS_NUTRIENT] > 1) continue;
+        int rain = t->climate >> 3 & 3;
+        if (worked && (fungus || (t->bits & MAP_FOREST) || (t->rocky_lock & 0xc0) == 0x80 || !rain)) continue;
+        if (rain == 1 || has_tech(game_rules_basic->tech_three_nutrients, faction)) farmland++;
+    }
+    if (farmland && has_tech(game_protos[PROTO_FORMERS].preq_tech, faction)) {
+        growth_popb(game_factions[faction].units_active[PROTO_FORMERS] ? msg_farms : msg_formers, faction, 0, -1);
+    } else if (b->specialist_total <= 1 && (!b->specialist_total || b->pop_size >= 3)) {
+        growth_popb(msg_low_nutrient, faction, 0x80, 16);
+    } else {
+        growth_popb(*game_psych_drones ? msg_specialists_drones : msg_specialists, faction, 0, -1);
+    }
+}
+
+// The habitation facility the base needs before it can grow, or 0.
+static int growth_blocked(const struct base *b, int id, int faction) {
+    int pop = b->pop_size - (holds_project(SP_ASCETIC_VIRTUES, faction) ? 2 : 0) + game_faction_defs[faction].rule_population;
+    if (pop >= game_rules_basic->pop_limit_hab_complex && !has_fac(FAC_HAB_COMPLEX, id, 0)) return FAC_HAB_COMPLEX;
+    if (pop >= game_rules_basic->pop_limit_hab_dome && !has_fac(FAC_HABITATION_DOME, id, 0)) return FAC_HABITATION_DOME;
+    return 0;
+}
+
+// The current base's nutrients at the end of its turn. With its stores
+// below zero it starves, outside a finished game, and starts again from
+// this turn's surplus. With a population boom (GROWTH 6 or the Cloning
+// Vats) and a surplus of a citizen's food it grows at once; with full
+// stores it grows and empties them, or at a habitation limit says so and
+// keeps half; and at GROWTH -3 or below (stagnation) stores stay full.
+// Then this turn's surplus is added, with advice when it will empty the
+// stores within five turns, unless the governor places citizens. Returns
+// whether the base was lost.
+int base_growth(void) {
+    struct base *b = *game_current_base;
+    int id = *game_current_base_id, faction = b->faction, x = b->x, y = b->y;
+    if (b->nutrients < 0) {
+        if (!(*game_state & GAME_STATE_DONE) || (*game_state & GAME_STATE_FINAL_SCORE_DONE))
+            if (starve(b, id, faction)) return 1;
+        b->nutrients = b->surplus[RESOURCE_NUTRIENT];
+        game_draw_tile(x, y, 2);
+        return 0;
+    }
+    int cost = cost_factor(faction, 0, id) * (b->pop_size + 1);
+    int need = game_rules_basic->nutrient_intake_citizen;
+    if ((holds_project(SP_CLONING_VATS, faction) || *game_base_growth >= 6) && need &&
+        b->surplus[RESOURCE_NUTRIENT] >= need && !growth_blocked(b, id, faction)) {
+        if (b->pop_size < 127) b->pop_size++;
+        base_compute(1);
+        game_draw_tile(x, y, 2);
+        if (b->nutrients > cost) b->nutrients = cost;
+        return 0;
+    }
+    if (b->nutrients >= cost) {
+        if (*game_base_growth <= -3) {
+            b->nutrients = cost;
+            return 0;
+        }
+        int fac = growth_blocked(b, id, faction);
+        if (fac) {
+            b->nutrients = cost_factor(b->faction, 0, id) * (b->pop_size + 1) / 2;
+            game_parse_say(1, (int)(intptr_t)game_facilities[fac].name, -1, -1);
+            growth_popb(msg_pop_limit, faction, 0x800, 16);
+        } else {
+            b->nutrients = 0;
+            b->pop_size++;  // no limit here: 127 wraps
+            base_compute(1);
+            game_draw_tile(x, y, 2);
+        }
+    }
+    b->nutrients += b->surplus[RESOURCE_NUTRIENT];
+    // The tests on the stores, as the original makes them, by the sign of
+    // the 32-bit result.
+    int32_t s = b->surplus[RESOURCE_NUTRIENT];
+    if (s >= 0 || (int32_t)((uint32_t)b->nutrients - (uint32_t)s) < 0 ||
+        (int32_t)((uint32_t)b->nutrients + 5u * (uint32_t)s) >= 0)
+        return 0;
+    if ((b->governor & (GOVERNOR_ACTIVE | GOVERNOR_CITIZENS)) == (GOVERNOR_ACTIVE | GOVERNOR_CITIZENS)) return 0;
+    low_nutrient_advice(b, id, faction);
+    return 0;
+}
+
+// ---- Production -------------------------------------------------------------
+
+// Takes the item at the head of the base's queue off it (a unit no longer
+// counts as being built), and the next ones the base can no longer build,
+// until one it can is at the head; a secret project plays its sound.
+// Returns whether one was found. Like the original, it tries the entry
+// moved up from past the end even when the queue is now empty, and moving
+// a full queue up reads one entry past its end (the base's worked squares).
+int base_queue(int base) {
+    struct base *b = &game_bases[base];
+    int faction = b->faction;
+    while (b->queue_size) {
+        int item = b->queue[0];
+        if (item >= 0) game_factions[faction].units_queue[item]--;
+        if (b->queue_size > 0) memmove((char *)b + offsetof(struct base, queue), (char *)b + offsetof(struct base, queue) + 4, (size_t)b->queue_size * 4);
+        b->queue_size--;
+        item = b->queue[0];
+        if (item >= 0 ? game_veh_avail(item, faction, base) : game_facility_avail(-item, faction, base, 0)) {
+            if (b->queue[0] <= -FAC_FIRST_PROJECT) game_wave_it(36);
+            game_draw_radius(b->x, b->y, 2, 2);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 // ---- Hooks and shadow checks ------------------------------------------------
 
 extern struct hook_module base_module;
@@ -1333,6 +1507,25 @@ SHADOW_WRITER(BASE, void, base_psych, (void), (), WRITES_CURRENT, "%s", "")
 SHADOW_WRITER_VIA(BASE, void, base_energy, (void), (), call_with_ebp4(orig_base_energy, minerals_left), WRITES_CURRENT,
                   "%s", "")
 
+// Growth also writes the base's units' orders. When the base may starve to
+// death the original runs unchecked: losing a base writes all over the game.
+static int growth_may_kill(void) {
+    const struct base *b = *game_current_base;
+    return b->nutrients < 0 && b->pop_size <= 1;
+}
+SHADOW_WRITER_CHECK(int, base_growth, (void), (), orig_base_growth(), WRITES_COMPUTE, "%s", "")
+static int shadow_base_growth(void) {
+    if (hooks_nested) return orig_base_growth();
+    if (shadow_bypass()) return base_growth();
+    stats_base_growth.calls++;
+    shadow_tick(BASE);
+    if (growth_may_kill()) return orig_base_growth();
+    return check_base_growth();
+}
+
+#define WRITES_QUEUE WRITES(&game_bases[a], sizeof(struct base)); WRITES(&game_factions[game_bases[a].faction], sizeof(struct faction_data))
+SHADOW_WRITER(BASE, int, base_queue, (int a), (a), WRITES_QUEUE, "%d", a)
+
 static int slice;
 
 // Every square for every faction with no base, the flag both ways; and
@@ -1362,6 +1555,65 @@ static void sweep_yields(void) {
             check_crop_yield(base->faction, b, x, y, 1);
         }
     }
+}
+
+// Growth for the current base b as it is, and then with full stores, in a
+// population boom, in stagnation, starving and running short; each from
+// the base as it is.
+static void sweep_growth(int b) {
+    struct base *base = &game_bases[b], saved = *base;
+    int growth = *game_base_growth;
+    uint32_t state = *game_state;
+    if (!growth_may_kill()) check_base_growth();
+    int full = cost_factor(base->faction, 0, b) * (base->pop_size + 1);
+    base->nutrients = full + slice % 3;
+    check_base_growth();
+    *game_base_growth = -3 - slice % 2;
+    check_base_growth();
+    *game_base_growth = 6;
+    base->nutrients = slice % 5;
+    base->surplus[RESOURCE_NUTRIENT] = game_rules_basic->nutrient_intake_citizen + slice % 2;
+    check_base_growth();
+    *game_base_growth = growth;
+    if (base->pop_size > 1) {
+        base->nutrients = -1 - slice % 4;
+        if (slice & 1) *game_state |= GAME_STATE_DONE;
+        check_base_growth();
+        *game_state = state;
+    }
+    // Stores that run out within five turns: the advice, unless the
+    // governor places citizens.
+    base->nutrients = 2 + slice % 3;
+    base->surplus[RESOURCE_NUTRIENT] = -1 - (b + slice) % 3;
+    base->specialist_total = (b + slice) % 4;
+    if (slice % 4 == 3) base->governor |= GOVERNOR_ACTIVE | GOVERNOR_CITIZENS;
+    check_base_growth();
+    *base = saved;
+}
+
+// The base's queue as it is, and then made up: facilities, secret
+// projects and units, basic and the faction's own, up to a full queue.
+static void sweep_queue(int b) {
+    struct base *base = &game_bases[b], saved = *base;
+    struct faction_data *f = &game_factions[base->faction];
+    uint8_t queued[sizeof(f->units_queue)];
+    memcpy(queued, f->units_queue, sizeof(queued));
+    check_base_queue(b);
+    // Short of full: the original reads past a full queue's end, and takes
+    // the base's worked squares for a unit.
+    base->queue_size = 1 + (b + slice) % 9;
+    for (int i = 0; i <= base->queue_size && i < 10; i++) {
+        int k = b * 7 + slice * 3 + i * 11;
+        switch (k % 4) {
+        case 0: base->queue[i] = -(1 + k % (FAC_FIRST_PROJECT - 1)); break;
+        case 1: base->queue[i] = -(FAC_FIRST_PROJECT + k % SP_COUNT); break;
+        case 2: base->queue[i] = k % 64; break;
+        default: base->queue[i] = base->faction * 64 + k % 64; break;
+        }
+    }
+    check_base_queue(b);
+    *base = saved;
+    memcpy(f->units_queue, queued, sizeof(queued));
 }
 
 // Every facility, with and without the queue; and the totals as if each
@@ -1412,6 +1664,8 @@ static void sweep_bases(void) {
         *game_base_upkeep_state = upkeep_state;
         *f = saved_f;
         *base = saved;
+        sweep_growth(b);
+        sweep_queue(b);
     }
     *game_current_base = current;
     *game_current_base_id = current_id;
@@ -1458,5 +1712,7 @@ static const struct hook base_hooks[] = {
     HOOK(0x4eb490, base_rank, PUSH_EBP_MOV_EBP_ESP, 0xb8, 0x00, 0x10, 0x00, 0x00),         // mov eax, 0x1000
     HOOK(0x4ea540, base_psych, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x48),                    // sub esp, 72
     HOOK(0x4eb560, base_energy, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x28),                   // sub esp, 40
+    HOOK(0x4f06e0, base_queue, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x8b, 0x5d, 0x08),             // push ebx; mov ebx, [ebp+8]
+    HOOK(0x4ef1c0, base_growth, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x28),                   // sub esp, 40
 };
 struct hook_module base_module = {"base", base_hooks, HOOK_COUNT(base_hooks), base_sweep, NULL, -1};

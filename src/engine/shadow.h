@@ -76,7 +76,12 @@ static inline int shadow_bypass(void) { return hooks_sweeping || hooks_checking(
     SHADOW_WRITER_VIA(module, ret, name, params, args, orig_##name args, writes, fmt, __VA_ARGS__)
 
 // The same, calling the original with the expression `call`.
-#define SHADOW_WRITER_VIA(module, ret, name, params, args, call, writes, fmt, ...)  \
+#define SHADOW_WRITER_VIA(module, ret, name, params, args, call, writes, fmt, ...)    \
+    SHADOW_WRITER_CHECK(ret, name, params, args, call, writes, fmt, __VA_ARGS__)      \
+    SHADOW_WRITER_ENTRY(module, ret, name, params, args)
+
+// Only orig_, stats_ and check_, for a function with a shadow_ of its own.
+#define SHADOW_WRITER_CHECK(ret, name, params, args, call, writes, fmt, ...)        \
     SHADOW_DECLARE(ret, name, params)                                               \
     static ret check_##name params {                                                \
         struct hook_writes w_ = {0};                                                \
@@ -89,9 +94,9 @@ static inline int shadow_bypass(void) { return hooks_sweeping || hooks_checking(
         SHADOW_RESULT_##ret(got) name args;                                         \
         const char *diff_ = hooks_writes_end(&w_, SHADOW_INT_##ret(got), SHADOW_INT_##ret(want)); \
         if (diff_) hooks_mismatch(&stats_##name, "(" fmt ") %s", __VA_ARGS__, diff_);  \
+        hooks_ui_release();                                                         \
         SHADOW_RETURN_##ret(want);                                                  \
-    }                                                                               \
-    SHADOW_WRITER_ENTRY(module, ret, name, params, args)
+    }
 
 // How SHADOW_WRITER keeps a result, by return type.
 #define SHADOW_RESULT_int(v) int v =
