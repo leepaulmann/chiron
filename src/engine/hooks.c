@@ -16,8 +16,9 @@ enum hook_mode hooks_mode = HOOKS_OFF;
 int hooks_nested;
 
 // Each module defines its hooks and sweep.
-extern struct hook_module tech_module, map_module, mapgen_module, base_module, quiet_module;
-static struct hook_module *const modules[] = {&tech_module, &map_module, &mapgen_module, &base_module, &quiet_module};
+extern struct hook_module tech_module, map_module, mapgen_module, base_module, production_module, quiet_module;
+static struct hook_module *const modules[] = {&tech_module, &map_module, &mapgen_module, &base_module, &production_module,
+                                              &quiet_module};
 
 #define N_MODULES (sizeof(modules) / sizeof(modules[0]))
 
@@ -226,6 +227,14 @@ void hooks_writes_abandon(struct hook_writes *w) {
 }
 
 int hooks_checking(void) { return checking_depth > 0; }
+
+void hooks_writes_game(struct hook_writes *w) {
+    hooks_writes_add(w, game_data, game_data_size);
+    if (*game_map)
+        hooks_writes_add(w, *game_map, (size_t)*game_map_half_width * *game_map_height * sizeof(struct map_tile));
+    if (*game_abstract_map) hooks_writes_add(w, *game_abstract_map, (size_t)*game_abstract_area);
+    hooks_writes_add(w, game_rand_state(), sizeof(uint32_t));
+}
 int hooks_protecting(void) { return writes_depth > 0; }
 
 void hooks_writes_middle(struct hook_writes *w) {

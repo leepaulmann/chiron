@@ -58,3 +58,4 @@ int pop_goal_fac(int base);
 int cost_factor(int faction, int type, int base);
 int base_growth(void);
 int base_queue(int base);
+void base_production(void);

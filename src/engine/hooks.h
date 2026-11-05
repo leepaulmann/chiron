@@ -98,6 +98,10 @@ void hooks_writes_middle(struct hook_writes *w);
 // sweep that changes the game state to test on.
 void hooks_writes_abandon(struct hook_writes *w);
 
+// All of the game's state a check can put back: its writable memory, the
+// map, and rand()'s state.
+void hooks_writes_game(struct hook_writes *w);
+
 // Non-zero while a writing function is being checked.
 int hooks_checking(void);
 

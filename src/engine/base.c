@@ -775,8 +775,9 @@ void base_minerals(void) {
         b->eco_damage += game_tectonic_detonations[faction] * 5 / d;
     }
     if (b->eco_damage < 0) b->eco_damage = 0;
-    // Any Ascent to Transcendence not unbuilt, even a destroyed one.
-    if (game_secret_projects[SP_ASCENT] != -1 && (*game_rules & RULES_VICTORY_TRANSCENDENCE)) b->eco_damage *= 2;
+    // Once the Voice of Planet is built (even if since destroyed), with the
+    // Transcendence victory on.
+    if (game_secret_projects[SP_VOICE_OF_PLANET] != -1 && (*game_rules & RULES_VICTORY_TRANSCENDENCE)) b->eco_damage *= 2;
     if (*game_state & GAME_STATE_PERIHELION) b->eco_damage *= 2;
     int level;
     if (game_is_human(faction)) {

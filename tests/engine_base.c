@@ -121,6 +121,34 @@ static int veh_avail_stub(int proto, int faction, int base) { return proto < 5; 
 static int facility_avail_stub(int facility, int faction, int base, int queue) { return facility != 9; }
 static void wave_stub(int id) { sound = id; }
 static void draw_radius_stub(int x, int y, int radius, int unk) {}
+// Production: what it calls in the game.
+static int resets, vehs_made, monuments;
+static void __attribute__((thiscall)) pop_stub(void *pop) {}
+static void reset_stub(int base, int unk) { resets++; }
+static int veh_cost_stub(int proto, int base, int *unk) { return 3; }
+static int veh_init_stub(int proto, int faction, int x, int y) {
+    memset(&vehs[5], 0, sizeof(vehs[5]));
+    vehs[5].proto = (int16_t)proto, vehs[5].faction = (uint8_t)faction, vehs[5].x = (int16_t)x, vehs[5].y = (int16_t)y;
+    vehs_made++;
+    return 5;
+}
+static int morale_stub(int base, int faction, int triad) { return 1; }
+static void mon_stub(int faction) { monuments++; }
+static void mon_facility_stub(int faction, char *name) { monuments++; }
+static int parse_num_stub(int slot, int value) { return 0; }
+static int parse_says_stub(int slot, char *text, int gender, int plural) { return 0; }
+static void set_dirty_stub(void) {}
+static int news;
+static void __attribute__((thiscall)) pop_init_stub(void *pop, int a, int b) {}
+static void __attribute__((thiscall)) pop_width_stub(void *pop, int w) {}
+static void __attribute__((thiscall)) pop_string_stub(void *pop, char *s) {}
+static int __attribute__((thiscall)) pop_start_stub(void *pop, char *f, char *l, int a, int b, int c, int d) { return 0; }
+static int __attribute__((thiscall)) pop_exec_stub(void *pop, int a, int b) { return news++, 0; }
+static int pcx_stub(char *file, int *w, int *h) { return 1; }
+static void interlude_stub(int id, char *text, int a, int b) {}
+static void help_stub(int project) {}
+static int popps;
+static int popp_stub(char *file, char *label, int flags, char *picture, int unk) { return popps++, 0; }
 
 int main(void) {
     game_map = &tiles_ptr;
@@ -1028,6 +1056,120 @@ int main(void) {
     EXPECT(base_queue(1), 1);
     EXPECT(b1->queue_size, 0);
     EXPECT(b1->queue[0], 3);
+    *b1 = saved_b1;
+
+    // Production, for an AI base with a unit in it.
+    static struct rules_facility prod_rules[FACILITY_COUNT];
+    prod_rules[FAC_RECYCLING_TANKS].cost = 4, prod_rules[FAC_SKY_HYDRO_LAB].cost = 12;
+    prod_rules[FAC_FIRST_PROJECT + 5].cost = 20;
+    game_facilities = prod_rules;
+    game_popup_ctor = game_popup_close = game_scroll_close = game_flat_button_dtor = pop_stub;
+    game_graphic_win_dtor = game_base_pop_dtor = pop_stub;
+    game_base_reset = reset_stub, game_veh_cost = veh_cost_stub, game_veh_init = veh_init_stub;
+    game_morale_mod = morale_stub;
+    game_mon_prototype_built = game_mon_native_life_bred = game_mon_naval_unit_built = mon_stub;
+    game_mon_air_unit_built = game_mon_first_in_space = game_mon_built_preserve = mon_stub;
+    game_mon_facility_built = mon_facility_stub;
+    game_parse_num = parse_num_stub, game_parse_says = parse_says_stub, game_set_dirty = set_dirty_stub;
+    static char *script = "script";
+    game_popp = popp_stub, game_script_file = &script;
+    game_base_pop_init = pop_init_stub, game_base_pop_set_width = pop_width_stub, game_base_pop_string = pop_string_stub;
+    game_popup_start = pop_start_stub, game_base_pop_exec_3 = pop_exec_stub, game_pcx_dimensions = pcx_stub;
+    game_interlude = interlude_stub, game_help_project = game_amovie_project = help_stub;
+    static uint8_t image[0x300000];  // the game's strings, all empty, up to 0x700000
+    game_test_image = image;
+    static char str_buffer[1024];
+    game_str_buffer = str_buffer;
+    int32_t screen_width = 1024, prefs = 0, more_prefs = 0;
+    static char pop_file[16];
+    game_screen_width = &screen_width, game_pop_file = pop_file, game_preferences = &prefs;
+    game_more_preferences = &more_prefs;
+    int32_t player = 7, warnings = 0, mp = 0, build_blocked = 0, proto_upkeep = 0, map_area = W / 2 * H;
+    game_current_faction = &player, game_warnings = &warnings, game_net_multiplayer = &mp;
+    game_base_build_blocked = &build_blocked, game_base_proto_upkeep = &proto_upkeep;
+    if (!game_map_area) game_map_area = &map_area;
+    saved_b1 = *b1;
+    struct faction_data saved_f1 = factions[1];
+    uint32_t garrison_bits = at(6, 4)->bits;
+    uint8_t garrison_owner = at(6, 4)->owner_site;
+    at(6, 4)->bits |= MAP_UNIT, at(6, 4)->owner_site = 1;
+    current = b1, current_id = 1, humans = 0, difficulty = 3;
+    rules_basic.mineral_cost_multi = 10;
+    b1->state = 0, b1->nutrients = 0, b1->pop_size = 3, b1->queue_size = 0;
+    b1->queue[0] = -FAC_RECYCLING_TANKS, b1->minerals = 10, b1->surplus[RESOURCE_MINERAL] = 5;
+    // 15 minerals, not yet the 40 the tanks cost.
+    resets = 0;
+    base_production();
+    EXPECT(b1->minerals, 15);
+    EXPECT(resets, 0);
+    EXPECT(has_fac(FAC_RECYCLING_TANKS, 1, 0), 0);
+    // Done: built, paid for, and the AI chooses again.
+    b1->minerals = 36;
+    base_production();
+    EXPECT(has_fac(FAC_RECYCLING_TANKS, 1, 0), 1);
+    EXPECT(b1->minerals, 1);
+    EXPECT(resets, 1);
+    EXPECT((b1->state & 0x800000) != 0, 1);
+    // Already built, with nothing after it: the AI chooses again.
+    resets = 0;
+    base_production();
+    EXPECT(resets, 1);
+    // In riots no minerals are added; with stores below zero, nothing at all.
+    b1->state = 2, b1->minerals = 0;
+    base_production();
+    EXPECT(b1->minerals, 0);
+    b1->state = 0, b1->nutrients = -1;
+    resets = 0;
+    base_production();
+    EXPECT(b1->minerals, 0);
+    EXPECT(resets, 0);
+    b1->nutrients = 0;
+    // Without a unit in the base, the AI chooses first.
+    at(6, 4)->bits &= ~(uint32_t)MAP_UNIT;
+    base_production();
+    EXPECT(resets, 2);
+    at(6, 4)->bits |= MAP_UNIT;
+    // A unit: 30 minerals (3 rows of 10), with morale from the base, plus 1.
+    memset(b1->facilities_built, 0, sizeof(b1->facilities_built));
+    b1->queue[0] = 1, b1->minerals = 26, vehs_made = 0, resets = 0;
+    base_production();
+    EXPECT(vehs_made, 1);
+    EXPECT(b1->minerals, 1);
+    EXPECT(vehs[5].morale, 2);
+    EXPECT((vehs[5].state & 0x2000) != 0, 1);
+    EXPECT(resets, 1);
+    // Blocked, nothing is built but it is paid for.
+    build_blocked = 1, b1->minerals = 30;
+    base_production();
+    EXPECT(vehs_made, 1);
+    EXPECT(b1->minerals, 5);
+    build_blocked = 0;
+    // A satellite: the faction's first reveals the map to it.
+    b1->queue[0] = -FAC_SKY_HYDRO_LAB, b1->minerals = 120;
+    factions[1].flags &= ~(uint32_t)FACTION_FLAG_MAP_REVEALED;
+    factions[1].satellites[0] = 0, tiles[0].visibility = 0, monuments = 0;
+    base_production();
+    EXPECT(factions[1].satellites[0], 1);
+    EXPECT((factions[1].flags & FACTION_FLAG_MAP_REVEALED) != 0, 1);
+    EXPECT(tiles[0].visibility & 2, 2);
+    EXPECT(monuments, 1);
+    EXPECT(popps, 1);  // the player hears of it
+    // A secret project another base holds: the AI chooses again; one free
+    // to build is the base's once paid for.
+    b1->queue[0] = -(FAC_FIRST_PROJECT + 5), b1->minerals = 300, resets = 0;
+    projects[5] = 0;
+    base_production();
+    EXPECT(resets, 1);
+    EXPECT(b1->minerals, 305);
+    projects[5] = -1;
+    game_mon_secret_project = (void (*)(int, int))mon_facility_stub;
+    base_production();
+    EXPECT(projects[5], 1);
+    EXPECT(b1->minerals, 110);  // 305 and 5 more, less 200
+    EXPECT(news, 1);  // the player is shown it
+    projects[5] = -1;
+    at(6, 4)->bits = garrison_bits, at(6, 4)->owner_site = garrison_owner;
+    factions[1] = saved_f1;
     *b1 = saved_b1;
 
     if (failures) return 1;

@@ -1470,13 +1470,7 @@ extern struct hook_module mapgen_module;
 #define MAPGEN (&mapgen_module)
 
 // All the game's state these can touch.
-static void writes_state(struct hook_writes *w) {
-    hooks_writes_add(w, game_data, game_data_size);
-    if (*game_map)
-        hooks_writes_add(w, *game_map, (size_t)*game_map_half_width * *game_map_height * sizeof(struct map_tile));
-    if (*game_abstract_map) hooks_writes_add(w, *game_abstract_map, (size_t)*game_abstract_area);
-    hooks_writes_add(w, game_rand_state(), sizeof(uint32_t));
-}
+static void writes_state(struct hook_writes *w) { hooks_writes_game(w); }
 #define WRITES_STATE writes_state(&w_)
 
 SHADOW_WRITER(MAPGEN, void, alt_set, (int a, int b, int c), (a, b, c), WRITES_STATE, "%d, %d, %d", a, b, c)

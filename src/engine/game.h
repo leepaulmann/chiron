@@ -107,7 +107,10 @@ struct faction_data {
     int32_t earned_techs_saved;
     int32_t net_random_event;
     int32_t ai_fight, ai_growth, ai_tech, ai_wealth, ai_power;  // the AI's priorities
-    GAME_PAD(0x3f0, 0x464);
+    GAME_PAD(0x3f0, 0x3f8);
+    int32_t best_mineral_output;  // the most a base of the faction has made, its surplus counted twice
+    GAME_PAD(0x3fc, 0x458);
+    uint8_t facility_announced[12];  // bit per facility the player has been shown
     int32_t clean_minerals;  // minerals a base makes before ecological damage
     GAME_PAD(0x468, 0x690);
     // Units costing support at each SUPPORT from -4, added up for the AI.
@@ -207,12 +210,15 @@ struct unit_proto {
     uint8_t chassis, weapon, armor, reactor;
     uint8_t carry, cost;
     uint8_t plan;  // PLAN_*; up to PLAN_RECON for combat units
-    GAME_PAD(0x2b, 0x32);
+    GAME_PAD(0x2b, 0x30);
+    uint16_t flags;  // PROTO_FLAG_*
     int16_t preq_tech;
 };
+enum { PROTO_FLAG_ACTIVE = 0x1, PROTO_FLAG_BUILT = 0x4, PROTO_FLAG_SEEN_ONLINE = 0x100 };
 _Static_assert(sizeof(struct unit_proto) == 0x34, "unit_proto size");
 GAME_AT(struct unit_proto, chassis, 0x24);
 GAME_AT(struct unit_proto, plan, 0x2a);
+GAME_AT(struct unit_proto, flags, 0x30);
 
 struct rules_weapon {
     char *name, *short_name;
@@ -254,7 +260,9 @@ _Static_assert(sizeof(struct rules_chassis) == 0x90, "rules_chassis size");
 
 struct rules_facility {
     char *name;
-    GAME_PAD(0x04, 0x14);
+    GAME_PAD(0x04, 0x0c);
+    int32_t cost;  // in rows of minerals
+    GAME_PAD(0x10, 0x14);
     int32_t preq_tech;
     GAME_PAD(0x18, 0x30);
 };
@@ -378,7 +386,7 @@ enum {
 enum {
     SP_HUMAN_GENOME_PROJECT = 0, SP_MERCHANT_EXCHANGE = 3, SP_VIRTUAL_WORLD = 6, SP_PLANETARY_TRANSIT_SYSTEM = 7, SP_SUPERCOLLIDER = 12, SP_LONGEVITY_VACCINE = 14,
     SP_ASCETIC_VIRTUES = 13, SP_PHOLUS_MUTAGEN = 16, SP_THEORY_OF_EVERYTHING = 18, SP_NETWORK_BACKBONE = 21, SP_SPACE_ELEVATOR = 27, SP_SINGULARITY_INDUCTOR = 28,
-    SP_BULK_MATTER_TRANSMITTER = 29, SP_ASCENT = 31, SP_SELF_AWARE_COLONY = 25, SP_CLONING_VATS = 24,
+    SP_BULK_MATTER_TRANSMITTER = 29, SP_VOICE_OF_PLANET = 31, SP_ASCENT_TO_TRANSCENDENCE = 32, SP_SELF_AWARE_COLONY = 25, SP_CLONING_VATS = 24,
     SP_CLINICAL_IMMORTALITY = 26, SP_MANIFOLD_HARMONICS = 33,
     SP_CLOUDBASE_ACADEMY = 35, SP_PLANETARY_ENERGY_GRID = 36, SP_COUNT = 64,
 };
@@ -456,6 +464,8 @@ struct rules_basic {
     int32_t tech_three_nutrients, tech_three_minerals, tech_three_energy;
     GAME_PAD(0x58, 0xa4);
     int32_t tech_mining_platform_bonus;
+    GAME_PAD(0xa8, 0xf8);
+    int32_t retool_exemption;  // the most minerals a human's base carries over after building
 };
 GAME_AT(struct rules_basic, mine_road_limit, 0x24);
 GAME_AT(struct rules_basic, tech_three_nutrients, 0x4c);
@@ -497,7 +507,9 @@ struct veh {
     uint8_t faction;
     GAME_PAD(0x0f, 0x11);
     uint8_t order;  // ORDER_*
-    GAME_PAD(0x12, 0x26);
+    GAME_PAD(0x12, 0x24);
+    uint8_t morale;
+    uint8_t unk_25;
     uint8_t order_auto_type;  // for a convoy, the RESOURCE_* it carries
     uint8_t visibility;  // bit per other faction that can see it
     GAME_PAD(0x28, 0x2e);
@@ -696,12 +708,74 @@ extern void (*game_set_fac)(int facility, int base, int on);
 extern int (*game_is_objective)(int base);
 extern void(__attribute__((thiscall)) * game_console_focus)(void *console, int x, int y, int faction);
 extern int (*game_parse_says)(int slot, char *text, int gender, int plural);
-extern int (*game_parse_say)(int slot, int text, int gender, int plural);  // text from the string table
+extern int (*game_parse_say)(int slot, int text, int gender, int plural);
+extern int (*game_parse_num)(int slot, int value);  // text from the string table
 extern int (*game_popb)(char *label, int flags, int sound, char *picture, void *sprite);
 extern int (*game_eliminate_player)(int faction, int by);
 extern int (*game_veh_avail)(int proto, int faction, int base);  // whether the base may build the unit
 extern int (*game_facility_avail)(int facility, int faction, int base, int queue);
 extern void (*game_wave_it)(int sound);
+// For base_production().
+extern void (*game_base_reset)(int base, int unk);       // the AI (or governor) picks what to build next
+extern int (*game_ascending)(int faction);                 // may it build the Ascent to Transcendence
+extern int (*game_veh_cost)(int proto, int base, int *unk);
+extern void (*game_prune_protos)(int faction, int proto, int unk);
+extern int (*game_morale_mod)(int base, int faction, int triad);
+extern void (*game_upgrade_prototypes)(int faction, int proto);
+extern void (*game_set_dirty)(void);
+extern void (*game_interlude)(int id, char *text, int unk1, int unk2);
+extern int (*game_generators)(int faction, int *count);
+extern void (*game_bit_set)(int x, int y, uint32_t bit, int on);
+extern void (*game_synch_bit)(int x, int y, int faction);
+extern int (*game_whose_territory)(int faction, int x, int y, int unk1, int unk2);
+extern int (*game_game_year)(int turn);
+extern void (*game_tech_advance)(int faction);
+extern void (*game_amovie_project)(int project);
+extern void (*game_amovie_project_2)(char *name);
+extern void (*game_help_project)(int project);
+// The tutorial's and the AI's notes on what was built.
+extern void (*game_mon_prototype_built)(int faction), (*game_mon_native_life_bred)(int faction);
+extern void (*game_mon_naval_unit_built)(int faction), (*game_mon_air_unit_built)(int faction);
+extern void (*game_mon_first_in_space)(int faction), (*game_mon_facility_built)(int faction, char *base_name);
+extern void (*game_mon_built_preserve)(int faction), (*game_mon_secret_project)(int faction, int project);
+extern void (*game_mon_winning_trans)(int faction, int other);
+// The popup object base_production() keeps on its stack, and its methods.
+enum { BASE_POP_SIZE = 0x5430 - 0xb4 };
+extern void(__attribute__((thiscall)) * game_popup_ctor)(void *pop);
+extern void(__attribute__((thiscall)) * game_popup_close)(void *pop);
+extern void(__attribute__((thiscall)) * game_scroll_close)(void *scroll);
+extern void(__attribute__((thiscall)) * game_flat_button_dtor)(void *button);
+extern void(__attribute__((thiscall)) * game_graphic_win_dtor)(void *win);
+extern void(__attribute__((thiscall)) * game_base_pop_dtor)(void *pop);
+extern void(__attribute__((thiscall)) * game_base_pop_init)(void *pop, int unk1, int unk2);
+extern void(__attribute__((thiscall)) * game_base_pop_set_width)(void *pop, int width);
+extern void(__attribute__((thiscall)) * game_base_pop_string)(void *pop, char *text);
+extern int(__attribute__((thiscall)) * game_popup_start)(void *pop, char *file, char *label, int a, int b, int c, int d);
+extern int(__attribute__((thiscall)) * game_base_pop_exec_3)(void *pop, int a, int b);
+extern int(__attribute__((thiscall)) * game_sprite_init)(void *sprite, char *file, int w, int h);
+extern int (*game_pcx_dimensions)(char *file, int *w, int *h);
+extern void(__attribute__((thiscall)) * game_graphic_win_redraw)(void *win);
+extern void *game_wave;  // the voice-over player
+extern void(__attribute__((thiscall)) * game_wave_unload)(void *wave);
+extern void(__attribute__((thiscall)) * game_wave_load)(void *wave, char *file);
+extern void(__attribute__((thiscall)) * game_wave_play)(void *wave);
+extern void(__attribute__((thiscall)) * game_sound_fade)(void *wave, int ms);
+extern uint32_t(__attribute__((stdcall)) * *game_char_upper)(char *s);  // CharUpperA, as imported
+// Its globals.
+extern char *game_str_buffer;            // where messages are put together
+extern char *game_pop_file;              // [] the file a popup's text is read from
+extern char *game_upper_buffer;          // a name upper-cased for a message
+extern int32_t *game_preferences, *game_more_preferences, *game_warnings, *game_interlude_state;
+extern int32_t *game_victory_type, *game_screen_width, *game_upkeep_flag;
+extern int32_t *game_base_build_blocked, *game_base_proto_upkeep;  // 0x90ea40, 0x90ea3c
+extern int32_t *game_default_gender, *game_default_plural;     // for parse_says with -1
+extern int32_t *game_ascent_numbers;     // [2] shown with the subspace generators
+extern uint8_t *game_factions_alive;     // bit per faction still in the game
+extern uint32_t *game_vop_clear_bits;    // map bits the Voice of Planet clears where it puts fungus
+// The game's own address `addr` as loaded, and as a pointer.
+uint32_t game_va(uint32_t addr);
+void *game_at(uint32_t addr);
+extern uint8_t *game_test_image;
 extern int (*game_popp)(char *file, char *label, int flags, char *picture, int unk);
 extern int (*game_x_pop2)(char *label, char *picture, int unk);
 extern void (*game_base_kill)(int base);

@@ -119,8 +119,9 @@ module at a time. So far:
   losses to inefficiency and the split into economy, psych and labs; its
   talents and drones; its population goal and the cost factors for
   growth and building; its growth and starvation at the end of a turn,
-  with the advice the game gives when stores run low; and moving its
-  production queue on.
+  with the advice the game gives when stores run low; and its production:
+  finishing units, facilities, satellites and secret projects (with their
+  effects, the Ascent to Transcendence included), and moving its queue on.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once

@@ -109,6 +109,79 @@ static void __attribute__((thiscall)) shadow_console_focus(void *console, int x,
     hooks_ui_hold(&c);
 }
 
+// The popup base_production() keeps on its stack: while state is protected
+// its dialogs are dropped, as the object is gone by the time they could be
+// shown.
+#define QUIET_THIS(ret, fn, quiet, params, args)                                  \
+    static ret(__attribute__((thiscall)) * orig_##fn) params;                     \
+    static struct hook_stats stats_##fn = {"(quiet " #fn ")"};                   \
+    static ret __attribute__((thiscall)) shadow_##fn params {                     \
+        if (!hooks_protecting()) return orig_##fn args;                           \
+        stats_##fn.calls++;                                                       \
+        return quiet;                                                             \
+    }
+QUIET_THIS(int, popup_start, 0, (void *pop, char *file, char *label, int a, int b, int c, int d),
+           (pop, file, label, a, b, c, d))
+QUIET_THIS(void, base_pop_init, (void)0, (void *pop, int a, int b), (pop, a, b))
+QUIET_THIS(void, base_pop_set_width, (void)0, (void *pop, int w), (pop, w))
+QUIET_THIS(void, base_pop_string, (void)0, (void *pop, char *s), (pop, s))
+QUIET_THIS(int, base_pop_exec_3, 0, (void *pop, int a, int b), (pop, a, b))
+
+// Calls on one of the game's own objects, held like the others: the object
+// is kept in arg[4].
+#define HELD_THIS(fn, params, args, fill, replay_call)                            \
+    static void(__attribute__((thiscall)) * orig_##fn) params;                    \
+    static struct hook_stats stats_##fn = {"(held " #fn ")"};                    \
+    static void replay_##fn(const struct hook_ui_call *c) {                      \
+        const int *a_ = c->arg;                                                   \
+        (void)a_;                                                                 \
+        replay_call;                                                              \
+    }                                                                             \
+    static void __attribute__((thiscall)) shadow_##fn params {                    \
+        if (!hooks_protecting()) {                                                \
+            orig_##fn args;                                                       \
+            return;                                                               \
+        }                                                                         \
+        stats_##fn.calls++;                                                       \
+        struct hook_ui_call c_ = {.name = #fn, .replay = replay_##fn};           \
+        c_.arg[4] = (int)(intptr_t)self;                                          \
+        fill;                                                                     \
+        hooks_ui_hold(&c_);                                                       \
+    }
+#define SELF ((void *)(intptr_t)a_[4])
+HELD_THIS(graphic_win_redraw, (void *self), (self), (void)0, orig_graphic_win_redraw(SELF))
+HELD_THIS(wave_unload, (void *self), (self), (void)0, orig_wave_unload(SELF))
+HELD_THIS(wave_load, (void *self, char *file), (self, file), hooks_ui_text(&c_, 0, file), orig_wave_load(SELF, TEXT(0)))
+HELD_THIS(wave_play, (void *self), (self), (void)0, orig_wave_play(SELF))
+HELD_THIS(sound_fade, (void *self, int ms), (self, ms), c_.arg[0] = ms, orig_sound_fade(SELF, a_[0]))
+// Movies and help for secret projects.
+HELD(void, amovie_project, (void)0, (int project), (project), (c_.arg[0] = project), orig_amovie_project(a_[0]))
+HELD(void, amovie_project_2, (void)0, (char *name), (name), (hooks_ui_text(&c_, 0, name)), orig_amovie_project_2(TEXT(0)))
+HELD(void, help_project, (void)0, (int project), (project), (c_.arg[0] = project), orig_help_project(a_[0]))
+
+// The monuments the game keeps of what was built: the Monuments window
+// they update allocates from the game's heap, whose bookkeeping a check
+// would put back without the memory it hands out, so they are held too.
+#define HELD_MON(fn)                                                                                          \
+    HELD(void, fn, (void)0, (int faction), (faction), (c_.arg[0] = faction), orig_##fn(a_[0]))
+HELD_MON(mon_prototype_built)
+HELD_MON(mon_native_life_bred)
+HELD_MON(mon_naval_unit_built)
+HELD_MON(mon_air_unit_built)
+HELD_MON(mon_first_in_space)
+HELD_MON(mon_built_preserve)
+// The base's name is passed as it was: the game may keep the pointer.
+HELD(void, mon_facility_built, (void)0, (int faction, char *name), (faction, name),
+     (c_.arg[0] = faction, c_.arg[1] = (int)(intptr_t)name), orig_mon_facility_built(a_[0], PTR(1)))
+HELD(void, mon_secret_project, (void)0, (int faction, int project), (faction, project),
+     (c_.arg[0] = faction, c_.arg[1] = project), orig_mon_secret_project(a_[0], a_[1]))
+HELD(void, mon_winning_trans, (void)0, (int faction, int other), (faction, other),
+     (c_.arg[0] = faction, c_.arg[1] = other), orig_mon_winning_trans(a_[0], a_[1]))
+
+// A tech given away (by a secret project), with its announcement and the
+// window that shows it, which allocates as the monuments do.
+HELD(void, tech_advance, (void)0, (int faction), (faction), (c_.arg[0] = faction), orig_tech_advance(a_[0]))
+
 #define PUSH_EBP_MOV_EBP_ESP 0x55, 0x8b, 0xec
 #define QUIET_HOOK(addr, name, ...)                                                                     \
     {addr, (const uint8_t[]){__VA_ARGS__}, sizeof((const uint8_t[]){__VA_ARGS__}), NULL, (void *)shadow_##name, \
@@ -131,5 +204,30 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x4455f0, wave_it, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0x90, 0x64, 0x9a, 0x00),  // mov eax, [0x9a6490]
     QUIET_HOOK(0x5230e0, interlude, SEH_PROLOGUE),
     QUIET_HOOK(0x5108a0, console_focus, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),
+    QUIET_HOOK(0x406380, popup_start, PUSH_EBP_MOV_EBP_ESP, 0x51, 0xa1, 0x0c, 0x1b, 0x69, 0x00),  // push ecx; mov eax, [0x691b0c]
+    QUIET_HOOK(0x6015b0, base_pop_init, 0x53, 0x55, 0x56, 0x57, 0x8b, 0xf1),                    // push ebx, ebp, esi, edi; mov esi, ecx
+    QUIET_HOOK(0x601b20, base_pop_set_width, 0x8b, 0x81, 0x14, 0x0a, 0x00, 0x00),               // mov eax, [ecx+0xa14]
+    QUIET_HOOK(0x601980, base_pop_string, 0x8b, 0x44, 0x24, 0x04, 0x33, 0xd2),                  // mov eax, [esp+4]; xor edx, edx
+    QUIET_HOOK(0x602600, base_pop_exec_3, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),                  // mov eax, fs:0
+    QUIET_HOOK(0x5d5a70, graphic_win_redraw, 0xa1, 0x28, 0x7b, 0x9b, 0x00),                     // mov eax, [0x9b7b28]
+    QUIET_HOOK(0x4c6ea0, wave_unload, 0x56, 0x8b, 0xf1, 0x57, 0x33, 0xff),                      // push esi; mov esi, ecx; push edi; xor edi, edi
+    QUIET_HOOK(0x4c6c20, wave_load, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56),
+    QUIET_HOOK(0x4c6920, wave_play, 0x56, 0x8b, 0xf1, 0x57, 0x33, 0xff),
+    QUIET_HOOK(0x4c6600, sound_fade, PUSH_EBP_MOV_EBP_ESP, 0x56, 0x8b, 0xf1),                  // push esi; mov esi, ecx
+    QUIET_HOOK(0x403ba0, amovie_project, PUSH_EBP_MOV_EBP_ESP, 0x68, 0x48, 0x27, 0x68, 0x00),    // push 0x682748
+    QUIET_HOOK(0x403be0, amovie_project_2, SEH_PROLOGUE),
+// The monuments start with: push ebp; mov ebp, esp; push ecx; mov eax, [0x9a64d4]
+#define MON_PROLOGUE PUSH_EBP_MOV_EBP_ESP, 0x51, 0xa1, 0xd4, 0x64, 0x9a, 0x00
+    QUIET_HOOK(0x476ee0, mon_prototype_built, MON_PROLOGUE),
+    QUIET_HOOK(0x477640, mon_native_life_bred, MON_PROLOGUE),
+    QUIET_HOOK(0x477440, mon_naval_unit_built, MON_PROLOGUE),
+    QUIET_HOOK(0x477540, mon_air_unit_built, MON_PROLOGUE),
+    QUIET_HOOK(0x477740, mon_first_in_space, MON_PROLOGUE),
+    QUIET_HOOK(0x476fe0, mon_facility_built, MON_PROLOGUE),
+    QUIET_HOOK(0x477840, mon_built_preserve, MON_PROLOGUE),
+    QUIET_HOOK(0x477100, mon_secret_project, MON_PROLOGUE),
+    QUIET_HOOK(0x4779d0, mon_winning_trans, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0xd4, 0x64, 0x9a, 0x00),
+    QUIET_HOOK(0x5be530, tech_advance, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x8b, 0x75, 0x08),  // push ebx; push esi; mov esi, [ebp+8]
+    QUIET_HOOK(0x44c9e0, help_project, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                // mov eax, [ebp+8]
 };
 struct hook_module quiet_module = {"quiet", quiet_hooks, HOOK_COUNT(quiet_hooks), NULL, NULL, -1};
