@@ -132,8 +132,11 @@ module at a time. So far:
   going into the faction's reserves; and the faction's turn around them:
   loans, the AI's maintenance discount, interest, the first turn's free
   techs and the end of sanctions; the AI's split of energy into economy,
-  psych and labs (and the player's warning of falling reserves); and
-  units' repairs, moves and orders at the start of a faction's turn;
+  psych and labs (and the player's warning of falling reserves);
+  units' repairs, moves and orders at the start of a faction's turn; and
+  the whole of a faction's turn around these, with rushing paid for, the
+  AI cornering the energy market, the Planetary Council, a faction with
+  nothing left put out of the game, and the autosave;
 - social engineering: the effects of a faction's choices, with its
   projects, temples and faction rules, and their taking effect each turn.
 

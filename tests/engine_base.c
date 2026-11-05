@@ -196,6 +196,15 @@ static int __attribute__((thiscall)) focus_stub(void *console, int x, int y, int
 static void __attribute__((thiscall)) redraw_stub(void *win) { redrawn++; }
 static void __attribute__((thiscall)) zoom_stub(void *win, int base, int unk) { zoomed = base + 1; }
 static void log_say_stub(char *text, int a, int b, int c) {}
+static int fu_calls[8], market_cost = 50, council_open = 1;
+static void diplomacy_stub(int faction) { fu_calls[0]++; }
+static void strategy_stub(int faction) { fu_calls[1]++; }
+static int social_ai_stub(int faction, int a, int b, int c, int d, int e) { return fu_calls[2]++, 0; }
+static int market_stub(int faction) { return fu_calls[3]++, market_cost; }
+static int can_council_stub(int faction, int unk) { return council_open; }
+static void call_council_stub(int faction) { fu_calls[4]++; }
+static void auto_save_stub(void) { fu_calls[5]++; }
+static int year_stub(int turn) { return 2100 + turn; }
 static void log_say5_stub(char *a, char *b, int n1, int n2, int n3) {}
 static int pumps, advances;
 static void pump_stub(void) { pumps++; }
@@ -1679,6 +1688,76 @@ int main(void) {
     EXPECT(vehs[0].moves_spent, 0);
     base_at_value = -1, humans = 0, *b1 = saved_b1;
     vehs[0] = kept_v0, veh_count = kept_count;
+
+    // A faction's whole turn: on a full turn the AI's diplomacy, strategy
+    // and social engineering run and it corners the energy market (paying
+    // for it) when it can; rush flags are cleared and rushing paid for,
+    // reserves kept at zero or more; the Council called; and a faction left
+    // with no bases or colony pods is out.
+    static uint8_t social_table[SOCIAL_CATEGORIES * SOCIAL_CATEGORY_SIZE];
+    static int32_t path_table[16];
+    game_social_effects = social_table, game_path = path_table;
+    game_enemy_diplomacy = diplomacy_stub, game_enemy_strategy = strategy_stub, game_social_ai = social_ai_stub;
+    game_corner_market = market_stub, game_can_call_council = can_council_stub, game_call_council = call_council_stub;
+    game_auto_save = auto_save_stub, game_game_year = year_stub;
+    saved_b1 = *b1, saved_f1 = factions[1];
+    saved_d1 = faction_defs[1];
+    uint32_t saved_rules = rules;
+    turn = 10, humans = 0, state = 0, player = 7, prefs = 0, mp = 0, popps = 0, eliminated = 0;
+    rules |= 0x4, rules_basic.turns_corner_market = 20, rules_basic.tech_economic_victory = -1;
+    factions[1].energy_credits = 200, factions[1].hurry_cost_total = 0;
+    factions[1].corner_market_turn = 0, factions[1].corner_market_cost = 0;
+    b1->state = 0x40000001;
+    path_table[6] = path_table[7] = 5;
+    faction_upkeep(1);
+    EXPECT(fu_calls[0], 1);
+    EXPECT(fu_calls[1], 1);
+    EXPECT(fu_calls[2], 1);
+    EXPECT(fu_calls[3], 3);
+    EXPECT(fu_calls[4], 1);
+    EXPECT(fu_calls[5], 0);
+    EXPECT(factions[1].corner_market_turn, 30);
+    EXPECT(factions[1].corner_market_cost, 50);
+    EXPECT(popps, 1);
+    EXPECT(b1->state & 0x40000001, 0);
+    EXPECT(path_table[6], -1);
+    EXPECT(path_table[7], -1);
+    EXPECT(upkeep_a, 0);
+    EXPECT(eliminated, 0);
+    // A human's turn: no market, no Council call; it is told the Council can
+    // be called, once; its rushing is paid for, down to zero; its game saved.
+    *b1 = saved_b1, factions[1] = saved_f1;
+    memset(fu_calls, 0, sizeof fu_calls);
+    humans = 1 << 1, player = 1, prefs = 0x2, popps = 0;
+    factions[1].energy_credits = 5, factions[1].hurry_cost_total = 9;
+    faction_upkeep(1);
+    EXPECT(fu_calls[3], 0);
+    EXPECT(fu_calls[4], 0);
+    EXPECT(fu_calls[5], 1);
+    EXPECT(factions[1].energy_credits, 0);
+    EXPECT(factions[1].hurry_cost_total, 0);
+    EXPECT(popps, 1);
+    EXPECT(state & 0x4000, 0x4000);
+    faction_upkeep(1);
+    EXPECT(popps, 1);
+    // Answering only (a game that is over, its score not yet shown): no
+    // energy split, diplomacy or Council.
+    memset(fu_calls, 0, sizeof fu_calls);
+    humans = 0, state = 0x1, prefs = 0, player = 7;
+    faction_upkeep(1);
+    EXPECT(fu_calls[0], 0);
+    EXPECT(fu_calls[4], 0);
+    // No bases and no colony pods: out.
+    *b1 = saved_b1, factions[1] = saved_f1;
+    state = 0;
+    int32_t kept_bases = factions[1].base_count;
+    factions[1].base_count = 0, factions[1].units_active[0] = 0, factions[1].units_active[21] = 0;
+    factions[1].energy_credits = 0;
+    faction_upkeep(1);
+    EXPECT(eliminated, 1);
+    factions[1].base_count = kept_bases;
+    *b1 = saved_b1, factions[1] = saved_f1, faction_defs[1] = saved_d1, rules = saved_rules;
+    humans = 0, eliminated = 0;
 
     if (failures) return 1;
     printf("engine_base: all tests passed\n");

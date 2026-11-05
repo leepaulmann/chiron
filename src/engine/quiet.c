@@ -224,6 +224,11 @@ HELD(void, tech_advance, (void)0, (int faction), (faction), (c_.arg[0] = faction
 HELD(void, tech_research, (void)0, (int faction, int labs), (faction, labs), (c_.arg[0] = faction, c_.arg[1] = labs),
      orig_tech_research(a_[0], a_[1]))
 
+// The AI calling the Planetary Council, whose window allocates. The game
+// calls it last in a faction's turn but for the autosave, which a check of
+// faction_upkeep() leaves out, so made after the check it comes in order.
+HELD(void, call_council, (void)0, (int faction), (faction), (c_.arg[0] = faction), orig_call_council(a_[0]))
+
 // The heap guard: nothing may allocate from the game's heap, or free to
 // it, while state is protected, as a check puts back the heap's
 // bookkeeping but not the memory it hands out. Any that does counts as a
@@ -306,6 +311,7 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x477840, mon_built_preserve, MON_PROLOGUE),
     QUIET_HOOK(0x477100, mon_secret_project, MON_PROLOGUE),
     QUIET_HOOK(0x4779d0, mon_winning_trans, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0xd4, 0x64, 0x9a, 0x00),
+    QUIET_HOOK(0x52c880, call_council, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),  // mov eax, fs:[0]
     QUIET_HOOK(0x46b140, draw_tiles, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x8b, 0x5d, 0x0c),            // push ebx; mov ebx, [ebp+12]
     QUIET_HOOK(0x4b9ea0, status_win_redraw, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10),           // sub esp, 16
     QUIET_HOOK(0x514880, console_update_data, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),         // mov eax, [ebp+8]

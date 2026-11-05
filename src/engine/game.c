@@ -210,6 +210,13 @@ uint8_t *game_social_effects;
 int (*game_veh_cargo)(int veh);
 int (*game_breed_mod)(int base, int faction);
 void (*game_do_all_draws)(void);
+void (*game_enemy_diplomacy)(int faction);
+void (*game_enemy_strategy)(int faction);
+int (*game_social_ai)(int faction, int a, int b, int c, int d, int e);
+int (*game_corner_market)(int faction);
+int (*game_can_call_council)(int faction, int unk);
+void (*game_call_council)(int faction);
+void (*game_auto_save)(void);
 int16_t(__attribute__((stdcall)) * game_get_async_key_state)(int key);
 struct rules_terraform *game_terraform;
 int32_t *game_climate_level, *game_climate_change, *game_climate_shown;
@@ -504,6 +511,13 @@ void game_bind(struct pe_image *exe) {
     game_veh_cargo = (void *)code_at(exe, 0x5c1760);
     game_breed_mod = (void *)code_at(exe, 0x4e65c0);
     game_do_all_draws = (void *)code_at(exe, 0x5fcbb0);
+    game_enemy_diplomacy = (void *)code_at(exe, 0x55f930);
+    game_enemy_strategy = (void *)code_at(exe, 0x561080);
+    game_social_ai = (void *)code_at(exe, 0x5b4790);
+    game_corner_market = (void *)code_at(exe, 0x59ee50);
+    game_can_call_council = (void *)code_at(exe, 0x52c670);
+    game_call_council = (void *)code_at(exe, 0x52c880);
+    game_auto_save = (void *)code_at(exe, 0x5abd20);
     game_get_async_key_state = *(void **)code_at(exe, 0x669330);  // filled in when imports were bound
     game_terraform = (struct rules_terraform *)code_at(exe, 0x691878);
     game_climate_level = (int32_t *)code_at(exe, 0x9a6824);

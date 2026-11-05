@@ -10,6 +10,7 @@
 #include "map.h"
 #include "mapgen.h"
 #include "shadow.h"
+#include "social.h"
 #include "tech.h"
 
 static inline struct map_tile *tile(int x, int y) { return &(*game_map)[(x >> 1) + y * *game_map_half_width]; }
@@ -1909,6 +1910,93 @@ void repair_phase(int faction) {
     game_do_all_draws();
 }
 
+// ---- A faction's whole turn --------------------------------------------------
+
+enum {
+    GAME_STATE_COUNCIL_SHOWN = 0x4000, GAME_STATE_COUNCIL_CONVENED = 0x10000,
+    RULES_VICTORY_ECONOMIC = 0x4, PREF_AUTOSAVE = 0x2,
+    BASE_STATE_HURRY_ = 0x40000000, BASE_STATE_UNK_1 = 0x1,
+    PROTO_COLONY_POD = 0, PROTO_SEA_ESCAPE_POD = 21,
+};
+
+// A full turn: not one of the turns of a game played by e-mail where a
+// faction only answers (GAME_STATE_DONE set without FINAL_SCORE_DONE).
+static int full_turn(uint32_t state) { return !(state & GAME_STATE_DONE) || (state & GAME_STATE_FINAL_SCORE_DONE); }
+
+// The AI corners the energy market when it can pay: the win comes the
+// rules' number of turns later, and every faction is told. Unlike Thinker,
+// the original neither waits for an earlier attempt to end nor checks that
+// the game is still undecided.
+static void corner_market(int faction) {
+    struct faction_data *f = &game_factions[faction];
+    if (f->energy_credits <= game_corner_market(faction)) return;
+    if (!has_tech(game_rules_basic->tech_economic_victory, faction) || !(*game_rules & RULES_VICTORY_ECONOMIC)) return;
+    f->corner_market_turn = *game_current_turn + game_rules_basic->turns_corner_market;
+    f->corner_market_cost = game_corner_market(faction);
+    f->energy_credits -= game_corner_market(faction);
+    struct faction_def *d = &game_faction_defs[faction];
+    *game_parse_gender = d->leader_female, *game_parse_plural = 0;
+    game_parse_says(0, d->leader_title, -1, -1);
+    *game_parse_gender = d->leader_female, *game_parse_plural = 0;
+    game_parse_says(1, d->leader_name, -1, -1);
+    *game_parse_gender = d->noun_gender, *game_parse_plural = d->noun_plural;
+    game_parse_says(2, d->noun, -1, -1);
+    game_parse_says(3, d->adjective, -1, -1);
+    game_parse_num(0, game_game_year(f->corner_market_turn));
+    game_popp(*game_script_file, text(0x68ba38), 0, text(0x68ba28), 0);
+}
+
+// A faction's turn: its social models, repairs and bases, and on a full
+// turn its energy, the AI's diplomacy, strategy and social engineering
+// and its try at the energy market. Then its bases' rush flags are
+// cleared and what it spent rushing paid; a faction with neither bases
+// nor colony pods is out. On a full turn the player is told once that
+// the Planetary Council can be called, and the AI may call it; and the
+// player's game is saved when the preferences say so. Unlike Thinker,
+// the original picks no research here.
+void faction_upkeep(int faction) {
+    *game_control_upkeep_a = 1;
+    social_upkeep(faction);
+    game_do_all_non_input();
+    repair_phase(faction);
+    game_do_all_non_input();
+    production_phase(faction);
+    game_do_all_non_input();
+    if (full_turn(*game_state)) {
+        allocate_energy(faction);
+        game_do_all_non_input();
+        game_enemy_diplomacy(faction);
+        game_do_all_non_input();
+        game_enemy_strategy(faction);
+        game_do_all_non_input();
+        game_social_ai(faction, -1, -1, -1, -1, 0);
+        game_do_all_non_input();
+        if (!is_human(faction)) corner_market(faction);
+    }
+    for (int b = 0; b < *game_base_count; b++)
+        if (game_bases[b].faction == faction) game_bases[b].state &= ~(uint32_t)(BASE_STATE_HURRY_ | BASE_STATE_UNK_1);
+    struct faction_data *f = &game_factions[faction];
+    f->energy_credits -= f->hurry_cost_total;
+    f->hurry_cost_total = 0;
+    if (f->energy_credits < 0) f->energy_credits = 0;
+    if (!f->base_count && !f->units_active[PROTO_COLONY_POD] && !f->units_active[PROTO_SEA_ESCAPE_POD])
+        game_eliminate_player(faction, 0);
+    *game_control_upkeep_a = 0;
+    int32_t *path = game_path;
+    path[6] = path[7] = -1;  // the path finder's destination
+    uint32_t state = *game_state;
+    if (full_turn(state)) {
+        if (faction == *game_current_faction && !(state & (GAME_STATE_COUNCIL_SHOWN | GAME_STATE_COUNCIL_CONVENED)) &&
+            game_can_call_council(faction, 0) && !(*game_state & GAME_STATE_DONE)) {
+            *game_state |= GAME_STATE_COUNCIL_SHOWN;
+            game_popp(*game_script_file, text(0x68ba58), 0, text(0x68ba48), 0);
+        }
+        if (!is_human(faction)) game_call_council(faction);
+    }
+    if (!*game_net_multiplayer && (*game_preferences & PREF_AUTOSAVE) && faction == *game_current_faction)
+        game_auto_save();
+}
+
 // ---- Hooks and shadow checks ------------------------------------------------
 
 extern struct hook_module upkeep_module;
@@ -2048,6 +2136,32 @@ static void shadow_production_phase(int a) {
     if (is_human(a) || renames_base(a)) orig_production_phase(a);
     else check_production_phase(a);
 }
+
+// A faction's whole turn is checked with all it calls, the original's run
+// calling the original's phases and the AI's code twice. As for
+// production_phase(), the original runs unchecked for a human faction or
+// one about to rename a base; and also while any faction is human, since
+// the AI's diplomacy and the Council would put questions to the player
+// that a check holds back unanswered, and before an autosave, which
+// writes a file.
+SHADOW_WRITER_CHECK(void, faction_upkeep, (int a), (a), orig_faction_upkeep(a),
+                    (hooks_writes_game(&w_), writes_path(&w_)), "%d", a)
+static void shadow_faction_upkeep(int a) {
+    if (hooks_nested) {
+        orig_faction_upkeep(a);
+        return;
+    }
+    if (shadow_bypass()) {
+        faction_upkeep(a);
+        return;
+    }
+    stats_faction_upkeep.calls++;
+    shadow_tick(UPKEEP);
+    int autosave = !*game_net_multiplayer && (*game_preferences & PREF_AUTOSAVE) && a == *game_current_faction;
+    if (*game_human_factions || renames_base(a) || autosave) orig_faction_upkeep(a);
+    else check_faction_upkeep(a);
+}
+
 
 static int slice;
 
@@ -2294,6 +2408,7 @@ static const struct hook upkeep_hooks[] = {
     HOOK(0x445440, energy_limit, 0xb8, 0x0a, 0x00, 0x00, 0x00),                    // mov eax, 10
     HOOK(0x5267b0, allocate_energy, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x18),       // sub esp, 24
     HOOK(0x526030, repair_phase, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x28),          // sub esp, 40
+    HOOK(0x527290, faction_upkeep, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x57),         // push ebx; push esi; push edi
 };
 // The game calls base_production() only from base_upkeep(), whose check
 // covers it, so for AI bases it is never checked on its own: its sweep

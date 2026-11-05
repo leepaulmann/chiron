@@ -147,8 +147,8 @@ struct faction_data {
     GAME_PAD(0x167c, 0x197c);
     uint8_t region_base_plan[REGION_COUNT];  // PLAN_* for the AI
     GAME_PAD(0x19fc, 0x207c);
-    int32_t corner_market_turn;
-    GAME_PAD(0x2080, 0x20cc);
+    int32_t corner_market_turn, corner_market_cost;  // when the energy market is cornered, and what it cost
+    GAME_PAD(0x2084, 0x20cc);
 };
 _Static_assert(sizeof(struct faction_data) == 0x20cc, "faction_data size");
 GAME_AT(struct faction_data, diplo_status, 0x18);
@@ -186,6 +186,8 @@ GAME_AT(struct faction_data, social_psych, 0x6b0);
 GAME_AT(struct faction_data, armed_units, 0x7f8);
 GAME_AT(struct faction_data, social_effic, 0x7d0);
 GAME_AT(struct faction_data, base_count, 0x105c);
+GAME_AT(struct faction_data, corner_market_cost, 0x2080);
+GAME_AT(struct faction_data, units_active, 0x858);
 GAME_AT(struct faction_data, units_queue, 0xa58);
 GAME_AT(struct faction_data, best_weapon_value, 0x818);
 
@@ -503,9 +505,11 @@ struct rules_basic {
     int32_t drones_genejack, pop_limit_hab_complex, pop_limit_hab_dome;
     int32_t tech_improve_fungus, tech_ease_fungus_move, tech_road_fungus, tech_two_special;
     int32_t tech_three_nutrients, tech_three_minerals, tech_three_energy;
-    GAME_PAD(0x58, 0xa4);
+    GAME_PAD(0x58, 0xa0);
+    int32_t turns_corner_market;  // from cornering the energy market to the win
     int32_t tech_mining_platform_bonus;
-    GAME_PAD(0xa8, 0xf8);
+    int32_t tech_economic_victory;  // needed to corner the energy market
+    GAME_PAD(0xac, 0xf8);
     int32_t retool_exemption;  // the most minerals a human's base carries over after building
     GAME_PAD(0xfc, 0x114);
     int32_t warming_num, warming_den;  // how fast ecological damage warms the planet
@@ -514,6 +518,7 @@ GAME_AT(struct rules_basic, warming_num, 0x114);
 GAME_AT(struct rules_basic, mine_road_limit, 0x24);
 GAME_AT(struct rules_basic, tech_three_nutrients, 0x4c);
 GAME_AT(struct rules_basic, tech_mining_platform_bonus, 0xa4);
+GAME_AT(struct rules_basic, tech_economic_victory, 0xa8);
 
 enum { RULE_FLAG_WORM_POLICE = 0x40, RULE_FLAG_ALIEN = 0x80, RULE_FLAG_AQUATIC = 0x100, RULE_FLAG_INTEREST = 0x4000 };  // faction_def.rule_flags
 enum { ECONOMICS_FREE_MARKET = 1, ECONOMICS_PLANNED = 2 };  // faction_data.se_models_pending[1]
@@ -884,6 +889,16 @@ extern uint8_t *game_social_effects;
 extern int (*game_veh_cargo)(int veh);
 extern int (*game_breed_mod)(int base, int faction);
 extern void (*game_do_all_draws)(void);
+// The rest of a faction's turn: the AI's diplomacy, strategy and social
+// engineering, the cost of cornering the energy market, the Planetary
+// Council, and the autosave.
+extern void (*game_enemy_diplomacy)(int faction);
+extern void (*game_enemy_strategy)(int faction);
+extern int (*game_social_ai)(int faction, int a, int b, int c, int d, int e);
+extern int (*game_corner_market)(int faction);
+extern int (*game_can_call_council)(int faction, int unk);
+extern void (*game_call_council)(int faction);
+extern void (*game_auto_save)(void);
 
 // Ecological damage: fungus, native life, warming and volcanoes.
 struct rules_terraform {

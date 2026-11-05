@@ -84,3 +84,5 @@ int energy_limit(int faction);
 void allocate_energy(int faction);
 // A faction's units at the start of its turn: moves, orders and repairs.
 void repair_phase(int faction);
+// A faction's whole turn.
+void faction_upkeep(int faction);
