@@ -35,6 +35,8 @@ enum {
     BSC_UNITY_MINING_LASER = 20, BASIC_PROTOS = 64,
     WEAPON_PROBE = 11, WEAPON_TECTONIC = 21, WMODE_TRANSPORT = 7, WMODE_PROBE = 11,
     MAP_AIRBASE = 0x40000, VEH_STATE_UNK_4000000 = 0x4000000, VEH_STATE_MONOLITH_USED = 0x100,
+    VEH_STATE_UNK_200 = 0x200, VEH_STATE_UNK_10000 = 0x10000, VEH_STATE_UNK_20000 = 0x20000, VEH_STATE_UNK_40000 = 0x40000,
+    PLAN_TERRAFORM = 9, ORDER_HOLD = 2,
     PLAN_PROBE = 11, PLAN_ARTIFACT = 12, BONUS_FREE_ABILITY = 15, TECH_FLAG_PROBE = 0x2,
     RULE_FLAG_FREE_PROTO = 0x200, RULE_FLAG_MORALE = 0x8000,
     RULES_NO_COLONY_PODS = 0x400000, MAP_UNK_40000000_ = 0x40000000, FACTION_FLAG_UNK_40000000 = 0x40000000,
@@ -881,6 +883,109 @@ int want_monolith(int veh) {
 }
 
 
+static struct map_tile *square(int x, int y) { return &(*game_map)[(x >> 1) + y * *game_map_half_width]; }
+// A base of a faction (0 to 7, or 1 to 7 with natives left out) on the
+// square.
+static int faction_base(const struct map_tile *t, int first) {
+    int owner = t->owner_site & 0xf;
+    return (t->bits & MAP_BASE) && owner < 8 && owner >= first;
+}
+
+// A transport's cargo: the units of its faction on its square that it can
+// carry (land units that aren't transports themselves, and for a carrier
+// air units that aren't carriers), up to its capacity (any number for the
+// natives).
+//
+// Type 0 counts: units already on board this transport count first, then
+// sentried ones without a transport, or for the AI, units it would load;
+// they're marked (state bit 1), and the room left is returned. Type 1 also
+// takes them off the map, to a stack at (-2, -2), and then the transport,
+// returning veh_drop()'s answer. Type 2, for a transport about to be
+// killed, takes only the units on board, and in a base none.
+//
+// The AI loads a unit at sea, or one its goal says should go by sea, or
+// one in a region the AI isn't defending; a unit on hold, an artifact or
+// a former only at sea. An air transport loads only at a base of a
+// faction (not the natives') or an airbase.
+int stack_veh(int veh, int type) {
+    if (veh < 0) return type ? veh : 0;
+    if (!veh_cargo(veh) && !has_abil(game_vehs[veh].proto, ABL_CARRIER)) {
+        if (!type) return 0;
+        return veh_drop(veh_lift(veh), -2, -2);
+    }
+    if (*game_net_multiplayer) stack_fix(veh);
+    if (type) {
+        const struct veh *T = &game_vehs[veh];
+        if (type > 1 && faction_base(square(T->x, T->y), 0)) return veh_drop(veh_lift(veh), -2, -2);
+        stack_sort(veh);
+    } else {
+        for (int v = veh_top(veh); v >= 0; v = game_vehs[v].next_in_stack) game_vehs[v].state &= ~1u;
+    }
+    const struct veh *T = &game_vehs[veh];
+    int tx = T->x, ty = T->y, at_sea = 0;
+    if (on_map_(tx, ty) && is_ocean(tx, ty) && !faction_base(square(tx, ty), 0)) at_sea = 1;
+    int faction = T->faction, air = triad(T->proto) == TRIAD_AIR;
+    int room = veh_cargo(veh), air_room = 0;
+    if (has_abil(T->proto, ABL_CARRIER)) air_room = veh_cargo(veh) < 1 ? 1 : veh_cargo(veh);
+    if (!faction) room = 99;
+    int passes = type <= 1 ? 2 : 1;
+    for (int pass = 0; pass < passes; pass++) {
+        int v = type ? veh : veh_top(veh);
+        while (v >= 0 && (room || air_room)) {
+            int next = game_vehs[v].next_in_stack;
+            struct veh *U = &game_vehs[v];
+            int load = 0;
+            if (U->faction != faction) goto skip;
+            int fits = room && triad(U->proto) == TRIAD_LAND && !veh_cargo(v);
+            if (!fits && !(air_room && triad(U->proto) == TRIAD_AIR && !has_abil(U->proto, ABL_CARRIER))) goto skip;
+            if (pass == 0) {
+                load = U->order == ORDER_SENTRY_BOARD && U->waypoint_x[0] == veh;
+            } else {
+                if (air) {
+                    const struct map_tile *t = square(tx, ty);
+                    if (!faction_base(t, 1) && !(t->bits & MAP_AIRBASE)) goto skip;
+                }
+                int sentried = 0;
+                if (((uint8_t)(1u << U->faction) & *game_human_factions) &&
+                    !((T->state & VEH_STATE_UNK_200) && (U->state & VEH_STATE_UNK_200))) {
+                    if (U->order == ORDER_SENTRY_BOARD) load = U->waypoint_x[0] < 0;
+                    else sentried = 1;
+                } else if (U->state & VEH_STATE_UNK_40000) {
+                    if (!(U->state & VEH_STATE_UNK_20000)) goto skip;
+                    int f = U->faction;
+                    load = game_factions[f].region_base_plan[square(U->x, U->y)->region] == PLAN_NAVAL_TRANSPORT;
+                } else {
+                    int plan = proto_of(U->proto)->plan;
+                    if (U->order == ORDER_HOLD || plan == PLAN_ARTIFACT || plan == PLAN_TERRAFORM) {
+                        sentried = 1;
+                    } else if (at_sea || !on_map_(U->x, U->y) ||
+                               game_factions[U->faction].region_base_plan[square(U->x, U->y)->region] != PLAN_DEFENSIVE ||
+                               plan >= PLAN_COLONY) {
+                        load = 1;
+                    }
+                }
+                if (sentried) load = at_sea;
+            }
+            if (!load) goto skip;
+            if (!type && (U->state & 1)) goto skip;
+            veh_sleep(v);
+            U->waypoint_x[0] = (int16_t)veh;
+            if (type) {
+                veh_drop(veh_lift(v), -2, -2);
+                U->state &= ~VEH_STATE_UNK_10000;
+            } else {
+                U->state |= 1;
+            }
+            if (air_room > 0) air_room--;
+            if (room > 0) room--;
+        skip:
+            v = next;
+        }
+    }
+    if (type) return veh_drop(veh_lift(veh), -2, -2);
+    return veh_cargo(veh) ? room : air_room;
+}
+
 // Removes the unit: off its stack and its faction's counts, and every
 // later unit moves down a slot, so the units' stack links, the transport
 // a unit on board names, and the unit numbers kept elsewhere are
@@ -950,7 +1055,7 @@ void kill(int veh) {
         stack_kill(veh);
         return;
     } else {
-        game_stack_veh(veh, 2);
+        stack_veh(veh, 2);
         stack_kill(veh);
     }
     game_base_win_check_base(game_base_win, home);
@@ -1056,6 +1161,7 @@ SHADOW1(VEH, int, veh_health, int)
 SHADOW2(VEH, int, get_plan, int, int)
 SHADOW1(VEH, int, want_monolith, int)
 // Killing a unit renumbers units all over the game's memory.
+SHADOW_WRITER(VEH, int, stack_veh, (int a, int b), (a, b), WRITES_STACKS, "%d, %d", a, b)
 SHADOW_WRITER(VEH, void, veh_kill, (int a), (a), hooks_writes_game(&w_), "%d", a)
 SHADOW_WRITER(VEH, void, stack_kill, (int a), (a), hooks_writes_game(&w_), "%d", a)
 SHADOW_WRITER(VEH, void, kill, (int a), (a), hooks_writes_game(&w_), "%d", a)
@@ -1141,6 +1247,32 @@ static void sweep_stacks(void) {
         check_veh_wake(v);
         check_veh_fake(V->proto, V->faction);
     }
+    // Loading: every transport, each way, and again as a human's (soaks
+    // hand every faction to the AI).
+    for (int v = 0; v < vehs; v++) {
+        if (!stack_sound(v) || (!veh_cargo(v) && !has_abil(game_vehs[v].proto, ABL_CARRIER) && v % 16)) continue;
+        for (int type = 0; type < 3; type++) check_stack_veh(v, type);
+        uint8_t humans = *game_human_factions;
+        *game_human_factions ^= (uint8_t)(1u << game_vehs[v].faction);
+        for (int type = 0; type < 2; type++) check_stack_veh(v, type);
+        // With the next unit on board this transport, or another one.
+        int n = game_vehs[v].next_in_stack;
+        if (n >= 0) {
+            struct veh saved = game_vehs[n];
+            game_vehs[n].order = ORDER_SENTRY_BOARD;
+            for (int k = 0; k < 2; k++) {
+                game_vehs[n].waypoint_x[0] = (int16_t)(k ? (v + 1) % vehs : v);
+                for (int type = 0; type < 3; type++) check_stack_veh(v, type);
+                *game_human_factions = humans;
+                for (int type = 0; type < 3; type++) check_stack_veh(v, type);
+                *game_human_factions ^= (uint8_t)(1u << game_vehs[v].faction);
+            }
+            game_vehs[n] = saved;
+        }
+        *game_human_factions = humans;
+    }
+    check_stack_veh(-1, 1);
+    check_stack_veh(-1, 0);
     // Killing: a few units, a stack, and every transport (some at sea).
     for (int k = 0; k < 4 && vehs; k++) {
         int v = (k * 53 + t * 5) % vehs;
@@ -1423,6 +1555,7 @@ static const struct hook veh_hooks[] = {
     HOOK(0x5a59e0, veh_health, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),               // mov eax, [ebp+8]
     HOOK(0x5aed50, get_plan, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x57),                 // push ebx; push esi; push edi
     HOOK(0x579f80, want_monolith, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),            // mov eax, [ebp+8]
+    HOOK(0x5b8ee0, stack_veh, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x28),                // sub esp, 40
     HOOK(0x5c08c0, veh_kill, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),                 // sub esp, 8
     HOOK(0x5b9510, stack_kill, PUSH_EBP_MOV_EBP_ESP, 0x56, 0x8b, 0x75, 0x08),         // push esi; mov esi, [ebp+8]
     HOOK(0x5c0b00, kill, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10),                     // sub esp, 16

@@ -43,12 +43,11 @@ static int objective_stub(int base) { return objective; }
 static int proto_cost_stub(int c, int w, int a, int abl, int r) { return 20; }
 static int veh_at_stub(int x, int y) { return -1; }
 static int32_t refs[5], *net_ref, battle;
-static int drawn_radius, drawn_tile, checked_base, stacked;
+static int drawn_radius, drawn_tile, checked_base;
 static void log_say_stub(char *t, int a, int b, int c) {}
 static void __attribute__((thiscall)) deletion_stub(void *l, int v) {}
 static void __attribute__((thiscall)) check_base_stub(void *w, int b) { checked_base = b; }
 static void __attribute__((thiscall)) check_loc_stub(void *w, int x, int y, int u) {}
-static int stack_veh_stub(int v, int type) { return stacked = type; }
 static void draw_radius_stub(int x, int y, int r, int u) { drawn_radius++; }
 static void draw_tile_stub(int x, int y, int u) { drawn_tile++; }
 
@@ -357,7 +356,7 @@ int main(void) {
 
     // Killing: later units move down a slot and are renumbered.
     game_log_say = log_say_stub, game_deletion_add = deletion_stub, game_base_win_check_base = check_base_stub;
-    game_base_win_check_loc = check_loc_stub, game_stack_veh = stack_veh_stub, game_draw_radius = draw_radius_stub;
+    game_base_win_check_loc = check_loc_stub, game_draw_radius = draw_radius_stub;
     game_draw_tile = draw_tile_stub, game_battle_state = &battle, game_net_veh_ref = &net_ref;
     game_veh_ref_map_1 = &refs[0], game_veh_ref_map_2 = &refs[1], game_veh_ref_3 = &refs[2], game_veh_ref_4 = &refs[3];
     game_current_veh = &refs[4];
@@ -398,19 +397,55 @@ int main(void) {
     kill(0);
     EXPECT(veh_count, 0);
     EXPECT(drawn_radius, 1);
-    EXPECT(stacked, 0);
     // A transport at sea takes its cargo with it.
     veh_count = 2;
     vehs[0] = (struct veh){.x = 2, .y = 2, .proto = 66, .faction = 2, .next_in_stack = 1, .prev_in_stack = -1};
-    vehs[1] = (struct veh){.x = 2, .y = 2, .proto = 64, .faction = 2, .next_in_stack = -1, .prev_in_stack = 0};
+    vehs[1] = (struct veh){.x = 2, .y = 2, .proto = 64, .faction = 2, .next_in_stack = -1, .prev_in_stack = 0,
+                           .order = 1, .waypoint_x = {0}};  // on board
     protos[66] = (struct unit_proto){.chassis = 1, .carry = 2, .flags = PROTO_FLAG_ACTIVE};
     factions[2].units_active[64] = factions[2].units_active[66] = 1;
     tiles[1 * 1 + 2 * (W / 2)].climate = 0;  // (2, 2) is ocean
+    tiles[1 + 2 * (W / 2)].bits |= MAP_UNIT;
     kill(0);
-    EXPECT(stacked, 2);
     EXPECT(veh_count, 0);
     EXPECT(drawn_tile, 1);  // another faction's square
     tiles[1 + 2 * (W / 2)].climate = 3 << 5;
+    // Loading a transport at sea (2, 2): the AI loads any land unit, up to
+    // its capacity; counting marks them and gives the room left.
+    {
+        static uint8_t humans = 0;
+        game_human_factions = &humans;
+        tiles[1 + 2 * (W / 2)].climate = 0, tiles[1 + 2 * (W / 2)].bits |= MAP_UNIT;
+        veh_count = 4;
+        vehs[0] = (struct veh){.x = 2, .y = 2, .proto = 66, .faction = 2, .next_in_stack = 1, .prev_in_stack = -1};
+        for (int i = 1; i < 4; i++)
+            vehs[i] = (struct veh){.x = 2, .y = 2, .proto = 64, .faction = 2, .next_in_stack = (int16_t)(i < 3 ? i + 1 : -1),
+                                   .prev_in_stack = (int16_t)(i - 1), .waypoint_x = {-1}};
+        EXPECT(stack_veh(0, 0), 0);
+        EXPECT(vehs[1].state & 1, 1);
+        EXPECT(vehs[2].state & 1, 1);
+        EXPECT(vehs[3].state & 1, 0);
+        EXPECT(vehs[1].waypoint_x[0], 0);
+        // A human's units: only those sentried for no transport in
+        // particular, or any at sea.
+        humans = 1 << 2;
+        for (int i = 1; i < 4; i++) vehs[i].state = 0, vehs[i].order = 0, vehs[i].waypoint_x[0] = -1;
+        vehs[3].order = 1;
+        tiles[1 + 2 * (W / 2)].climate = 3 << 5;  // on land now
+        EXPECT(stack_veh(0, 0), 1);
+        EXPECT(vehs[3].state & 1, 1);
+        EXPECT(vehs[1].state & 1, 0);
+        // Type 1 takes the cargo and the transport off the map, to one stack.
+        stack_veh(0, 1);
+        EXPECT(vehs[0].x, -2);
+        EXPECT(vehs[3].x, -2);
+        EXPECT(vehs[1].x, 2);
+        EXPECT(veh_top(3), 0);
+        EXPECT(stack_veh(-1, 1), -1);
+        EXPECT(stack_veh(-1, 0), 0);
+        humans = 0;
+    }
+
     // The player's square with a unit of theirs left on it: just the
     // square, or its surroundings for a unit with deep radar.
     for (int radar = 0; radar < 2; radar++) {

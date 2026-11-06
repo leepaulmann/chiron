@@ -168,7 +168,8 @@ module at a time. So far:
   unit is ready for orders; a unit's health and moves left, how far air
   drops reach, transports' capacity, the design a faction uses for a plan,
   and which units the AI sends to a monolith; killing units, with the
-  units they carry at sea, and renumbering the units after them.
+  units they carry at sea, and renumbering the units after them; loading
+  transports and carriers, for the player and the AI.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once

@@ -199,7 +199,6 @@ void *game_deletion_list;
 void(__attribute__((thiscall)) * game_deletion_add)(void *list, int veh);
 void(__attribute__((thiscall)) * game_base_win_check_base)(void *win, int base);
 void(__attribute__((thiscall)) * game_base_win_check_loc)(void *win, int x, int y, int unk);
-int (*game_stack_veh)(int veh, int type);
 void (*game_reset_territory)(void);
 int (*game_world_site)(int x, int y, int unk);
 void (*game_add_site)(int faction, int type, int priority, int x, int y);
@@ -556,7 +555,6 @@ void game_bind(struct pe_image *exe) {
     game_deletion_add = (void *)code_at(exe, 0x52de70);
     game_base_win_check_base = (void *)code_at(exe, 0x41a7a0);
     game_base_win_check_loc = (void *)code_at(exe, 0x41a7e0);
-    game_stack_veh = (void *)code_at(exe, 0x5b8ee0);
     game_veh_lift_y = (int32_t *)code_at(exe, 0x9b2284);
     game_veh_at_rebuilt = (int32_t *)code_at(exe, 0x9b228c);
     game_reset_territory = (void *)code_at(exe, 0x523dd0);
