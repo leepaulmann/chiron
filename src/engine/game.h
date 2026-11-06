@@ -111,7 +111,9 @@ struct faction_data {
     int32_t loan_payment[FACTION_COUNT];  // and paid to it each turn
     GAME_PAD(0x104, 0x124);
     int32_t integrity_blemishes;  // treaties broken
-    GAME_PAD(0x128, 0x1d8);
+    GAME_PAD(0x128, 0x1d0);
+    uint32_t base_governor_adv;  // the governor settings new bases start with
+    int32_t atrocities;
     int32_t major_atrocities;
     int32_t mind_control_total;  // bases mind-controlled (4 each) and units subverted by its probes
     int32_t diplo_mind_control[FACTION_COUNT];  // bases (4 each) and units (1) its probes took from each faction
@@ -205,7 +207,10 @@ struct faction_data {
     uint8_t region_base_plan[REGION_COUNT];  // PLAN_* for the AI
     struct goal goals[GOAL_COUNT];  // the AI's, for this turn
     struct goal sites[25];  // places the AI means to settle (type 3) or otherwise act on
-    GAME_PAD(0x203c, 0x207c);
+    GAME_PAD(0x203c, 0x205c);
+    // News of the secret projects other factions have begun: bitmask()'s
+    // byte index and bit, so 8 bits a word.
+    uint32_t project_intel[8];
     int32_t corner_market_turn, corner_market_cost;  // when the energy market is cornered, and what it cost
     GAME_PAD(0x2084, 0x2090);
     uint32_t flags_ext;  // FACTION_FLAG_EXT_*
@@ -271,6 +276,8 @@ GAME_AT(struct faction_data, base_count, 0x105c);
 GAME_AT(struct faction_data, corner_market_cost, 0x2080);
 GAME_AT(struct faction_data, units_active, 0x858);
 GAME_AT(struct faction_data, units_queue, 0xa58);
+GAME_AT(struct faction_data, base_governor_adv, 0x1d0);
+GAME_AT(struct faction_data, project_intel, 0x205c);
 GAME_AT(struct faction_data, best_weapon_value, 0x818);
 GAME_AT(struct faction_data, best_psi_offense, 0x81c);
 GAME_AT(struct faction_data, unk_7f4, 0x7f4);
@@ -620,12 +627,15 @@ struct rules_basic {
     int32_t turns_corner_market;  // from cornering the energy market to the win
     int32_t tech_mining_platform_bonus;
     int32_t tech_economic_victory;  // needed to corner the energy market
-    GAME_PAD(0xac, 0xf8);
+    GAME_PAD(0xac, 0xf0);
+    int32_t retool_strictness;  // which changes of production lose minerals (base_making)
+    int32_t retool_penalty;     // the percentage lost, for humans
     int32_t retool_exemption;  // the most minerals a human's base carries over after building
     GAME_PAD(0xfc, 0x114);
     int32_t warming_num, warming_den;  // how fast ecological damage warms the planet
 };
 GAME_AT(struct rules_basic, warming_num, 0x114);
+GAME_AT(struct rules_basic, retool_strictness, 0xf0);
 GAME_AT(struct rules_basic, mine_road_limit, 0x24);
 GAME_AT(struct rules_basic, tech_three_nutrients, 0x4c);
 GAME_AT(struct rules_basic, tech_mining_platform_bonus, 0xa4);
@@ -1000,6 +1010,8 @@ extern void (*game_draw_tiles)(int x, int y, int unk);
 // windows are skipped, and the debug log's five-part line.
 extern int32_t *game_turn_start_credits;
 extern int32_t *game_skip_tech_screen;
+extern int32_t *game_skip_project_news;  // non-zero keeps base_change() from telling of projects begun
+extern void (*game_help_topic)(int kind, int id);
 extern void (*game_log_say5)(char *a, char *b, int n1, int n2, int n3);
 // The faction's SOCIAL screen.
 extern void (*game_social_select)(int faction);

@@ -10,6 +10,12 @@
 // wants what the item does. Many of the original's quirks are kept: some
 // of its working values outlive the loop that set them and change how
 // later items are scored, and a few read past the tables they index.
+//
+// base_reset() asks base_build() and sets the answer with base_change(),
+// and bases_reset() does so for many bases; base_making() classes items
+// for the retooling penalty. These too follow the disassembly. Thinker's
+// base_change is close to the original but adds checks of the base and
+// the item that the original doesn't make.
 #include <string.h>
 
 #include "base.h"
@@ -35,6 +41,7 @@ enum {
 
 static inline int human(int faction) { return (*game_human_factions >> faction) & 1; }
 static inline struct map_tile *tile(int x, int y) { return &(*game_map)[(x >> 1) + y * *game_map_half_width]; }
+static inline char *text(uint32_t addr) { return (char *)game_at(addr); }
 static inline int built(int base, int fac) {  // the inline test the original repeats
     return fac < 65 ? (game_bases[base].facilities_built[fac >> 3] >> (fac & 7)) & 1 : 0;
 }
@@ -1866,6 +1873,197 @@ int base_build(int base, int *second, int *third, int *score_out) {
     return pick;
 }
 
+// Which class of item a base is making, for the retooling penalty: two
+// items of the same class trade minerals freely. With strictness 0 there
+// is one class; with 1, units, facilities and secret projects, with
+// facilities 65 and up (satellites and the like) a class of their own;
+// with 2 every item but the secret projects, which share one; above that
+// every item. A Skunkworks lowers the strictness to 1. Whatever the item,
+// it is -1 while the facility the base is set on is one it already has.
+int base_making(int item, int base) {
+    int strict = game_rules_basic->retool_strictness;
+    if (built(base, FAC_SKUNKWORKS) && strict >= 1) strict = 1;
+    int q = game_bases[base].queue[0];
+    if (item < 0 && q < 0 && -q < 65 && built(base, -q)) return -1;
+    if (!strict) return 0;
+    if (strict == 2) return item <= -FIRST_PROJECT ? -FIRST_PROJECT : item;
+    if (strict > 1) return item;
+    if (item >= 0) return 0;
+    if (item <= -FIRST_PROJECT) return 1;
+    return (item > -65) + 2;
+}
+
+// bitmask(): a bit number as a byte index and a bit, as the game keeps
+// its project news.
+static void bitmask(int n, int *word, uint32_t *mask) {
+    *word = n / 8;
+    *mask = 1u << (n & 7);
+}
+
+static int iabs(int v) { return v < 0 ? -v : v; }
+
+// Sets what the base builds, keeping its faction's count of units being
+// built. A human base changing to another class of item (base_making())
+// loses part of the minerals over the exemption. When a faction other
+// than the player's begins a secret project no one has built, and none
+// of its bases is on it already, the player hears of it once; and when it
+// moves every base off one project to begin another, the news changes
+// with it. 99999 changes nothing.
+void base_change(int base, int item) {
+    if (item == 99999) return;
+    struct base *B = &game_bases[base];
+    int old = B->queue[0];
+    B->queue[0] = item;
+    if (item == old) return;
+    int f = B->faction;
+    struct faction_data *F = &game_factions[f];
+    if (old >= 0) F->units_queue[old]--;
+    if (item >= 0) F->units_queue[item]++;
+    int penalty = 0;
+    const struct rules_basic *R = game_rules_basic;
+    if (R->retool_penalty && human(f) && base_making(B->production_last, base) != base_making(B->queue[0], base)) {
+        int m = B->minerals_2, ex = R->retool_exemption;
+        if (m > ex) penalty = m - (100 - R->retool_penalty) * (m - ex) / 100 - ex;
+    }
+    B->minerals = B->minerals_2 - penalty;
+    game_draw_radius(B->x, B->y, 2, 2);
+    if (f == *game_current_faction || *game_skip_project_news) return;
+
+    int q = B->queue[0];
+    int begun = q <= -FIRST_PROJECT && game_secret_projects[-q - FIRST_PROJECT] == -1;  // an unbuilt project
+    // Whether it leaves a project that is unbuilt (or, when it begins one,
+    // any project) and not its own.
+    int left = 0;
+    if (old <= -FIRST_PROJECT && (begun || game_secret_projects[-old - FIRST_PROJECT] == -1)) {
+        int holder = game_secret_projects[iabs(old) - FIRST_PROJECT];
+        left = holder < 0 || game_bases[holder].faction != f;
+    }
+    if (!begun && !left) return;
+    if ((*game_state & GAME_STATE_DONE) && !(*game_state & GAME_STATE_FINAL_SCORE_DONE)) return;
+    int project = iabs(q) - FIRST_PROJECT;
+    int word;
+    uint32_t mask;
+    bitmask(begun ? project : iabs(old) - FIRST_PROJECT, &word, &mask);
+    int on_old = 0, on_new = 0;  // the faction's other bases on each
+    for (int i = 0; i < *game_base_count; i++) {
+        const struct base *O = &game_bases[i];
+        if (O->faction != B->faction || i == base) continue;
+        if (O->queue[0] == old) on_old++;
+        if (O->queue[0] == B->queue[0]) on_new++;
+    }
+    if (!begun || on_new) return;
+
+    if (left && (!on_old || game_secret_projects[-old - FIRST_PROJECT] != -1)) {
+        // It gives up the old project everywhere for the new one.
+        for (int i = 0; i < *game_base_count; i++)
+            if (game_bases[i].faction == f && game_bases[i].queue[0] == old) game_bases[i].queue[0] = B->queue[0];
+        if (*game_sunspot_duration > 0) return;
+        struct faction_def *D = &game_faction_defs[f];
+        game_parse_says(0, D->adjective, -1, -1);
+        game_parse_say(1, (int)(intptr_t)game_facilities[iabs(old)].name, -1, -1);
+        *game_parse_gender = D->noun_gender;
+        *game_parse_plural = D->noun_plural;
+        game_parse_says(2, D->noun, -1, -1);
+        game_parse_say(3, (int)(intptr_t)game_facilities[iabs(q)].name, -1, -1);
+        game_popp(*game_script_file, text(0x689474), 0, text(0x689464), 0);
+        F->project_intel[word] |= mask;
+        bitmask(iabs(old) - FIRST_PROJECT, &word, &mask);
+        F->project_intel[word] &= ~mask;
+        return;
+    }
+    if (!(F->project_intel[word] & mask)) {
+        if (*game_sunspot_duration > 0 && project != SP_VOICE_OF_PLANET) return;
+        struct faction_def *D = &game_faction_defs[f];
+        *game_parse_plural = 0;
+        *game_parse_gender = D->leader_female;
+        game_parse_says(0, D->leader_title, -1, -1);
+        *game_parse_gender = D->leader_female;
+        *game_parse_plural = 0;
+        game_parse_says(1, D->leader_name, -1, -1);
+        *game_parse_gender = D->noun_gender;
+        *game_parse_plural = D->noun_plural;
+        game_parse_says(2, D->noun, -1, -1);
+        game_parse_say(3, (int)(intptr_t)game_facilities[iabs(q)].name, -1, -1);
+        game_wave_it(treaty(*game_current_faction, f, TREATY_PACT) ? 0x24 : 0x26);
+        game_popp(*game_script_file, text(0x689454), 0, text(0x689444), 0);
+        F->project_intel[word] |= mask;
+    }
+    if (project == SP_VOICE_OF_PLANET) {
+        game_interlude(11, 0, 1, 0);
+        *game_interlude_state |= 0x400;
+    }
+}
+
+// Picks the base's next item with base_build() and sets it. For a human
+// base under a governor, `governor` first has the governor's four kinds
+// of work (bits 24 to 27 of its settings) each claim an item, retrying up
+// to 8 times in all while two claim the same; base_build() then passes
+// over items claimed with better scores. Otherwise, when a human's
+// governor turns from something else to a secret project, the player is
+// asked whether to build it: no puts back the quick pick without
+// projects; the third answer also turns off the governor's projects
+// (bit 18), for the base being worked on and for the faction's new bases;
+// help shows the project and asks again.
+void base_reset(int base, int governor) {
+    struct base *B = &game_bases[base];
+    int f = B->faction;
+    uint8_t bit = (uint8_t)(1u << f);
+    int tries = 0;
+    if ((*game_human_factions & bit) && (B->governor & 0x80000000u) && governor) {
+        uint32_t saved = B->governor;
+        for (int i = 0; i < 4; i++) game_gov_claims[i] = 0, game_gov_claim_scores[i] = 999999;
+        if (saved & 0x0f000000u) {
+            for (int k = 0; k < 4; k++) {
+                B->governor = (B->governor & ~0x0f000000u) | (0x01000000u << k);
+                int c = game_gov_claims[k] = base_build(base, NULL, NULL, &game_gov_claim_scores[k]);
+                int same = 0;
+                for (int j = 0; j < k; j++) same |= game_gov_claims[j] == c;
+                if (same && ++tries < 8) k = -1;  // all four again
+            }
+            B->governor = saved;
+        }
+        base_change(base, base_build(base, NULL, NULL, &tries));
+        return;
+    }
+    int was = B->queue[0];
+    base_change(base, base_build(base, NULL, NULL, NULL));
+    if (!(*game_human_factions & bit) || !(B->governor & 0x80000000u) || was <= -FIRST_PROJECT
+        || B->queue[0] > -FIRST_PROJECT || *game_net_multiplayer || (*game_state & GAME_STATE_DONE))
+        return;
+    int fac = -B->queue[0];
+    int answer;
+    for (;;) {
+        game_parse_says(0, B->name, -1, -1);
+        game_parse_say(1, (int)(intptr_t)game_facilities[fac].name, -1, -1);
+        answer = game_popp(*game_script_file, text(0x689494), 0, text(0x689484), 0);
+        if (answer != 3) break;
+        game_help_topic(11, fac);
+    }
+    if (!answer) return;
+    base_change(base, base_build(-1 - base, NULL, NULL, NULL));
+    if (answer > 1) {
+        (*game_current_base)->governor &= ~0x40000u;
+        game_factions[f].base_governor_adv &= ~0x40000u;
+    }
+}
+
+// base_reset() for each of an AI faction's bases, those in one region if
+// it isn't negative; with `undefended`, only those without a unit of any
+// faction on them.
+void bases_reset(int region, int faction, int undefended) {
+    uint8_t bit = (uint8_t)(1u << faction);
+    if (*game_human_factions & bit) return;
+    for (int b = 0; b < *game_base_count; b++) {
+        const struct base *B = &game_bases[b];
+        if (B->faction != faction) continue;
+        const struct map_tile *t = tile(B->x, B->y);
+        if (region >= 0 && t->region != region) continue;
+        if (undefended && (t->bits & MAP_UNIT) && (t->owner_site & 0xf) < 8) continue;
+        if ((*game_human_factions & bit) && ((*game_current_base)->state & 0x80000000u)) continue;
+        base_reset(b, 0);
+    }
+}
+
 extern struct hook_module build_module;
 #define BUILD (&build_module)
 
@@ -1878,6 +2076,69 @@ static void writes_outputs(struct hook_writes *w, int *second, int *third, int *
 }
 SHADOW_WRITER(BUILD, int, base_build, (int a, int *b, int *c, int *d), (a, b, c, d),
               (hooks_writes_game(&w_), writes_outputs(&w_, b, c, d)), "%d", a)
+SHADOW2(BUILD, int, base_making, int, int)
+SHADOW_WRITER(BUILD, void, base_change, (int a, int b), (a, b), hooks_writes_game(&w_), "%d, %d", a, b)
+SHADOW_WRITER(BUILD, void, bases_reset, (int a, int b, int c), (a, b, c), hooks_writes_game(&w_), "%d, %d, %d", a, b, c)
+
+// A human base's reset may ask the player about a secret project and act
+// on the answer, which a check can't give, so those run the original
+// unchecked; the sweep checks them on a copy, where no question gets one.
+SHADOW_WRITER_CHECK(void, base_reset, (int a, int b), (a, b), orig_base_reset(a, b), hooks_writes_game(&w_), "%d, %d", a, b)
+static void shadow_base_reset(int a, int b) {
+    if (hooks_nested) {
+        orig_base_reset(a, b);
+        return;
+    }
+    if (shadow_bypass()) {
+        base_reset(a, b);
+        return;
+    }
+    stats_base_reset.calls++;
+    shadow_tick(BUILD);
+    if (human(game_bases[a].faction)) orig_base_reset(a, b);
+    else check_base_reset(a, b);
+}
+
+// A secret project no one has built, from the n'th on, as an item.
+static int unbuilt_project(int n) {
+    for (int i = 0; i < SP_COUNT; i++) {
+        int sp = (n + i) % SP_COUNT;
+        if (game_secret_projects[sp] == -1) return -FIRST_PROJECT - sp;
+    }
+    return -FIRST_PROJECT;
+}
+
+// base_change() to each kind of item, from a project or not, for an AI
+// faction or, now and then, a human one (the retooling penalty).
+static void sweep_change(int b) {
+    struct base *B = &game_bases[b];
+    int k = b + *game_turn;
+    int items[] = {unbuilt_project(k), unbuilt_project(k + 7), 1 + (k & 1), -(1 + k % 64), B->queue[0], 99999};
+    int was = B->queue[0];
+    uint8_t humans = *game_human_factions;
+    if (k % 3 == 0) B->queue[0] = unbuilt_project(k + 3);
+    if (k % 5 == 0) *game_human_factions |= (uint8_t)(1u << B->faction);
+    check_base_change(b, items[k % 6]);
+    B->queue[0] = was;
+    *game_human_factions = humans;
+}
+
+// base_reset(), now and then as a human's base under a governor doing all
+// four kinds of work.
+static void sweep_reset(int b) {
+    struct base *B = &game_bases[b];
+    if ((b + *game_turn) % 4) {
+        check_base_reset(b, 0);
+        return;
+    }
+    uint8_t humans = *game_human_factions;
+    uint32_t governor = B->governor;
+    *game_human_factions |= (uint8_t)(1u << B->faction);
+    B->governor |= 0x8f000000u;
+    check_base_reset(b, 1);
+    *game_human_factions = humans;
+    B->governor = governor;
+}
 
 // Every base's pick, the way base_reset() asks for it. On alternate turns
 // the quick pick without projects is checked too, and otherwise the full
@@ -1898,11 +2159,26 @@ static void build_sweep(void) {
             check_base_build(b, &second, &third, &score);
             *game_difficulty = difficulty;
         }
+        for (int item = -133; item < 520; item += 37) check_base_making(item, b);
+        sweep_change(b);
+        sweep_reset(b);
+    }
+    // One faction's bases, in all regions or in its first base's.
+    int f = 1 + *game_turn % 7;
+    for (int b = 0; b < *game_base_count; b++) {
+        if (game_bases[b].faction != f) continue;
+        int region = (*game_turn & 2) ? -1 : tile(game_bases[b].x, game_bases[b].y)->region;
+        check_bases_reset(region, f, *game_turn & 1);
+        break;
     }
     hooks_sweeping = sweeping;
 }
 
 static const struct hook build_hooks[] = {
+    HOOK(0x4e4700, base_making, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x08),              // sub esp, 8
+    HOOK(0x4e5a60, base_change, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x24),              // sub esp, 36
+    HOOK(0x4e5fe0, base_reset, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x08),               // sub esp, 8
+    HOOK(0x4e6300, bases_reset, 0x55, 0x8b, 0xec, 0x51, 0x8b, 0x4d, 0x0c),       // push ecx; mov ecx, [ebp+12]
     HOOK(0x4f81a0, base_build, 0x55, 0x8b, 0xec, 0xb8, 0x6c, 0x1f, 0x00, 0x00),  // mov eax, 0x1f6c (then the stack probe)
 };
 struct hook_module build_module = {"build", build_hooks, HOOK_COUNT(build_hooks), build_sweep, NULL, -1};

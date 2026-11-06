@@ -206,7 +206,8 @@ int32_t *game_base_win_redraw_base;
 void(__attribute__((thiscall)) * game_base_win_on_redraw)(void *win);
 void(__attribute__((thiscall)) * game_base_win_zoom)(void *win, int base, int unk);
 void (*game_draw_tiles)(int x, int y, int unk);
-int32_t *game_turn_start_credits, *game_skip_tech_screen;
+int32_t *game_turn_start_credits, *game_skip_tech_screen, *game_skip_project_news;
+void (*game_help_topic)(int kind, int id);
 void (*game_log_say5)(char *a, char *b, int n1, int n2, int n3);
 void (*game_social_select)(int faction);
 uint8_t *game_social_effects;
@@ -547,6 +548,8 @@ void game_bind(struct pe_image *exe) {
     game_draw_tiles = (void *)code_at(exe, 0x46b140);
     game_turn_start_credits = (int32_t *)code_at(exe, 0x93a958);
     game_skip_tech_screen = (int32_t *)code_at(exe, 0x945f40);
+    game_skip_project_news = (int32_t *)code_at(exe, 0x945f44);
+    game_help_topic = (void *)code_at(exe, 0x44cb60);
     game_log_say5 = (void *)code_at(exe, 0x626250);
     game_social_select = (void *)code_at(exe, 0x5b5620);
     game_social_effects = (uint8_t *)code_at(exe, 0x94b024);

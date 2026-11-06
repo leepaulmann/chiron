@@ -62,6 +62,16 @@ static int parse_stub(int slot, int value) { return parsed[slot & 1] = value; }
 static uint32_t __attribute__((stdcall)) upper_stub(char *s) { return 0; }
 static void *upper_ptr = (void *)upper_stub;
 static void compute_stub(int update) { computed++; }
+static int popps, helps, sounds, answers[4], answer_at;
+static int32_t current_faction = 0, skip_news = 0, sunspots = 0, gender, plural, interlude_state;
+static char *script_file = "script";
+static void radius_stub(int x, int y, int r, int u) {}
+static int says_stub(int slot, char *text, int g, int p) { return 0; }
+static int say_stub(int slot, int text, int g, int p) { return 0; }
+static int popp_stub(char *file, char *label, int flags, char *pic, int unk) { popps++; return answers[answer_at++ & 3]; }
+static void wave_stub(int sound) { sounds = sound; }
+static void interlude_stub(int id, char *text, int a, int b) {}
+static void help_stub(int kind, int id) { helps++; }
 
 int main(void) {
     game_map = &tiles_ptr, game_map_width = &width, game_map_height = &height, game_map_half_width = &half_width;
@@ -87,6 +97,11 @@ int main(void) {
     game_aah_ooga = zero2, game_generators = generators_stub, game_climactic_battle = zero_void, game_at_climax = zero1;
     game_parse_num = parse_stub, game_great_satan = zero2;
     build_compute = compute_stub;
+    game_draw_radius = radius_stub, game_parse_says = says_stub, game_parse_say = say_stub, game_popp = popp_stub;
+    game_wave_it = wave_stub, game_interlude = interlude_stub, game_help_topic = help_stub;
+    game_current_faction = &current_faction, game_skip_project_news = &skip_news, game_sunspot_duration = &sunspots;
+    game_parse_gender = &gender, game_parse_plural = &plural, game_interlude_state = &interlude_state;
+    game_script_file = &script_file;
     (void)zero3;
     for (int i = 0; i < SP_COUNT; i++) projects[i] = -1;
     for (int i = 1; i < 121; i++) radius_x[i] = (i % 3) - 1, radius_y[i] = (i / 3 % 3) - 1;
@@ -146,6 +161,90 @@ int main(void) {
     EXPECT(base_build(0, NULL, NULL, NULL), -FAC_FIRST_PROJECT);
     EXPECT(base_build(-1, NULL, NULL, NULL), -FAC_RECYCLING_TANKS);
     EXPECT(strcmp(str_buffer, "TEST"), 0);  // the faction's name, put together for a check
+
+
+    // The class of item for retooling, by strictness; -1 while the base
+    // is set on a facility it has.
+    rules_basic.retool_strictness = 0;
+    EXPECT(base_making(-10, 0), 0);
+    rules_basic.retool_strictness = 2;
+    EXPECT(base_making(-75, 0), -FAC_FIRST_PROJECT);
+    EXPECT(base_making(5, 0), 5);
+    rules_basic.retool_strictness = 1;
+    EXPECT(base_making(3, 0), 0);
+    EXPECT(base_making(-75, 0), 1);
+    EXPECT(base_making(-10, 0), 3);
+    EXPECT(base_making(-66, 0), 2);
+    bases[0].queue[0] = -FAC_RECREATION_COMMONS;
+    EXPECT(base_making(-10, 0), -1);
+    EXPECT(base_making(3, 0), 0);
+
+    // Changing: the faction's count of units being built follows, and a
+    // human's base loses half its minerals over the exemption of 10
+    // between a unit and a facility.
+    humans = 0, bases[0].queue[0] = -FAC_RECYCLING_TANKS, bases[0].minerals_2 = 30;
+    base_change(0, 2);
+    EXPECT(factions[1].units_queue[2], 1);
+    EXPECT(bases[0].minerals, 30);
+    humans = 1 << 1, rules_basic.retool_penalty = 50, rules_basic.retool_exemption = 10, bases[0].production_last = 2;
+    base_change(0, -FAC_RECYCLING_TANKS);
+    EXPECT(factions[1].units_queue[2], 0);
+    EXPECT(bases[0].minerals, 20);
+    base_change(0, 99999);
+    EXPECT(bases[0].queue[0], -FAC_RECYCLING_TANKS);
+
+    // The player hears once of another faction's unbuilt project; a
+    // faction leaving one unbuilt project for another moves the news.
+    humans = 0;
+    base_change(0, -75);
+    EXPECT(popps, 1);
+    EXPECT(sounds, 0x26);
+    EXPECT(factions[1].project_intel[0], 1 << 5);
+    base_change(0, -FAC_RECYCLING_TANKS);
+    base_change(0, -75);
+    EXPECT(popps, 1);
+    base_change(0, -76);
+    EXPECT(popps, 2);
+    EXPECT(factions[1].project_intel[0], 1 << 6);
+    current_faction = 1;  // the player's own: no news
+    base_change(0, -77);
+    EXPECT(popps, 2);
+    current_faction = 0;
+
+    // Resetting an AI base: its undefended pick.
+    defenders = 0;
+    base_reset(0, 0);
+    EXPECT(bases[0].queue[0], 2);
+    // A human's governor turning to a project asks the player; help asks
+    // again, and the third answer takes the quick pick and turns off the
+    // governor's projects.
+    humans = 1 << 1, defenders = 1, skip_news = 1, popps = 0;
+    factions[1].base_governor_adv = 0x40000;
+    answers[0] = 3, answers[1] = 2, answer_at = 0;
+    base_reset(0, 0);
+    EXPECT(popps, 2);
+    EXPECT(helps, 1);
+    EXPECT(bases[0].queue[0], -FAC_RECYCLING_TANKS);
+    EXPECT(bases[0].governor & 0x40000, 0);
+    EXPECT(factions[1].base_governor_adv, 0);
+    // The governor's four kinds of work each claim an item first, and its
+    // settings are put back.
+    bases[0].governor |= 0x0f000000;
+    base_reset(0, 1);
+    EXPECT(claims[0] != 0 && claim_scores[0] != 999999, 1);
+    EXPECT(bases[0].governor >> 24, 0x8f);
+
+    // All an AI faction's bases, or those in a region, or undefended.
+    humans = 0, defenders = 0, bases[0].queue[0] = -FAC_STOCKPILE_ENERGY;
+    bases_reset(2, 1, 0);
+    EXPECT(bases[0].queue[0], -FAC_STOCKPILE_ENERGY);
+    bases_reset(-1, 1, 1);  // its unit stands on it
+    EXPECT(bases[0].queue[0], -FAC_STOCKPILE_ENERGY);
+    bases_reset(1, 1, 0);
+    EXPECT(bases[0].queue[0], 2);
+    humans = 1 << 1, bases[0].queue[0] = -FAC_STOCKPILE_ENERGY;
+    bases_reset(-1, 1, 0);
+    EXPECT(bases[0].queue[0], -FAC_STOCKPILE_ENERGY);
 
     if (failures) return 1;
     printf("engine_build: all tests passed\n");
