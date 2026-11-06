@@ -25,7 +25,7 @@ enum {  // secret projects, as indices into game_secret_projects
     SP_CYBORG_FACTORY = 17, SP_DREAM_TWISTER = 19, SP_TELEPATHIC_MATRIX = 30, SP_NETHACK_TERMINUS = 34,
 };
 enum {  // unit_proto.abilities
-    ABL_DEEP_RADAR = 0x2, ABL_AIR_SUPERIORITY = 0x20, ABL_ARTILLERY = 0x8000, ABL_ANTIGRAV_STRUTS = 0x400, ABL_SLOW = 0x800000,
+    ABL_DEEP_RADAR = 0x2, ABL_AIR_SUPERIORITY = 0x20, ABL_ARTILLERY = 0x8000, ABL_CARRIER = 0x80, ABL_ANTIGRAV_STRUTS = 0x400, ABL_SLOW = 0x800000,
     ABL_SOPORIFIC_GAS = 0x1000000, ABL_DISSOCIATIVE_WAVE = 0x2000000, ABL_MARINE_DETACHMENT = 0x4000000,
     ABL_FUEL_NANOCELLS = 0x8000000, ABL_ALGO_ENHANCEMENT = 0x10000000,
 };
@@ -33,11 +33,12 @@ enum {
     BSC_LOCUSTS_OF_CHIRON = 10, BSC_SEALURK = 14, BSC_SPORE_LAUNCHER = 15, BSC_FUNGAL_TOWER = 19,
     BSC_UNITY_MINING_LASER = 20, BASIC_PROTOS = 64,
     WEAPON_PROBE = 11, WEAPON_TECTONIC = 21, WMODE_TRANSPORT = 7,
-    PLAN_PROBE = 11, BONUS_FREE_ABILITY = 15, TECH_FLAG_PROBE = 0x2,
+    PLAN_PROBE = 11, PLAN_ARTIFACT = 12, BONUS_FREE_ABILITY = 15, TECH_FLAG_PROBE = 0x2,
     RULE_FLAG_FREE_PROTO = 0x200, RULE_FLAG_MORALE = 0x8000,
     RULES_NO_COLONY_PODS = 0x400000, MAP_UNK_40000000_ = 0x40000000, FACTION_FLAG_UNK_40000000 = 0x40000000,
 };
 
+static inline char *text(uint32_t addr) { return (char *)game_at(addr); }
 static inline const struct unit_proto *proto_of(int proto) { return &game_protos[proto]; }
 static inline int triad(int proto) { return game_chassis[proto_of(proto)->chassis].triad; }
 static inline int built(int base, int fac) {  // the inline test: any base number, even negative
@@ -422,6 +423,225 @@ int stack_check(int veh, int type, int c1, int c2, int c3) {
     return n;
 }
 
+// Stacks. The units on a square are a list through next_in_stack and
+// prev_in_stack; the map marks squares with units (MAP_UNIT, and
+// MAP_UNIT_GROUND for one not in the air or native), and nothing else
+// points at a list's head, which veh_at() finds by searching.
+enum { MAP_UNIT_GROUND = 0x100000, ORDER_SENTRY = 1, GAME_STATE_UNK_40 = 0x40, GAME_STATE_UNK_1000 = 0x1000 };
+
+static int on_map_(int x, int y) { return y >= 0 && y < *game_map_height && x >= 0 && x < *game_map_width; }
+static int top(int veh) {
+    while (game_vehs[veh].prev_in_stack >= 0) veh = game_vehs[veh].prev_in_stack;
+    return veh;
+}
+
+// The head of the stack on a square, or -1. A square the map marks as
+// having units but where none is found is logged and the map's unit bits
+// rebuilt (in a network or some other games only once).
+int veh_at(int x, int y) {
+    if (on_map_(x, y) && !((*game_map)[(x >> 1) + y * *game_map_half_width].bits & MAP_UNIT)) return -1;
+    for (int v = 0; v < *game_veh_count; v++)
+        if (game_vehs[v].x == x && game_vehs[v].y == y) return top(v);
+    if (!on_map_(x, y)) return -1;
+    if (!*game_veh_at_rebuilt) game_log_say(text(0x691d70), x, y, 0);
+    if ((*game_state & (GAME_STATE_UNK_40 | GAME_STATE_UNK_1000)) || *game_net_multiplayer) {
+        if (*game_veh_at_rebuilt) return -1;
+        *game_veh_at_rebuilt = 1;
+    }
+    rebuild_vehicle_bits();
+    return -1;
+}
+
+// Takes a unit out of its stack (and off the map), noting where it was.
+int veh_lift(int veh) {
+    struct veh *V = &game_vehs[veh];
+    int had_prev = 0;
+    if (V->prev_in_stack >= 0) had_prev = 1, game_vehs[V->prev_in_stack].next_in_stack = V->next_in_stack;
+    if (V->next_in_stack >= 0) game_vehs[V->next_in_stack].prev_in_stack = V->prev_in_stack;
+    else if (!had_prev && on_map_(V->x, V->y)) bit_set(V->x, V->y, MAP_UNIT, 0);
+    *game_veh_lift_x = V->x;
+    *game_veh_lifted = veh;
+    *game_veh_lift_y = V->y;
+    V->x = V->y = V->next_in_stack = V->prev_in_stack = -1;
+    return veh;
+}
+
+// Puts a unit at the head of the stack on a square; on an empty square
+// without a base it takes the square's ownership.
+int veh_drop(int veh, int x, int y) {
+    int head = veh_at(x, y);
+    struct veh *V = &game_vehs[veh];
+    V->next_in_stack = (int16_t)head;
+    V->prev_in_stack = -1;
+    V->x = (int16_t)x;
+    V->y = (int16_t)y;
+    *game_veh_lifted = -1;
+    if (head >= 0) game_vehs[head].prev_in_stack = (int16_t)veh;
+    else {
+        if (y < 0) return veh;
+        if (on_map_(x, y) && !((*game_map)[(x >> 1) + y * *game_map_half_width].bits & MAP_BASE)) owner_set(x, y, V->faction);
+    }
+    if (on_map_(x, y)) {
+        uint32_t bits = (V->faction && triad(V->proto) != TRIAD_AIR) ? MAP_UNIT_GROUND : 0;
+        bit_set(x, y, bits | MAP_UNIT, 1);
+    }
+    return veh;
+}
+
+// Moves a unit to the head of its stack.
+void veh_promote(int veh) {
+    int head = veh >= 0 ? top(veh) : -1;
+    if (head == veh) return;
+    veh_lift(veh);
+    veh_drop(veh, game_vehs[head].x, game_vehs[head].y);
+}
+
+// Moves a unit to the bottom of its stack.
+void veh_demote(int veh) {
+    if (veh < 0 || game_vehs[veh].next_in_stack < 0) return;
+    int last = game_vehs[veh].next_in_stack;
+    while (game_vehs[last].next_in_stack >= 0) last = game_vehs[last].next_in_stack;
+    if (last == veh) return;
+    veh_lift(veh);
+    struct veh *V = &game_vehs[veh], *L = &game_vehs[last];
+    L->next_in_stack = (int16_t)veh;
+    V->prev_in_stack = (int16_t)last;
+    V->next_in_stack = -1;
+    V->x = L->x;
+    V->y = L->y;
+}
+
+// Moves a whole stack to a square, one unit at a time from the head.
+void stack_put(int veh, int x, int y) {
+    if (veh < 0) return;
+    for (int v = top(veh); v >= 0;) {
+        int next = game_vehs[v].next_in_stack;
+        veh_drop(veh_lift(v), x, y);
+        v = next;
+    }
+}
+
+// Moves the units collected off the map (at -3, -3) back onto the square,
+// ending with them at the head.
+static void restack(int last, int x, int y) {
+    if (last < 0) return;
+    for (int v = top(last); v >= 0;) {
+        int next = game_vehs[v].next_in_stack;
+        veh_drop(veh_lift(v), x, y);
+        v = next;
+    }
+}
+
+// Puts a stack's transports and carriers at its head.
+void stack_sort(int veh) {
+    if (veh < 0) return;
+    int x = game_vehs[veh].x, y = game_vehs[veh].y, last = -1;
+    for (int v = top(veh); v >= 0;) {
+        int next = game_vehs[v].next_in_stack;
+        if (veh_cargo(v) || has_abil(game_vehs[v].proto, ABL_CARRIER)) last = v, veh_drop(veh_lift(v), -3, -3);
+        v = next;
+    }
+    restack(last, x, y);
+}
+
+// Puts a stack's colony pods, then its offensive and combat units, at its
+// head. The unit is read for its square even when negative.
+void stack_sort_2(int veh) {
+    int x = game_vehs[veh].x, y = game_vehs[veh].y, last = -1;
+    if (veh >= 0) {
+        for (int v = top(veh); v >= 0;) {
+            int next = game_vehs[v].next_in_stack;
+            if (proto_of(game_vehs[v].proto)->plan == PLAN_COLONY) last = v, veh_drop(veh_lift(v), -3, -3);
+            v = next;
+        }
+    }
+    for (int v = veh_at(x, y); v >= 0;) {
+        int next = game_vehs[v].next_in_stack;
+        if (proto_of(game_vehs[v].proto)->plan <= PLAN_COMBAT) last = v, veh_drop(veh_lift(v), -3, -3);
+        v = next;
+    }
+    restack(last, x, y);
+}
+
+// In a network game, puts a stack in order and returns its head. Its loop
+// meant to visit the units on the unit's square but compares the unit
+// with itself, so every unit in the game is promoted in turn, each time
+// sorting the unit's stack.
+int stack_fix(int veh) {
+    if (veh < 0 || !*game_net_multiplayer) return veh;
+    const struct veh *V = &game_vehs[veh];
+    if (V->next_in_stack < 0 && V->prev_in_stack < 0) return veh;
+    int x = V->x, y = V->y;
+    for (int i = 0; i < *game_veh_count; i++)
+        if (V->x == x && V->y == y) veh_promote(i), stack_sort(veh);
+    return V->prev_in_stack >= 0 ? top(V->prev_in_stack) : veh;
+}
+
+// Starts a unit afresh, off the map: no orders, no home, and the morale
+// the faction's bonus gives.
+void veh_clear(int veh, int proto, int faction) {
+    struct veh *V = &game_vehs[veh];
+    V->x = V->y = -4;
+    V->lurking = 0;
+    V->unk_c = 0;
+    V->flags = 0;
+    V->faction = (uint8_t)faction;
+    V->proto = (int16_t)proto;
+    V->next_in_stack = V->prev_in_stack = -1;
+    V->waypoint_count = V->patrol_point = 0;
+    V->order = 0;
+    for (int i = 0; i < 4; i++) V->waypoint_x[i] = V->waypoint_y[i] = -1;
+    V->state = 0;
+    V->iter_count = V->damage = V->order_auto_type = V->movement_turns = V->moves_spent = V->status_icon = 0;
+    V->visibility = 0;
+    V->home_base = -1;
+    V->morale = (uint8_t)(game_faction_defs[faction].rule_morale + 1);
+    V->unk_29 = 2;
+    V->unk_2c[0] = V->unk_2c[1] = 0;
+}
+
+// Puts a unit on sentry with no end.
+void veh_sleep(int veh) {
+    struct veh *V = &game_vehs[veh];
+    V->order = ORDER_SENTRY;
+    V->waypoint_x[0] = -1;
+    V->order_turns = 0;
+}
+
+// A unit's moves this turn, in thirds: its design's, two more squares for
+// a ship with the Maritime Control Center, one for an elite unit (not
+// native, unless asked for a straight line), cut by damage for all but
+// air units (to at least one square, two for ships). A fungal tower has
+// none.
+int veh_speed(int veh, int straight) {
+    const struct veh *V = &game_vehs[veh];
+    int rate = game_rules_basic->move_rate_roads;
+    int s = speed_proto(V->proto);
+    const struct unit_proto *P = proto_of(V->proto);
+    if (triad(V->proto) == TRIAD_SEA && game_secret_projects[SP_MARITIME_CONTROL_CENTER] >= 0
+        && game_bases[game_secret_projects[SP_MARITIME_CONTROL_CENTER]].faction == V->faction)
+        s += rate * 2;
+    if (morale_veh(veh, 1, 0) == 6 && !straight && (V->proto >= BASIC_PROTOS || game_weapons[P->weapon].offense >= 0))
+        s += rate;
+    int damage = V->damage, tr = triad(V->proto);
+    if (damage && tr != TRIAD_AIR) {
+        int r = P->reactor < 1 ? 1 : P->reactor > 100 ? 100 : P->reactor;
+        int hp = P->plan == PLAN_ARTIFACT ? 1 : r * 10;
+        int full = P->plan == PLAN_ARTIFACT ? 1 : hp < 1 ? 1 : hp > 99 ? 99 : hp;
+        int moves = s / rate;
+        int left = hp - damage;
+        left = left < 0 ? 0 : left > 9999 ? 9999 : left;
+        int v = (left * moves + full - 1) / full;
+        int least = tr == TRIAD_SEA ? 2 : 1;
+        v = v < least ? least : v > 999 ? 999 : v;
+        s = v * rate;
+    }
+    return V->proto == BSC_FUNGAL_TOWER ? 0 : s;
+}
+
+// Uses up a unit's moves for the turn.
+void veh_skip(int veh) { game_vehs[veh].iter_count = (uint8_t)veh_speed(veh, 0); }
+
 extern struct hook_module veh_module;
 #define VEH (&veh_module)
 
@@ -446,6 +666,85 @@ SHADOW3(VEH, int, veh_avail, int, int, int)
 SHADOW2(VEH, int, can_arty, int, int)
 SHADOW5(VEH, int, stack_check, int, int, int, int, int)
 
+// The stack functions write units, the map and the lifted unit's globals.
+static void writes_stacks(struct hook_writes *w) {
+    hooks_writes_add(w, game_vehs, VEH_COUNT * sizeof(struct veh));
+    hooks_writes_add(w, game_veh_lift_x, 0x18);  // to game_veh_at_rebuilt
+    hooks_writes_add(w, *game_map, (size_t)*game_map_half_width * *game_map_height * sizeof(struct map_tile));
+}
+#define WRITES_STACKS writes_stacks(&w_)
+SHADOW_WRITER(VEH, int, veh_lift, (int a), (a), WRITES_STACKS, "%d", a)
+SHADOW_WRITER(VEH, int, veh_drop, (int a, int b, int c), (a, b, c), WRITES_STACKS, "%d, %d, %d", a, b, c)
+SHADOW_WRITER(VEH, void, veh_promote, (int a), (a), WRITES_STACKS, "%d", a)
+SHADOW_WRITER(VEH, void, veh_demote, (int a), (a), WRITES_STACKS, "%d", a)
+SHADOW_WRITER(VEH, void, stack_put, (int a, int b, int c), (a, b, c), WRITES_STACKS, "%d, %d, %d", a, b, c)
+SHADOW_WRITER(VEH, void, stack_sort, (int a), (a), WRITES_STACKS, "%d", a)
+SHADOW_WRITER(VEH, void, stack_sort_2, (int a), (a), WRITES_STACKS, "%d", a)
+// stack_fix() is called constantly and acts only in a network game: it is
+// checked as a query otherwise.
+SHADOW_WRITER_CHECK(int, stack_fix, (int a), (a), orig_stack_fix(a), WRITES_STACKS, "%d", a)
+static int shadow_stack_fix(int a) {
+    if (hooks_nested) return orig_stack_fix(a);
+    if (shadow_bypass()) return stack_fix(a);
+    stats_stack_fix.calls++;
+    shadow_tick(VEH);
+    if (*game_net_multiplayer) return check_stack_fix(a);
+    hooks_nested++;
+    int want = orig_stack_fix(a);
+    hooks_nested--;
+    int got = stack_fix(a);
+    if (got != want) hooks_mismatch(&stats_stack_fix, "(%d) = %d, original %d", a, got, want);
+    return want;
+}
+SHADOW_WRITER(VEH, void, veh_clear, (int a, int b, int c), (a, b, c), WRITES_STACKS, "%d, %d, %d", a, b, c)
+SHADOW_WRITER(VEH, void, veh_sleep, (int a), (a), WRITES_STACKS, "%d", a)
+SHADOW_WRITER(VEH, void, veh_skip, (int a), (a), WRITES_STACKS, "%d", a)
+SHADOW2(VEH, int, veh_speed, int, int)
+
+// veh_at() is called constantly, so it's checked as a query; a square the
+// map marks with units but where the original found none (it then logs
+// and rebuilds the map's bits) isn't compared, as ours would do it again.
+SHADOW_DECLARE(int, veh_at, (int a, int b))
+static int check_veh_at(int x, int y) {
+    hooks_nested++;
+    int want = orig_veh_at(x, y);
+    hooks_nested--;
+    if (want < 0 && on_map_(x, y) && ((*game_map)[(x >> 1) + y * *game_map_half_width].bits & MAP_UNIT)) return want;
+    int got = veh_at(x, y);
+    if (got != want) hooks_mismatch(&stats_veh_at, "(%d, %d) = %d, original %d", x, y, got, want);
+    return want;
+}
+SHADOW_ENTRY(VEH, int, veh_at, (int a, int b), (a, b))
+
+// Stacks moved, sorted and cleared for a few units each turn, and every
+// square's head. stack_fix() is checked only as games other than network
+// ones use it: made to act, the original promoted unit after unit until
+// it tied a stack into a loop and its veh_at() never returned.
+static void sweep_stacks(void) {
+    int vehs = *game_veh_count, t = *game_turn, w = *game_map_width, h = *game_map_height;
+    for (int y = 0; y < h; y++)
+        for (int x = y & 1; x < w; x += 2) check_veh_at(x, y);
+    check_veh_at(-3, -3);
+    check_veh_at(w, 0);
+    for (int v = 0; v < vehs; v++) check_veh_speed(v, v & 1);
+    for (int k = 0; k < 12 && vehs; k++) {
+        int v = (k * 37 + t) % vehs;
+        const struct veh *V = &game_vehs[v];
+        int x = V->x, y = V->y, nx = (x + 2) % w;
+        check_veh_lift(v);
+        check_veh_drop(v, x, y);
+        check_veh_promote(v);
+        check_veh_demote(v);
+        check_stack_put(v, nx, y);
+        check_stack_sort(v);
+        check_stack_sort_2(v);
+        check_stack_fix(v);
+        check_veh_clear(v, V->proto, (V->faction + k) % FACTION_COUNT);
+        check_veh_sleep(v);
+        check_veh_skip(v);
+    }
+}
+
 // veh_cost writes whether the extra was charged.
 SHADOW_DECLARE(int, veh_cost, (int a, int b, int *c))
 static int check_veh_cost(int a, int b, int *c) {
@@ -464,7 +763,7 @@ SHADOW_ENTRY(VEH, int, veh_cost, (int a, int b, int *c), (a, b, c))
 // The checks again with the settings these functions read varied: the
 // factions' PSI and MORALE bonuses, social engineering, who holds the
 // secret projects that count, some of the bases' facilities and some
-// units' designs. They are put back afterwards; nothing else
+// units' designs and damage. They are put back afterwards; nothing else
 // changes, as these functions only read.
 static const int varied_projects[] = {SP_COMMAND_NEXUS, SP_XENOEMPATHY_DOME, SP_NEURAL_AMPLIFIER,
                                       SP_MARITIME_CONTROL_CENTER, SP_PHOLUS_MUTAGEN, SP_CYBORG_FACTORY,
@@ -539,6 +838,13 @@ static void sweep_varied(void) {
         check_can_arty(V->proto, v & 1);
         check_veh_cargo(v);
         check_morale_veh(v, 0, 0);
+        uint8_t damage = V->damage;
+        V->damage = (uint8_t)((v * 7 + t) % 30);
+        check_veh_speed(v, v & 1);
+        V->damage = damage;
+        check_veh_lift(v);
+        check_veh_drop(v, V->x, V->y);
+        check_stack_sort(v);
         V->proto = proto;
     }
     for (int i = 0; i < VARIED; i++) game_secret_projects[varied_projects[i]] = held[i];
@@ -608,6 +914,7 @@ static void veh_sweep(void) {
     }
     check_morale_alien(-1, 1);
     sweep_varied();
+    sweep_stacks();
     hooks_sweeping = sweeping;
 }
 
@@ -633,6 +940,19 @@ static const struct hook veh_hooks[] = {
     HOOK(0x560b30, garrison_check, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),           // sub esp, 12
     HOOK(0x5c0db0, can_arty, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x4d, 0x08),                 // mov ecx, [ebp+8]
     HOOK(0x5b9580, stack_check, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x56, 0x8b, 0x75, 0x08),  // push ecx; push esi; mov esi, [ebp+8]
+    HOOK(0x5bfe90, veh_at, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x55, 0x0c),                   // mov edx, [ebp+12]
+    HOOK(0x5bffa0, veh_lift, PUSH_EBP_MOV_EBP_ESP, 0x56, 0x57),                       // push esi; push edi
+    HOOK(0x5c0080, veh_drop, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x8b, 0x5d, 0x0c),           // push ebx; mov ebx, [ebp+12]
+    HOOK(0x5c01a0, veh_sleep, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                // mov eax, [ebp+8]
+    HOOK(0x5c01d0, veh_demote, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x8b, 0x5d, 0x08),         // push ebx; mov ebx, [ebp+8]
+    HOOK(0x5c0260, veh_promote, PUSH_EBP_MOV_EBP_ESP, 0x56, 0x8b, 0x75, 0x08),        // push esi; mov esi, [ebp+8]
+    HOOK(0x5c02d0, veh_clear, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                // mov eax, [ebp+8]
+    HOOK(0x5b8af0, stack_put, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                // mov eax, [ebp+8]
+    HOOK(0x5b8b60, stack_sort, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53),                     // push ecx; push ebx
+    HOOK(0x5b8c90, stack_sort_2, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x45, 0x08),       // push ecx; mov eax, [ebp+8]
+    HOOK(0x5b8e10, stack_fix, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53),                      // push ecx; push ebx
+    HOOK(0x5c1540, veh_speed, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56),                      // push ebx; push esi
+    HOOK(0x5c1d20, veh_skip, PUSH_EBP_MOV_EBP_ESP, 0x56, 0x8b, 0x75, 0x08),           // push esi; mov esi, [ebp+8]
     HOOK(0x5ba910, veh_avail, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x57),                // push ebx; push esi; push edi
 };
 struct hook_module veh_module = {"veh", veh_hooks, HOOK_COUNT(veh_hooks), veh_sweep, NULL, -1};

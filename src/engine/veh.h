@@ -24,3 +24,18 @@ int garrison_check(int base);
 int veh_avail(int proto, int faction, int base);
 int can_arty(int proto, int sea);
 int stack_check(int veh, int type, int c1, int c2, int c3);
+
+// Stacks: the units on a square, as a list from its head.
+int veh_at(int x, int y);
+int veh_lift(int veh);
+int veh_drop(int veh, int x, int y);
+void veh_promote(int veh);
+void veh_demote(int veh);
+void stack_put(int veh, int x, int y);
+void stack_sort(int veh);
+void stack_sort_2(int veh);
+int stack_fix(int veh);
+void veh_clear(int veh, int proto, int faction);
+void veh_sleep(int veh);
+int veh_speed(int veh, int straight);
+void veh_skip(int veh);

@@ -688,15 +688,15 @@ struct veh {
     union {
         int16_t order_turns;  // turns left on sentry or hold, or 0 for no end
         int16_t waypoint_y0;  // the first waypoint's y, for a move
+        int16_t waypoint_y[4];
     };
-    GAME_PAD(0x1e, 0x24);
     uint8_t morale;
     uint8_t movement_turns;
     uint8_t order_auto_type;  // for a convoy, the RESOURCE_* it carries
     uint8_t visibility;  // bit per other faction that can see it
     uint8_t iter_count, unk_29, moves_spent;
     uint8_t status_icon;  // a letter or digit: 'F' fortified, '1' given a goal this turn
-    GAME_PAD(0x2c, 0x2e);
+    uint8_t unk_2c[2];
     int16_t home_base;
     int16_t next_in_stack, prev_in_stack;  // -1 at the ends
 };
@@ -756,7 +756,12 @@ extern int32_t *game_landmark_count;
 extern struct landmark *game_landmarks;       // [LANDMARK_COUNT]
 extern struct base *game_bases;               // [BASE_COUNT]
 extern int32_t *game_base_count;
-extern struct veh *game_vehs;
+extern struct veh *game_vehs;  // [VEH_COUNT]
+enum { VEH_COUNT = 2048 };
+// Where veh_lift() last took a unit from, and the unit (-1 once dropped);
+// veh_at() sets the flag once it has rebuilt the map's unit bits in a
+// network game.
+extern int32_t *game_veh_lift_x, *game_veh_lift_y, *game_veh_lifted, *game_veh_at_rebuilt;
 extern int32_t *game_veh_count;
 extern uint32_t *game_state;                  // GAME_STATE_*
 extern int32_t *game_net_multiplayer;         // non-zero in a network game

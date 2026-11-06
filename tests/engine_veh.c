@@ -11,7 +11,8 @@ enum { W = 8, H = 6 };
 static struct map_tile tiles[W / 2 * H], *tiles_ptr = tiles;
 static int32_t width = W, height = H, half_width = W / 2, base_count = 2, veh_count = 2, turn = 100;
 static int32_t expansion = 1, projects[SP_COUNT], net_mp = 0, tectonic[FACTION_COUNT];
-static uint32_t flat = 0, rules = 0;
+static uint32_t flat = 0, rules = 0, state = 0;
+static int32_t lift[6];
 static uint8_t achieved[TECH_COUNT];
 static struct base bases[2];
 static struct veh vehs[2];
@@ -50,6 +51,8 @@ int main(void) {
     game_tech = techs, game_tech_achieved = achieved, game_expansion = &expansion, game_secret_projects = projects;
     game_net_multiplayer = &net_mp, game_tectonic_detonations = tectonic;
     game_radius_x = radius_x, game_radius_y = radius_y, game_radius_near_x = near_x, game_radius_near_y = near_y;
+    game_veh_lift_x = &lift[0], game_veh_lifted = &lift[2], game_veh_lift_y = &lift[3], game_veh_at_rebuilt = &lift[5];
+    game_state = &state;
     game_is_objective = objective_stub, game_proto_cost = proto_cost_stub, game_veh_at = veh_at_stub;
     for (int i = 0; i < SP_COUNT; i++) projects[i] = -1;
     for (int i = 1; i < 9; i++) radius_x[i] = (i % 3) - 1, radius_y[i] = (i / 3 % 3) - 1;
@@ -195,6 +198,45 @@ int main(void) {
     EXPECT(can_arty(64, 1), 0);
     protos[64].abilities = 0x8000;
     EXPECT(can_arty(64, 0), 1);
+
+    // Lifting, dropping, promoting and demoting keep the list and the
+    // map's unit bits.
+    for (int i = 0; i < W / 2 * H; i++) tiles[i].bits = 0, tiles[i].owner_site = 0xf;
+    vehs[0] = (struct veh){.x = 4, .y = 2, .faction = 1, .proto = 64, .next_in_stack = -1, .prev_in_stack = -1};
+    vehs[1] = (struct veh){.x = -1, .y = -1, .faction = 1, .proto = 65, .next_in_stack = -1, .prev_in_stack = -1};
+    veh_count = 2;
+    EXPECT(veh_at(4, 2), -1);  // the map doesn't mark it yet
+    veh_lift(0);
+    veh_drop(0, 4, 2);
+    EXPECT(tiles[2 + 2 * (W / 2)].bits, MAP_UNIT | 0x100000);
+    EXPECT(tiles[2 + 2 * (W / 2)].owner_site & 0xf, 1);
+    veh_drop(1, 4, 2);  // the air unit, at the head
+    EXPECT(veh_at(4, 2), 1);
+    EXPECT(vehs[1].next_in_stack, 0);
+    EXPECT(vehs[0].prev_in_stack, 1);
+    veh_promote(0);
+    EXPECT(veh_at(4, 2), 0);
+    veh_demote(0);
+    EXPECT(veh_at(4, 2), 1);
+    EXPECT(vehs[0].prev_in_stack, 1);
+    EXPECT(veh_lift(1), 1);
+    EXPECT(lift[0], 4);
+    EXPECT(lift[2], 1);
+    EXPECT(veh_at(4, 2), 0);
+    veh_lift(0);
+    EXPECT(tiles[2 + 2 * (W / 2)].bits & MAP_UNIT, 0);
+    veh_drop(0, 4, 2);
+    veh_drop(1, 4, 2);
+    stack_put(0, 6, 2);
+    EXPECT(veh_at(6, 2) >= 0 && veh_at(4, 2) < 0, 1);
+    EXPECT(stack_check(0, 1, -1, -1, -1), 2);
+    EXPECT(stack_fix(0), 0);  // only in a network game
+    veh_clear(1, 2, 1);
+    EXPECT(vehs[1].x, -4);
+    EXPECT(vehs[1].home_base, -1);
+    EXPECT(vehs[1].morale, defs[1].rule_morale + 1);
+    veh_sleep(0);
+    EXPECT(vehs[0].order, 1);
 
     if (failures) return 1;
     printf("engine_veh: all tests passed\n");

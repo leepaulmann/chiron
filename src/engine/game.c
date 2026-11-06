@@ -191,6 +191,7 @@ void (*game_draw_map)(int unk);
 void (*game_draw_tile)(int x, int y, int unk);
 void (*game_do_checksums)(int stage);
 void (*game_log_say)(char *text, int a, int b, int c);
+int32_t *game_veh_lift_x, *game_veh_lift_y, *game_veh_lifted, *game_veh_at_rebuilt;
 void (*game_reset_territory)(void);
 int (*game_world_site)(int x, int y, int unk);
 void (*game_add_site)(int faction, int type, int priority, int x, int y);
@@ -533,6 +534,10 @@ void game_bind(struct pe_image *exe) {
     game_draw_tile = (void *)code_at(exe, 0x46af40);
     game_do_checksums = (void *)code_at(exe, 0x51e760);
     game_log_say = (void *)code_at(exe, 0x6262f0);
+    game_veh_lift_x = (int32_t *)code_at(exe, 0x9b2278);
+    game_veh_lifted = (int32_t *)code_at(exe, 0x9b2280);
+    game_veh_lift_y = (int32_t *)code_at(exe, 0x9b2284);
+    game_veh_at_rebuilt = (int32_t *)code_at(exe, 0x9b228c);
     game_reset_territory = (void *)code_at(exe, 0x523dd0);
     game_world_site = (void *)code_at(exe, 0x5c4fd0);
     game_add_site = (void *)code_at(exe, 0x579b70);
