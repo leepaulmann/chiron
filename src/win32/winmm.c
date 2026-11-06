@@ -63,14 +63,19 @@ static void *mmtimer_thread(void *arg) {
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
         // A callback is game code, which marks its timer object as fired:
         // while a shadow check holds the game's clock, it waits, as
-        // SetTimer's timers do.
-        while (t->kind == 0 && !t->stop && kernel32_ticks_held_anywhere()) {
+        // SetTimer's timers do (and a check waits for one already running).
+        int entered = 0;
+        while (t->kind == 0 && !t->stop && !(entered = kernel32_timer_enter())) {
             struct timespec ms = {0, 1000000L};
             nanosleep(&ms, NULL);
         }
-        if (t->stop) break;
+        if (t->stop) {
+            if (entered) kernel32_timer_leave();
+            break;
+        }
         if (t->kind == 0) {
             ((TIMECALLBACK)t->target)(t->id, 0, t->user, 0, 0);
+            kernel32_timer_leave();
         } else {
             SetEvent(t->target);
             if (t->kind == 2) ResetEvent(t->target);

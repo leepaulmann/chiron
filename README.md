@@ -139,6 +139,8 @@ module at a time. So far:
   nothing left put out of the game, and the autosave;
 - social engineering: the effects of a faction's choices, with its
   projects, temples and faction rules, and their taking effect each turn;
+  which models a faction may choose and what a change costs; and the AI's
+  choice of models, with the advice the social engineering screen gives;
 - factions: what it costs to take a base over by mind control, and to
   corner the energy market.
 

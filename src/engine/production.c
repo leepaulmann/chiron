@@ -27,7 +27,7 @@ static inline int is_alien(int faction) { return (game_faction_defs[faction].rul
 #define ID (*game_current_base_id)
 
 enum {
-    PLAN_COLONY = 8, PLAN_ARTIFACT = 12,
+    PLAN_ARTIFACT = 12,
     PROTO_MIND_WORMS = 8, PROTO_SEALURK = 14, PROTO_SPORE_LAUNCHER = 15,
     WEAPON_PROBE = 21, FAC_COVERT_OPS = 34, FAC_SUBSPACE_GENERATOR = 40, FAC_BIOENHANCEMENT = 30,
     FAC_PRESERVE = 31, FAC_TEMPLE = 32,

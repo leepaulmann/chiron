@@ -14,6 +14,10 @@ void kernel32_hold_ticks(int hold);
 int kernel32_ticks_held(void);
 // Whether any thread holds its clock.
 int kernel32_ticks_held_anywhere(void);
+// A multimedia timer callback may run (1, and kernel32_timer_leave() after
+// it) only while no thread holds its clock.
+int kernel32_timer_enter(void);
+void kernel32_timer_leave(void);
 
 // WIN32_FIND_DATAA.
 struct win32_find_data {

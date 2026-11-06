@@ -492,13 +492,29 @@ static DWORD ticks_now(void) {
 
 DWORD WINAPI GetTickCount(void) { return ticks_held ? ticks_held_at : ticks_now(); }
 
-// Threads holding their clock, for timer threads to wait on.
-static volatile int ticks_holders;
+// Threads holding their clock, for timer threads to wait on, and timer
+// callbacks running. A hold starts only once no callback is running, and a
+// callback runs only while nothing is held: each side counts itself in
+// before looking at the other, so at least one of them sees the other.
+static volatile int ticks_holders, timer_callbacks;
 
 void kernel32_hold_ticks(int hold) {
-    if (hold && !ticks_held++) ticks_held_at = ticks_now(), __atomic_add_fetch(&ticks_holders, 1, __ATOMIC_SEQ_CST);
+    if (hold && !ticks_held++) {
+        __atomic_add_fetch(&ticks_holders, 1, __ATOMIC_SEQ_CST);
+        while (__atomic_load_n(&timer_callbacks, __ATOMIC_SEQ_CST) > 0) sched_yield();
+        ticks_held_at = ticks_now();
+    }
     if (!hold && ticks_held && !--ticks_held) __atomic_sub_fetch(&ticks_holders, 1, __ATOMIC_SEQ_CST);
 }
+
+int kernel32_timer_enter(void) {
+    __atomic_add_fetch(&timer_callbacks, 1, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&ticks_holders, __ATOMIC_SEQ_CST) == 0) return 1;
+    __atomic_sub_fetch(&timer_callbacks, 1, __ATOMIC_SEQ_CST);
+    return 0;
+}
+
+void kernel32_timer_leave(void) { __atomic_sub_fetch(&timer_callbacks, 1, __ATOMIC_SEQ_CST); }
 
 int kernel32_ticks_held(void) { return ticks_held > 0; }
 int kernel32_ticks_held_anywhere(void) { return __atomic_load_n(&ticks_holders, __ATOMIC_SEQ_CST) > 0; }

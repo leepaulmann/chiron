@@ -67,7 +67,7 @@ enum { FUNGUS_NUTRIENT, FUNGUS_MINERALS, FUNGUS_ENERGY, FUNGUS_UNUSED, FUNGUS_CO
 
 enum {  // region_base_plan values that tech_val() looks at
     PLAN_OFFENSIVE = 0, PLAN_COMBAT = 1, PLAN_DEFENSIVE = 2, PLAN_RECON = 3, PLAN_AIR_SUPERIORITY = 4,
-    PLAN_PLANET_BUSTER = 5, PLAN_NAVAL_TRANSPORT = 7, PLAN_SUPPLY = 10,
+    PLAN_PLANET_BUSTER = 5, PLAN_NAVAL_TRANSPORT = 7, PLAN_COLONY = 8, PLAN_SUPPLY = 10,
 };
 
 enum { REGION_COUNT = 128, LAND_REGION_COUNT = 64 };
@@ -127,23 +127,32 @@ struct faction_data {
     // added up for the AI.
     int32_t social_psych[8][9];
     int32_t social_effic[9];  // energy lost this turn at each EFFICIENCY from 4 down, for the AI
-    int32_t unk_7f4;
+    int32_t unk_7f4;  // social_ai's starting weight for a high ECONOMY
     int32_t armed_units;  // armed units, offensive ones twice, added up over the turn
     int32_t eco_damage_total;  // ecological damage over the game, weighed by PLANET
     int32_t nutrient_surplus_total, labs_total;
     int32_t satellites[4];  // orbital nutrient, mineral and energy satellites, and defense pods
     int32_t best_weapon_value;
-    GAME_PAD(0x81c, 0x82c);
+    int32_t best_psi_offense;  // land units' psi attack
+    GAME_PAD(0x820, 0x82c);
     int32_t enemy_best_weapon_value;
     GAME_PAD(0x830, 0x858);
     uint8_t units_active[512], units_queue[512];  // per prototype (PROTO_COUNT): its units, and those being built
-    GAME_PAD(0xc58, 0x105c);
+    GAME_PAD(0xc58, 0x1058);
+    int32_t total_combat_units;
     int32_t base_count;
-    GAME_PAD(0x1060, 0x1070);
+    GAME_PAD(0x1060, 0x1068);
+    int32_t pop_total;
+    int32_t unk_106c;
     int32_t planet_busters;
-    GAME_PAD(0x1074, 0x117c);
+    GAME_PAD(0x1074, 0x107c);
+    // The AI's planning for each region (the map's land and sea areas),
+    // updated by enemy_strategy.
+    uint16_t region_total_combat_units[REGION_COUNT];
     uint8_t region_total_bases[REGION_COUNT];
-    GAME_PAD(0x11fc, 0x157c);
+    GAME_PAD(0x11fc, 0x137c);
+    uint16_t region_flags[REGION_COUNT];  // movement planning
+    GAME_PAD(0x147c, 0x157c);
     uint16_t region_visible_tiles[REGION_COUNT];
     GAME_PAD(0x167c, 0x197c);
     uint8_t region_base_plan[REGION_COUNT];  // PLAN_* for the AI
@@ -192,6 +201,13 @@ GAME_AT(struct faction_data, corner_market_cost, 0x2080);
 GAME_AT(struct faction_data, units_active, 0x858);
 GAME_AT(struct faction_data, units_queue, 0xa58);
 GAME_AT(struct faction_data, best_weapon_value, 0x818);
+GAME_AT(struct faction_data, best_psi_offense, 0x81c);
+GAME_AT(struct faction_data, unk_7f4, 0x7f4);
+GAME_AT(struct faction_data, total_combat_units, 0x1058);
+GAME_AT(struct faction_data, pop_total, 0x1068);
+GAME_AT(struct faction_data, planet_busters, 0x1070);
+GAME_AT(struct faction_data, region_total_combat_units, 0x107c);
+GAME_AT(struct faction_data, region_flags, 0x137c);
 
 enum {  // faction_def bonus ids
     BONUS_FUNGUS_NUTRIENT = 7, BONUS_FUNGUS_MINERALS = 8, BONUS_FUNGUS_ENERGY = 9,
@@ -223,7 +239,13 @@ struct faction_def {
     int32_t rule_population, rule_hurry, rule_techcost, rule_psi, rule_sharetech, rule_commerce, rule_flags;
     int32_t bonus_count;
     int32_t bonus_id[8], bonus_val1[8], bonus_val2[8];
-    GAME_PAD(0x570, 0x59c);
+    GAME_PAD(0x570, 0x584);
+    // Its leader's social preferences: a model it favours (category and
+    // model, or -1), one it will never choose, and an effect it favours
+    // (SE_*, or -1).
+    int32_t ideology_category, anti_ideology_category, ideology_model, anti_ideology_model;
+    int32_t ideology_effect;
+    GAME_PAD(0x598, 0x59c);
 };
 _Static_assert(sizeof(struct faction_def) == 0x59c, "faction_def size");
 GAME_AT(struct faction_def, noun, 0x2e4);
@@ -236,6 +258,9 @@ GAME_AT(struct faction_def, leader_title, 0x4c);
 GAME_AT(struct faction_def, rule_research, 0x4dc);
 GAME_AT(struct faction_def, bonus_count, 0x50c);
 GAME_AT(struct faction_def, bonus_val1, 0x530);
+GAME_AT(struct faction_def, rule_population, 0x4f0);
+GAME_AT(struct faction_def, ideology_category, 0x584);
+GAME_AT(struct faction_def, ideology_effect, 0x594);
 
 // ---- Units and the rules tables ---------------------------------------------
 
@@ -333,7 +358,7 @@ enum { FACTION_FLAG_MAP_REVEALED = 0x200, FACTION_FLAG_MAINT_HALF = 0x20, FACTIO
 
 enum { TREATY_UNK_8000000 = 0x8000000 };  // with TREATY_COMMLINK, whose_territory() names the owner
 
-enum { GAME_STATE_DONE = 0x1, GAME_STATE_FINAL_SCORE_DONE = 0x8, GAME_STATE_OMNISCIENT = 0x80, GAME_STATE_VOLCANO = 0x20000, GAME_STATE_PERIHELION = 0x100000 };  // game_state bits
+enum { GAME_STATE_DONE = 0x1, GAME_STATE_FINAL_SCORE_DONE = 0x8, GAME_STATE_OMNISCIENT = 0x80, GAME_STATE_RANKED = 0x200 /* set by rankings() late in the game */, GAME_STATE_VOLCANO = 0x20000, GAME_STATE_PERIHELION = 0x100000 };  // game_state bits
 enum { FACTION_FLAG_BASE_SUBMERGED = 0x80000 };  // faction_data.flags
 
 // ---- The map -------------------------------------------------------------------
@@ -782,7 +807,7 @@ extern int (*game_at_goal)(int faction, int type, int x, int y);
 extern int (*game_planet_buster2)(int proto);
 extern int (*game_at_climax)(int faction);
 extern int32_t *game_sunspot_duration;
-extern int32_t *game_ranked_faction;  // a faction base_hurry() looks at the ranking of
+extern int32_t *game_ranked_faction;  // [2]: factions base_hurry() and social_ai() compare themselves with
 // For base_production().
 extern void (*game_base_reset)(int base, int unk);       // the AI (or governor) picks what to build next
 extern int (*game_ascending)(int faction);                 // may it build the Ascent to Transcendence
@@ -886,6 +911,15 @@ extern void (*game_social_select)(int faction);
 // first model's effects.
 enum { SOCIAL_CATEGORIES = 4, SOCIAL_MODELS = 4, SOCIAL_CATEGORY_SIZE = 0xd4, SOCIAL_MODEL_SIZE = 0x2c };
 extern uint8_t *game_social_effects;
+// Each model's prerequisite tech, at [category * SOCIAL_PREQ_STRIDE + model].
+enum { SOCIAL_PREQ_STRIDE = SOCIAL_CATEGORY_SIZE / 4 };
+extern int32_t *game_social_preqs;
+// For social_ai(): whether a faction is close to a diplomatic victory
+// (the faction, or 0), its social choice put into effect, and the AI
+// redesigning its units.
+extern int (*game_aah_ooga)(int faction, int pact_faction);
+extern void (*game_social_set)(int faction);
+extern void (*game_consider_designs)(int faction);
 // Repairs: whether a unit carries others, and whether a base breeds native
 // life for its faction.
 extern int (*game_veh_cargo)(int veh);
