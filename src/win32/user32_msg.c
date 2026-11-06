@@ -591,9 +591,16 @@ int user32_on_sdl_thread(void) { return current_tid() == sdl_tid; }
 
 static __thread int idle_peeks;
 
+// While a shadow check holds the clock, the game thread is shown an empty
+// queue and messages wait until the check is over. The queue isn't part of
+// the state a check puts back, and the game has a pump of its own besides
+// the one quiet.c idles (0x5fd370, which takes and dispatches only its timer
+// objects' 0x401 messages, each clearing its object's flag): a message it
+// took in the original's run would be gone for Chiron's.
 BOOL WINAPI PeekMessageA(MSG *m, HWND hwnd, UINT lo, UINT hi, UINT flags) {
     if (current_tid() == sdl_tid) {
         sdl_host_init();
+        if (kernel32_ticks_held()) return FALSE;
         pump_sdl(0);
         maybe_present(0);
     }
