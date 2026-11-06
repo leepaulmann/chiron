@@ -12,10 +12,11 @@ static struct map_tile tiles[W / 2 * H], *tiles_ptr = tiles;
 static int32_t width = W, height = H, half_width = W / 2, base_count = 2, veh_count = 2, turn = 100;
 static int32_t expansion = 1, projects[SP_COUNT], net_mp = 0, tectonic[FACTION_COUNT];
 static uint32_t flat = 0, rules = 0, state = 0;
-static int32_t lift[6];
+static int32_t lift[6], current_faction = 1;
+static int contribution_stub(int veh, int t) { return 2; }
 static uint8_t achieved[TECH_COUNT];
 static struct base bases[2];
-static struct veh vehs[2];
+static struct veh vehs[VEH_COUNT + 1];
 static struct faction_data factions[FACTION_COUNT];
 static struct faction_def defs[FACTION_COUNT];
 static struct unit_proto protos[PROTO_COUNT];
@@ -51,8 +52,8 @@ int main(void) {
     game_tech = techs, game_tech_achieved = achieved, game_expansion = &expansion, game_secret_projects = projects;
     game_net_multiplayer = &net_mp, game_tectonic_detonations = tectonic;
     game_radius_x = radius_x, game_radius_y = radius_y, game_radius_near_x = near_x, game_radius_near_y = near_y;
-    game_veh_lift_x = &lift[0], game_veh_lifted = &lift[2], game_veh_lift_y = &lift[3], game_veh_at_rebuilt = &lift[5];
-    game_state = &state;
+    game_veh_lift_x = &lift[0], game_veh_find_dist = &lift[1], game_veh_lifted = &lift[2], game_veh_lift_y = &lift[3], game_veh_at_rebuilt = &lift[5];
+    game_state = &state, game_current_faction = &current_faction, game_contribution = contribution_stub;
     game_is_objective = objective_stub, game_proto_cost = proto_cost_stub, game_veh_at = veh_at_stub;
     for (int i = 0; i < SP_COUNT; i++) projects[i] = -1;
     for (int i = 1; i < 9; i++) radius_x[i] = (i % 3) - 1, radius_y[i] = (i / 3 % 3) - 1;
@@ -237,6 +238,53 @@ int main(void) {
     EXPECT(vehs[1].morale, defs[1].rule_morale + 1);
     veh_sleep(0);
     EXPECT(vehs[0].order, 1);
+
+    // Strengths in combat: psi odds against psi armor, eight times a
+    // weapon against a unit, half again for a missile.
+    vehs[0] = (struct veh){.x = 2, .y = 2, .faction = 1, .proto = 64, .next_in_stack = -1, .prev_in_stack = -1};
+    vehs[1] = (struct veh){.x = 4, .y = 2, .faction = 2, .proto = 65, .next_in_stack = -1, .prev_in_stack = -1};
+    EXPECT(offense_proto(64, -1, 0), 4);
+    EXPECT(offense_proto(64, 0, 0), 32);
+    EXPECT(offense_proto(64, 1, 0), 3 * 8);   // psi armor: the air psi ratio
+    EXPECT(offense_proto(64, 1, 1), 32);      // bombarding: no psi
+    chassis[0].missile = 1;
+    EXPECT(offense_proto(64, 0, 0), 48);
+    chassis[0].missile = 0;
+    EXPECT(armor_proto(64, -1, 0), 3);
+    EXPECT(armor_proto(64, 0, 0), 24);
+    EXPECT(armor_proto(64, 1, 0), 2 * 8);     // a psi attacker: odds for its own (land) triad
+    rules_basic.psi_combat_ratio_def[2] = 5;
+    EXPECT(armor_proto(65, 0, 0), 5 * 8);
+    EXPECT(prototype_factor(64), 50);
+    EXPECT(prototype_factor(65), 150);
+
+    // The nearest unit, and its distance.
+    EXPECT(veh_find(4, 2, -1, -1), 1);
+    EXPECT(lift[1], 0);
+    EXPECT(veh_find(4, 2, 1, -1), 0);
+    EXPECT(lift[1], 1);  // x two apart on a row is one square
+    EXPECT(veh_find(4, 2, 3, -1), -1);
+    EXPECT(lift[1], 9999);
+
+    // Readiness for the player's faction.
+    vehs[0].iter_count = 0;
+    EXPECT(veh_selectable(0), 1);
+    EXPECT(veh_selectable(1), 0);  // another faction's
+    EXPECT(veh_ready(0), 1);
+    vehs[0].order = 2;
+    EXPECT(veh_ready(0), 0);
+    EXPECT(veh_unmoved(0), 1);
+    vehs[0].iter_count = 3;
+    EXPECT(veh_unmoved(0), 0);
+    vehs[0].order = 5, vehs[0].movement_turns = 3;  // terraforming
+    EXPECT(veh_unmoved(0), 1);
+    EXPECT(veh_wake(0), 0);
+    EXPECT(vehs[0].order, 0);
+    EXPECT(vehs[0].iter_count, 0);  // its 3 moves, less one square
+    EXPECT(vehs[0].movement_turns, 1);
+    EXPECT(veh_jail(0), 0);
+    EXPECT(veh_fake(64, 1), VEH_COUNT);
+    EXPECT(vehs[VEH_COUNT].proto, 64);
 
     if (failures) return 1;
     printf("engine_veh: all tests passed\n");

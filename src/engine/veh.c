@@ -32,7 +32,8 @@ enum {  // unit_proto.abilities
 enum {
     BSC_LOCUSTS_OF_CHIRON = 10, BSC_SEALURK = 14, BSC_SPORE_LAUNCHER = 15, BSC_FUNGAL_TOWER = 19,
     BSC_UNITY_MINING_LASER = 20, BASIC_PROTOS = 64,
-    WEAPON_PROBE = 11, WEAPON_TECTONIC = 21, WMODE_TRANSPORT = 7,
+    WEAPON_PROBE = 11, WEAPON_TECTONIC = 21, WMODE_TRANSPORT = 7, WMODE_PROBE = 11,
+    MAP_AIRBASE = 0x40000, VEH_STATE_UNK_4000000 = 0x4000000,
     PLAN_PROBE = 11, PLAN_ARTIFACT = 12, BONUS_FREE_ABILITY = 15, TECH_FLAG_PROBE = 0x2,
     RULE_FLAG_FREE_PROTO = 0x200, RULE_FLAG_MORALE = 0x8000,
     RULES_NO_COLONY_PODS = 0x400000, MAP_UNK_40000000_ = 0x40000000, FACTION_FLAG_UNK_40000000 = 0x40000000,
@@ -299,10 +300,7 @@ int veh_cost(int proto, int base, int *prototype) {
         if (prototype) *prototype = 0;
         return cost;
     }
-    int f = proto / BASIC_PROTOS, extra;
-    if ((game_faction_defs[f].rule_flags & RULE_FLAG_FREE_PROTO) || game_factions[f].diff_level <= 1) extra = 0;
-    else extra = game_rules_basic->extra_cost_prototype[triad(proto) == TRIAD_SEA ? 1 : triad(proto) == TRIAD_AIR ? 2 : 0];
-    int p = (base_cost(proto) * extra + 50) / 100;
+    int p = (base_cost(proto) * prototype_factor(proto) + 50) / 100;
     if (base >= 0 && built(base, FAC_SKUNKWORKS)) p = 0;
     if (prototype) *prototype = p != 0;
     return cost + p;
@@ -642,6 +640,157 @@ int veh_speed(int veh, int straight) {
 // Uses up a unit's moves for the turn.
 void veh_skip(int veh) { game_vehs[veh].iter_count = (uint8_t)veh_speed(veh, 0); }
 
+// Combat strengths of a design's weapon and armor, against (or from) a
+// unit if one is given, when they are multiplied by 8: probe against probe
+// is 16; psi combat, a psi weapon or armor on either side (unless
+// bombarding) or a spore launcher, uses the rules' psi odds, for the
+// defender's triad; a missile's weapon counts half again. The other unit is
+// read for the spore launcher test even when there is none.
+int offense_proto(int proto, int veh_def, int bombard) {
+    const struct unit_proto *P = proto_of(proto);
+    const struct rules_weapon *W = &game_weapons[P->weapon];
+    int c = veh_def;
+    if (W->mode == WMODE_PROBE && c >= 0 && proto_of(game_vehs[c].proto)->plan == PLAN_PROBE) return 16;
+    int psi = 0;
+    if (!bombard && (W->offense < 0 || (c >= 0 && game_armor[proto_of(game_vehs[c].proto)->armor].defense < 0))) psi = 1;
+    if (!psi && (game_vehs[c].proto == BSC_SPORE_LAUNCHER || proto == BSC_SPORE_LAUNCHER)) psi = 1;
+    if (psi) {
+        if (c < 0) return game_rules_basic->psi_combat_ratio_atk[0];
+        return game_rules_basic->psi_combat_ratio_atk[triad(game_vehs[c].proto)] * 8;
+    }
+    int v = W->offense < 0 ? -W->offense : W->offense;
+    if (game_chassis[P->chassis].missile && W->offense < 99) v = v * 3 / 2;
+    return c >= 0 ? v * 8 : v;
+}
+
+int armor_proto(int proto, int veh_att, int bombard) {
+    const struct unit_proto *P = proto_of(proto);
+    int c = veh_att;
+    if (game_weapons[P->weapon].mode == WMODE_PROBE && c >= 0 && proto_of(game_vehs[c].proto)->plan == PLAN_PROBE) return 16;
+    int psi = 0;
+    if (!bombard || game_vehs[c].proto == BSC_SPORE_LAUNCHER || proto == BSC_SPORE_LAUNCHER)
+        psi = game_armor[P->armor].defense < 0
+              || (c >= 0 && game_weapons[proto_of(game_vehs[c].proto)->weapon].offense < 0);
+    if (psi) {  // by its own triad, where offense_proto() takes the other unit's
+        if (c < 0) return game_rules_basic->psi_combat_ratio_def[0];
+        return game_rules_basic->psi_combat_ratio_def[triad(proto)] * 8;
+    }
+    int v = game_armor[P->armor].defense;
+    v = v < 1 ? 1 : v > 9999 ? 9999 : v;
+    return c >= 0 ? v * 8 : v;
+}
+
+// The extra percent a new design's first unit costs, by triad: none for a
+// faction that builds prototypes free or plays at the two lowest levels.
+int prototype_factor(int proto) {
+    int f = proto / BASIC_PROTOS;
+    if ((game_faction_defs[f].rule_flags & RULE_FLAG_FREE_PROTO) || game_factions[f].diff_level <= 1) return 0;
+    switch (triad(proto)) {
+    case TRIAD_SEA: return game_rules_basic->extra_cost_prototype[1];
+    case TRIAD_AIR: return game_rules_basic->extra_cost_prototype[2];
+    default: return game_rules_basic->extra_cost_prototype[0];
+    }
+}
+
+// The nearest unit (of a faction, unless negative) other than `skip`, by
+// the game's map distance, the last of equals; its distance goes to
+// game_veh_find_dist.
+int veh_find(int x, int y, int faction, int skip) {
+    int best = 9999, found = -1;
+    *game_veh_find_dist = 9999;
+    for (int i = 0; i < *game_veh_count; i++) {
+        const struct veh *V = &game_vehs[i];
+        if ((faction >= 0 && V->faction != faction) || i == skip) continue;
+        int dx = x - V->x;
+        dx = dx < 0 ? -dx : dx;
+        if (!(*game_map_flat & 1) && dx > *game_map_half_width) dx = *game_map_width - dx;
+        int dy = y - V->y;
+        dy = dy < 0 ? -dy : dy;
+        dx = dx < 0 ? -dx : dx;  // again, as the original does
+        int big = dx > dy ? dx : dy, small = dx < dy ? dx : dy;
+        int d = big - ((((dx + dy) >> 1) - small + 1) >> 1);
+        if (d <= best) best = d, found = i;
+    }
+    if (found >= 0) *game_veh_find_dist = best;
+    return found;
+}
+
+// A land unit on sentry aboard an air transport, away from a base of its
+// own faction (or any but native life's) and from an airbase: it can't
+// leave.
+int veh_jail(int veh) {
+    const struct veh *V = &game_vehs[veh];
+    if (triad(V->proto) != TRIAD_LAND || V->order != ORDER_SENTRY) return 0;
+    int t = V->waypoint_x[0];
+    if (t < 0 || triad(game_vehs[t].proto) != TRIAD_AIR) return 0;
+    const struct map_tile *T = &(*game_map)[(V->x >> 1) + V->y * *game_map_half_width];
+    if (T->bits & MAP_BASE) {
+        int owner = T->owner_site & 0xf;
+        if (owner < 8 && owner > 0) return 0;
+    }
+    return !(T->bits & MAP_AIRBASE);
+}
+
+// The player's unit on the map, not held back (flags 0x40 with 0x400) or
+// jailed.
+static int playable(int veh) {
+    const struct veh *V = &game_vehs[veh];
+    if (!on_map_(V->x, V->y) || V->faction != *game_current_faction) return 0;
+    if ((V->flags & 0x40) && (V->flags & 0x400)) return 0;
+    return !veh_jail(veh);
+}
+
+int veh_selectable(int veh) { return veh >= 0 && playable(veh); }
+
+static int moves_left(int veh) {
+    int r = veh_speed(veh, 0) - game_vehs[veh].iter_count;
+    return r > 0;
+}
+
+// The player's unit with moves left, or on a terraforming order.
+int veh_unmoved(int veh) {
+    if (veh < 0 || !playable(veh)) return 0;
+    const struct veh *V = &game_vehs[veh];
+    if (!(V->state & VEH_STATE_UNK_4000000) && (int8_t)V->order >= 4 && (int8_t)V->order < 24) return 1;
+    return moves_left(veh);
+}
+
+// The player's unit waiting for orders: moves left and not on sentry,
+// hold or fortified (unless its state says otherwise).
+int veh_ready(int veh) {
+    if (veh < 0 || !playable(veh)) return 0;
+    const struct veh *V = &game_vehs[veh];
+    if (!(V->state & 0x4200) && (V->order == 1 || V->order == 2 || V->order == 3)) return 0;
+    return moves_left(veh);
+}
+
+// The spare unit slot past the table, cleared for a design: for working
+// out what a unit would do.
+int veh_fake(int proto, int faction) {
+    veh_clear(VEH_COUNT, proto, faction);
+    return VEH_COUNT;
+}
+
+// Ends a unit's order. A former stopped mid-terraforming loses a move
+// and the turns its work already counted for; an automated convoy
+// (state 0x200, type 11) loses its moves unless state 4 says otherwise.
+int veh_wake(int veh) {
+    struct veh *V = &game_vehs[veh];
+    int8_t order = (int8_t)V->order;
+    if (order >= 4 && order < 24 && !(V->state & VEH_STATE_UNK_4000000)) {
+        V->iter_count = (uint8_t)(veh_speed(veh, 0) - game_rules_basic->move_rate_roads);
+        int turns = V->movement_turns;
+        if (turns) {
+            turns -= game_contribution(veh, order - 4);
+            V->movement_turns = (uint8_t)(turns < 0 ? 0 : turns);
+        }
+    }
+    if ((V->state & 0x200) && V->order_auto_type == 11 && !(V->state & 4)) V->iter_count = 0;
+    V->order = 0;
+    V->state &= 0xf4ffbdffu;
+    return veh;
+}
+
 extern struct hook_module veh_module;
 #define VEH (&veh_module)
 
@@ -668,7 +817,7 @@ SHADOW5(VEH, int, stack_check, int, int, int, int, int)
 
 // The stack functions write units, the map and the lifted unit's globals.
 static void writes_stacks(struct hook_writes *w) {
-    hooks_writes_add(w, game_vehs, VEH_COUNT * sizeof(struct veh));
+    hooks_writes_add(w, game_vehs, (VEH_COUNT + 1) * sizeof(struct veh));
     hooks_writes_add(w, game_veh_lift_x, 0x18);  // to game_veh_at_rebuilt
     hooks_writes_add(w, *game_map, (size_t)*game_map_half_width * *game_map_height * sizeof(struct map_tile));
 }
@@ -696,10 +845,35 @@ static int shadow_stack_fix(int a) {
     if (got != want) hooks_mismatch(&stats_stack_fix, "(%d) = %d, original %d", a, got, want);
     return want;
 }
-SHADOW_WRITER(VEH, void, veh_clear, (int a, int b, int c), (a, b, c), WRITES_STACKS, "%d, %d, %d", a, b, c)
+// veh_init() calls veh_clear() for a slot that still holds a dead unit's
+// stack links, so it never starts the sweep, which would walk them.
+SHADOW_WRITER_CHECK(void, veh_clear, (int a, int b, int c), (a, b, c), orig_veh_clear(a, b, c), WRITES_STACKS, "%d, %d, %d",
+                    a, b, c)
+static void shadow_veh_clear(int a, int b, int c) {
+    if (hooks_nested) {
+        orig_veh_clear(a, b, c);
+        return;
+    }
+    if (shadow_bypass()) {
+        veh_clear(a, b, c);
+        return;
+    }
+    stats_veh_clear.calls++;
+    check_veh_clear(a, b, c);
+}
 SHADOW_WRITER(VEH, void, veh_sleep, (int a), (a), WRITES_STACKS, "%d", a)
 SHADOW_WRITER(VEH, void, veh_skip, (int a), (a), WRITES_STACKS, "%d", a)
 SHADOW2(VEH, int, veh_speed, int, int)
+SHADOW3(VEH, int, offense_proto, int, int, int)
+SHADOW3(VEH, int, armor_proto, int, int, int)
+SHADOW1(VEH, int, prototype_factor, int)
+SHADOW1(VEH, int, veh_jail, int)
+SHADOW1(VEH, int, veh_selectable, int)
+SHADOW1(VEH, int, veh_unmoved, int)
+SHADOW1(VEH, int, veh_ready, int)
+SHADOW_WRITER(VEH, int, veh_find, (int a, int b, int c, int d), (a, b, c, d), WRITES(game_veh_find_dist, 4), "%d, %d, %d, %d", a, b, c, d)
+SHADOW_WRITER(VEH, int, veh_fake, (int a, int b), (a, b), WRITES(&game_vehs[VEH_COUNT], sizeof(struct veh)), "%d, %d", a, b)
+SHADOW_WRITER(VEH, int, veh_wake, (int a), (a), WRITES(&game_vehs[a], sizeof(struct veh)), "%d", a)
 
 // veh_at() is called constantly, so it's checked as a query; a square the
 // map marks with units but where the original found none (it then logs
@@ -716,6 +890,21 @@ static int check_veh_at(int x, int y) {
 }
 SHADOW_ENTRY(VEH, int, veh_at, (int a, int b), (a, b))
 
+// Whether a unit's stack is a proper list both ways, without loops: the
+// stack functions would walk forever otherwise.
+static int stack_sound(int veh) {
+    int n = *game_veh_count, steps = 0;
+    for (int v = veh; game_vehs[v].prev_in_stack >= 0; v = game_vehs[v].prev_in_stack) {
+        int p = game_vehs[v].prev_in_stack;
+        if (p >= n || game_vehs[p].next_in_stack != v || ++steps > n) return 0;
+    }
+    for (int v = veh; game_vehs[v].next_in_stack >= 0; v = game_vehs[v].next_in_stack) {
+        int q = game_vehs[v].next_in_stack;
+        if (q >= n || game_vehs[q].prev_in_stack != v || ++steps > 2 * n) return 0;
+    }
+    return 1;
+}
+
 // Stacks moved, sorted and cleared for a few units each turn, and every
 // square's head. stack_fix() is checked only as games other than network
 // ones use it: made to act, the original promoted unit after unit until
@@ -726,9 +915,30 @@ static void sweep_stacks(void) {
         for (int x = y & 1; x < w; x += 2) check_veh_at(x, y);
     check_veh_at(-3, -3);
     check_veh_at(w, 0);
-    for (int v = 0; v < vehs; v++) check_veh_speed(v, v & 1);
+    for (int v = 0; v < vehs; v++) {
+        const struct veh *V = &game_vehs[v];
+        check_veh_speed(v, v & 1);
+        check_veh_jail(v);
+        check_veh_selectable(v);
+        check_veh_unmoved(v);
+        check_veh_ready(v);
+        int other = (v * 7 + t) % vehs;
+        for (int b = 0; b < 2; b++) {
+            check_offense_proto(V->proto, other, b);
+            check_armor_proto(V->proto, other, b);
+        }
+        check_offense_proto(V->proto, -1, v & 1);
+        check_armor_proto(V->proto, -1, v & 1);
+    }
+    for (int p = 0; p < PROTO_COUNT; p++)
+        if (game_protos[p].flags & PROTO_FLAG_ACTIVE) check_prototype_factor(p);
+    for (int k = 0; k < 16; k++) {
+        int x = (k * 13 + t) % w, y = (k * 7 + t) % h;
+        check_veh_find(x, y, k % 9 - 1, k * 5 % (vehs + 1) - 1);
+    }
     for (int k = 0; k < 12 && vehs; k++) {
         int v = (k * 37 + t) % vehs;
+        if (!stack_sound(v)) continue;
         const struct veh *V = &game_vehs[v];
         int x = V->x, y = V->y, nx = (x + 2) % w;
         check_veh_lift(v);
@@ -742,6 +952,8 @@ static void sweep_stacks(void) {
         check_veh_clear(v, V->proto, (V->faction + k) % FACTION_COUNT);
         check_veh_sleep(v);
         check_veh_skip(v);
+        check_veh_wake(v);
+        check_veh_fake(V->proto, V->faction);
     }
 }
 
@@ -762,8 +974,8 @@ SHADOW_ENTRY(VEH, int, veh_cost, (int a, int b, int *c), (a, b, c))
 
 // The checks again with the settings these functions read varied: the
 // factions' PSI and MORALE bonuses, social engineering, who holds the
-// secret projects that count, some of the bases' facilities and some
-// units' designs and damage. They are put back afterwards; nothing else
+// secret projects that count, some of the bases' facilities, and some
+// units' designs, damage, owner and orders, and their chassis as a missile. They are put back afterwards; nothing else
 // changes, as these functions only read.
 static const int varied_projects[] = {SP_COMMAND_NEXUS, SP_XENOEMPATHY_DOME, SP_NEURAL_AMPLIFIER,
                                       SP_MARITIME_CONTROL_CENTER, SP_PHOLUS_MUTAGEN, SP_CYBORG_FACTORY,
@@ -830,6 +1042,7 @@ static void sweep_varied(void) {
     for (int p = 0; p < PROTO_COUNT; p++)
         if (game_protos[p].flags & PROTO_FLAG_ACTIVE) designs[count++] = p;
     for (int v = 0; v < *game_veh_count && v < 24 && count; v++) {
+        if (!stack_sound(v)) continue;
         struct veh *V = &game_vehs[v];
         int16_t proto = V->proto;
         V->proto = (int16_t)designs[(v * 13 + t) % count];
@@ -845,6 +1058,21 @@ static void sweep_varied(void) {
         check_veh_lift(v);
         check_veh_drop(v, V->x, V->y);
         check_stack_sort(v);
+        // As the player's, under each order; and its design as a missile.
+        uint8_t faction = V->faction, order = V->order;
+        V->faction = (uint8_t)*game_current_faction;
+        V->order = (uint8_t)((v + t) % 26);
+        check_veh_selectable(v);
+        check_veh_unmoved(v);
+        check_veh_ready(v);
+        check_veh_wake(v);
+        V->faction = faction, V->order = order;
+        struct rules_chassis *C = &game_chassis[proto_of(V->proto)->chassis];
+        uint8_t missile = C->missile;
+        C->missile = 1;
+        check_offense_proto(V->proto, (v * 3 + t) % *game_veh_count, 0);
+        check_offense_proto(V->proto, -1, 1);
+        C->missile = missile;
         V->proto = proto;
     }
     for (int i = 0; i < VARIED; i++) game_secret_projects[varied_projects[i]] = held[i];
@@ -900,6 +1128,7 @@ static void veh_sweep(void) {
     }
     for (int v = 0; v < vehs; v++) {
         const struct veh *V = &game_vehs[v];
+        if (!stack_sound(v)) continue;
         int type = (v + turn) % 21;
         const int conds[] = {-1, 0, 1, 2, 3, V->proto, V->faction, 0x100, 0x2000000, 0x8000};
         for (unsigned i = 0; i < sizeof conds / sizeof conds[0]; i++) {
@@ -953,6 +1182,16 @@ static const struct hook veh_hooks[] = {
     HOOK(0x5b8e10, stack_fix, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53),                      // push ecx; push ebx
     HOOK(0x5c1540, veh_speed, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56),                      // push ebx; push esi
     HOOK(0x5c1d20, veh_skip, PUSH_EBP_MOV_EBP_ESP, 0x56, 0x8b, 0x75, 0x08),           // push esi; mov esi, [ebp+8]
+    HOOK(0x5c1150, offense_proto, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56),                 // push ebx; push esi
+    HOOK(0x5c1290, armor_proto, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x55, 0x08),              // mov edx, [ebp+8]
+    HOOK(0x5c17d0, prototype_factor, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x4d, 0x08),         // mov ecx, [ebp+8]
+    HOOK(0x5c0cb0, veh_find, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),                 // sub esp, 12
+    HOOK(0x5c1a20, veh_selectable, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x4d, 0x08),           // mov ecx, [ebp+8]
+    HOOK(0x5c1ab0, veh_unmoved, PUSH_EBP_MOV_EBP_ESP, 0x56, 0x57),                    // push esi; push edi
+    HOOK(0x5c1b70, veh_ready, PUSH_EBP_MOV_EBP_ESP, 0x56, 0x57),                      // push esi; push edi
+    HOOK(0x5c1c40, veh_jail, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                 // mov eax, [ebp+8]
+    HOOK(0x5c1d50, veh_fake, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x0c),                 // mov eax, [ebp+12]
+    HOOK(0x5c1d70, veh_wake, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56),                       // push ebx; push esi
     HOOK(0x5ba910, veh_avail, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x57),                // push ebx; push esi; push edi
 };
 struct hook_module veh_module = {"veh", veh_hooks, HOOK_COUNT(veh_hooks), veh_sweep, NULL, -1};

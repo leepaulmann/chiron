@@ -163,7 +163,9 @@ module at a time. So far:
   morale units get from social engineering, bases and secret projects, and
   the defenders a base wants, and the counts the AI makes over a stack of
   units; keeping the stacks of units on each square: lifting, dropping,
-  promoting, sorting and clearing units, and their moves left after damage.
+  promoting, sorting and clearing units, and their moves left after damage;
+  combat strengths of weapons and armor, the nearest unit, and whether a
+  unit is ready for orders.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once

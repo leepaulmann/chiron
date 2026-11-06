@@ -757,11 +757,13 @@ extern struct landmark *game_landmarks;       // [LANDMARK_COUNT]
 extern struct base *game_bases;               // [BASE_COUNT]
 extern int32_t *game_base_count;
 extern struct veh *game_vehs;  // [VEH_COUNT]
-enum { VEH_COUNT = 2048 };
+enum { VEH_COUNT = 2048 };  // and one more slot, for veh_fake()
 // Where veh_lift() last took a unit from, and the unit (-1 once dropped);
 // veh_at() sets the flag once it has rebuilt the map's unit bits in a
 // network game.
 extern int32_t *game_veh_lift_x, *game_veh_lift_y, *game_veh_lifted, *game_veh_at_rebuilt;
+extern int32_t *game_veh_find_dist;  // veh_find()'s distance to the unit it found
+extern int (*game_contribution)(int veh, int terraform);  // a former's work a turn on a terraforming order
 extern int32_t *game_veh_count;
 extern uint32_t *game_state;                  // GAME_STATE_*
 extern int32_t *game_net_multiplayer;         // non-zero in a network game

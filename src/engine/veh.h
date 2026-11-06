@@ -39,3 +39,14 @@ void veh_clear(int veh, int proto, int faction);
 void veh_sleep(int veh);
 int veh_speed(int veh, int straight);
 void veh_skip(int veh);
+
+int offense_proto(int proto, int veh_def, int bombard);
+int armor_proto(int proto, int veh_att, int bombard);
+int prototype_factor(int proto);
+int veh_find(int x, int y, int faction, int skip);
+int veh_jail(int veh);
+int veh_selectable(int veh);
+int veh_unmoved(int veh);
+int veh_ready(int veh);
+int veh_fake(int proto, int faction);
+int veh_wake(int veh);

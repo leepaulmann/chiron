@@ -546,7 +546,10 @@ BOOL WINAPI WritePrivateProfileStringA(const char *app, const char *key, const c
     char *data = slurp(path, &len);
     FILE *out = NULL;
     char tmp[4200];
-    snprintf(tmp, sizeof(tmp), "%s.chiron-tmp", path);
+    // A name of its own per process: two instances writing the same file at
+    // once otherwise share the temporary file, and one renames the other's
+    // half-written copy into place.
+    snprintf(tmp, sizeof(tmp), "%s.chiron-tmp.%d", path, (int)getpid());
     if (!(out = fopen(tmp, "wb"))) {
         free(data);
         return FALSE;
