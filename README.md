@@ -167,7 +167,8 @@ module at a time. So far:
   combat strengths of weapons and armor, the nearest unit, and whether a
   unit is ready for orders; a unit's health and moves left, how far air
   drops reach, transports' capacity, the design a faction uses for a plan,
-  and which units the AI sends to a monolith.
+  and which units the AI sends to a monolith; killing units, with the
+  units they carry at sea, and renumbering the units after them.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once

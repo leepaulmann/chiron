@@ -193,6 +193,11 @@ HELD_THIS(sound_fade, (void *self, int ms), (self, ms), c_.arg[0] = ms, orig_sou
 HELD_THIS(base_win_on_redraw, (void *self), (self), (void)0, orig_base_win_on_redraw(SELF))
 HELD_THIS(base_win_zoom, (void *self, int base, int unk), (self, base, unk), (c_.arg[0] = base, c_.arg[1] = unk),
           orig_base_win_zoom(SELF, a_[0], a_[1]))
+// The base window told of a unit killed: redrawn if it shows its home
+// base or the square.
+HELD_THIS(base_win_check_base, (void *self, int base), (self, base), c_.arg[0] = base, orig_base_win_check_base(SELF, a_[0]))
+HELD_THIS(base_win_check_loc, (void *self, int x, int y, int unk), (self, x, y, unk),
+          (c_.arg[0] = x, c_.arg[1] = y, c_.arg[2] = unk), orig_base_win_check_loc(SELF, a_[0], a_[1], a_[2]))
 // Movies and help for secret projects.
 HELD(void, amovie_project, (void)0, (int project), (project), (c_.arg[0] = project), orig_amovie_project(a_[0]))
 HELD(void, amovie_project_2, (void)0, (char *name), (name), (hooks_ui_text(&c_, 0, name)), orig_amovie_project_2(TEXT(0)))
@@ -330,5 +335,7 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x50dd90, clock_wait, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x8b, 0x35, 0x68, 0x93, 0x66, 0x00),  // push ebx; push esi; mov esi, [0x669368]
     QUIET_HOOK(0x41e790, base_win_on_redraw, 0xa1, 0x2c, 0x39, 0x7d, 0x00, 0x56, 0x8b, 0xf1),  // mov eax, [0x7d392c]; push esi; mov esi, ecx
     QUIET_HOOK(0x41a920, base_win_zoom, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10, 0x53, 0x56),  // sub esp, 16; push ebx; push esi
+    QUIET_HOOK(0x41a7a0, base_win_check_base, PUSH_EBP_MOV_EBP_ESP, 0x56, 0x8b, 0xf1),       // push esi; mov esi, ecx
+    QUIET_HOOK(0x41a7e0, base_win_check_loc, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x8b, 0xd9),        // push ebx; mov ebx, ecx
 };
 struct hook_module quiet_module = {"quiet", quiet_hooks, HOOK_COUNT(quiet_hooks), NULL, NULL, -1};

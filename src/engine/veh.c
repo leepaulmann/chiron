@@ -880,6 +880,86 @@ int want_monolith(int veh) {
     return game_weapons[proto_of(V->proto)->weapon].offense != 0;
 }
 
+
+// Removes the unit: off its stack and its faction's counts, and every
+// later unit moves down a slot, so the units' stack links, the transport
+// a unit on board names, and the unit numbers kept elsewhere are
+// renumbered; a unit on board this one is left without orders. Removing
+// the spare slot (veh_fake) leaves the count alone. The base window is
+// told about the square and the home base.
+void veh_kill(int veh) {
+    if (veh < 0) return;
+    if (*game_net_multiplayer) game_deletion_add(game_deletion_list, veh);
+    struct veh *V = &game_vehs[veh];
+    game_log_say(text(0x691dc0), veh, V->faction, V->proto);
+    int x = V->x, y = V->y, home = V->home_base;
+    struct faction_data *F = &game_factions[V->faction];
+    if (proto_of(V->proto)->plan <= PLAN_NAVAL_TRANSPORT) F->total_combat_units--;
+    F->units_active[V->proto]--;
+    veh_lift(veh);
+    int n = *game_veh_count;
+    if (veh < n - 1) memmove(V, V + 1, (size_t)(n - veh - 1) * sizeof *V);
+    if (veh < VEH_COUNT) *game_veh_count = --n;
+    for (int i = 0; i < n; i++) {
+        struct veh *U = &game_vehs[i];
+        if (U->prev_in_stack > veh) U->prev_in_stack--;
+        if (U->next_in_stack > veh) U->next_in_stack--;
+        if (U->order == ORDER_SENTRY_BOARD) {
+            if (U->waypoint_x[0] == veh) U->order = 0;
+            else if (U->waypoint_x[0] > veh) U->waypoint_x[0]--;
+        }
+    }
+    int32_t *refs[] = {game_veh_ref_map_1, game_veh_ref_map_2, game_veh_ref_3, game_veh_ref_4};
+    for (unsigned i = 0; i < sizeof refs / sizeof refs[0]; i++) {
+        if (*refs[i] == veh) *refs[i] = -1;
+        else if (*refs[i] > veh) (*refs[i])--;
+    }
+    if (*game_current_veh && *game_current_veh >= veh) (*game_current_veh)--;
+    int32_t *p = *game_net_veh_ref;
+    if (*game_net_multiplayer && p && p != game_veh_ref_map_1 && p != game_current_veh && p != game_veh_ref_map_2 &&
+        *p >= veh)
+        (*p)--;
+    game_base_win_check_loc(game_base_win, x, y, 0);
+    game_base_win_check_base(game_base_win, home);
+}
+
+// Kills every unit in the unit's stack, from its head.
+void stack_kill(int veh) {
+    if (veh < 0) return;
+    for (int v = veh_top(veh); v >= 0;) {
+        int next = game_vehs[v].next_in_stack;
+        veh_kill(v);
+        if (next > v) next--;
+        v = next;
+    }
+}
+
+// Kills the unit and, for a transport at sea (or off the map, but for a
+// unit at x -2, which takes no redraw), the units it carries; it then
+// redraws the square. The player's square is redrawn with its
+// surroundings when no unit of theirs is left there, or the unit had
+// deep radar.
+void kill(int veh) {
+    const struct veh *V = &game_vehs[veh];
+    int x = V->x, y = V->y, faction = V->faction, home = V->home_base;
+    int radar = has_abil(V->proto, ABL_DEEP_RADAR);
+    int on_map = on_map_(x, y);
+    if (!veh_cargo(veh) || (on_map && !is_ocean(x, y))) {
+        veh_kill(veh);
+    } else if (!on_map && x == -2) {
+        stack_kill(veh);
+        return;
+    } else {
+        game_stack_veh(veh, 2);
+        stack_kill(veh);
+    }
+    game_base_win_check_base(game_base_win, home);
+    if (*game_battle_state || !on_map) return;
+    if (faction == *game_current_faction && (!stack_check(veh_at(x, y), 1, faction, -1, -1) || radar))
+        game_draw_radius(x, y, 2, 2);
+    else
+        game_draw_tile(x, y, 2);
+}
 extern struct hook_module veh_module;
 #define VEH (&veh_module)
 
@@ -975,6 +1055,10 @@ SHADOW_WRITER(VEH, int, veh_put, (int a, int b, int c), (a, b, c), WRITES_STACKS
 SHADOW1(VEH, int, veh_health, int)
 SHADOW2(VEH, int, get_plan, int, int)
 SHADOW1(VEH, int, want_monolith, int)
+// Killing a unit renumbers units all over the game's memory.
+SHADOW_WRITER(VEH, void, veh_kill, (int a), (a), hooks_writes_game(&w_), "%d", a)
+SHADOW_WRITER(VEH, void, stack_kill, (int a), (a), hooks_writes_game(&w_), "%d", a)
+SHADOW_WRITER(VEH, void, kill, (int a), (a), hooks_writes_game(&w_), "%d", a)
 
 // veh_at() is called constantly, so it's checked as a query; a square the
 // map marks with units but where the original found none (it then logs
@@ -1057,6 +1141,17 @@ static void sweep_stacks(void) {
         check_veh_wake(v);
         check_veh_fake(V->proto, V->faction);
     }
+    // Killing: a few units, a stack, and every transport (some at sea).
+    for (int k = 0; k < 4 && vehs; k++) {
+        int v = (k * 53 + t * 5) % vehs;
+        if (!stack_sound(v)) continue;
+        check_veh_kill(v);
+        if (k == 0) check_stack_kill(v);
+        check_kill(v);
+    }
+    for (int v = 0; v < vehs; v++)
+        if (veh_cargo(v) && stack_sound(v)) check_kill(v);
+    check_veh_kill(-1);
 }
 
 // veh_cost writes whether the extra was charged.
@@ -1328,5 +1423,8 @@ static const struct hook veh_hooks[] = {
     HOOK(0x5a59e0, veh_health, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),               // mov eax, [ebp+8]
     HOOK(0x5aed50, get_plan, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x57),                 // push ebx; push esi; push edi
     HOOK(0x579f80, want_monolith, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),            // mov eax, [ebp+8]
+    HOOK(0x5c08c0, veh_kill, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),                 // sub esp, 8
+    HOOK(0x5b9510, stack_kill, PUSH_EBP_MOV_EBP_ESP, 0x56, 0x8b, 0x75, 0x08),         // push esi; mov esi, [ebp+8]
+    HOOK(0x5c0b00, kill, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10),                     // sub esp, 16
 };
 struct hook_module veh_module = {"veh", veh_hooks, HOOK_COUNT(veh_hooks), veh_sweep, NULL, -1};

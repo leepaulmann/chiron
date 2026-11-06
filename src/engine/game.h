@@ -654,7 +654,7 @@ GAME_AT(struct rules_basic, tech_orbital_insert, 0x90);
 enum { RULE_FLAG_WORM_POLICE = 0x40, RULE_FLAG_ALIEN = 0x80, RULE_FLAG_AQUATIC = 0x100, RULE_FLAG_INTEREST = 0x4000 };  // faction_def.rule_flags
 enum { ECONOMICS_FREE_MARKET = 1, ECONOMICS_PLANNED = 2 };  // faction_data.se_models_pending[1]
 enum { ABILITY_CLEAN_REACTOR = 0x10000, ABILITY_POLICE_2X = 0x400000 };  // unit_proto.abilities
-enum { ORDER_CONVOY = 3 };
+enum { ORDER_SENTRY_BOARD = 1, ORDER_CONVOY = 3 };  // on board: waypoint_x[0] is the transport
 enum {  // veh.state bits base_support() sets
     VEH_STATE_SUPPORTED = 0x10,         // costs its base minerals
     VEH_STATE_PACIFISM_DRONE = 0x200000, VEH_STATE_PACIFISM_FREE = 0x400000,
@@ -771,6 +771,16 @@ enum { VEH_COUNT = 2048 };  // and one more slot, for veh_fake()
 extern int32_t *game_veh_lift_x, *game_veh_lift_y, *game_veh_lifted, *game_veh_at_rebuilt;
 extern int32_t *game_veh_find_dist;  // veh_find()'s distance to the unit it found
 extern int (*game_contribution)(int veh, int terraform);  // a former's work a turn on a terraforming order
+// Unit numbers the game keeps outside the unit table, which veh_kill()
+// renumbers: two of the map window's, two others, the unit being moved
+// (0 also for none) and, in a network game, a pointer to one more.
+extern int32_t *game_veh_ref_map_1, *game_veh_ref_map_2, *game_veh_ref_3, *game_veh_ref_4, *game_current_veh;
+extern int32_t **game_net_veh_ref;
+extern void *game_deletion_list;  // network games: units deleted, to tell the other players
+extern void(__attribute__((thiscall)) * game_deletion_add)(void *list, int veh);
+extern void(__attribute__((thiscall)) * game_base_win_check_base)(void *win, int base);  // redraws if it shows the base
+extern void(__attribute__((thiscall)) * game_base_win_check_loc)(void *win, int x, int y, int unk);
+extern int (*game_stack_veh)(int veh, int type);
 extern int32_t *game_veh_count;
 extern uint32_t *game_state;                  // GAME_STATE_*
 extern int32_t *game_net_multiplayer;         // non-zero in a network game

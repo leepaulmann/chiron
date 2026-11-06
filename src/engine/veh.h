@@ -63,3 +63,6 @@ int veh_put(int veh, int x, int y);
 int veh_health(int veh);
 int get_plan(int faction, int plan);
 int want_monolith(int veh);
+void veh_kill(int veh);
+void stack_kill(int veh);
+void kill(int veh);
