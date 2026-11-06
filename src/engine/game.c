@@ -116,6 +116,7 @@ int (*game_best_reactor)(int faction);
 void (*game_tech_research)(int faction, int labs);
 int (*game_kill)(int veh);
 int (*game_at_goal)(int faction, int type, int x, int y);
+int (*game_proto_cost)(int chassis, int weapon, int armor, int abilities, int reactor);
 int (*game_planet_buster2)(int proto);
 int (*game_at_climax)(int faction);
 int32_t *game_sunspot_duration, *game_ranked_faction;
@@ -452,6 +453,7 @@ void game_bind(struct pe_image *exe) {
     game_kill = (void *)code_at(exe, 0x5c0b00);
     game_at_goal = (void *)code_at(exe, 0x579cc0);
     game_planet_buster2 = (void *)code_at(exe, 0x5004f0);
+    game_proto_cost = (void *)code_at(exe, 0x5a5a60);
     game_at_climax = (void *)code_at(exe, 0x539ef0);
     game_sunspot_duration = (int32_t *)code_at(exe, 0x9a6800);
     game_ranked_faction = (int32_t *)code_at(exe, 0x9a650c);

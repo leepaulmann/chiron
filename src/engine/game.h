@@ -551,7 +551,7 @@ enum {
     SP_CLOUDBASE_ACADEMY = 35, SP_PLANETARY_ENERGY_GRID = 36, SP_COUNT = 64,
 };
 
-enum { BASE_STATE_GOLDEN_AGE = 0x4, BASE_STATE_UNK_100 = 0x100, BASE_STATE_WORKS_OCEAN = 0x8000 };
+enum { BASE_STATE_DRONE_RIOT = 0x2, BASE_STATE_GOLDEN_AGE = 0x4, BASE_STATE_UNK_100 = 0x100, BASE_STATE_WORKS_OCEAN = 0x8000 };
 enum {  // base.governor
     GOVERNOR_CITIZENS = 0x40,  // the governor places the workers
     GOVERNOR_EXPLORE = 0x1000000, GOVERNOR_DISCOVER = 0x2000000, GOVERNOR_BUILD = 0x4000000,
@@ -622,7 +622,9 @@ struct rules_basic {
     int32_t drones_genejack, pop_limit_hab_complex, pop_limit_hab_dome;
     int32_t tech_improve_fungus, tech_ease_fungus_move, tech_road_fungus, tech_two_special;
     int32_t tech_three_nutrients, tech_three_minerals, tech_three_energy;
-    GAME_PAD(0x58, 0x9c);
+    int32_t extra_cost_prototype[3];  // percent more for a new design's first unit, by TRIAD_*
+    int32_t psi_combat_ratio_atk[3], psi_combat_ratio_def[3];  // psi combat odds, by TRIAD_*
+    GAME_PAD(0x7c, 0x9c);
     int32_t territory_max_dist;  // how far a base's territory reaches over land; half that at sea
     int32_t turns_corner_market;  // from cornering the energy market to the win
     int32_t tech_mining_platform_bonus;
@@ -641,6 +643,8 @@ GAME_AT(struct rules_basic, tech_three_nutrients, 0x4c);
 GAME_AT(struct rules_basic, tech_mining_platform_bonus, 0xa4);
 GAME_AT(struct rules_basic, tech_economic_victory, 0xa8);
 GAME_AT(struct rules_basic, territory_max_dist, 0x9c);
+GAME_AT(struct rules_basic, extra_cost_prototype, 0x58);
+GAME_AT(struct rules_basic, psi_combat_ratio_def, 0x70);
 
 enum { RULE_FLAG_WORM_POLICE = 0x40, RULE_FLAG_ALIEN = 0x80, RULE_FLAG_AQUATIC = 0x100, RULE_FLAG_INTEREST = 0x4000 };  // faction_def.rule_flags
 enum { ECONOMICS_FREE_MARKET = 1, ECONOMICS_PLANNED = 2 };  // faction_data.se_models_pending[1]
@@ -908,6 +912,7 @@ extern void (*game_tech_research)(int faction, int labs);
 extern int (*game_kill)(int veh);                    // disbands a unit
 extern int (*game_at_goal)(int faction, int type, int x, int y);
 extern int (*game_planet_buster2)(int proto);
+extern int (*game_proto_cost)(int chassis, int weapon, int armor, int abilities, int reactor);
 extern int (*game_at_climax)(int faction);
 extern int32_t *game_sunspot_duration;
 extern int32_t *game_ranked_faction;  // [2]: factions base_hurry() and social_ai() compare themselves with
@@ -1054,7 +1059,7 @@ extern void (*game_action_sat_attack)(int faction, int target, int kind, int bas
 // The AI's strategy (Thinker's names).
 extern int (*game_garrison_check)(int base);          // the defenders a base wants
 extern int (*game_weap_val)(int proto, int faction);  // a design's weapon, as the AI rates it
-extern int (*game_arm_val)(int proto, int faction);
+extern int (*game_arm_val)(int armor, int faction);  // the game's callers pass a prototype
 extern int (*game_weap_strat)(int weapon, int faction);
 extern int (*game_arm_strat)(int armor, int faction);
 extern int (*game_planet_buster)(int veh);            // non-zero for a planet buster

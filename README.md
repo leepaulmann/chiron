@@ -157,7 +157,11 @@ module at a time. So far:
   priorities and what its bases and units already cover; then setting it,
   with the retooling penalty for humans, the governor's kinds of work each
   claiming an item, its question before a secret project, and the news of
-  projects other factions begin.
+  projects other factions begin;
+- units: which designs a faction can build and what they cost, their
+  speed, abilities and the AI's rating of their weapons and armor, the
+  morale units get from social engineering, bases and secret projects, and
+  the defenders a base wants.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once
