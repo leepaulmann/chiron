@@ -161,7 +161,8 @@ module at a time. So far:
 - units: which designs a faction can build and what they cost, their
   speed, abilities and the AI's rating of their weapons and armor, the
   morale units get from social engineering, bases and secret projects, and
-  the defenders a base wants.
+  the defenders a base wants, and the counts the AI makes over a stack of
+  units.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once

@@ -22,3 +22,5 @@ int base_cost(int proto);
 int veh_cost(int proto, int base, int *prototype);
 int garrison_check(int base);
 int veh_avail(int proto, int faction, int base);
+int can_arty(int proto, int sea);
+int stack_check(int veh, int type, int c1, int c2, int c3);

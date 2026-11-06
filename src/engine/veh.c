@@ -25,7 +25,7 @@ enum {  // secret projects, as indices into game_secret_projects
     SP_CYBORG_FACTORY = 17, SP_DREAM_TWISTER = 19, SP_TELEPATHIC_MATRIX = 30, SP_NETHACK_TERMINUS = 34,
 };
 enum {  // unit_proto.abilities
-    ABL_DEEP_RADAR = 0x2, ABL_AIR_SUPERIORITY = 0x20, ABL_ANTIGRAV_STRUTS = 0x400, ABL_SLOW = 0x800000,
+    ABL_DEEP_RADAR = 0x2, ABL_AIR_SUPERIORITY = 0x20, ABL_ARTILLERY = 0x8000, ABL_ANTIGRAV_STRUTS = 0x400, ABL_SLOW = 0x800000,
     ABL_SOPORIFIC_GAS = 0x1000000, ABL_DISSOCIATIVE_WAVE = 0x2000000, ABL_MARINE_DETACHMENT = 0x4000000,
     ABL_FUEL_NANOCELLS = 0x8000000, ABL_ALGO_ENHANCEMENT = 0x10000000,
 };
@@ -364,6 +364,64 @@ int veh_avail(int proto, int faction, int base) {
     return proto < BASIC_PROTOS || proto / BASIC_PROTOS == faction;
 }
 
+// Whether a design can bombard: one with a weapon and no psi armor (or
+// the spore launcher), on land if it has artillery, at sea only if asked,
+// never in the air.
+int can_arty(int proto, int sea) {
+    const struct unit_proto *P = proto_of(proto);
+    if (game_weapons[P->weapon].offense <= 0 && proto != BSC_SPORE_LAUNCHER) return 0;
+    if (game_armor[P->armor].defense < 0 && proto != BSC_SPORE_LAUNCHER) return 0;
+    switch (triad(proto)) {
+    case TRIAD_SEA: return sea;
+    case TRIAD_AIR: return 0;
+    default: return has_abil(proto, ABL_ARTILLERY);
+    }
+}
+
+// Counts (or adds up) something over the units of the stack the unit is
+// in, from its head. `type` picks what (STACK_*), and for most kinds one of
+// the conditions, when not negative, keeps to one faction's units.
+int stack_check(int veh, int type, int c1, int c2, int c3) {
+    int n = 0;
+    if (veh < 0) return 0;
+    while (game_vehs[veh].prev_in_stack >= 0) veh = game_vehs[veh].prev_in_stack;
+    for (int v = veh; v >= 0; v = game_vehs[v].next_in_stack) {
+        const struct veh *V = &game_vehs[v];
+        const struct unit_proto *P = proto_of(V->proto);
+        int f = V->faction, tr = triad(V->proto);
+#define BY(c) ((c) < 0 || f == (c))
+        switch (type) {
+        case 0: n += BY(c2) && V->proto == c1; break;  // of a design
+        case 1: n += BY(c1); break;                       // units
+        case 2: n += BY(c2) && P->plan == c1; break;     // of a plan
+        case 3: n += BY(c2) && tr == c1; break;          // of a triad
+        case 4: if (BY(c1)) n += game_weapons[P->weapon].offense; break;
+        case 5: if (BY(c1)) n += game_armor[P->armor].defense; break;
+        case 6: n += BY(c2) && has_abil(V->proto, c1); break;
+        case 7: if (BY(c1)) n += P->cost; break;
+        case 8:  // room aboard: ships' cargo, less a place for each land unit
+            if (!BY(c1)) break;
+            if (tr == TRIAD_LAND) n--;
+            else if (tr == TRIAD_SEA) n += veh_cargo(v);
+            break;
+        case 9: n += BY(c2) && (int8_t)V->order == c1; break;
+        case 10: n += f == c1; break;
+        case 11: n += BY(c3) && (int)(V->state & c1) == c2; break;
+        case 12: n += BY(c1) && arm_strat(P->armor, f) > weap_strat(P->weapon, f); break;  // defenders
+        case 13: n += BY(c1) && game_chassis[P->chassis].missile != 0; break;
+        case 14: n += BY(c1) && (P->plan == PLAN_DEFENSIVE || P->plan == PLAN_COMBAT); break;
+        case 15: n += BY(c1) && can_arty(V->proto, 1); break;
+        case 16: n += BY(c1) && (P->plan == PLAN_DEFENSIVE || P->plan == PLAN_RECON || P->plan == PLAN_COMBAT); break;
+        case 17: n += BY(c2) && P->group == c1; break;
+        case 18: n += BY(c1) && tr == TRIAD_AIR && game_chassis[P->chassis].range > 1; break;
+        case 19: n += BY(c1) && game_weapons[P->weapon].offense == 0; break;
+        default: break;
+        }
+#undef BY
+    }
+    return n;
+}
+
 extern struct hook_module veh_module;
 #define VEH (&veh_module)
 
@@ -385,6 +443,8 @@ SHADOW3(VEH, int, morale_veh, int, int, int)
 SHADOW1(VEH, int, base_cost, int)
 SHADOW1(VEH, int, garrison_check, int)
 SHADOW3(VEH, int, veh_avail, int, int, int)
+SHADOW2(VEH, int, can_arty, int, int)
+SHADOW5(VEH, int, stack_check, int, int, int, int, int)
 
 // veh_cost writes whether the extra was charged.
 SHADOW_DECLARE(int, veh_cost, (int a, int b, int *c))
@@ -403,7 +463,8 @@ SHADOW_ENTRY(VEH, int, veh_cost, (int a, int b, int *c), (a, b, c))
 
 // The checks again with the settings these functions read varied: the
 // factions' PSI and MORALE bonuses, social engineering, who holds the
-// secret projects that count, and some of the bases' facilities. They are put back afterwards; nothing else
+// secret projects that count, some of the bases' facilities and some
+// units' designs. They are put back afterwards; nothing else
 // changes, as these functions only read.
 static const int varied_projects[] = {SP_COMMAND_NEXUS, SP_XENOEMPATHY_DOME, SP_NEURAL_AMPLIFIER,
                                       SP_MARITIME_CONTROL_CENTER, SP_PHOLUS_MUTAGEN, SP_CYBORG_FACTORY,
@@ -464,6 +525,22 @@ static void sweep_varied(void) {
         check_garrison_check(b);
     }
     for (int v = 0; v < *game_veh_count; v++) check_morale_veh(v, 1, (v + t) % FACTION_COUNT);
+    // A few units given other designs, so that every kind of stack is
+    // counted, air units early in a game too.
+    int designs[PROTO_COUNT], count = 0;
+    for (int p = 0; p < PROTO_COUNT; p++)
+        if (game_protos[p].flags & PROTO_FLAG_ACTIVE) designs[count++] = p;
+    for (int v = 0; v < *game_veh_count && v < 24 && count; v++) {
+        struct veh *V = &game_vehs[v];
+        int16_t proto = V->proto;
+        V->proto = (int16_t)designs[(v * 13 + t) % count];
+        for (int type = 0; type < 20; type++)
+            check_stack_check(v, type, type == 6 ? (int)(1u << (v % 32)) : (v + t) % 4, -1, -1);
+        check_can_arty(V->proto, v & 1);
+        check_veh_cargo(v);
+        check_morale_veh(v, 0, 0);
+        V->proto = proto;
+    }
     for (int i = 0; i < VARIED; i++) game_secret_projects[varied_projects[i]] = held[i];
     for (int b = 0; b < bases; b++) memcpy(game_bases[b].facilities_built, facilities[b], sizeof facilities[b]);
     for (int f = 0; f < FACTION_COUNT; f++) {
@@ -516,6 +593,15 @@ static void veh_sweep(void) {
         check_garrison_check(b);
     }
     for (int v = 0; v < vehs; v++) {
+        const struct veh *V = &game_vehs[v];
+        int type = (v + turn) % 21;
+        const int conds[] = {-1, 0, 1, 2, 3, V->proto, V->faction, 0x100, 0x2000000, 0x8000};
+        for (unsigned i = 0; i < sizeof conds / sizeof conds[0]; i++) {
+            check_stack_check(v, type, conds[i], -1, -1);
+            check_stack_check(v, type, conds[i], V->faction, (v & 1) ? V->faction : -1);
+            check_stack_check(v, type, conds[i], 0, -1);
+        }
+        check_can_arty(V->proto, v & 1);
         check_veh_cargo(v);
         check_morale_veh(v, v & 1, (v + turn) % FACTION_COUNT);
         check_morale_alien(v, (v + turn) % FACTION_COUNT);
@@ -545,6 +631,8 @@ static const struct hook veh_hooks[] = {
     HOOK(0x5a5d00, base_cost, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                // mov eax, [ebp+8]
     HOOK(0x5c1850, veh_cost, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53, 0x56),                 // push ecx; push ebx; push esi
     HOOK(0x560b30, garrison_check, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),           // sub esp, 12
+    HOOK(0x5c0db0, can_arty, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x4d, 0x08),                 // mov ecx, [ebp+8]
+    HOOK(0x5b9580, stack_check, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x56, 0x8b, 0x75, 0x08),  // push ecx; push esi; mov esi, [ebp+8]
     HOOK(0x5ba910, veh_avail, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x57),                // push ebx; push esi; push edi
 };
 struct hook_module veh_module = {"veh", veh_hooks, HOOK_COUNT(veh_hooks), veh_sweep, NULL, -1};

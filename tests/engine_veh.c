@@ -181,6 +181,21 @@ int main(void) {
     factions[1].region_base_plan[1] = PLAN_COLONY;
     EXPECT(garrison_check(0), 3);
 
+    // Stacks: counted from the head, whichever unit is given.
+    vehs[0].next_in_stack = 1, vehs[0].prev_in_stack = -1;
+    vehs[1] = (struct veh){.x = 2, .y = 2, .faction = 1, .proto = 65, .morale = 1, .next_in_stack = -1, .prev_in_stack = 0};
+    EXPECT(stack_check(1, 1, -1, -1, -1), 2);
+    EXPECT(stack_check(1, 0, 65, 1, -1), 1);
+    EXPECT(stack_check(1, 3, TRIAD_AIR, -1, -1), 1);
+    EXPECT(stack_check(0, 4, 1, -1, -1), 4 - 1);   // weapon strengths
+    EXPECT(stack_check(0, 8, -1, -1, -1), -1);     // a land unit wants a place aboard
+    EXPECT(stack_check(0, 10, 2, -1, -1), 0);
+    EXPECT(stack_check(-1, 1, -1, -1, -1), 0);
+    EXPECT(stack_check(0, 25, -1, -1, -1), 0);
+    EXPECT(can_arty(64, 1), 0);
+    protos[64].abilities = 0x8000;
+    EXPECT(can_arty(64, 0), 1);
+
     if (failures) return 1;
     printf("engine_veh: all tests passed\n");
     return 0;
