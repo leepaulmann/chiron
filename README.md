@@ -143,7 +143,10 @@ module at a time. So far:
   which models a faction may choose and what a change costs; and the AI's
   choice of models, with the advice the social engineering screen gives;
 - factions: what it costs to take a base over by mind control, and to
-  corner the energy market.
+  corner the energy market; and the AI's diplomacy each turn: betrayals,
+  meetings and tech trades between AIs, calls to the player, complaints
+  about its territory, the friction between them, and orbital attacks on
+  satellites.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once

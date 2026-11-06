@@ -1899,7 +1899,7 @@ static void repair_veh(int faction, int v) {
 // run down, and repairs; then the player's view of the units it can see
 // outside bases redrawn.
 void repair_phase(int faction) {
-    game_factions[faction].unk_364 = 0;
+    game_factions[faction].odp_deployed = 0;
     for (int v = 0; v < *game_veh_count; v++)
         if (game_vehs[v].faction == faction) repair_veh(faction, v);
     for (int v = 0; v < *game_veh_count; v++) {

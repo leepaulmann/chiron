@@ -60,8 +60,15 @@ enum {  // social effects, in the game's order
 
 enum {  // diplo_status bits
     TREATY_PACT = 0x1, TREATY_TREATY = 0x2, TREATY_COMMLINK = 0x8,
-    TREATY_VENDETTA = 0x10, TREATY_WANT_REVENGE = 0x20,
+    TREATY_VENDETTA = 0x10, TREATY_WANT_REVENGE = 0x20, TREATY_UNK_40 = 0x40,
+    TREATY_UNK_100 = 0x100, TREATY_UNK_200 = 0x200, TREATY_SHALL_BETRAY = 0x400, TREATY_UNK_800 = 0x800,
+    TREATY_WANT_TO_TALK = 0x2000, TREATY_UNK_8000 = 0x8000, TREATY_UNK_20000 = 0x20000,
+    TREATY_ATROCITY_VICTIM = 0x40000, TREATY_UNK_1000000 = 0x1000000, TREATY_UNK_4000000 = 0x4000000,
+    TREATY_UNK_10000000 = 0x10000000, TREATY_UNK_20000000 = 0x20000000,
 };
+#define TREATY_UNK_80000000 0x80000000u
+enum { AGENDA_UNK_20 = 0x20, AGENDA_UNK_40 = 0x40, AGENDA_UNK_400 = 0x400, AGENDA_UNK_800 = 0x800 };  // diplo_agenda bits
+enum { FACTION_FLAG_EXT_SHAMELESS = 0x20 };  // flags_ext: betrays humans without cause
 
 enum { FUNGUS_NUTRIENT, FUNGUS_MINERALS, FUNGUS_ENERGY, FUNGUS_UNUSED, FUNGUS_COUNT };
 
@@ -81,11 +88,17 @@ struct faction_data {
     int32_t base_name_offset, base_sea_name_offset;  // base names used from the faction's file
     int32_t last_base_turn;  // when it last gained a base
     uint32_t diplo_status[FACTION_COUNT];  // TREATY_* towards each faction
-    GAME_PAD(0x038, 0x0c0);
+    uint32_t diplo_agenda[FACTION_COUNT];  // AGENDA_* towards each faction
+    int32_t diplo_friction[FACTION_COUNT];
+    int32_t diplo_spoke[FACTION_COUNT];  // the turn each last spoke to it, or -1
+    int32_t diplo_merc[FACTION_COUNT];   // turns left of a betrayal's mood (TREATY_UNK_40)
+    int8_t diplo_patience[FACTION_COUNT];
     int32_t sanction_turns;  // economic sanctions: no commerce while above 0
     int32_t loan_balance[FACTION_COUNT];  // energy owed to each faction
     int32_t loan_payment[FACTION_COUNT];  // and paid to it each turn
-    GAME_PAD(0x104, 0x1d8);
+    GAME_PAD(0x104, 0x124);
+    int32_t integrity_blemishes;  // treaties broken
+    GAME_PAD(0x128, 0x1d8);
     int32_t major_atrocities;
     int32_t mind_control_total;  // bases mind-controlled (4 each) and units subverted by its probes
     GAME_PAD(0x1e0, 0x220);
@@ -106,7 +119,8 @@ struct faction_data {
     int32_t alloc_psych, alloc_labs;  // energy allocation, in tenths; economy gets the rest
     GAME_PAD(0x32c, 0x35c);
     int32_t tech_ranking;  // twice the techs discovered
-    int32_t unk_360, unk_364;
+    int32_t unk_360;
+    int32_t odp_deployed;  // orbital defense pods used this turn
     int32_t transcendent_techs;  // techs past the end of the tree
     GAME_PAD(0x36c, 0x3cc);
     int32_t tech_research_id;  // the tech being researched, or negative
@@ -114,7 +128,7 @@ struct faction_data {
     int32_t earned_techs_saved;
     int32_t net_random_event;  // base_research() keeps the hundredths of a lab left over here
     int32_t ai_fight, ai_growth, ai_tech, ai_wealth, ai_power;  // the AI's priorities
-    GAME_PAD(0x3f0, 0x3f8);
+    int32_t target_x, target_y;  // the AI's, or -1
     int32_t best_mineral_output;  // the most a base of the faction has made, its surplus counted twice
     GAME_PAD(0x3fc, 0x458);
     uint8_t facility_announced[12];  // bit per facility the player has been shown
@@ -141,7 +155,8 @@ struct faction_data {
     GAME_PAD(0xc58, 0x1058);
     int32_t total_combat_units;
     int32_t base_count;
-    GAME_PAD(0x1060, 0x1068);
+    int32_t mil_strength;  // military strength, for the AI's diplomacy
+    int32_t unk_1064;
     int32_t pop_total;
     int32_t unk_106c;
     int32_t planet_busters;
@@ -164,10 +179,19 @@ struct faction_data {
     uint8_t region_base_plan[REGION_COUNT];  // PLAN_* for the AI
     GAME_PAD(0x19fc, 0x207c);
     int32_t corner_market_turn, corner_market_cost;  // when the energy market is cornered, and what it cost
-    GAME_PAD(0x2084, 0x20cc);
+    GAME_PAD(0x2084, 0x2090);
+    uint32_t flags_ext;  // FACTION_FLAG_EXT_*
+    GAME_PAD(0x2094, 0x20cc);
 };
 _Static_assert(sizeof(struct faction_data) == 0x20cc, "faction_data size");
 GAME_AT(struct faction_data, diplo_status, 0x18);
+GAME_AT(struct faction_data, diplo_merc, 0x98);
+GAME_AT(struct faction_data, diplo_patience, 0xb8);
+GAME_AT(struct faction_data, integrity_blemishes, 0x124);
+GAME_AT(struct faction_data, odp_deployed, 0x364);
+GAME_AT(struct faction_data, target_x, 0x3f0);
+GAME_AT(struct faction_data, mil_strength, 0x1060);
+GAME_AT(struct faction_data, flags_ext, 0x2090);
 GAME_AT(struct faction_data, last_base_turn, 0x14);
 GAME_AT(struct faction_data, base_sea_name_offset, 0x10);
 GAME_AT(struct faction_data, attack_target_base, 0x468);
@@ -359,6 +383,8 @@ _Static_assert(sizeof(struct continent) == 0x1c, "continent size");
 
 enum {  // game_rules bits
     RULES_TECH_STAGNATION = 0x20,
+    RULES_INTENSE_RIVALRY = 0x40,
+    RULES_VICTORY_COOPERATIVE = 0x1000,
     RULES_VICTORY_TRANSCENDENCE = 0x800,
     RULES_BLIND_RESEARCH = 0x200,
     RULES_NO_UNITY_SCATTERING = 0x2000,
@@ -466,7 +492,7 @@ enum {
 };
 // Secret projects, as indices into game_secret_projects (facility id - 70).
 enum {
-    SP_HUMAN_GENOME_PROJECT = 0, SP_MERCHANT_EXCHANGE = 3, SP_VIRTUAL_WORLD = 6, SP_PLANETARY_TRANSIT_SYSTEM = 7, SP_SUPERCOLLIDER = 12, SP_LONGEVITY_VACCINE = 14,
+    SP_HUMAN_GENOME_PROJECT = 0, SP_MERCHANT_EXCHANGE = 3, SP_EMPATH_GUILD = 4, SP_VIRTUAL_WORLD = 6, SP_PLANETARY_TRANSIT_SYSTEM = 7, SP_SUPERCOLLIDER = 12, SP_LONGEVITY_VACCINE = 14,
     SP_ASCETIC_VIRTUES = 13, SP_PHOLUS_MUTAGEN = 16, SP_THEORY_OF_EVERYTHING = 18, SP_NETWORK_BACKBONE = 21, SP_SPACE_ELEVATOR = 27, SP_SINGULARITY_INDUCTOR = 28,
     SP_BULK_MATTER_TRANSMITTER = 29, SP_VOICE_OF_PLANET = 31, SP_ASCENT_TO_TRANSCENDENCE = 32, SP_SELF_AWARE_COLONY = 25, SP_CLONING_VATS = 24,
     SP_CLINICAL_IMMORTALITY = 26, SP_MANIFOLD_HARMONICS = 33,
@@ -947,6 +973,25 @@ extern void (*game_do_all_draws)(void);
 // engineering, the Planetary Council, and the autosave.
 extern void (*game_enemy_diplomacy)(int faction);
 extern void (*game_enemy_strategy)(int faction);
+// The AI's diplomacy (Thinker's names). The first faction acts towards the
+// second unless noted.
+extern void (*game_cause_friction)(int faction, int other, int friction);
+extern void (*game_treaty_on)(int faction, int other, uint32_t status);  // sets TREATY_* bits both ways
+extern int (*game_reputation)(int faction, int other);
+extern void (*game_diplomacy_check)(int faction, int other, int unk);  // sets the game_diplo_* moods
+extern void (*game_communicate)(int faction, int other, int unk);       // talks to the player
+extern void (*game_enemies_trade_tech)(int faction, int other);
+extern void (*game_encounter)(int faction, int other, int x, int y, int fungal_tower, int native);
+// How far the second faction has pressed into the first's territory, with
+// one of the bases concerned and a count.
+extern int (*game_territory)(int faction, int other, int flags, int *base, int *count);
+extern void (*game_action_sat_attack)(int faction, int target, int kind, int base);
+extern int32_t *game_pbem;                 // non-zero in a hotseat or play-by-email game
+extern int32_t *game_diplo_state;          // [FACTION_COUNT] what the AI will raise with the player
+extern int32_t (*game_diplo_state_with)[FACTION_COUNT];  // [player][faction] the same, kept per player
+extern int32_t *game_diplo_attack_chance;  // diplomacy_check's: the rival's openings to attack
+extern int32_t *game_diplo_hostility;      // and its hostility, 0 to 4
+extern int32_t *game_diplo_friction;
 extern int (*game_social_ai)(int faction, int a, int b, int c, int d, int e);
 extern int (*game_can_call_council)(int faction, int unk);
 extern void (*game_call_council)(int faction);
