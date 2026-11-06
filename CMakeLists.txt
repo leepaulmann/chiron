@@ -64,6 +64,7 @@ add_executable(chiron
   src/engine/soak.c
   src/engine/social.c
   src/engine/faction.c
+  src/engine/strategy.c
   src/engine/tech.c
   src/loader/pe.c
   src/loader/teb.c

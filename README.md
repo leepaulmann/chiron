@@ -146,7 +146,12 @@ module at a time. So far:
   corner the energy market; and the AI's diplomacy each turn: betrayals,
   meetings and tech trades between AIs, calls to the player, complaints
   about its territory, the friction between them, and orbital attacks on
-  satellites.
+  satellites;
+- the AI's strategy each turn: its census of bases and units (and its
+  rivals'), the goals they suggest, disbanding obsolete and stranded units,
+  each region's plan of offense, defense or expansion, raising land
+  towards other regions, choosing a base to attack from, and every unit's
+  orders.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once

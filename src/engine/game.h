@@ -79,6 +79,19 @@ enum {  // region_base_plan values that tech_val() looks at
 
 enum { REGION_COUNT = 128, LAND_REGION_COUNT = 64 };
 
+// Something the AI wants done at a square: GOAL_* (or a PLAN_* for units
+// of that plan), with a priority.
+struct goal {
+    int16_t type, priority;
+    int32_t x, y, base;
+};
+_Static_assert(sizeof(struct goal) == 0x10, "goal size");
+enum { GOAL_COUNT = 75 };
+enum {
+    GOAL_ATTACK = 0, GOAL_DEFEND = 2, GOAL_SCOUT = 3, GOAL_UNK_6 = 6, GOAL_COLONIZE = 8, GOAL_TERRAFORM = 9,
+    GOAL_ARTILLERY = 16, GOAL_RAISE_LAND = 41,
+};
+
 // A faction's state in the game being played (Thinker's Faction, OpenSMACX's
 // PlayerData). Only the fields Chiron uses are named.
 struct faction_data {
@@ -150,22 +163,34 @@ struct faction_data {
     int32_t best_psi_offense;  // land units' psi attack
     GAME_PAD(0x820, 0x82c);
     int32_t enemy_best_weapon_value;
-    GAME_PAD(0x830, 0x858);
+    int32_t enemy_best_armor_value;
+    GAME_PAD(0x834, 0x840);
+    // Counted by enemy_strategy among the units of factions it has a
+    // commlink with and isn't at peace with: transports, the reactors of
+    // naval superiority ships, air attackers that can pierce its best
+    // armor, and missiles other than planet busters.
+    int32_t enemy_transports, enemy_naval_reactors, enemy_air_attackers, unk_84c, enemy_missiles;
+    GAME_PAD(0x854, 0x858);
     uint8_t units_active[512], units_queue[512];  // per prototype (PROTO_COUNT): its units, and those being built
     GAME_PAD(0xc58, 0x1058);
     int32_t total_combat_units;
     int32_t base_count;
     int32_t mil_strength;  // military strength, for the AI's diplomacy
-    int32_t unk_1064;
+    int32_t mil_attack;  // the attack part of mil_strength
     int32_t pop_total;
-    int32_t unk_106c;
+    // Sea units, plus transports << 11 and the most cargo one carries << 22
+    // (enemy_strategy); its rivals' greatest cargo is added to
+    // enemy_transports << 11.
+    int32_t naval;
     int32_t planet_busters;
-    GAME_PAD(0x1074, 0x107c);
+    int32_t target_units;  // land units sent against the target (target_x)
+    uint32_t target_kinds;  // 1 with a defender among them, 2 with a probe
     // The AI's planning for each region (the map's land and sea areas),
     // updated by enemy_strategy.
     uint16_t region_total_combat_units[REGION_COUNT];
     uint8_t region_total_bases[REGION_COUNT];
-    GAME_PAD(0x11fc, 0x137c);
+    uint8_t region_offensive[REGION_COUNT];  // units kept back to defend, in the goal pass
+    uint16_t region_force_rating[REGION_COUNT];  // attack strength
     uint16_t region_flags[REGION_COUNT];  // movement planning
     // Counted by reset_territory: squares the faction owns, has seen, owns
     // and could farm (rainy, not rocky, no fungus), and those of the last
@@ -177,11 +202,13 @@ struct faction_data {
     uint8_t region_best_site[REGION_COUNT];
     uint8_t region_territory_pods[REGION_COUNT];
     uint8_t region_base_plan[REGION_COUNT];  // PLAN_* for the AI
-    GAME_PAD(0x19fc, 0x207c);
+    struct goal goals[GOAL_COUNT];  // the AI's, for this turn
+    GAME_PAD(0x1eac, 0x207c);
     int32_t corner_market_turn, corner_market_cost;  // when the energy market is cornered, and what it cost
     GAME_PAD(0x2084, 0x2090);
     uint32_t flags_ext;  // FACTION_FLAG_EXT_*
-    GAME_PAD(0x2094, 0x20cc);
+    int32_t air_offense, air_superiority;  // air units of each plan
+    GAME_PAD(0x209c, 0x20cc);
 };
 _Static_assert(sizeof(struct faction_data) == 0x20cc, "faction_data size");
 GAME_AT(struct faction_data, diplo_status, 0x18);
@@ -192,6 +219,13 @@ GAME_AT(struct faction_data, odp_deployed, 0x364);
 GAME_AT(struct faction_data, target_x, 0x3f0);
 GAME_AT(struct faction_data, mil_strength, 0x1060);
 GAME_AT(struct faction_data, flags_ext, 0x2090);
+GAME_AT(struct faction_data, enemy_best_armor_value, 0x830);
+GAME_AT(struct faction_data, enemy_missiles, 0x850);
+GAME_AT(struct faction_data, mil_attack, 0x1064);
+GAME_AT(struct faction_data, target_kinds, 0x1078);
+GAME_AT(struct faction_data, region_force_rating, 0x127c);
+GAME_AT(struct faction_data, goals, 0x19fc);
+GAME_AT(struct faction_data, air_superiority, 0x2098);
 GAME_AT(struct faction_data, last_base_turn, 0x14);
 GAME_AT(struct faction_data, base_sea_name_offset, 0x10);
 GAME_AT(struct faction_data, attack_target_base, 0x468);
@@ -311,7 +345,9 @@ struct unit_proto {
     uint8_t chassis, weapon, armor, reactor;
     uint8_t carry, cost;
     uint8_t plan;  // PLAN_*; up to PLAN_RECON for combat units
-    GAME_PAD(0x2b, 0x30);
+    uint8_t group;  // 21 for units that take no goals
+    uint8_t obsolete_factions;  // bit per faction that has a better design
+    GAME_PAD(0x2d, 0x30);
     uint16_t flags;  // PROTO_FLAG_*
     int16_t preq_tech;
 };
@@ -319,6 +355,7 @@ enum { PROTO_FLAG_ACTIVE = 0x1, PROTO_FLAG_BUILT = 0x4, PROTO_FLAG_SEEN_ONLINE =
 _Static_assert(sizeof(struct unit_proto) == 0x34, "unit_proto size");
 GAME_AT(struct unit_proto, chassis, 0x24);
 GAME_AT(struct unit_proto, plan, 0x2a);
+GAME_AT(struct unit_proto, obsolete_factions, 0x2c);
 GAME_AT(struct unit_proto, flags, 0x30);
 
 struct rules_weapon {
@@ -355,7 +392,9 @@ struct rules_chassis {
     uint8_t speed;
     uint8_t triad;  // TRIAD_*
     uint8_t range;  // turns aloft for air units, else 0
-    GAME_PAD(0x4b, 0x8e);
+    GAME_PAD(0x4b, 0x4d);
+    uint8_t missile;
+    GAME_PAD(0x4e, 0x8e);
     int16_t preq_tech;
 };
 _Static_assert(sizeof(struct rules_chassis) == 0x90, "rules_chassis size");
@@ -621,18 +660,23 @@ struct veh {
     int16_t proto;
     int16_t unk_c;
     uint8_t faction;
-    GAME_PAD(0x0f, 0x10);
+    uint8_t lurking;  // turns left hidden: at 0 it shows again
     uint8_t damage;
     uint8_t order;  // ORDER_*
-    GAME_PAD(0x12, 0x1c);
-    int16_t order_turns;  // turns left on sentry or hold, or 0 for no end
+    uint8_t waypoint_count, patrol_point;
+    int16_t waypoint_x[4];
+    union {
+        int16_t order_turns;  // turns left on sentry or hold, or 0 for no end
+        int16_t waypoint_y0;  // the first waypoint's y, for a move
+    };
     GAME_PAD(0x1e, 0x24);
     uint8_t morale;
-    uint8_t unk_25;
+    uint8_t movement_turns;
     uint8_t order_auto_type;  // for a convoy, the RESOURCE_* it carries
     uint8_t visibility;  // bit per other faction that can see it
     uint8_t iter_count, unk_29, moves_spent;
-    GAME_PAD(0x2b, 0x2e);
+    uint8_t status_icon;  // a letter or digit: 'F' fortified, '1' given a goal this turn
+    GAME_PAD(0x2c, 0x2e);
     int16_t home_base;
     int16_t next_in_stack, prev_in_stack;  // -1 at the ends
 };
@@ -643,6 +687,9 @@ GAME_AT(struct veh, order_turns, 0x1c);
 GAME_AT(struct veh, moves_spent, 0x2a);
 GAME_AT(struct veh, visibility, 0x27);
 GAME_AT(struct veh, home_base, 0x2e);
+GAME_AT(struct veh, waypoint_x, 0x14);
+GAME_AT(struct veh, movement_turns, 0x25);
+GAME_AT(struct veh, status_icon, 0x2b);
 
 enum { RADIUS_SQUARES = 289, BASE_RADIUS_SQUARES = 21 };  // BASE_RADIUS_SQUARES: a base's own radius
 
@@ -986,6 +1033,23 @@ extern void (*game_encounter)(int faction, int other, int x, int y, int fungal_t
 // one of the bases concerned and a count.
 extern int (*game_territory)(int faction, int other, int flags, int *base, int *count);
 extern void (*game_action_sat_attack)(int faction, int target, int kind, int base);
+// The AI's strategy (Thinker's names).
+extern int (*game_garrison_check)(int base);          // the defenders a base wants
+extern int (*game_weap_val)(int proto, int faction);  // a design's weapon, as the AI rates it
+extern int (*game_arm_val)(int proto, int faction);
+extern int (*game_weap_strat)(int weapon, int faction);
+extern int (*game_arm_strat)(int armor, int faction);
+extern int (*game_planet_buster)(int veh);            // non-zero for a planet buster
+extern void (*game_veh_sleep)(int veh);                // sentries it
+extern int (*game_morale_veh)(int veh, int unk1, int unk2);
+extern int (*game_want_monolith)(int veh);
+extern void (*game_bases_reset)(int region, int faction, int same_plan);  // rethinks the region's builds
+extern int (*game_terraform_cost)(int x, int y, int faction);
+extern int (*game_contiguous)(int faction, int other, int region, int by_sea);
+extern void (*game_enemy_capabilities)(int faction);
+extern int(__attribute__((thiscall)) * game_console_upgrade)(void *console, int veh);  // 0 when it can't
+extern void (*game_del_site)(int faction, int type, int x, int y, int unk);
+extern void (*game_wipe_goals)(int faction);
 extern int32_t *game_pbem;                 // non-zero in a hotseat or play-by-email game
 extern int32_t *game_diplo_state;          // [FACTION_COUNT] what the AI will raise with the player
 extern int32_t (*game_diplo_state_with)[FACTION_COUNT];  // [player][faction] the same, kept per player

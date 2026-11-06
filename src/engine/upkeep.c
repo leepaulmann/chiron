@@ -320,7 +320,7 @@ static void defect(int faction, int target) {
             u->home_base = (int16_t)ID;
             now->units_active[u->proto]++;
             owner_set(sx, sy, target);
-            if (game_chassis[game_protos[u->proto].chassis].range) u->unk_25 = 0;
+            if (game_chassis[game_protos[u->proto].chassis].range) u->movement_turns = 0;
             if (u->order != 2) u->order = 0;
             u->state &= 0xfcffbdffu;
         }
@@ -1036,7 +1036,7 @@ enum {
     BASE_STATE_WANTS_ENERGY = 0x1000, BASE_STATE_WANTS_MINERALS = 0x2000, BASE_STATE_WANTS_NUTRIENTS = 0x4000,
     MAP_SPECIAL = 0x1c00000,
     MAP_IMPROVED = 0x1e00050, MAP_BOREHOLE = 0x1000000, MAP_MONOLITH_ = 0x2000,
-    GOAL_TERRAFORM = 9, GOAL_RAISE_LAND = 0x29, GOAL_CONDENSER = 0x49, GOAL_BOREHOLE = 0x69, GOAL_FOREST = 0x79,
+    GOAL_CONDENSER = 0x49, GOAL_BOREHOLE = 0x69, GOAL_FOREST = 0x79,
     GOAL_SEA = 25, TERRAFORM_ROAD_TECH = 1, TERRAFORM_LEVEL_TECH = 6, TERRAFORM_FUNGUS_TECH = 10,
 };
 
