@@ -114,7 +114,8 @@ struct faction_data {
     GAME_PAD(0x128, 0x1d8);
     int32_t major_atrocities;
     int32_t mind_control_total;  // bases mind-controlled (4 each) and units subverted by its probes
-    GAME_PAD(0x1e0, 0x220);
+    int32_t diplo_mind_control[FACTION_COUNT];  // bases (4 each) and units (1) its probes took from each faction
+    int32_t diplo_stolen_techs[FACTION_COUNT];  // techs and maps its probes stole from each
     int32_t energy_credits, hurry_cost_total;
     int32_t se_models_pending[4];  // politics, economics, values, future
     int32_t se_models[4];          // as they stand this turn
@@ -161,7 +162,7 @@ struct faction_data {
     int32_t satellites[4];  // orbital nutrient, mineral and energy satellites, and defense pods
     int32_t best_weapon_value;
     int32_t best_psi_offense;  // land units' psi attack
-    GAME_PAD(0x820, 0x82c);
+    int32_t best_psi_defense, best_armor_value, best_land_speed;
     int32_t enemy_best_weapon_value;
     int32_t enemy_best_armor_value;
     GAME_PAD(0x834, 0x840);
@@ -203,7 +204,8 @@ struct faction_data {
     uint8_t region_territory_pods[REGION_COUNT];
     uint8_t region_base_plan[REGION_COUNT];  // PLAN_* for the AI
     struct goal goals[GOAL_COUNT];  // the AI's, for this turn
-    GAME_PAD(0x1eac, 0x207c);
+    struct goal sites[25];  // places the AI means to settle (type 3) or otherwise act on
+    GAME_PAD(0x203c, 0x207c);
     int32_t corner_market_turn, corner_market_cost;  // when the energy market is cornered, and what it cost
     GAME_PAD(0x2084, 0x2090);
     uint32_t flags_ext;  // FACTION_FLAG_EXT_*
@@ -219,6 +221,9 @@ GAME_AT(struct faction_data, odp_deployed, 0x364);
 GAME_AT(struct faction_data, target_x, 0x3f0);
 GAME_AT(struct faction_data, mil_strength, 0x1060);
 GAME_AT(struct faction_data, flags_ext, 0x2090);
+GAME_AT(struct faction_data, diplo_stolen_techs, 0x200);
+GAME_AT(struct faction_data, best_armor_value, 0x824);
+GAME_AT(struct faction_data, sites, 0x1eac);
 GAME_AT(struct faction_data, enemy_best_armor_value, 0x830);
 GAME_AT(struct faction_data, enemy_missiles, 0x850);
 GAME_AT(struct faction_data, mil_attack, 0x1064);
@@ -405,7 +410,8 @@ struct rules_facility {
     int32_t cost;  // in rows of minerals
     int32_t maint;  // energy a turn
     int32_t preq_tech;
-    GAME_PAD(0x18, 0x30);
+    int32_t free_tech;
+    int32_t ai_fight, ai_growth, ai_tech, ai_wealth, ai_power;  // the AI's weights for it, by its priorities
 };
 _Static_assert(sizeof(struct rules_facility) == 0x30, "rules_facility size");
 
@@ -1050,6 +1056,14 @@ extern void (*game_enemy_capabilities)(int faction);
 extern int(__attribute__((thiscall)) * game_console_upgrade)(void *console, int veh);  // 0 when it can't
 extern void (*game_del_site)(int faction, int type, int x, int y, int unk);
 extern void (*game_wipe_goals)(int faction);
+// The AI's choice of what a base builds.
+extern int (*game_speed_proto)(int proto);              // moves a turn, in thirds
+extern int (*game_worm_mod)(int base, int faction);     // morale against native life
+extern int (*game_base_lose_minerals)(int base, int item);  // minerals a change of build would lose
+extern int32_t *game_gov_claims, *game_gov_claim_scores;
+extern int32_t *game_tech_unk_9a5e9c;  // a tech the AI checks rivals for before building probe teams (use unknown)  // [4] base_reset()'s choice for each governor priority, and its score
+extern int32_t *game_dome_depth_a, *game_dome_depth_b;
+extern const char *game_name_believers, *game_name_peacekeepers, *game_name_caretakers;  // faction file names the AI singles out  // depths below sea level a pressure dome is wanted at (unconfirmed)
 extern int32_t *game_pbem;                 // non-zero in a hotseat or play-by-email game
 extern int32_t *game_diplo_state;          // [FACTION_COUNT] what the AI will raise with the player
 extern int32_t (*game_diplo_state_with)[FACTION_COUNT];  // [player][faction] the same, kept per player
