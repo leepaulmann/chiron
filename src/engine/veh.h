@@ -50,3 +50,16 @@ int veh_unmoved(int veh);
 int veh_ready(int veh);
 int veh_fake(int proto, int faction);
 int veh_wake(int veh);
+
+int drop_range(int faction);
+int planet_buster(int veh);
+int veh_top(int veh);
+int veh_moves(int veh);
+int proto_power(int veh);
+int armor_val(int proto, int faction);
+int transport_val(int chassis, uint32_t ability, int reactor);
+int abil_index(uint32_t ability);
+int veh_put(int veh, int x, int y);
+int veh_health(int veh);
+int get_plan(int faction, int plan);
+int want_monolith(int veh);

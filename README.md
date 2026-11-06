@@ -165,7 +165,9 @@ module at a time. So far:
   units; keeping the stacks of units on each square: lifting, dropping,
   promoting, sorting and clearing units, and their moves left after damage;
   combat strengths of weapons and armor, the nearest unit, and whether a
-  unit is ready for orders.
+  unit is ready for orders; a unit's health and moves left, how far air
+  drops reach, transports' capacity, the design a faction uses for a plan,
+  and which units the AI sends to a monolith.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once

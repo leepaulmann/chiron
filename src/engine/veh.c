@@ -28,12 +28,13 @@ enum {  // unit_proto.abilities
     ABL_DEEP_RADAR = 0x2, ABL_AIR_SUPERIORITY = 0x20, ABL_ARTILLERY = 0x8000, ABL_CARRIER = 0x80, ABL_ANTIGRAV_STRUTS = 0x400, ABL_SLOW = 0x800000,
     ABL_SOPORIFIC_GAS = 0x1000000, ABL_DISSOCIATIVE_WAVE = 0x2000000, ABL_MARINE_DETACHMENT = 0x4000000,
     ABL_FUEL_NANOCELLS = 0x8000000, ABL_ALGO_ENHANCEMENT = 0x10000000,
+    ABL_HEAVY_TRANSPORT = 0x80000,
 };
 enum {
     BSC_LOCUSTS_OF_CHIRON = 10, BSC_SEALURK = 14, BSC_SPORE_LAUNCHER = 15, BSC_FUNGAL_TOWER = 19,
     BSC_UNITY_MINING_LASER = 20, BASIC_PROTOS = 64,
     WEAPON_PROBE = 11, WEAPON_TECTONIC = 21, WMODE_TRANSPORT = 7, WMODE_PROBE = 11,
-    MAP_AIRBASE = 0x40000, VEH_STATE_UNK_4000000 = 0x4000000,
+    MAP_AIRBASE = 0x40000, VEH_STATE_UNK_4000000 = 0x4000000, VEH_STATE_MONOLITH_USED = 0x100,
     PLAN_PROBE = 11, PLAN_ARTIFACT = 12, BONUS_FREE_ABILITY = 15, TECH_FLAG_PROBE = 0x2,
     RULE_FLAG_FREE_PROTO = 0x200, RULE_FLAG_MORALE = 0x8000,
     RULES_NO_COLONY_PODS = 0x400000, MAP_UNK_40000000_ = 0x40000000, FACTION_FLAG_UNK_40000000 = 0x40000000,
@@ -638,7 +639,7 @@ int veh_speed(int veh, int straight) {
 }
 
 // Uses up a unit's moves for the turn.
-void veh_skip(int veh) { game_vehs[veh].iter_count = (uint8_t)veh_speed(veh, 0); }
+void veh_skip(int veh) { game_vehs[veh].moves_spent = (uint8_t)veh_speed(veh, 0); }
 
 // Combat strengths of a design's weapon and armor, against (or from) a
 // unit if one is given, when they are multiplied by 8: probe against probe
@@ -743,7 +744,7 @@ static int playable(int veh) {
 int veh_selectable(int veh) { return veh >= 0 && playable(veh); }
 
 static int moves_left(int veh) {
-    int r = veh_speed(veh, 0) - game_vehs[veh].iter_count;
+    int r = veh_speed(veh, 0) - game_vehs[veh].moves_spent;
     return r > 0;
 }
 
@@ -778,17 +779,105 @@ int veh_wake(int veh) {
     struct veh *V = &game_vehs[veh];
     int8_t order = (int8_t)V->order;
     if (order >= 4 && order < 24 && !(V->state & VEH_STATE_UNK_4000000)) {
-        V->iter_count = (uint8_t)(veh_speed(veh, 0) - game_rules_basic->move_rate_roads);
+        V->moves_spent = (uint8_t)(veh_speed(veh, 0) - game_rules_basic->move_rate_roads);
         int turns = V->movement_turns;
         if (turns) {
             turns -= game_contribution(veh, order - 4);
             V->movement_turns = (uint8_t)(turns < 0 ? 0 : turns);
         }
     }
-    if ((V->state & 0x200) && V->order_auto_type == 11 && !(V->state & 4)) V->iter_count = 0;
+    if ((V->state & 0x200) && V->order_auto_type == 11 && !(V->state & 4)) V->moves_spent = 0;
     V->order = 0;
     V->state &= 0xf4ffbdffu;
     return veh;
+}
+
+// How far the faction's units can air drop: the rule's range, or across
+// the whole map with the orbital insertion tech or the Space Elevator.
+int drop_range(int faction) {
+    if (!has_tech(game_rules_basic->tech_orbital_insert, faction) && !owns_project(SP_SPACE_ELEVATOR, faction))
+        return game_rules_basic->max_airdrop_range;
+    return *game_map_width > *game_map_height ? *game_map_width : *game_map_height;
+}
+
+// The unit's reactor if it's a planet buster, else 0.
+int planet_buster(int veh) { return planet_buster2(game_vehs[veh].proto); }
+
+// The head of the unit's stack, or -1 for no unit.
+int veh_top(int veh) {
+    if (veh < 0) return -1;
+    while (game_vehs[veh].prev_in_stack >= 0) veh = game_vehs[veh].prev_in_stack;
+    return veh;
+}
+
+// The moves the unit has left this turn, from 0 to 999.
+int veh_moves(int veh) {
+    int r = veh_speed(veh, 0) - game_vehs[veh].moves_spent;
+    return r < 0 ? 0 : r > 999 ? 999 : r;
+}
+
+// The unit's full health: ten per reactor level (1 to 100), or 1 for an
+// alien artifact.
+int proto_power(int veh) {
+    const struct unit_proto *P = proto_of(game_vehs[veh].proto);
+    if (P->plan == PLAN_ARTIFACT) return 1;
+    int r = P->reactor < 1 ? 1 : P->reactor > 100 ? 100 : P->reactor;
+    return r * 10;
+}
+
+// The design's armor rating doubled, as arm_val().
+int armor_val(int proto, int faction) { return arm_val(proto_of(proto)->armor, faction); }
+
+// The units a transport of the chassis carries: times the reactor at sea,
+// halved when slow, and half again more for heavy transport.
+int transport_val(int chassis, uint32_t ability, int reactor) {
+    int cargo = game_chassis[chassis].cargo;
+    if (game_chassis[chassis].triad == TRIAD_SEA) cargo *= reactor;
+    if (ability & ABL_SLOW) cargo /= 2;
+    if (ability & ABL_HEAVY_TRANSPORT) cargo = (cargo * 3 + 1) / 2;
+    return cargo;
+}
+
+// The number of the lowest bit set: an ability's index from its flag. Like
+// the original it never returns for 0.
+int abil_index(uint32_t ability) {
+    int i = 0;
+    int32_t a = (int32_t)ability;
+    while (!(a & 1)) a >>= 1, i++;
+    return i;
+}
+
+// Moves the unit alone to the square.
+int veh_put(int veh, int x, int y) { return veh_drop(veh_lift(veh), x, y); }
+
+// The unit's health left, from 0 to 9999.
+int veh_health(int veh) {
+    int r = proto_power(veh) - game_vehs[veh].damage;
+    return r < 0 ? 0 : r > 9999 ? 9999 : r;
+}
+
+// The faction's first design with the plan that it can build: of the
+// basic designs, those whose tech it has, then its own; -1 if none.
+int get_plan(int faction, int plan) {
+    for (int i = 0; i < 2 * BASIC_PROTOS; i++) {
+        int p = i < BASIC_PROTOS ? i : faction * BASIC_PROTOS + i - BASIC_PROTOS;
+        const struct unit_proto *P = proto_of(p);
+        if (!(P->flags & PROTO_FLAG_ACTIVE)) continue;
+        if ((uint8_t)(1u << (faction & 31)) & P->obsolete_factions) continue;
+        if (p < BASIC_PROTOS && !has_tech(P->preq_tech, faction)) continue;
+        if (P->plan == plan) return p;
+    }
+    return -1;
+}
+
+// Whether the AI wants the unit to visit a monolith: an armed unit below
+// elite morale (by its own count and morale_veh()'s) that hasn't had its
+// upgrade there yet.
+int want_monolith(int veh) {
+    const struct veh *V = &game_vehs[veh];
+    if (V->state & VEH_STATE_MONOLITH_USED) return 0;
+    if (morale_veh(veh, 1, 0) >= 6 || V->morale >= 6) return 0;
+    return game_weapons[proto_of(V->proto)->weapon].offense != 0;
 }
 
 extern struct hook_module veh_module;
@@ -874,6 +963,18 @@ SHADOW1(VEH, int, veh_ready, int)
 SHADOW_WRITER(VEH, int, veh_find, (int a, int b, int c, int d), (a, b, c, d), WRITES(game_veh_find_dist, 4), "%d, %d, %d, %d", a, b, c, d)
 SHADOW_WRITER(VEH, int, veh_fake, (int a, int b), (a, b), WRITES(&game_vehs[VEH_COUNT], sizeof(struct veh)), "%d, %d", a, b)
 SHADOW_WRITER(VEH, int, veh_wake, (int a), (a), WRITES(&game_vehs[a], sizeof(struct veh)), "%d", a)
+SHADOW1(VEH, int, drop_range, int)
+SHADOW1(VEH, int, planet_buster, int)
+SHADOW1(VEH, int, veh_top, int)
+SHADOW1(VEH, int, veh_moves, int)
+SHADOW1(VEH, int, proto_power, int)
+SHADOW2(VEH, int, armor_val, int, int)
+SHADOW3(VEH, int, transport_val, int, uint32_t, int)
+SHADOW1(VEH, int, abil_index, uint32_t)
+SHADOW_WRITER(VEH, int, veh_put, (int a, int b, int c), (a, b, c), WRITES_STACKS, "%d, %d, %d", a, b, c)
+SHADOW1(VEH, int, veh_health, int)
+SHADOW2(VEH, int, get_plan, int, int)
+SHADOW1(VEH, int, want_monolith, int)
 
 // veh_at() is called constantly, so it's checked as a query; a square the
 // map marks with units but where the original found none (it then logs
@@ -946,6 +1047,7 @@ static void sweep_stacks(void) {
         check_veh_promote(v);
         check_veh_demote(v);
         check_stack_put(v, nx, y);
+        check_veh_put(v, nx, (y + 2) % h);
         check_stack_sort(v);
         check_stack_sort_2(v);
         check_stack_fix(v);
@@ -980,7 +1082,7 @@ SHADOW_ENTRY(VEH, int, veh_cost, (int a, int b, int *c), (a, b, c))
 static const int varied_projects[] = {SP_COMMAND_NEXUS, SP_XENOEMPATHY_DOME, SP_NEURAL_AMPLIFIER,
                                       SP_MARITIME_CONTROL_CENTER, SP_PHOLUS_MUTAGEN, SP_CYBORG_FACTORY,
                                       SP_DREAM_TWISTER, SP_TELEPATHIC_MATRIX, SP_VOICE_OF_PLANET,
-                                      SP_NETHACK_TERMINUS, SP_CLOUDBASE_ACADEMY};
+                                      SP_NETHACK_TERMINUS, SP_CLOUDBASE_ACADEMY, SP_SPACE_ELEVATOR};
 enum { VARIED = sizeof varied_projects / sizeof varied_projects[0] };
 static void sweep_varied(void) {
     static const int psi[5] = {0, 10, 25, -20, 50};
@@ -1023,6 +1125,7 @@ static void sweep_varied(void) {
         for (int v = -7; v < 30; v += 3) check_psi_factor(v, f, v & 1, (v >> 1) & 1);
         for (int a = 0; a < ARMOR_COUNT; a++) check_arm_strat(a, f);
         for (int w = 0; w < WEAPON_COUNT; w++) check_weap_strat(w, f);
+        check_drop_range(f);
     }
     for (int p = 0; p < PROTO_COUNT; p++)
         if (game_protos[p].flags & PROTO_FLAG_ACTIVE) check_speed_proto(p), check_has_abil(p, ABL_ALGO_ENHANCEMENT);
@@ -1103,6 +1206,8 @@ static void veh_sweep(void) {
         check_weap_val(p, f);
         check_arm_val(p, f);
         check_arm_val(p % ARMOR_COUNT, -1);
+        check_armor_val(p, f);
+        check_armor_val(p, -1);
         check_speed_proto(p);
         check_base_cost(p);
         int charged;
@@ -1113,6 +1218,8 @@ static void veh_sweep(void) {
     for (int f = -1; f <= FACTION_COUNT; f++) {
         if (f >= 0 && f < FACTION_COUNT) {
             check_best_reactor(f);
+            check_drop_range(f);
+            for (int plan = 0; plan < 16; plan++) check_get_plan(f, plan);
             for (int w = 0; w < WEAPON_COUNT; w++) check_weap_strat(w, f);
             for (int a = 0; a < ARMOR_COUNT; a++) check_arm_strat(a, f);
             for (int v = -7; v < 30; v += 3) check_psi_factor(v, f, v & 1, (v >> 1) & 1);
@@ -1140,8 +1247,24 @@ static void veh_sweep(void) {
         check_veh_cargo(v);
         check_morale_veh(v, v & 1, (v + turn) % FACTION_COUNT);
         check_morale_alien(v, (v + turn) % FACTION_COUNT);
+        check_planet_buster(v);
+        check_veh_top(v);
+        check_veh_moves(v);
+        check_proto_power(v);
+        check_veh_health(v);
+        check_want_monolith(v);
     }
+    check_veh_top(-1);
     check_morale_alien(-1, 1);
+    for (int c = 0; c < CHASSIS_COUNT; c++)
+        for (int r = 0; r < 5; r++) {
+            static const uint32_t abls[] = {0, ABL_SLOW, ABL_HEAVY_TRANSPORT, ABL_SLOW | ABL_HEAVY_TRANSPORT, 0xffffffffu};
+            for (int a = 0; a < 5; a++) check_transport_val(c, abls[a], r * 3 - 1);
+        }
+    for (int i = 0; i < 32; i++) {
+        check_abil_index(1u << i);
+        check_abil_index((1u << i) | 0x80000000u | (uint32_t)turn << 16);
+    }
     sweep_varied();
     sweep_stacks();
     hooks_sweeping = sweeping;
@@ -1193,5 +1316,17 @@ static const struct hook veh_hooks[] = {
     HOOK(0x5c1d50, veh_fake, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x0c),                 // mov eax, [ebp+12]
     HOOK(0x5c1d70, veh_wake, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56),                       // push ebx; push esi
     HOOK(0x5ba910, veh_avail, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x57),                // push ebx; push esi; push edi
+    HOOK(0x500320, drop_range, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0xc8, 0x97, 0x94, 0x00),   // mov eax, [tech_orbital_insert]
+    HOOK(0x500520, planet_buster, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),            // mov eax, [ebp+8]
+    HOOK(0x579920, veh_top, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                  // mov eax, [ebp+8]
+    HOOK(0x579960, veh_moves, PUSH_EBP_MOV_EBP_ESP, 0x56, 0x8b, 0x75, 0x08),          // push esi; mov esi, [ebp+8]
+    HOOK(0x5799a0, proto_power, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),              // mov eax, [ebp+8]
+    HOOK(0x57d480, armor_val, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                // mov eax, [ebp+8]
+    HOOK(0x57d510, transport_val, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),            // mov eax, [ebp+8]
+    HOOK(0x581170, abil_index, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x4d, 0x08),               // mov ecx, [ebp+8]
+    HOOK(0x5a59b0, veh_put, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x10),                  // mov eax, [ebp+16]
+    HOOK(0x5a59e0, veh_health, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),               // mov eax, [ebp+8]
+    HOOK(0x5aed50, get_plan, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x57),                 // push ebx; push esi; push edi
+    HOOK(0x579f80, want_monolith, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),            // mov eax, [ebp+8]
 };
 struct hook_module veh_module = {"veh", veh_hooks, HOOK_COUNT(veh_hooks), veh_sweep, NULL, -1};

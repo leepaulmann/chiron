@@ -267,24 +267,84 @@ int main(void) {
     EXPECT(lift[1], 9999);
 
     // Readiness for the player's faction.
-    vehs[0].iter_count = 0;
+    vehs[0].moves_spent = 0;
     EXPECT(veh_selectable(0), 1);
     EXPECT(veh_selectable(1), 0);  // another faction's
     EXPECT(veh_ready(0), 1);
     vehs[0].order = 2;
     EXPECT(veh_ready(0), 0);
     EXPECT(veh_unmoved(0), 1);
-    vehs[0].iter_count = 3;
+    vehs[0].moves_spent = 3;
     EXPECT(veh_unmoved(0), 0);
     vehs[0].order = 5, vehs[0].movement_turns = 3;  // terraforming
     EXPECT(veh_unmoved(0), 1);
     EXPECT(veh_wake(0), 0);
     EXPECT(vehs[0].order, 0);
-    EXPECT(vehs[0].iter_count, 0);  // its 3 moves, less one square
+    EXPECT(vehs[0].moves_spent, 0);  // its 3 moves, less one square
     EXPECT(vehs[0].movement_turns, 1);
     EXPECT(veh_jail(0), 0);
     EXPECT(veh_fake(64, 1), VEH_COUNT);
     EXPECT(vehs[VEH_COUNT].proto, 64);
+
+    // Health, moves and stacks. Unit 0 (proto 64, reactor 1) has 3 moves.
+    vehs[0].damage = 4, vehs[0].moves_spent = 1;
+    EXPECT(proto_power(0), 10);
+    EXPECT(veh_health(0), 6);
+    vehs[0].damage = 12;
+    EXPECT(veh_health(0), 0);
+    vehs[0].damage = 0;
+    EXPECT(veh_moves(0), 2);
+    vehs[0].moves_spent = 9;
+    EXPECT(veh_moves(0), 0);
+    vehs[0].moves_spent = 0;
+    protos[64].plan = PLAN_PLANET_BUSTER;
+    EXPECT(planet_buster(0), 1);
+    protos[64].plan = 12;  // an alien artifact
+    EXPECT(proto_power(0), 1);
+    protos[64].plan = 0;
+    EXPECT(veh_top(-1), -1);
+    vehs[0].prev_in_stack = -1, vehs[0].next_in_stack = 1, vehs[1].prev_in_stack = 0, vehs[1].next_in_stack = -1;
+    EXPECT(veh_top(1), 0);
+    vehs[0].next_in_stack = vehs[1].prev_in_stack = -1;
+
+    // Air drops: the rule's range, or the whole map with the Space Elevator.
+    rules_basic.max_airdrop_range = 5, rules_basic.tech_orbital_insert = 30;
+    EXPECT(drop_range(1), 5);
+    projects[SP_SPACE_ELEVATOR] = 1;  // bases[1] is faction 1's
+    EXPECT(drop_range(1), W);
+    EXPECT(drop_range(2), 5);
+    projects[SP_SPACE_ELEVATOR] = -1;
+
+    // Transports: at sea times the reactor, halved if slow, half again
+    // more (rounded up) for heavy transport.
+    chassis[1].cargo = 2, chassis[0].cargo = 3;
+    EXPECT(transport_val(1, 0, 3), 6);
+    EXPECT(transport_val(0, 0, 3), 3);
+    EXPECT(transport_val(0, 0x800000, 3), 1);
+    EXPECT(transport_val(0, 0x80000, 3), 5);
+    EXPECT(abil_index(0x80000), 19);
+    EXPECT(abil_index(0x80000000u), 31);
+    EXPECT(armor_val(64, -1), 6);
+
+    // A design for a plan: basic ones need their tech, the faction's own
+    // don't, and an obsolete one is skipped.
+    protos[2].plan = 3, protos[64].plan = 3, achieved[5] = 0;
+    EXPECT(get_plan(1, 3), 64);
+    achieved[5] = 1 << 1;
+    EXPECT(get_plan(1, 3), 2);
+    protos[2].obsolete_factions = 1 << 1;
+    EXPECT(get_plan(1, 3), 64);
+    EXPECT(get_plan(1, 9), -1);
+    protos[2].plan = protos[64].plan = 0;
+
+    // A monolith for an armed unit below elite.
+    vehs[0].morale = 2, vehs[0].state = 0;
+    EXPECT(want_monolith(0), 1);
+    vehs[0].state = 0x100;
+    EXPECT(want_monolith(0), 0);
+    vehs[0].state = 0, vehs[0].morale = 6;
+    EXPECT(want_monolith(0), 0);
+    vehs[0].morale = 0;
 
     if (failures) return 1;
     printf("engine_veh: all tests passed\n");

@@ -404,12 +404,14 @@ struct rules_chassis {
     uint8_t speed;
     uint8_t triad;  // TRIAD_*
     uint8_t range;  // turns aloft for air units, else 0
-    GAME_PAD(0x4b, 0x4d);
+    uint8_t cargo;  // units a transport of it carries, before the reactor
+    GAME_PAD(0x4c, 0x4d);
     uint8_t missile;
     GAME_PAD(0x4e, 0x8e);
     int16_t preq_tech;
 };
 _Static_assert(sizeof(struct rules_chassis) == 0x90, "rules_chassis size");
+GAME_AT(struct rules_chassis, cargo, 0x4b);
 
 struct rules_facility {
     char *name;
@@ -624,7 +626,9 @@ struct rules_basic {
     int32_t tech_three_nutrients, tech_three_minerals, tech_three_energy;
     int32_t extra_cost_prototype[3];  // percent more for a new design's first unit, by TRIAD_*
     int32_t psi_combat_ratio_atk[3], psi_combat_ratio_def[3];  // psi combat odds, by TRIAD_*
-    GAME_PAD(0x7c, 0x9c);
+    GAME_PAD(0x7c, 0x90);
+    int32_t tech_orbital_insert;  // lets air drops reach anywhere without the Space Elevator
+    GAME_PAD(0x94, 0x9c);
     int32_t territory_max_dist;  // how far a base's territory reaches over land; half that at sea
     int32_t turns_corner_market;  // from cornering the energy market to the win
     int32_t tech_mining_platform_bonus;
@@ -645,6 +649,7 @@ GAME_AT(struct rules_basic, tech_economic_victory, 0xa8);
 GAME_AT(struct rules_basic, territory_max_dist, 0x9c);
 GAME_AT(struct rules_basic, extra_cost_prototype, 0x58);
 GAME_AT(struct rules_basic, psi_combat_ratio_def, 0x70);
+GAME_AT(struct rules_basic, tech_orbital_insert, 0x90);
 
 enum { RULE_FLAG_WORM_POLICE = 0x40, RULE_FLAG_ALIEN = 0x80, RULE_FLAG_AQUATIC = 0x100, RULE_FLAG_INTEREST = 0x4000 };  // faction_def.rule_flags
 enum { ECONOMICS_FREE_MARKET = 1, ECONOMICS_PLANNED = 2 };  // faction_data.se_models_pending[1]
@@ -694,7 +699,8 @@ struct veh {
     uint8_t movement_turns;
     uint8_t order_auto_type;  // for a convoy, the RESOURCE_* it carries
     uint8_t visibility;  // bit per other faction that can see it
-    uint8_t iter_count, unk_29, moves_spent;
+    uint8_t moves_spent;  // in the units veh_speed() counts in
+    uint8_t unk_29, iter_count;
     uint8_t status_icon;  // a letter or digit: 'F' fortified, '1' given a goal this turn
     uint8_t unk_2c[2];
     int16_t home_base;
@@ -704,7 +710,8 @@ _Static_assert(sizeof(struct veh) == 0x34, "veh size");
 GAME_AT(struct veh, damage, 0x10);
 GAME_AT(struct veh, order, 0x11);
 GAME_AT(struct veh, order_turns, 0x1c);
-GAME_AT(struct veh, moves_spent, 0x2a);
+GAME_AT(struct veh, moves_spent, 0x28);
+GAME_AT(struct veh, iter_count, 0x2a);
 GAME_AT(struct veh, visibility, 0x27);
 GAME_AT(struct veh, home_base, 0x2e);
 GAME_AT(struct veh, waypoint_x, 0x14);
