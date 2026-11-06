@@ -665,6 +665,97 @@ void rebuild_base_bits(void) {
         }
 }
 
+// Works out who owns each square, and recounts each faction's and region's
+// territory and the AI's sites from scratch. A square belongs to the
+// faction of the nearest base in its region within the territory distance
+// (half that at sea); a square of sea next to a base belongs to that base's
+// faction whatever the distance. Squares that change hands are marked for
+// redrawing. Squares outside every base's radius without a site value get
+// one. Pods in someone's territory become sites for its owner's AI; pods
+// in no one's become sites for any faction with bases in the region whose
+// nearest base is between one and two territory distances away. Either way
+// only where the faction has seen the square, unless it is an AI and the
+// difficulty is above the fourth level.
+static int site_known(int faction, const struct map_tile *t) {
+    return (t->visibility & (1 << faction)) || (!(*game_human_factions & (1 << faction)) && *game_difficulty > 3);
+}
+
+void reset_territory(void) {
+    for (int f = 0; f < FACTION_COUNT; f++)
+        for (int r = 0; r < REGION_COUNT; r++) {
+            struct faction_data *F = &game_factions[f];
+            F->region_territory_tiles[r] = F->region_visible_tiles[r] = 0;
+            F->region_good_tiles[r] = F->region_good_base_tiles[r] = 0;
+            F->region_best_site[r] = F->region_territory_pods[r] = 0;
+        }
+    for (int r = 0; r < REGION_COUNT; r++) game_continents[r].best_site = game_continents[r].pods = 0;
+    struct map_tile *t = *game_map;
+    for (int y = 0; y < *game_map_height; y++)
+        for (int x = y & 1; x < *game_map_width; x += 2, t++) {
+            int region = t->region;
+            for (int f = 1; f < FACTION_COUNT; f++) {
+                uint32_t flags = game_factions[f].flags;
+                int seen = flags & FACTION_FLAG_UNK_20000000 ? (t->bits & MAP_POD_TAKEN) != 0
+                                                             : (flags & FACTION_FLAG_MAP_REVEALED) || (t->visibility & (1 << f));
+                if (seen) game_factions[f].region_visible_tiles[region]++;
+            }
+            int base = game_base_find3(x, y, -1, region, -1, -1), owner = -1;
+            int ocean = t->climate >> 5 < ALT_SHORE_LINE;
+            if (base >= 0) {
+                int limit = game_rules_basic->territory_max_dist;
+                if (ocean) limit >>= 1;
+                if (*game_base_find_dist < limit) owner = game_bases[base].faction;
+            }
+            if (ocean)
+                for (int i = 0; i < 9; i++) {
+                    int x2 = x + game_radius_x[i], y2 = y + game_radius_y[i];
+                    if (!(*game_map_flat & 1)) {
+                        if (x2 < 0) x2 += *game_map_width;
+                        else if (x2 >= *game_map_width) x2 -= *game_map_width;
+                    }
+                    if (y2 < 0 || y2 >= *game_map_height || x2 < 0 || x2 >= *game_map_width) continue;
+                    int b = game_base_at(x2, y2);
+                    if (b >= 0) {
+                        owner = game_bases[b].faction;
+                        break;
+                    }
+                }
+            if (owner != t->territory) {
+                t->bits2 |= MAP2_CHANGED;
+                *game_draw_state |= DRAW_TERRAIN;
+            }
+            t->territory = (int8_t)owner;
+            if (owner < 0) owner = 0;
+            struct faction_data *F = &game_factions[owner];
+            F->region_territory_tiles[region]++;
+            if ((t->climate & 0x18) && (t->rocky_lock & 0xc0) < 0x80 && !(t->bits & MAP_FUNGUS)) {
+                F->region_good_tiles[region]++;
+                if (t->bits & MAP_BASE_RADIUS) F->region_good_base_tiles[region]++;
+            }
+            int site = 0;
+            if (!(t->bits & MAP_BASE_RADIUS) && !(site = t->owner_site >> 4)) {
+                site = game_world_site(x, y, 0);
+                site_set(x, y, site);
+            }
+            struct continent *c = &game_continents[region];
+            if (site > c->best_site) c->best_site = site;
+            if (owner && site > F->region_best_site[region]) F->region_best_site[region] = (uint8_t)site;
+            if (!goody_at(x, y)) continue;
+            c->pods++;
+            F->region_territory_pods[region]++;
+            if (owner) {
+                if (site_known(owner, t)) game_add_site(owner, 3, 1, x, y);
+                continue;
+            }
+            for (int f = 1; f < FACTION_COUNT; f++) {
+                if (!game_factions[f].region_total_bases[region] || !site_known(f, t) || game_at_site(f, 3, x, y)) continue;
+                if (game_base_find3(x, y, f, region, -1, -1) < 0) continue;
+                int d = *game_base_find_dist, limit = game_rules_basic->territory_max_dist;
+                if (d >= limit && d <= 2 * limit) game_add_site(f, 3, 1, x, y);
+            }
+        }
+}
+
 // ---- Hooks and shadow checks ------------------------------------------------
 
 // Functions that read squares or bases start the sweep; the others can be
@@ -758,6 +849,7 @@ SET3(void, site_radius, int, WRITES_MAP)
 SHADOW_WRITER(MAP, int, new_landmark, (int a, int b, const char *c), (a, b, c), WRITES_LANDMARKS, "%d, %d, \"%s\"", a, b, c)
 SHADOW_WRITER(MAP, void, kill_landmark, (int a, int b), (a, b), WRITES_LANDMARKS, "%d, %d", a, b)
 SHADOW_WRITER(MAP, void, rebuild_vehicle_bits, (void), (), WRITES_MAP, "%s", "")
+SHADOW_WRITER(MAP, void, reset_territory, (void), (), (hooks_writes_game(&w_), WRITES_MAP), "%s", "")
 SHADOW_WRITER(MAP, void, rebuild_base_bits, (void), (), WRITES_MAP, "%s", "")
 
 // Input sweeps, run once a turn in shadow mode. Squares are the map's own
@@ -922,6 +1014,7 @@ static void sweep_setters(void) {
         if (x < w) check_site_radius(x, y, 0);
     }
     check_rebuild_vehicle_bits();
+    check_reset_territory();
     check_rebuild_base_bits();
     // On the landmark itself, or diagonally off it, which it still reaches.
     for (int l = 0; l < *game_landmark_count; l++)
@@ -1022,6 +1115,7 @@ static const struct hook map_hooks[] = {
     HOOK(0x592600, new_landmark, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0x90, 0x98, 0x94, 0x00),  // mov eax, [0x949890]
     HOOK(0x5926f0, kill_landmark, PUSH_EBP_MOV_EBP_ESP, 0x51, 0xa1, 0xc8, 0xf8, 0x66, 0x00),  // push ecx; mov eax, [0x66f8c8]
     HOOK(0x532a90, rebuild_vehicle_bits, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),
+    HOOK(0x523dd0, reset_territory, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x14),
     HOOK(0x532b70, rebuild_base_bits, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x0d, 0x74, 0x98, 0x94, 0x00),  // push ecx; mov ecx, [0x949874]
 };
 struct hook_module map_module = {"map", map_hooks, HOOK_COUNT(map_hooks), map_sweep, &mapgen_module, -1};

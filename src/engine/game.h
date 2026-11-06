@@ -152,9 +152,15 @@ struct faction_data {
     uint8_t region_total_bases[REGION_COUNT];
     GAME_PAD(0x11fc, 0x137c);
     uint16_t region_flags[REGION_COUNT];  // movement planning
-    GAME_PAD(0x147c, 0x157c);
+    // Counted by reset_territory: squares the faction owns, has seen, owns
+    // and could farm (rainy, not rocky, no fungus), and those of the last
+    // within a base's radius; the best site value and the pods it owns.
+    uint16_t region_territory_tiles[REGION_COUNT];
     uint16_t region_visible_tiles[REGION_COUNT];
-    GAME_PAD(0x167c, 0x197c);
+    uint16_t region_good_tiles[REGION_COUNT];
+    uint16_t region_good_base_tiles[REGION_COUNT];
+    uint8_t region_best_site[REGION_COUNT];
+    uint8_t region_territory_pods[REGION_COUNT];
     uint8_t region_base_plan[REGION_COUNT];  // PLAN_* for the AI
     GAME_PAD(0x19fc, 0x207c);
     int32_t corner_market_turn, corner_market_cost;  // when the energy market is cornered, and what it cost
@@ -187,6 +193,8 @@ GAME_AT(struct faction_data, tech_research_id, 0x3cc);
 GAME_AT(struct faction_data, alloc_labs, 0x328);
 GAME_AT(struct faction_data, region_total_bases, 0x117c);
 GAME_AT(struct faction_data, region_base_plan, 0x197c);
+GAME_AT(struct faction_data, region_territory_tiles, 0x147c);
+GAME_AT(struct faction_data, region_territory_pods, 0x18fc);
 GAME_AT(struct faction_data, se_models_pending, 0x228);
 GAME_AT(struct faction_data, se_models, 0x238);
 GAME_AT(struct faction_data, se_upheaval_paid, 0x248);
@@ -342,7 +350,9 @@ _Static_assert(sizeof(struct rules_facility) == 0x30, "rules_facility size");
 struct continent {
     int32_t tile_count;
     int32_t open_terrain;  // land squares that are neither arid, rocky nor fungus
-    GAME_PAD(0x08, 0x14);
+    int32_t best_site;     // the highest site value (world_site) of its squares
+    int32_t pods;          // supply and unity pods left in it
+    GAME_PAD(0x10, 0x14);
     uint8_t sea_coasts[8];  // bit per land region its shore touches
 };
 _Static_assert(sizeof(struct continent) == 0x1c, "continent size");
@@ -354,7 +364,8 @@ enum {  // game_rules bits
     RULES_NO_UNITY_SCATTERING = 0x2000,
 };
 
-enum { FACTION_FLAG_MAP_REVEALED = 0x200, FACTION_FLAG_MAINT_HALF = 0x20, FACTION_FLAG_ECO_SPARED = 0x4000 };  // faction_data.flags
+enum { FACTION_FLAG_MAP_REVEALED = 0x200, FACTION_FLAG_MAINT_HALF = 0x20, FACTION_FLAG_ECO_SPARED = 0x4000,
+       FACTION_FLAG_UNK_20000000 = 0x20000000 };  // faction_data.flags
 
 enum { TREATY_UNK_8000000 = 0x8000000 };  // with TREATY_COMMLINK, whose_territory() names the owner
 
@@ -389,6 +400,7 @@ enum {  // map_tile.bits
     MAP_FUNGUS = 0x20, MAP_UNK_4000 = 0x4000, MAP_THERMAL_BORE = 0x1000000, MAP_UNK_40000000 = 0x40000000,
     MAP_ROAD = 0x4, MAP_MINE = 0x10, MAP_SOLAR = 0x40, MAP_FARM = 0x8000, MAP_SOIL_ENRICHER = 0x80000,
     MAP_ECHELON_MIRROR = 0x800000,
+    MAP_BASE_RADIUS = 0x1000,  // within a base's radius
 };
 enum {  // map_tile.bits2
     MAP2_CRATER = 0x1,
@@ -532,7 +544,8 @@ struct rules_basic {
     int32_t drones_genejack, pop_limit_hab_complex, pop_limit_hab_dome;
     int32_t tech_improve_fungus, tech_ease_fungus_move, tech_road_fungus, tech_two_special;
     int32_t tech_three_nutrients, tech_three_minerals, tech_three_energy;
-    GAME_PAD(0x58, 0xa0);
+    GAME_PAD(0x58, 0x9c);
+    int32_t territory_max_dist;  // how far a base's territory reaches over land; half that at sea
     int32_t turns_corner_market;  // from cornering the energy market to the win
     int32_t tech_mining_platform_bonus;
     int32_t tech_economic_victory;  // needed to corner the energy market
@@ -546,6 +559,7 @@ GAME_AT(struct rules_basic, mine_road_limit, 0x24);
 GAME_AT(struct rules_basic, tech_three_nutrients, 0x4c);
 GAME_AT(struct rules_basic, tech_mining_platform_bonus, 0xa4);
 GAME_AT(struct rules_basic, tech_economic_victory, 0xa8);
+GAME_AT(struct rules_basic, territory_max_dist, 0x9c);
 
 enum { RULE_FLAG_WORM_POLICE = 0x40, RULE_FLAG_ALIEN = 0x80, RULE_FLAG_AQUATIC = 0x100, RULE_FLAG_INTEREST = 0x4000 };  // faction_def.rule_flags
 enum { ECONOMICS_FREE_MARKET = 1, ECONOMICS_PLANNED = 2 };  // faction_data.se_models_pending[1]
@@ -882,6 +896,10 @@ extern void (*game_draw_tile)(int x, int y, int unk);
 extern void (*game_do_checksums)(int stage);
 extern void (*game_log_say)(char *text, int a, int b, int c);
 extern void (*game_reset_territory)(void);
+extern int (*game_world_site)(int x, int y, int unk);  // how good a place for a base, 0 to 15
+// The AI's sites (goals of one type at a square): add one, or find one.
+extern void (*game_add_site)(int faction, int type, int priority, int x, int y);
+extern int (*game_at_site)(int faction, int type, int x, int y);
 extern void (*game_fixup_landmarks)(void);
 extern uint32_t(__attribute__((stdcall)) * game_time_get_time)(void);         // the game's timeGetTime import
 extern int16_t(__attribute__((stdcall)) * game_get_async_key_state)(int key);  // and GetAsyncKeyState

@@ -191,6 +191,9 @@ void (*game_draw_tile)(int x, int y, int unk);
 void (*game_do_checksums)(int stage);
 void (*game_log_say)(char *text, int a, int b, int c);
 void (*game_reset_territory)(void);
+int (*game_world_site)(int x, int y, int unk);
+void (*game_add_site)(int faction, int type, int priority, int x, int y);
+int (*game_at_site)(int faction, int type, int x, int y);
 void (*game_fixup_landmarks)(void);
 uint32_t(__attribute__((stdcall)) * game_time_get_time)(void);
 void (*game_replay_base)(int event, int x, int y, int faction);
@@ -495,6 +498,9 @@ void game_bind(struct pe_image *exe) {
     game_do_checksums = (void *)code_at(exe, 0x51e760);
     game_log_say = (void *)code_at(exe, 0x6262f0);
     game_reset_territory = (void *)code_at(exe, 0x523dd0);
+    game_world_site = (void *)code_at(exe, 0x5c4fd0);
+    game_add_site = (void *)code_at(exe, 0x579b70);
+    game_at_site = (void *)code_at(exe, 0x579d20);
     game_fixup_landmarks = (void *)code_at(exe, 0x592940);
     game_time_get_time = *(void **)code_at(exe, 0x669368);  // filled in when imports were bound
     game_replay_base = (void *)code_at(exe, 0x5ade80);

@@ -216,11 +216,13 @@ void hooks_writes_begin(struct hook_writes *w) {
         }
         saves[w->depth].cap = total;
     }
-    writes_copy(w, saves[w->depth].buf[0], 1);
+    // The clock is held before the state is saved: a timer firing between
+    // the two would set its flag after the save, in the original's run only.
     if (!w->protect_only) {
         checking_depth++;
         if (hooks_hold_time) hooks_hold_time(1);
     }
+    writes_copy(w, saves[w->depth].buf[0], 1);
 }
 
 void hooks_writes_abandon(struct hook_writes *w) {

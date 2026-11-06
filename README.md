@@ -106,7 +106,8 @@ module at a time. So far:
 - the map: coordinates and distances, what a square holds (altitude,
   region, units and bases, resources, pods, elevation), territory, zones of
   control, sensors, landmarks, where units can reach and how bases, coasts
-  and seas connect; and the code that changes squares and landmarks;
+  and seas connect; the code that changes squares and landmarks; and who
+  owns each square, with the counts and sites the AI keeps from it;
 - map generation: all of making a new map (continents, hills, erosion,
   shorelines, temperature, rivers, rainfall, fungus, rockiness and all 16
   landmarks), the climate pass that reworks the map when the sea level

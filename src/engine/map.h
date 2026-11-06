@@ -87,4 +87,5 @@ void kill_landmark(int x, int y);
 
 // The whole map.
 void rebuild_vehicle_bits(void);
+void reset_territory(void);
 void rebuild_base_bits(void);

@@ -70,6 +70,18 @@ static int fake_base_find3(int x, int y, int faction, int region, int owner, int
     return best;
 }
 static int fake_base_find(int x, int y) { return fake_base_find3(x, y, -1, -1, -1, -1); }
+// reset_territory's: the same, leaving the distance behind.
+static int territory_find3(int x, int y, int faction, int region, int owner, int seen_by) {
+    int best = fake_base_find3(x, y, faction, region, owner, seen_by);
+    if (best >= 0) find_dist = vector_dist(x, y, bases[best].x, bases[best].y);
+    return best;
+}
+static int world_site_stub(int x, int y, int unk) { return 7; }
+static int sites_added, site_faction, site_x, site_y;
+static void add_site_stub(int faction, int type, int priority, int x, int y) {
+    if (!sites_added++) site_faction = faction, site_x = x, site_y = y;  // the first
+}
+static int at_site_stub(int faction, int type, int x, int y) { return 0; }
 
 static void put(int x, int y, int alt, int region) {
     struct map_tile *t = at(x, y);
@@ -437,6 +449,82 @@ int main(void) {
     EXPECT(bit_at(2, 2), MAP_BASE | MAP_UNIT);
     EXPECT(at(2, 2)->owner_site & 0xf, 1);
     EXPECT(at(6, 2)->owner_site & 0xf, 1);
+
+    // Territory, on a fresh map: land (region 1) west of x = 6, sea
+    // (region 2) east of it; bases at (0, 2) for faction 1 and (4, 4) for
+    // faction 2, reaching 1 square (so only their own on land, none by
+    // distance at sea).
+    static struct rules_basic rules_basic = {.territory_max_dist = 1};
+    static int32_t difficulty = 4;
+    game_rules_basic = &rules_basic, game_difficulty = &difficulty, game_base_find3 = territory_find3;
+    game_world_site = world_site_stub, game_add_site = add_site_stub, game_at_site = at_site_stub;
+    memset(tiles, 0, sizeof tiles), memset(factions, 0, sizeof factions), memset(continents, 0, sizeof continents);
+    for (int y = 0; y < H; y++)
+        for (int x = y & 1; x < W; x += 2) put(x, y, x < 6 ? 3 : 1, x < 6 ? 1 : 2), at(x, y)->territory = -1;
+    flat = 0, seed = 0, rules = 0, humans = 1 << 1, draw_state = 0;
+    base_count = 2;
+    bases[0].x = 0, bases[0].y = 2, bases[0].faction = 1;
+    bases[1].x = 4, bases[1].y = 4, bases[1].faction = 2;
+    at(0, 2)->territory = 1;
+    at(0, 2)->climate |= 1 << 3, at(0, 2)->bits = MAP_BASE_RADIUS;  // farmable, in a base's radius
+    at(2, 0)->owner_site = 0x9f;  // site 9 already
+    at(7, 1)->bits = at(2, 0)->bits = MAP_SUPPLY_POD;
+    at(7, 1)->visibility = 1 << 1;
+    factions[1].flags = FACTION_FLAG_MAP_REVEALED;
+    at(5, 5)->visibility = 1 << 2;
+    factions[3].flags = FACTION_FLAG_UNK_20000000, at(1, 1)->bits = MAP_POD_TAKEN;
+    factions[1].region_total_bases[1] = factions[2].region_total_bases[1] = 1;
+    factions[4].region_visible_tiles[5] = 9;
+    reset_territory();
+    EXPECT(factions[4].region_visible_tiles[5], 0);
+    EXPECT(at(0, 2)->territory, 1);
+    EXPECT(at(4, 4)->territory, 2);
+    EXPECT(at(2, 2)->territory, -1);
+    EXPECT(at(6, 4)->territory, 2);  // next to (4, 4)
+    EXPECT(at(7, 1)->territory, 1);  // next to (0, 2) around the edge
+    EXPECT(at(7, 3)->territory, 1);
+    EXPECT(at(6, 2)->territory, 1);
+    EXPECT(at(6, 0)->territory, -1);
+    EXPECT(at(0, 2)->bits2 & MAP2_CHANGED, 0);
+    EXPECT(at(2, 2)->bits2 & MAP2_CHANGED, 0);
+    EXPECT(at(4, 4)->bits2 & MAP2_CHANGED, MAP2_CHANGED);
+    EXPECT(draw_state, DRAW_TERRAIN);
+    EXPECT(factions[1].region_territory_tiles[1], 1);
+    EXPECT(factions[1].region_territory_tiles[2], 3);  // (6, 2) too
+    EXPECT(factions[2].region_territory_tiles[1], 1);
+    EXPECT(factions[2].region_territory_tiles[2], 1);
+    EXPECT(factions[0].region_territory_tiles[1], 16);
+    EXPECT(factions[1].region_visible_tiles[1], 18);
+    EXPECT(factions[1].region_visible_tiles[2], 6);
+    EXPECT(factions[2].region_visible_tiles[1], 1);
+    EXPECT(factions[3].region_visible_tiles[1], 1);
+    EXPECT(factions[1].region_good_tiles[1], 1);
+    EXPECT(factions[1].region_good_base_tiles[1], 1);
+    EXPECT(at(0, 2)->owner_site >> 4, 0);  // in a base's radius: no site
+    EXPECT(at(2, 2)->owner_site >> 4, 7);
+    EXPECT(at(2, 0)->owner_site >> 4, 9);
+    EXPECT(continents[1].best_site, 9);
+    EXPECT(continents[2].best_site, 7);
+    EXPECT(factions[1].region_best_site[1], 0);
+    EXPECT(factions[2].region_best_site[1], 7);
+    EXPECT(factions[1].region_best_site[2], 7);
+    EXPECT(factions[0].region_best_site[1], 0);  // nobody's isn't kept
+    // Pods: (7, 1) is faction 1's and seen by it; (2, 0) is no one's, and
+    // faction 2 (an AI, at a high difficulty) has a base 2 squares off.
+    // Faction 1 (human) hasn't seen it.
+    EXPECT(continents[1].pods, 1);
+    EXPECT(continents[2].pods, 1);
+    EXPECT(factions[1].region_territory_pods[2], 1);
+    EXPECT(factions[0].region_territory_pods[1], 1);
+    EXPECT(sites_added, 2);
+    EXPECT(site_faction, 2);
+    EXPECT(site_x, 2);
+    EXPECT(site_y, 0);
+    // A flat map doesn't wrap.
+    flat = 1;
+    reset_territory();
+    EXPECT(at(7, 1)->territory, -1);
+    EXPECT(at(7, 1)->bits2 & MAP2_CHANGED, MAP2_CHANGED);
 
     if (failures) return 1;
     puts("PASS");
