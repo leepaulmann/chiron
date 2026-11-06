@@ -780,6 +780,7 @@ extern void *game_deletion_list;  // network games: units deleted, to tell the o
 extern void(__attribute__((thiscall)) * game_deletion_add)(void *list, int veh);
 extern void(__attribute__((thiscall)) * game_base_win_check_base)(void *win, int base);  // redraws if it shows the base
 extern void(__attribute__((thiscall)) * game_base_win_check_loc)(void *win, int x, int y, int unk);
+extern void (*game_spot_all)(int veh, int unk);  // updates who can see the unit and what it sees
 extern int32_t *game_veh_count;
 extern uint32_t *game_state;                  // GAME_STATE_*
 extern int32_t *game_net_multiplayer;         // non-zero in a network game

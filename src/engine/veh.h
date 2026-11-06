@@ -67,3 +67,4 @@ void veh_kill(int veh);
 void stack_kill(int veh);
 void kill(int veh);
 int stack_veh(int veh, int type);
+int veh_init(int proto, int faction, int x, int y);

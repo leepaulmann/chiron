@@ -50,6 +50,12 @@ static void __attribute__((thiscall)) check_base_stub(void *w, int b) { checked_
 static void __attribute__((thiscall)) check_loc_stub(void *w, int x, int y, int u) {}
 static void draw_radius_stub(int x, int y, int r, int u) { drawn_radius++; }
 static void draw_tile_stub(int x, int y, int u) { drawn_tile++; }
+static int found_base = -1, spotted, rand_value;
+static int32_t computed_base = -1, find_dist = 0;
+static int base_find_stub(int x, int y) { return found_base; }
+static int base_find3_stub(int x, int y, int f, int r, int o, int s) { return -1; }
+static void spot_all_stub(int v, int u) { spotted = v; }
+static int rand_stub(void) { return rand_value; }
 
 int main(void) {
     game_map = &tiles_ptr, game_map_width = &width, game_map_height = &height, game_map_half_width = &half_width;
@@ -463,6 +469,41 @@ int main(void) {
     }
     protos[64].abilities = 0, veh_count = 0;
 
+    // New units: the next slot, homed at the faction's nearest base.
+    game_base_find = base_find_stub, game_base_find3 = base_find3_stub, game_spot_all = spot_all_stub, game_rand = rand_stub;
+    game_computed_base_id = &computed_base, game_base_find_dist = &find_dist;
+    veh_count = 0, factions[1].units_active[64] = 0, factions[1].total_combat_units = 0, factions[1].target_x = -1;
+    found_base = 1, computed_base = 1, defs[1].bonus_count = 0;  // no free drop pods
+    EXPECT(veh_init(64, 1, 4, 2), 0);
+    EXPECT(veh_count, 1);
+    EXPECT(vehs[0].home_base, 1);
+    EXPECT(computed_base, -1);
+    EXPECT(spotted, 0);
+    EXPECT(vehs[0].x, 4);
+    EXPECT(factions[1].units_active[64], 1);
+    EXPECT(factions[1].total_combat_units, 1);
+    found_base = 0, bases[0].faction = 2;  // another faction's
+    EXPECT(veh_init(64, 1, 4, 2), 1);
+    EXPECT(vehs[1].home_base, -1);
+    EXPECT(vehs[1].next_in_stack, 0);  // on top of the first
+    // An attacker sent to the target in its region, unless it stays home.
+    factions[1].target_x = 6, factions[1].target_y = 4, factions[1].target_units = 0, factions[1].target_kinds = 0;
+    rand_value = 1;
+    EXPECT(veh_init(64, 1, 4, 2), 2);
+    EXPECT(vehs[2].state & 0x40000, 0x40000);
+    EXPECT(factions[1].target_units, 1);
+    rand_value = 5;  // a multiple of 3 + 2
+    EXPECT(veh_init(64, 1, 4, 2), 3);
+    EXPECT(vehs[3].state & 0x60000, 0x20000);
+    EXPECT(factions[1].target_units, 1);
+    // At sea, nothing is sent.
+    tiles[2 + 2 * (W / 2)].climate = 0;
+    EXPECT(veh_init(64, 1, 4, 2), 4);
+    EXPECT(vehs[4].state & 0x60000, 0);
+    tiles[2 + 2 * (W / 2)].climate = 3 << 5;
+    veh_count = VEH_COUNT;
+    EXPECT(veh_init(64, 1, 4, 2), -1);
+    veh_count = 0, factions[1].target_x = -1;
     if (failures) return 1;
     printf("engine_veh: all tests passed\n");
     return 0;

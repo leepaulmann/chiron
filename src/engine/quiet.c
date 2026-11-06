@@ -128,6 +128,28 @@ static int __attribute__((thiscall)) shadow_console_focus(void *console, int x, 
     return 0;
 }
 
+// The tutorial's note on something first seen on the map (encounter(),
+// from spot_all()): its window builds a popup, which allocates from the
+// game's heap. Held, it answers 0.
+static int(__attribute__((thiscall)) * orig_tut_map)(void *win, char *label, int x, int y, int a, void *sprite, int b,
+                                                     int x2, int y2);
+static struct hook_stats stats_tut_map = {"(held tut_map)"};
+static void replay_tut_map(const struct hook_ui_call *c) {
+    const int *a = c->arg;
+    orig_tut_map((void *)(intptr_t)a[7], c->has_text & 1 ? (char *)c->text[0] : NULL, a[0], a[1], a[2],
+                 (void *)(intptr_t)a[3], a[4], a[5], a[6]);
+}
+static int __attribute__((thiscall)) shadow_tut_map(void *win, char *label, int x, int y, int a, void *sprite, int b,
+                                                    int x2, int y2) {
+    if (!hooks_protecting()) return orig_tut_map(win, label, x, y, a, sprite, b, x2, y2);
+    stats_tut_map.calls++;
+    struct hook_ui_call c = {.name = "tut_map", .replay = replay_tut_map,
+                             .arg = {x, y, a, (int)(intptr_t)sprite, b, x2, y2, (int)(intptr_t)win}};
+    if (label) hooks_ui_text(&c, 0, label);
+    hooks_ui_hold(&c);
+    return 0;
+}
+
 // The popup base_production() keeps on its stack: while state is protected
 // its dialogs are dropped, as the object is gone by the time they could be
 // shown.
@@ -292,6 +314,7 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x4455f0, wave_it, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0x90, 0x64, 0x9a, 0x00),  // mov eax, [0x9a6490]
     QUIET_HOOK(0x5230e0, interlude, SEH_PROLOGUE),
     QUIET_HOOK(0x5108a0, console_focus, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),
+    QUIET_HOOK(0x4be650, tut_map, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),  // sub esp, 12
     QUIET_HOOK(0x406380, popup_start, PUSH_EBP_MOV_EBP_ESP, 0x51, 0xa1, 0x0c, 0x1b, 0x69, 0x00),  // push ecx; mov eax, [0x691b0c]
     QUIET_HOOK(0x6015b0, base_pop_init, 0x53, 0x55, 0x56, 0x57, 0x8b, 0xf1),                    // push ebx, ebp, esi, edi; mov esi, ecx
     QUIET_HOOK(0x601b20, base_pop_set_width, 0x8b, 0x81, 0x14, 0x0a, 0x00, 0x00),               // mov eax, [ecx+0xa14]

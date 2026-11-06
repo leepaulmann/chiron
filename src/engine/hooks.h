@@ -138,7 +138,7 @@ enum { HOOK_UI_TEXTS = 3, HOOK_UI_TEXT_LEN = 256 };
 struct hook_ui_call {
     const char *name;
     void (*replay)(const struct hook_ui_call *c);
-    int arg[5];
+    int arg[8];
     unsigned has_text;  // bit i: text[i] holds a string argument (else it was NULL)
     char text[HOOK_UI_TEXTS][HOOK_UI_TEXT_LEN];
 };

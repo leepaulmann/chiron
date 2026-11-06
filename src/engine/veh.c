@@ -37,6 +37,7 @@ enum {
     MAP_AIRBASE = 0x40000, VEH_STATE_UNK_4000000 = 0x4000000, VEH_STATE_MONOLITH_USED = 0x100,
     VEH_STATE_UNK_200 = 0x200, VEH_STATE_UNK_10000 = 0x10000, VEH_STATE_UNK_20000 = 0x20000, VEH_STATE_UNK_40000 = 0x40000,
     PLAN_TERRAFORM = 9, ORDER_HOLD = 2,
+    ABL_DROP_POD = 0x10, GAME_STATE_UNK_40000 = 0x40000,
     PLAN_PROBE = 11, PLAN_ARTIFACT = 12, BONUS_FREE_ABILITY = 15, TECH_FLAG_PROBE = 0x2,
     RULE_FLAG_FREE_PROTO = 0x200, RULE_FLAG_MORALE = 0x8000,
     RULES_NO_COLONY_PODS = 0x400000, MAP_UNK_40000000_ = 0x40000000, FACTION_FLAG_UNK_40000000 = 0x40000000,
@@ -986,6 +987,88 @@ int stack_veh(int veh, int type) {
     return veh_cargo(veh) ? room : air_room;
 }
 
+// A new unit of the design for the faction at the square, or -1 when the
+// table is full. Its home is the nearest base if that's the faction's (not
+// for an alien artifact, which some games flag instead), and it is spotted
+// at once.
+//
+// The AI may then send a new land unit (other than drop-pod units) to the
+// faction's target, if it was made on land in the target's region, is a
+// combat or defensive unit or a probe, and the target is no further than
+// the nearest base of an enemy in the region (the first faction it has a
+// vendetta with, once it has bases there itself). It sends up to
+// two thirds of its bases in the region (3 to 8, and no more than twice
+// its transports' cargo when the region is a naval one), one probe, and
+// defenders (armor above weapon) only while none has gone. An attacker
+// stays home one time in that number plus two.
+int veh_init(int proto, int faction, int x, int y) {
+    if (*game_veh_count >= VEH_COUNT) return -1;
+    int veh = (*game_veh_count)++;
+    game_log_say(text(0x691d98), veh, faction, proto);
+    struct faction_data *F = &game_factions[faction];
+    if (proto_of(proto)->plan <= PLAN_NAVAL_TRANSPORT) F->total_combat_units++;
+    F->units_active[proto]++;
+    veh_clear(veh, proto, faction);
+    int base = game_base_find(x, y);
+    struct veh *V = &game_vehs[veh];
+    if (proto_of(proto)->plan == PLAN_ARTIFACT) {
+        if (*game_state & GAME_STATE_UNK_40000) V->flags |= VEH_FLAG_UNK_20;
+    } else if (base >= 0 && game_bases[base].faction == faction) {
+        V->home_base = (int16_t)base;
+        if (*game_computed_base_id == base) *game_computed_base_id = -1;
+    }
+    veh_drop(veh, x, y);
+    game_spot_all(veh, 1);
+    if (F->target_x < 0) return veh;
+    const struct map_tile *here = square(x, y);
+    if (here->climate >> 5 < ALT_SHORE_LINE) return veh;
+    int plan = proto_of(V->proto)->plan;
+    if (plan > PLAN_DEFENSIVE && plan != PLAN_PROBE) return veh;
+    int region = here->region;
+    if (square(F->target_x, F->target_y)->region != region) return veh;
+    int enemy = -1, best = 0;
+    for (int i = 1; i < FACTION_COUNT; i++) {
+        if (i == faction || !(F->diplo_status[i] & TREATY_VENDETTA)) continue;
+        if (F->region_total_bases[region] > best) best = F->region_total_bases[region], enemy = i;
+    }
+    if (enemy >= 0) {
+        game_base_find3(x, y, enemy, region, -1, -1);
+        if (vector_dist(x, y, F->target_x, F->target_y) > *game_base_find_dist) return veh;
+    }
+    int limit = F->region_total_bases[region] * 2 / 3;
+    limit = limit < 3 ? 3 : limit > 8 ? 8 : limit;
+    int naval = F->region_base_plan[region] == PLAN_NAVAL_TRANSPORT;
+    if (naval) {
+        int cargo = (int32_t)((uint32_t)F->naval << 1) / 0x400000;
+        if (limit >= cargo) limit = cargo;
+    }
+    if (F->target_units - game_bit_count(F->target_kinds) >= limit) return veh;
+    int weapon = weap_strat(proto_of(V->proto)->weapon, faction);
+    int armor = arm_strat(proto_of(V->proto)->armor, faction);
+    if (triad(V->proto) != TRIAD_LAND || has_abil(V->proto, ABL_DROP_POD)) return veh;
+    if (plan == PLAN_PROBE) {
+        if (F->target_kinds & 2) return veh;
+        V->state |= VEH_STATE_UNK_40000;
+        F->target_units++;
+        F->target_kinds |= 2;
+        return veh;
+    }
+    if (weapon < armor) {
+        if ((F->target_kinds & 1) || naval) return veh;
+    } else if (!naval) {
+        int n = F->region_total_bases[region] * 2 / 3;
+        n = n < 3 ? 3 : n > 8 ? 8 : n;
+        if (n + 1 <= 0 || game_rand() % (n + 2) == 0) {
+            V->state |= VEH_STATE_UNK_20000;
+            return veh;
+        }
+    }
+    V->state |= VEH_STATE_UNK_40000;
+    F->target_units++;
+    if (weapon < armor) F->target_kinds |= 1;
+    return veh;
+}
+
 // Removes the unit: off its stack and its faction's counts, and every
 // later unit moves down a slot, so the units' stack links, the transport
 // a unit on board names, and the unit numbers kept elsewhere are
@@ -1161,6 +1244,8 @@ SHADOW1(VEH, int, veh_health, int)
 SHADOW2(VEH, int, get_plan, int, int)
 SHADOW1(VEH, int, want_monolith, int)
 // Killing a unit renumbers units all over the game's memory.
+SHADOW_WRITER(VEH, int, veh_init, (int a, int b, int c, int d), (a, b, c, d), hooks_writes_game(&w_), "%d, %d, %d, %d", a,
+              b, c, d)
 SHADOW_WRITER(VEH, int, stack_veh, (int a, int b), (a, b), WRITES_STACKS, "%d, %d", a, b)
 SHADOW_WRITER(VEH, void, veh_kill, (int a), (a), hooks_writes_game(&w_), "%d", a)
 SHADOW_WRITER(VEH, void, stack_kill, (int a), (a), hooks_writes_game(&w_), "%d", a)
@@ -1273,6 +1358,24 @@ static void sweep_stacks(void) {
     }
     check_stack_veh(-1, 1);
     check_stack_veh(-1, 0);
+    // New units: each faction's designs at its bases and its target, and
+    // where a unit stands. (Like the original, veh_init() reads the map at
+    // its square unchecked, so it isn't given one off the map.)
+    for (int f = 0; f < FACTION_COUNT; f++) {
+        const struct faction_data *F = &game_factions[f];
+        for (int k = 0; k < 3; k++) {
+            int p = (k + t + f) % (2 * BASIC_PROTOS);
+            p = p < BASIC_PROTOS ? p : f * BASIC_PROTOS + p - BASIC_PROTOS;
+            if (!(game_protos[p].flags & PROTO_FLAG_ACTIVE)) continue;
+            int b = *game_base_count ? (f * 7 + k + t) % *game_base_count : -1;
+            if (b >= 0) check_veh_init(p, f, game_bases[b].x, game_bases[b].y);
+            if (F->target_x >= 0) check_veh_init(p, f, F->target_x, F->target_y);
+        }
+    }
+    for (int k = 0; k < 4 && vehs; k++) {
+        const struct veh *V = &game_vehs[(k * 97 + t) % vehs];
+        if (on_map_(V->x, V->y)) check_veh_init(V->proto, V->faction, V->x, V->y);
+    }
     // Killing: a few units, a stack, and every transport (some at sea).
     for (int k = 0; k < 4 && vehs; k++) {
         int v = (k * 53 + t * 5) % vehs;
@@ -1555,6 +1658,7 @@ static const struct hook veh_hooks[] = {
     HOOK(0x5a59e0, veh_health, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),               // mov eax, [ebp+8]
     HOOK(0x5aed50, get_plan, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x57),                 // push ebx; push esi; push edi
     HOOK(0x579f80, want_monolith, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),            // mov eax, [ebp+8]
+    HOOK(0x5c03d0, veh_init, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),                 // sub esp, 8
     HOOK(0x5b8ee0, stack_veh, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x28),                // sub esp, 40
     HOOK(0x5c08c0, veh_kill, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),                 // sub esp, 8
     HOOK(0x5b9510, stack_kill, PUSH_EBP_MOV_EBP_ESP, 0x56, 0x8b, 0x75, 0x08),         // push esi; mov esi, [ebp+8]
