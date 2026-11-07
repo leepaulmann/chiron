@@ -18,3 +18,7 @@ int enemy_planet_buster(int veh);
 // mostly a go-to order; a missile may be put down elsewhere (*x, *y then
 // its square). See ai.c for the results.
 int air_power(int veh, int home, int now, int *x, int *y);
+// The AI's move for one of its units (or the player's automated one): an
+// order set, or a move carried out. 1 if the unit is done or gone. A
+// negative veh (-1 - the unit) asks only whether it should hold its base.
+int enemy_move(int veh);

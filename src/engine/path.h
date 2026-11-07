@@ -33,3 +33,6 @@ void path_stale_put(int32_t saved);
 void path_stale_record(void);
 void path_stale_replay(void);
 void path_stale_stop(void);
+// The word for a Path_find call of one's own made outside path_move (as
+// path_find_at's `stale`): the next one replayed, or path_move's.
+int32_t path_stale_next(void);

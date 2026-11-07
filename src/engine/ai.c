@@ -4,9 +4,10 @@
 // terranx.exe 2.0's disassembly; names follow Thinker (MIT) and OpenSMACX
 // (Brendan Casey, GPL-3.0-or-later).
 //
-// The AI's choice of a move for one of its own units, enemy_move(), is 56
-// KB of the game's code and is kept: enemy_veh() calls it through a
-// pointer.
+// The AI's choice of a move for one of its own units, enemy_move(), is
+// reimplemented here too, but for naval transports (left to the original);
+// enemy_veh() calls it through the game's pointer, so that the sweeps can
+// hold it.
 #include "ai.h"
 
 #include <stddef.h>
@@ -16,12 +17,15 @@
 
 #include "base.h"
 #include "combat.h"
+#include "events.h"
 #include "faction.h"
 #include "game.h"
 #include "map.h"
 #include "move.h"
 #include "path.h"
+#include "score.h"
 #include "shadow.h"
+#include "strategy.h"
 #include "tech.h"
 #include "veh.h"
 
@@ -1247,6 +1251,2961 @@ int enemy_planet_buster(int veh) {
     return -1;
 }
 
+// ---- A unit's move -------------------------------------------------------------------
+//
+// enemy_move(), the AI's choice of what one of its units does (and the
+// automation of the player's): 56 KB of the original, taken here section by
+// section in the original's order, with its jumps between sections kept as
+// labels named after the original's addresses (at_56c9e1 is 0x56c9e1). The
+// original keeps one set of locals for all its sections and reuses them
+// for other ends as it goes (a section often reads what an earlier one
+// left), so they are kept as one set here too, named after their offsets
+// in its frame (l2c is [ebp-0x28], Ghidra's local_2c), with the clearer
+// ones named for what they first hold.
+//
+// Naval transports are the exception: their section is left to the
+// original, which runs for them from the start (em_ours()).
+
+enum {
+    PLAN_RECONNAISSANCE = 3, PLAN_COLONIZATION = 8, PLAN_TERRAFORMING = 9,
+    PLAN_SUPPLY_CONVOY = 10, PLAN_INFO_WARFARE = 11, PLAN_ALIEN_ARTIFACT = 12,
+};
+
+static int (*orig_enemy_move)(int veh) __attribute__((used));
+
+// The tech a kind of terraforming needs, on land or at sea.
+static int tf_preq(int tf, int sea) { return sea ? game_terraform[tf].preq_tech_sea : game_terraform[tf].preq_tech; }
+
+// The first unit of a unit's stack.
+static int stack_top_of(int veh) {
+    if (veh < 0) return -1;
+    while (game_vehs[veh].prev_in_stack >= 0) veh = game_vehs[veh].prev_in_stack;
+    return veh;
+}
+
+// Whether ours handles the unit: all but naval transports.
+static int em_ours(int veh) { return proto_of(game_vehs[veh].proto)->plan != PLAN_NAVAL_TRANSPORT; }
+
+// The calls that carry a move out, rather than choose it: fights, attacks
+// on squares (which end in a step), air drops, probe teams' missions, bases
+// founded, obliterated or gated to, units given away, artifacts studied,
+// aircraft's moves (air_power, the game's). While `em_probing`, a run made
+// to see what enemy_move would do, they are only noted (em_risky).
+static int em_probing, em_risky;
+static void em_destroy(int veh, int item, int x, int y) {
+    if (em_probing) {
+        em_risky = 1;
+        return;
+    }
+    action_destroy(veh, item, x, y);
+}
+static void em_fight(int veh, int dir, int table, int option) {
+    if (em_probing) {
+        em_risky = 1;
+        return;
+    }
+    game_battle_fight(veh, dir, table, option, 0);
+}
+// A fight's odds only (battle_fight's option 0), with the defender.
+static int em_odds(int veh, int dir, int *def) { return battle_fight(veh, dir, 0, 0, def); }
+static void em_build(int veh) {
+    if (em_probing) {
+        em_risky = 1;
+        return;
+    }
+    action_build(veh, NULL);
+}
+static void em_oblit(int veh, int base) {
+    if (em_probing) {
+        em_risky = 1;
+        return;
+    }
+    action_oblit(veh, base);
+}
+static void em_gate(int veh, int base) {
+    if (em_probing) {
+        em_risky = 1;
+        return;
+    }
+    action_gate(veh, base);
+}
+static int em_probe(int veh, int target) {
+    if (em_probing) {
+        em_risky = 1;
+        return 0;
+    }
+    return game_probe(veh, -1, target, 1);
+}
+static void em_airdrop(int veh, int x, int y, int flags) {
+    if (em_probing) {
+        em_risky = 1;
+        return;
+    }
+    game_action_airdrop(veh, x, y, flags);
+}
+static void em_give(int veh, int faction) {
+    if (em_probing) {
+        em_risky = 1;
+        return;
+    }
+    game_action_give(veh, faction);
+}
+static int em_study(int veh) {
+    if (em_probing) {
+        em_risky = 1;
+        return 1;
+    }
+    return study_artifact(veh);
+}
+static int em_air_power(int veh, int base_dist, int zoc, int *x, int *y) {
+    if (em_probing) {
+        em_risky = 1;
+        return -4;
+    }
+    return game_air_power(veh, base_dist, zoc, x, y);
+}
+
+static int em_body(int veh, int32_t stale) {
+    int forced = 0;
+    if (veh < 0) veh = -1 - veh, forced = 1;
+    struct veh *V = &game_vehs[veh];
+    int net_own = *game_net_multiplayer && V->faction == *game_current_faction;
+    game_do_all_non_input();
+    if (!V->faction && !net_own) return alien_move(veh);
+    int proto = V->proto, faction = V->faction, y = V->y, x = V->x;
+    int plan = proto_of(proto)->plan, triad = triad_of(proto);
+    struct faction_data *F = &game_factions[faction];
+    const struct map_tile *here = tile(x, y);
+    int alt = here->climate >> 5, at_sea = alt_of(here) < ALT_SHORE, region = here->region;
+    int st4 = (V->state & 0x60000) == 0x40000, st6 = (V->state & 0x60000) == 0x60000;
+    int recon_800 = plan == PLAN_RECONNAISSANCE && has_abil(proto, 0x800);
+    int region_plan = F->region_base_plan[region];
+    int damage = V->damage, hurt;
+    {
+        int hp = proto_of(V->proto)->plan == PLAN_ALIEN_ARTIFACT ? 1 : game_range(proto_of(V->proto)->reactor, 1, 100) * 10;
+        if (damage >= hp / 2) {
+            hurt = 4;
+        } else {
+            hp = proto_of(V->proto)->plan == PLAN_ALIEN_ARTIFACT ? 1 : game_range(proto_of(V->proto)->reactor, 1, 100) * 10;
+            if (damage > hp / 3) hurt = 3;
+            else if (damage > proto_of(V->proto)->reactor * 2) hurt = 2;
+            else hurt = damage != 0;
+        }
+    }
+    if (planet_buster(veh)) hurt = 0;
+    if (proto == 16 || proto == 17 || proto == 18) hurt = 0;
+    int zocm = zoc_move(x, y, faction), zocv = zoc_veh(x, y, faction);
+    int near_base = base_find_3(x, y, -1, triad == TRIAD_LAND ? region : -1, -1, -1);
+    int near_dist = *game_base_find_dist;
+    int own_base = base_find_3(x, y, faction, triad == TRIAD_LAND ? region : -1, -1, -1);
+    int own_dist = *game_base_find_dist;
+    int terr = whose_territory(faction, x, y, NULL, 0);
+    int own_terr = terr == faction;
+    int exploring = V->state & 0x4000;
+    int human_bit = 1 << faction;
+    // Locals the original shares between its sections.
+    int dir84 = -1, l88 = 0, lc8 = 0, lc4 = 0, lb8 = 0, l90 = 0, lbc = 0;
+    int l74 = 0, l3c = stale, l2c = 0, l7c = 0, l28 = 0, l20 = 0, l8 = 0, lc = 0, l4c = 0, l30 = 0, l58 = 0, l5c = 0;
+    int l24 = 0, l34 = 0, l48 = recon_800, l50 = own_terr, l6c = human_bit;
+    if (forced) goto at_57138d;
+    if ((V->flags & 0x440) && !game_is_human(faction)) {
+        veh_skip(veh);
+        return 0;
+    }
+    if (!game_range(veh_speed(veh, 0) - V->moves_spent, 0, 999)) {
+        lbc = 1;
+        goto at_574a7e;
+    }
+    // A former at work.
+    if (V->order >= 4 && V->order < 0x18) {
+        if (!zocv) goto finish;
+        if (zocv > 1 && (!game_is_human(faction) || !(F->diplo_status[zocv - 1] & 0x10))) goto finish;
+        if ((V->state & 0x200) && (V->order_auto_type == 4 || V->order_auto_type == 5)) goto at_56c2d1;
+        for (int i = 0; i < 8; i++) {
+            int nx = xrange(x + game_radius_near_x[i]), ny = y + game_radius_near_y[i];
+            l8 = nx, lc = ny;
+            if (!on_map(nx, ny)) continue;
+            const struct map_tile *t = tile(nx, ny);
+            if (triad != TRIAD_AIR && (alt_of(t) < ALT_SHORE) != (triad == TRIAD_SEA)) continue;
+            if (!(t->bits & 3)) {
+                l74 = -1;
+            } else {
+                l74 = owner_of(t);
+                if (l74 < 8) {
+                    if (l74 != faction && !(F->diplo_status[l74] & TREATY_PACT)) continue;
+                } else {
+                    l74 = -1;
+                }
+            }
+            if (!zoc_veh(nx, ny, faction) && (!zocm || !zoc_move(nx, ny, faction))) {
+                dir84 = i;
+                goto at_578b26;
+            }
+        }
+        if (V->state & 0x200) goto at_56c9c2;
+    }
+    if (zocv < 2 || !st4 || !(F->diplo_status[zocv - 1] & 0x10)) {
+        if (st6) goto at_56bcf8;
+    } else {
+        st4 = 0;
+        V->state &= ~0x40000u;
+        if (x == F->target_x && y == F->target_y) {
+            F->target_x = -1;
+            st6 = 1;
+            for (int c = stack_top_of(veh); c >= 0; c = game_vehs[c].next_in_stack)
+                if (c == veh || (game_vehs[c].state & 0x40000)) game_vehs[c].state |= 0x60000;
+        at_56bcf8:
+            if (V->moves_spent >= game_rules_basic->move_rate_roads && !zocv && !game_is_human(faction) &&
+                stack_check(veh, 14, -1, -1, -1)) {
+                veh_skip(veh);
+                goto finish;
+            }
+        } else if (st6) {
+            goto at_56bcf8;
+        }
+    }
+    if (st4 && V->x == F->target_x && V->y == F->target_y) {
+        lb8 = 1, l90 = 1;
+        goto at_57707f;
+    }
+    // Patrols and waypoints.
+    {
+        uint32_t st = V->state;
+        int a = (st & 0x1000200) == 0x1000200, b = (st & 0x2000200) == 0x2000200 && V->patrol_point < V->waypoint_count;
+        if (a || b) {
+            if (V->order != ORDER_MOVE_TO) {
+                if (b && !a) {
+                    V->order = ORDER_MOVE_TO;
+                    for (int i = 0; i < V->waypoint_count; i++)
+                        V->waypoint_x[i] = V->waypoint_x[i + 1], V->waypoint_y[i] = V->waypoint_y[i + 1];
+                    if (!--V->waypoint_count) V->state &= 0xfdfefdffu;
+                } else {
+                    int16_t wx = V->waypoint_x[0], wy = V->waypoint_y[0];
+                    for (int i = 0; i < V->waypoint_count; i++)
+                        V->waypoint_x[i] = V->waypoint_x[i + 1], V->waypoint_y[i] = V->waypoint_y[i + 1];
+                    V->waypoint_x[V->waypoint_count] = wx, V->waypoint_y[V->waypoint_count] = wy;
+                    V->state &= ~0x10000u;
+                    if (V->waypoint_x[0] == wx && V->waypoint_y[0] == wy && V->waypoint_count == 1) {
+                        V->order = ORDER_NONE;
+                        V->state &= 0xfefffdffu;
+                    } else {
+                        V->order = ORDER_MOVE_TO;
+                    }
+                }
+            }
+            goto finish;
+        }
+    }
+    if (!game_is_human(faction) && (V->flags & 0x800)) {
+        if (has_tech(game_terraform[6].preq_tech, faction)) V->order_auto_type = 2;
+        goto at_56c30f;
+    }
+    if (!((V->state & 0x200) && plan == PLAN_TERRAFORMING)) goto at_56c9e1;
+    // ---- An automated former.
+    switch (V->order_auto_type) {
+    case 3:
+        l28 = V->home_base;
+        if (l28 < 0 && (l28 = own_base) < 0) {
+            V->state &= ~0x200u;
+            veh_skip(veh);
+            return 0;
+        }
+        goto at_572922;
+    case 4:
+    case 5: {
+        const struct map_tile *t = here;
+        uint32_t bits = t->bits;
+        l50 = (int)bits;
+        if (alt_of(t) < 0x40 || (bits & 0x2000) || ((t->bits & 1) && owner_of(t) < 8)) goto at_56c9c2;
+        if (!(bits & MAP_FUNGUS)) {
+            if (!at_sea && !(bits & 0x8000) && (t->rocky_lock & 0xc0) < 0x80 && ((t->climate & 0x18) < 0x10 || alt > 3) &&
+                has_tech(game_terraform[0].preq_tech, faction)) {
+                V->order = 4;
+                goto finish;
+            }
+        } else if (has_tech(tf_preq(10, at_sea), faction)) {
+            V->order = 0xe;
+            goto finish;
+        }
+        if (!(t->bits & MAP_FUNGUS) || alt_of(t) < 0x40 || has_tech(game_rules_basic->tech_improve_fungus, faction)) {
+            if (V->order_auto_type == 4 && !(t->bits & 0x40) && energy_yield(faction, -1, x, y, 1) &&
+                has_tech(tf_preq(3, at_sea), faction)) {
+                V->order = 7;
+                goto finish;
+            }
+            if (V->order_auto_type == 5 && !(t->bits & 0x10) && has_tech(tf_preq(2, at_sea), faction)) {
+                V->order = 6;
+                goto finish;
+            }
+        }
+        bits = t->bits;
+        if (!(bits & 4)) {
+            if (at_sea) goto at_56c9c2;
+            if ((!(bits & MAP_FUNGUS) || alt_of(t) < 0x40 || has_tech(game_rules_basic->tech_road_fungus, faction)) &&
+                has_tech(game_terraform[5].preq_tech, faction)) {
+                V->order = 9;
+                goto finish;
+            }
+        } else if (at_sea) {
+            goto at_56c9c2;
+        }
+        if ((t->bits & 0x8000) || (t->rocky_lock & 0xc0) > 0x7f || !has_tech(game_terraform[0].preq_tech, faction))
+            goto at_56c9c2;
+        V->order = 4;
+        goto finish;
+    }
+    case 1:
+        goto at_56c30f;
+    case 2:
+        if (!has_tech(game_terraform[6].preq_tech, faction)) V->order_auto_type = 1;
+        goto at_56c30f;
+    }
+    if (V->order_auto_type != 6 &&
+        (!has_abil(V->proto, 0x2000) || V->order_auto_type || !(*game_more_preferences & 8))) {
+        if (V->order_auto_type != 7) goto at_56c9e1;
+        if (!good_sensor(faction, x, y)) {
+            l8 = x, lc = y;
+            if (game_path_sensors(game_path, faction, &l8, &lc)) goto at_56c2d1;
+            if (l8 != x || lc != y) {
+                go_to(veh, 's', l8, lc);
+                return 0;
+            }
+        }
+        V->order = 0xd;
+        goto finish;
+    }
+    if (!has_tech(tf_preq(10, triad == TRIAD_SEA), faction) && !has_abil(V->proto, 0x2000) && V->order_auto_type == 6)
+        goto at_56c2d1;
+    if (V->order == ORDER_MOVE_TO) goto finish;
+    if ((here->bits & MAP_FUNGUS) && alt_of(here) >= 0x40) {
+        V->order = 0xe;
+        goto finish;
+    }
+    if (triad == TRIAD_SEA && alt_of(here) >= ALT_SHORE) goto at_57717f;
+
+    // Fungus to clear round the faction's bases, ring by ring.
+    l2c = 99999;
+    for (l4c = 2; l4c <= (V->order_auto_type != 6 ? 3 : 6); l4c++) {
+        if (V->order == ORDER_MOVE_TO) goto finish;
+        for (l28 = 0; l28 < *game_base_count; l28++) {
+            const struct base *B = &game_bases[l28];
+            if (B->faction != faction) continue;
+            if (triad == TRIAD_SEA ? !base_on_sea(l28, region) : tile(B->x, B->y)->region != region) continue;
+            for (int i = l4c == 2 ? 1 : game_radius_count[l4c - 1]; i < game_radius_count[l4c]; i++) {
+                int sx = xrange(B->x + game_radius_x[i]), sy = B->y + game_radius_y[i];
+                l8 = sx, lc = sy;
+                if (!on_map(sx, sy)) continue;
+                const struct map_tile *t = tile(sx, sy);
+                if (t->region != region || !(t->bits & MAP_FUNGUS) || alt_of(t) < 0x40) continue;
+                if (t->bits & 3) {
+                    l74 = owner_of(t);
+                    if (l74 < 8) {
+                        if (l74 != faction || l3c) continue;
+                    } else {
+                        l74 = -1;
+                    }
+                } else {
+                    l74 = -1;
+                }
+                l3c = vector_dist_offset(x_dist(x, sx), abs(y - sy));
+                if (!zoc_move(sx, sy, faction) && l3c < l2c) {
+                    V->order = ORDER_MOVE_TO;
+                    V->status_icon = 'f';
+                    V->waypoint_x[0] = (int16_t)sx, V->waypoint_y[0] = (int16_t)sy;
+                    l2c = l3c;
+                    if (proto_of(V->proto)->plan == PLAN_COLONIZATION) V->movement_turns = 0;
+                }
+            }
+        }
+    }
+    if (V->order == ORDER_MOVE_TO) goto finish;
+    if (V->order_auto_type == 6) goto at_56c2d1;
+    goto at_56c9e1;
+at_56c2d1:
+    V->order = ORDER_NONE;
+    V->state &= ~0x200u;
+    return 0;
+at_56c9c2:
+    V->order = ORDER_NONE;
+    V->state &= ~0x200u;
+    return 0;
+at_56c30f: {
+    // Roads or magtubes to the faction's bases (and its pact friends').
+    if (V->order == 0x1b || V->order == 0x1c) {
+        int b = base_at(V->waypoint_x[0], V->waypoint_y[0]);
+        if (b >= 0 && game_bases[b].faction == faction) goto finish;
+        V->order = ORDER_NONE;
+    }
+    l2c = 9999, l34 = (V->order_auto_type == 2) + 0x1b;
+    l7c = -1;
+    for (l28 = 0; l28 < *game_base_count; l28++) {
+        const struct base *B = &game_bases[l28];
+        if (!(B->faction == faction ||
+              ((F->diplo_status[B->faction] & TREATY_PACT) && (near_dist || game_bases[near_base].faction == faction))))
+            continue;
+        int bx = B->x, cx = x, cy = y;
+        l5c = B->y;
+        if (tile(bx, l5c)->region != region) continue;
+        l58 = 1, l30 = 0, l3c = 0;
+        for (;;) {
+            int flags = !has_tech(game_rules_basic->tech_road_fungus, faction) &&
+                                !has_tech(game_terraform[10].preq_tech, faction)
+                            ? 4
+                            : 0;
+            dir84 = path_find_at(game_path, cx, cy, bx, l5c, 0, -1, flags, -1, path_stale_next());
+            if (dir84 < 0) break;
+            cx = xrange(cx + game_radius_near_x[dir84]), cy += game_radius_near_y[dir84];
+            l3c++;
+            if (cx == bx && cy == l5c) break;
+            const struct map_tile *t = tile(cx, cy);
+            if ((!(t->bits & 1) || owner_of(t) > 7) && (!(t->bits & 4) || (!(t->bits & 8) && V->order_auto_type == 2)))
+                l58 = 0;
+            if (++l30 > 100) break;
+            if (!l58) break;
+        }
+        if (l58) continue;
+        if (B->faction != faction) l3c *= 2;
+        int o = whose_territory(faction, cx, cy, NULL, 0);
+        if (o >= 0 && o != faction && !(F->diplo_status[o] & TREATY_PACT)) l3c += 100;
+        if (zoc_sea(cx, cy, faction)) l3c += 10;
+        if (l3c < l2c) l2c = l3c, l7c = l28;
+    }
+    if (l7c >= 0) {
+        V->status_icon = 'R';
+        V->order = (uint8_t)l34;
+        V->waypoint_x[0] = game_bases[l7c].x, V->waypoint_y[0] = game_bases[l7c].y;
+        goto finish;
+    }
+    if (game_is_human(faction) || !(V->flags & 0x800)) {
+        V->order = ORDER_NONE;
+        V->state &= ~0x200u;
+        veh_skip(veh);
+        if (faction != *game_current_faction) return 0;
+        game_console_focus(game_console, x, y, faction);
+        game_x_pop(text(V->order_auto_type == 1 ? 0x68e908 : 0x68e918), 0);
+        return 0;
+    }
+    goto at_56c9e1;
+}
+at_56c9e1:
+    if (near_dist == 1 && game_bases[near_base].faction != faction && triad != TRIAD_AIR &&
+        game_weapons[proto_of(V->proto)->weapon].offense) {
+        const struct base *B = &game_bases[near_base];
+        const struct map_tile *t = tile(B->x, B->y);
+        if ((!(t->bits & 2) || owner_of(t) > 7) && !(F->diplo_status[B->faction] & 7) &&
+            (triad == TRIAD_SEA) == (alt_of(t) < ALT_SHORE) && plan < 10) {
+            l88 = 1;
+            hurt = 0;
+            V->order = ORDER_NONE;
+        }
+    }
+    if (near_base != own_base && (F->diplo_status[game_bases[near_base].faction] & 2) && !at_sea &&
+        !(F->diplo_status[game_bases[near_base].faction] & TREATY_PACT) && V->order != ORDER_MOVE_TO) {
+        int bf = game_bases[near_base].faction;
+        if (whose_territory(faction, x, y, NULL, 0) == bf && F->diplo_friction[bf] < 10 &&
+            !(F->diplo_status[bf] & 0xc00) &&
+            ((V->faction == bf && (V->flags & 0x440) != 0x440) || ((1 << bf) & V->visibility))) {
+            if (own_base >= 0 && region == tile(game_bases[own_base].x, game_bases[own_base].y)->region) {
+                go_to(veh, 'w', game_bases[own_base].x, game_bases[own_base].y);
+                goto at_57707f;
+            }
+            if (triad_of(V->proto) == TRIAD_LAND) {
+                for (int i = 0; i < 8; i++) {
+                    l8 = xrange(game_radius_near_x[i] + x), lc = game_radius_near_y[i] + y;
+                    if (on_map(l8, lc) && alt_of(tile(l8, lc)) < ALT_SHORE) {
+                        l20 = stack_fix(veh_at(l8, lc));
+                        if (l20 >= 0 && game_vehs[l20].faction == faction && stack_check(l20, 8, -1, -1, -1) > 0)
+                            {
+                            dir84 = i;
+                            goto at_578b26;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if ((V->state & 0x200) && V->order_auto_type == 11 && triad != TRIAD_AIR) {
+        l90 = 1;
+        goto at_57707f;
+    }
+    if (V->status_icon == 'F') {
+        if (V->order != ORDER_MOVE_TO) V->status_icon = '-';
+        if (!(V->state & 0x100) || plan != PLAN_DEFENSIVE) goto at_56cfc4;
+        V->status_icon = '-';
+        if (V->home_base >= 0) {
+            l28 = V->home_base;
+            const struct base *B = &game_bases[l28];
+            if (x == B->x && y == B->y) {
+                game_bases[l28].state &= ~0x4000000u;
+            } else if (tile(B->x, B->y)->region == region) {
+                go_to(veh, 'F', B->x, B->y);
+                goto at_57707f;
+            }
+        }
+        goto at_56cdc1;
+    }
+at_56cfc4:
+    if (plan == PLAN_ALIEN_ARTIFACT) {
+        // An artifact: studied at a base with a network node, or given to a
+        // base building a secret project; else taken to the best base.
+        if (!(V->flags & 0x20)) {
+            if (!own_dist) {
+                if (net_own) {
+                    veh_skip(veh);
+                    game_synch_veh(veh);
+                    return 1;
+                }
+                if (((has_fac(FAC_NETWORK_NODE, own_base, 0) && !(game_bases[own_base].state & 0x400)) ||
+                     game_secret_projects[20] == own_base) &&
+                    em_study(veh))
+                    return 1;
+            }
+            if (!game_is_human(faction) && !own_dist && game_bases[own_base].queue[0] < -0x45 &&
+                game_bases[own_base].minerals > 99) {
+                int m = proto_of(V->proto)->cost * 10 / 2 + game_bases[own_base].minerals;
+                game_bases[own_base].minerals = m;
+                game_bases[own_base].minerals_2 = m;
+                game_bases[own_base].production_last = game_bases[own_base].queue[0];
+                kill(veh);
+                return 1;
+            }
+        }
+        l2c = 9999, l7c = -1;
+        for (l28 = 0; l28 < *game_base_count; l28++) {
+            const struct base *B = &game_bases[l28];
+            if (B->faction != faction || tile(B->x, B->y)->region != region) continue;
+            int d = vector_dist_offset(x_dist(x, B->x), abs(y - B->y));
+            if (game_secret_projects[20] != l28 && (B->queue[0] > -0x47 || B->minerals < 100 || game_is_human(faction))) {
+                if (!has_fac(FAC_NETWORK_NODE, l28, 0)) d += 1000;
+                if (!(B->state & 0x400) &&
+                    stack_check(veh_at(B->x, B->y), 2, 12, -1, -1) <= (x == B->x && y == B->y)) {
+                } else {
+                    d += 2000;
+                }
+            }
+            if (d < l2c) l7c = l28, l2c = d;
+        }
+        if (l7c >= 0) {
+            go_to(veh, 't', game_bases[l7c].x, game_bases[l7c].y);
+            goto finish;
+        }
+        goto at_57707f;
+    }
+    if (plan != PLAN_SUPPLY_CONVOY) goto at_56cdc1;
+    // A supply convoy: back into a base building a project, or to a square
+    // to work.
+    if (!game_is_human(faction)) {
+        l2c = 9999, l7c = -1;
+        for (l28 = 0; l28 < *game_base_count; l28++) {
+            const struct base *B = &game_bases[l28];
+            if (B->faction != faction || tile(B->x, B->y)->region != region) continue;
+            int d = (abs(y - B->y) + x_dist(x, B->x)) >> 1;
+            if (B->queue[0] < -0x45 && d < l2c) {
+                l7c = l28, l2c = d;
+                if (!d) {
+                    int m = game_bases[l28].minerals + veh_cost(V->proto, -1, NULL) * 10;
+                    game_bases[l28].minerals = m;
+                    game_bases[l28].minerals_2 = m;
+                    game_bases[l28].production_last = game_bases[l28].queue[0];
+                    kill(veh);
+                    return 1;
+                }
+            }
+        }
+        if (l7c >= 0) {
+            go_to(veh, 'V', game_bases[l7c].x, game_bases[l7c].y);
+            goto at_57707f;
+        }
+    }
+    if (V->order == 3) {
+        const struct map_tile *t = here;
+        switch (V->order_auto_type) {
+        case 0:
+            if ((t->bits & 0x8000) || (t->rocky_lock & 0xc0) > 0x7f) goto finish;
+            break;
+        case 1:
+            if (t->bits & 0x10) goto finish;
+            break;
+        default:
+            if (V->order_auto_type != 2 || (t->bits & 0x40) || alt - 2 < 0 || alt == 2) goto finish;
+        }
+        add_goal(faction, 9, 1, x, y, -1);
+        goto finish;
+    }
+    if (V->order != ORDER_MOVE_TO) {
+        l2c = 0;
+        for (l48 = 0; l48 < 0x484; l48 += 4) {
+            int i = l48 / 4;
+            l8 = xrange(game_radius_x[i] + x), lc = game_radius_y[i] + y;
+            if (!on_map(l8, lc)) continue;
+            const struct map_tile *t = tile(l8, lc);
+            if (t->region != region || (triad != TRIAD_AIR && (alt_of(t) < ALT_SHORE) != (triad == TRIAD_SEA))) continue;
+            if (!can_convoy(l8, lc)) continue;
+            if (!bonus_at(l8, lc, 0) && (tile(l8, lc)->rocky_lock & 0xc0) <= 0x7f && alt_of(tile(l8, lc)) <= 0xbf) continue;
+            if (whose_territory(faction, l8, lc, NULL, 0) != faction) continue;
+            base_find_2(l8, lc, faction);
+            if (*game_base_find_dist <= 2) continue;
+            int taken = 0;
+            for (l20 = 0; l20 < *game_veh_count; l20++) {
+                const struct veh *U = &game_vehs[l20];
+                if (U->faction == faction && proto_of(U->proto)->plan == PLAN_SUPPLY_CONVOY && l20 != veh &&
+                    ((U->x == l8 && U->y == lc && U->order == 3) ||
+                     (U->order == ORDER_MOVE_TO && V->waypoint_x[0] == l8 && V->waypoint_y[0] == lc))) {
+                    taken = 1;
+                    break;
+                }
+            }
+            if (taken) continue;
+            int dy = abs(y - lc), dx = x_dist(x, l8);
+            int best = 1;
+            l7c = 0;
+            for (int r = 0; r < 3; r++) {
+                int v = resource_yield(r, faction, V->home_base, l8, lc) * 2;
+                if (r == 1) v++;
+                if (best <= v) best = v, l7c = r;
+            }
+            int score = best * 0x200 - ((dy + dx) >> 1);
+            if (l2c < score) {
+                l2c = score;
+                go_to(veh, 'v', l8, lc);
+                if (!l48) {
+                    V->order = 3;
+                    V->order_auto_type = (uint8_t)l7c;
+                    goto finish;
+                }
+            }
+        }
+    }
+    goto at_57707f;
+at_56cdc1:
+    // Units given to a faction the AI is friendly with.
+    l74 = terr;
+    if (!game_is_human(faction) && terr != faction && terr > 0) {
+        uint32_t st = F->diplo_status[terr];
+        if ((st & 8) && (game_weapons[proto_of(V->proto)->weapon].offense > 2 || plan == PLAN_DEFENSIVE) &&
+            plan != PLAN_RECONNAISSANCE && !(st & 0x40c30) && (st & 3) && game_factions[terr].integrity_blemishes < 3) {
+            struct faction_data *T = &game_factions[terr];
+            if (V->order == ORDER_MOVE_TO) {
+                int o = whose_territory(faction, V->waypoint_x[0], V->waypoint_y[0], NULL, 0);
+                if (o != faction && o != terr && o > 0 && plan < 2 && triad == TRIAD_LAND &&
+                    (T->ranking < F->ranking ||
+                     (int)(((~F->diplo_status[terr] & 1) | 2) * T->mil_strength) / 2 < game_factions[o].mil_strength) &&
+                    (F->diplo_status[o] & 0x10) && (T->diplo_status[o] & 0x10)) {
+                    em_give(veh, terr);
+                    return 1;
+                }
+            }
+            int tplan = T->region_base_plan[region];
+            if (tplan == 2 && plan < 3 && (F->diplo_status[terr] & TREATY_PACT)) {
+                em_give(veh, terr);
+                return 1;
+            }
+            if (!F->region_total_bases[region] && T->region_total_bases[region] && triad == TRIAD_LAND &&
+                ((tplan == 2 && ((F->diplo_status[terr] & TREATY_PACT) || T->ranking < 7)) ||
+                 (tplan != 8 && (F->diplo_status[terr] & TREATY_PACT)))) {
+                em_give(veh, terr);
+                return 1;
+            }
+        }
+    }
+    if (hurt == 0 || (st6 && hurt < 4)) goto at_56e011;
+    goto at_hurt;
+at_56e011:
+    if (plan == PLAN_INFO_WARFARE) {
+        if (net_own) {
+            V->order = ORDER_NONE;
+            V->state &= ~0x200u;
+            game_synch_veh(veh);
+            game_net_await_synch(game_net_daemon);
+            game_net_unlock_veh(game_net_daemon);
+            return 1;
+        }
+        l4c = triad == TRIAD_SEA;
+        if (!exploring && at_sea == l4c) {
+            // A target within two squares: a probe team or a unit worth
+            // its work, of a faction it may act against.
+            for (l5c = 0; l5c < 0x54; l5c += 4) {
+                int i = l5c / 4;
+                l8 = xrange(game_radius_x[i] + x), lc = game_radius_y[i] + y;
+                if (!on_map(l8, lc)) continue;
+                const struct map_tile *t = tile(l8, lc);
+                if (!((triad == TRIAD_AIR || (alt_of(t) < ALT_SHORE) == l4c) && t->region == region)) continue;
+                l20 = stack_fix(veh_at(l8, lc));
+                if (l20 < 0 || game_vehs[l20].faction == faction) continue;
+                if (!stack_check(l20, 2, 11, -1, -1) && !(base_who(l8, lc) < 0 && game_probe(veh, -1, l20, 0))) continue;
+                uint32_t st = F->diplo_status[game_vehs[l20].faction];
+                if ((!(st & TREATY_PACT) || !(st & 0x2000000)) &&
+                    ((st & 0x30) || whose_territory(faction, l8, lc, NULL, 0) == faction)) {
+                    go_to(veh, 'P', l8, lc);
+                    goto at_57707f;
+                }
+            }
+            // A base to work against, or one of its own to guard.
+            l2c = 99999;
+            for (l28 = 0; l28 < *game_base_count; l28++) {
+                const struct base *B = &game_bases[l28];
+                l50 = B->x;
+                if (region != tile(l50, B->y)->region) continue;
+                terr = x;
+                int d = (abs(y - B->y) + x_dist(x, l50)) >> 1, v = d * 16;
+                if (B->faction == faction) {
+                    base_find_3(B->x, B->y, -1, -1, faction, -1);
+                    int n = stack_check(veh_at(B->x, B->y), 2, 11, -1, -1);
+                    v += ((n + (v != 0)) * 0x40 + *game_base_find_dist) * 0x40;
+                } else {
+                    if (has_project(15, B->faction)) continue;
+                    if (B->state & 0x40) {
+                        l50 = B->faction;
+                        if ((F->diplo_status[l50] & 7) &&
+                            (!(F->diplo_status[l50] & 0x20) ||
+                             (F->region_total_bases[region] &&
+                              (unsigned)((F->region_force_rating[region] >> 1) + F->region_total_combat_units[region]) <
+                                  game_factions[l50].region_force_rating[region])))
+                            continue;
+                        v = d * 32;
+                    }
+                    int bf = B->faction;
+                    uint32_t st = F->diplo_status[bf];
+                    if (st & 0x10) v /= 2;
+                    l50 = st & 1;
+                    if (l50) {
+                        v *= 2;
+                        if (game_factions[bf].ranking <= 5 || (st & 0x1000000)) continue;
+                    }
+                    if (st & 2) v *= 2;
+                    if (!((!l50 || !(st & 0x2000000)) &&
+                          (!(st & 7) || (st & 0x20) ||
+                           (F->tech_ranking < game_factions[bf].tech_ranking &&
+                            (at_climax(faction) || !(F->diplo_status[bf] & 0x1000000))))))
+                        continue;
+                }
+                if (v < l2c) {
+                    l2c = v;
+                    go_to(veh, 'p', B->x, B->y);
+                }
+            }
+            if (V->order != ORDER_MOVE_TO) {
+                kill(veh);
+                return 1;
+            }
+            goto at_57707f;
+        }
+    }
+    if (triad != TRIAD_LAND) goto at_56ed87;
+    if (has_abil(V->proto, ABL_DROP_POD) && !V->moves_spent &&
+        game_weapons[proto_of(V->proto)->weapon].offense) {
+        // A drop pod unit: dropped on an enemy base in range, or taken to
+        // a base of its own in range of one.
+        if (stack_check(veh, 2, 2, -1, -1) && !(V->state & 0x20) && !game_is_human(faction) && hurt < 4) {
+            if (!near_dist || (here->bits & 0x40000)) {
+                l3c = drop_range(faction);
+                l2c = 99999, l7c = -1;
+                int i;
+                for (i = 0; i < *game_base_count; i++) {
+                    const struct base *B = &game_bases[i];
+                    if (B->faction == faction || (F->diplo_status[B->faction] & TREATY_PACT) ||
+                        !(F->diplo_status[B->faction] & 0xc10) || has_fac(0x1d, i, 0) || has_project(0x23, B->faction) ||
+                        veh_who(B->x, B->y) >= 0)
+                        continue;
+                    l5c = B->x, terr = x;
+                    int d = (abs(B->y - y) + x_dist(l5c, terr)) >> 1;
+                    if (d <= l3c) {
+                        l28 = i;
+                        em_airdrop(veh, game_bases[i].x, game_bases[i].y, 3);
+                        return 1;
+                    }
+                    if (d < l2c) l7c = i, l2c = d;
+                }
+                l28 = i;
+                if (l7c >= 0) {
+                    l28 = l7c, l2c = 99999;
+                    for (l58 = 0; l58 < *game_base_count; l58++) {
+                        const struct base *B = &game_bases[l58];
+                        if (B->faction != faction) continue;
+                        terr = abs(B->y - game_bases[l7c].y);
+                        if ((terr + x_dist(B->x, game_bases[l7c].x)) >> 1 > l3c) continue;
+                        if (stack_check(veh_at(B->x, B->y), 6, ABL_DROP_POD, -1, -1)) continue;
+                        terr = abs(B->y - y);
+                        if ((terr + x_dist(B->x, x)) >> 1 <= l3c) {
+                            veh_skip(veh);
+                            em_airdrop(veh, game_bases[l58].x, game_bases[l58].y, 3);
+                            return 1;
+                        }
+                        if (tile(B->x, B->y)->region == region) {
+                            terr = x;
+                            int d = (abs(B->y - y) + x_dist(B->x, terr)) >> 1;
+                            if (d < l2c) {
+                                l2c = d;
+                                go_to(veh, 'i', B->x, B->y);
+                            }
+                        }
+                    }
+                    goto at_56e62d;
+                }
+                V->order = ORDER_NONE;
+                if (F->units_active[proto] > 1) {
+                    l5c = -1, terr = -1;
+                    for (l28 = 0; l28 < *game_base_count; l28++) {
+                        const struct base *B = &game_bases[l28];
+                        l74 = B->faction;
+                        if (l74 == faction || (F->diplo_status[l74] & TREATY_PACT) || !(F->diplo_status[l74] & 0xc10) ||
+                            has_fac(0x1d, l28, 0) || has_project(0x23, l74))
+                            continue;
+                        l24 = B->pop_size;
+                        int c = (int8_t)game_factions[l74].region_base_plan[region];
+                        if (c == 7) l24 *= 3;
+                        if (c == 8) l24 *= 2;
+                        if (c == 0) l24 /= 2;
+                        l20 = stack_fix(veh_at(B->x, B->y));
+                        if (stack_check(l20, 2, 4, -1, -1)) continue;
+                        l34 = stack_check(l20, 0x10, -1, -1, -1);
+                        for (l58 = 0; l58 < 0x60; l58 += 4) {
+                            int i2 = l58 / 4 + 1;
+                            l8 = xrange(game_radius_x[i2] + B->x), lc = game_radius_y[i2] + B->y;
+                            if (!on_map(l8, lc) || alt_of(tile(l8, lc)) < ALT_SHORE) continue;
+                            if ((abs(y - lc) + x_dist(x, l8)) >> 1 > l3c) continue;
+                            int a = anything_at(l8, lc);
+                            if (a >= 0 && a != faction) continue;
+                            int s = game_rnd(8) + l24;
+                            if (a == faction) s = s * 3 / 4;
+                            if (l58 < 0x20 && l34 > 1) s /= 2;
+                            if (tile(l8, lc)->bits & 0x1608050) s *= 2;
+                            if (tile(l8, lc)->bits & 4) s = (s << 2) / 3;
+                            for (l30 = 0; l30 < 0x20; l30 += 4) {
+                                int j = l30 / 4;
+                                int nx = xrange(game_radius_near_x[j] + l8), ny = game_radius_near_y[j] + lc;
+                                if (!on_map(nx, ny)) continue;
+                                if (whose_territory(faction, nx, ny, NULL, 0) == faction) s = 0;
+                                l20 = stack_fix(veh_at(nx, ny));
+                                if (l20 < 0) continue;
+                                if (game_vehs[l20].faction == faction) {
+                                    if (has_abil(game_vehs[l20].proto, ABL_DROP_POD)) s += 0x20;
+                                } else if (game_vehs[l20].faction == l74 && proto_of(game_vehs[l20].proto)->plan < 2) {
+                                    s /= 2;
+                                }
+                            }
+                            if (l2c < s) terr = l8, l5c = lc, l2c = s;
+                        }
+                    }
+                    if (on_map(terr, l5c)) {
+                        em_airdrop(veh, terr, l5c, 3);
+                        return 1;
+                    }
+                }
+            } else if (whose_territory(faction, x, y, NULL, 0) == faction && V->order != ORDER_MOVE_TO && own_base >= 0) {
+                go_to(veh, 'I', game_bases[own_base].x, game_bases[own_base].y);
+            }
+        }
+    }
+at_56e62d:
+    if (own_dist || region_plan == plan) goto at_56ed87;
+    if (!game_bases[own_base].ai_plan) {
+        if (!stack_check(veh, 2, 7, -1, -1) || plan == PLAN_TERRAFORMING) goto at_56ed87;
+        if (plan != 1 || region_plan > 2) goto at_56e693;
+        goto at_56ef2f;
+    }
+at_56e693:
+    l90 = 1, lb8 = 1;
+    goto at_57708a;
+at_56ed87:
+    if (!((plan != PLAN_NAVAL_SUPERIORITY || !(V->state & 0x200) || V->order_auto_type != 11) && triad != TRIAD_AIR))
+        goto at_air;
+at_56ef2f:
+    if (exploring) goto at_57460a;
+    if (plan == PLAN_NAVAL_SUPERIORITY) {
+        // A warship: to a transport of its own about to sail, or an enemy
+        // ship near.
+        if (V->order == ORDER_MOVE_TO)
+            l2c = (abs(y - V->waypoint_y[0]) + x_dist(x, V->waypoint_x[0])) >> 1;
+        else
+            l2c = 9999;
+        for (l30 = 0; l30 < game_radius_count[game_range(veh_moves(veh) / game_rules_basic->move_rate_roads, 1, 8)];
+             l30++) {
+            l8 = xrange(game_radius_x[l30] + x), lc = game_radius_y[l30] + y;
+            if (!on_map(l8, lc)) continue;
+            const struct map_tile *t = tile(l8, lc);
+            if (alt_of(t) >= ALT_SHORE) continue;
+            if (!own_dist ? !base_on_sea(own_base, t->region) : t->region != region) continue;
+            if (base_who(l8, lc) >= 0) continue;
+            l20 = stack_fix(veh_at(l8, lc));
+            if (l20 < 0) continue;
+            while (triad_of(game_vehs[l20].proto) != TRIAD_SEA)
+                if (l20 < 0 || (l20 = game_vehs[l20].next_in_stack) < 0) break;
+            if (l20 < 0) continue;
+            int d = (abs(y - lc) + x_dist(x, l8)) >> 1;
+            l3c = d;
+            if (game_vehs[l20].faction == faction) {
+                if (proto_of(game_vehs[l20].proto)->plan != PLAN_NAVAL_TRANSPORT || veh_moves(l20)) continue;
+                if (stack_check(l20, 2, 6, -1, -1) > (game_vehs[l20].x == x && game_vehs[l20].y == y)) continue;
+            } else if (!(F->diplo_status[game_vehs[l20].faction] & 0x10)) {
+                continue;
+            }
+            if (d < l2c) {
+                l2c = d;
+                go_to(veh, 'n', l8, lc);
+            }
+        }
+        for (l20 = 0; l20 < *game_veh_count; l20++) {
+            const struct veh *U = &game_vehs[l20];
+            if (U->faction == faction || !(F->diplo_status[U->faction] & 0xc30) || !(human_bit & U->visibility)) continue;
+            if (alt_of(tile(U->x, U->y)) >= ALT_SHORE || base_who(U->x, U->y) >= 0) continue;
+            l3c = (abs(y - U->y) + x_dist(x, U->x)) >> 1;
+            if (proto_of(U->proto)->plan != PLAN_NAVAL_TRANSPORT) l3c *= 2;
+            if (stack_check(l20, 1, -1, -1, -1) > 1) l3c /= 2;
+            if (l3c < l2c) {
+                add_goal(faction, 6, 2, U->x, U->y, -1);
+                go_to(veh, 'N', U->x, U->y);
+            }
+        }
+    }
+    if (can_arty(V->proto, 1) && (triad == TRIAD_SEA || alt_of(here) >= ALT_SHORE || !near_dist) && !l88) {
+        // Artillery: the best target in range.
+        l2c = 0, l7c = -1;
+        l5c = own_dist ? 25 : 81;
+        int t7c;
+        for (l30 = 0; l30 < l5c; l30++) {
+            l8 = xrange(game_radius_x[l30] + x), lc = game_radius_y[l30] + y;
+            if (!on_map(l8, lc)) continue;
+            if (anything_at(l8, lc) < 0) {
+                int o;
+                if (alt_of(tile(l8, lc)) >= ALT_SHORE && (o = whose_territory(faction, l8, lc, NULL, 0)) >= 0 && o != faction &&
+                    (F->diplo_status[o] & 0x10)) {
+                    const struct map_tile *t = tile(l8, lc);
+                    uint32_t bits = t->bits;
+                    int v = (bits & 0x80000000u ? 0x1e : 0) + 2;
+                    if ((!F->region_total_bases[t->region] || F->region_base_plan[t->region] == 2 || triad != TRIAD_LAND ||
+                         (bits & 0x80000000u)) &&
+                        (bits & 0x80001000u) && ((bits & 0x80000000u) || triad != TRIAD_SEA || V->order != ORDER_MOVE_TO) &&
+                        (bits & MAP_ARTY_TARGETS) && l2c < v) {
+                        l2c = v;
+                        l7c = l30;
+                    }
+                }
+            } else {
+                l20 = stack_fix(veh_at(l8, lc));
+                if (l20 < 0 || game_vehs[l20].faction == faction || !(F->diplo_status[game_vehs[l20].faction] & 0x10))
+                    continue;
+                int v = (stack_check(l20, 2, 6, -1, -1) + stack_check(l20, 6, ABL_ARTILLERY, -1, -1)) * 8;
+                if (triad == TRIAD_SEA) {
+                    if (alt_of(tile(l8, lc)) < ALT_SHORE && base_who(l8, lc) >= 0) {
+                        l7c = -1;
+                        goto at_56f841;
+                    }
+                    if (alt_of(tile(l8, lc)) < ALT_SHORE) {
+                        terr = l8;
+                        if ((abs(y - lc) + x_dist(x, terr)) >> 1 <= veh_moves(veh) / game_rules_basic->move_rate_roads) {
+                            l7c = -1;
+                            goto at_56f841;
+                        }
+                    }
+                    if (V->order == ORDER_MOVE_TO) continue;
+                }
+                if (!zocv || l30 < 9) v += stack_check(l20, 4, -1, -1, -1);
+                terr = x;
+                if ((abs(y - lc) + x_dist(terr, l8)) >> 1 > game_rules_basic->artillery_max_range && v > 1) v = 1;
+                if (l2c < v) {
+                    l2c = v;
+                    l7c = l30;
+                }
+            }
+        }
+        if (l7c >= 0) {
+            t7c = l7c;
+            l8 = xrange(game_radius_x[t7c] + x), lc = game_radius_y[t7c] + y;
+            terr = x;
+            if ((abs(y - lc) + x_dist(terr, l8)) >> 1 <= game_rules_basic->artillery_max_range) {
+                if (anything_at(l8, lc) < 0) {
+                    if (net_own) {
+                        game_log_say(text(0x68e934), veh, l8, lc);
+                        game_message_data(0x2413, veh, l8, lc, 0, 0);
+                        game_net_await_exec(game_net_daemon, 1);
+                        return 1;
+                    }
+                    game_log_say(text(0x68e954), veh, l8, lc);
+                    em_destroy(veh, 0, l8, lc);
+                    return 1;
+                }
+                if (t7c > 8 || (triad == TRIAD_SEA && alt_of(tile(l8, lc)) >= ALT_SHORE)) {
+                    if (!net_own) {
+                        game_log_say(text(0x68e990), veh, t7c, 0);
+                        em_fight(veh, t7c, 1, 1);
+                        return 1;
+                    }
+                    game_log_say(text(0x68e974), veh, faction, 0);
+                    game_message_veh(0x2402, veh, t7c, 0);
+                    goto net_exec;
+                }
+            }
+            if (!own_dist && t7c > 0x18 && (!st6 || region_plan) && anything_at(l8, lc) >= 0) goto at_578b34;
+            goto at_56f8ad;
+        }
+    at_56f841:
+        if (!own_dist && !st6 && region_plan && stack_check(veh, 15, -1, -1, -1) < 2 && triad != TRIAD_SEA &&
+            ((here->bits & 0x4000) || region_plan != 2))
+            goto at_578b34;
+    }
+at_56f8ad:
+    del_site(faction, 3, x, y, 0);
+    if ((plan != PLAN_COLONIZATION && triad != TRIAD_LAND) || l88 || (l4c = triad == TRIAD_SEA, at_sea != l4c))
+        goto at_570002;
+    // A base site within reach (colony pods), noted for the faction's
+    // other units.
+    if (plan == PLAN_COLONIZATION) del_site(faction, 8, x, y, 1);
+    l28 = 0;
+    if (plan == PLAN_COLONIZATION && V->order == ORDER_MOVE_TO &&
+        vector_dist_offset(x_dist(x, V->waypoint_x[0]), abs(y - V->waypoint_y[0])) > 2)
+        l28 = game_site_at(V->waypoint_x[0], V->waypoint_y[0], 0) - 1;
+    for (l30 = 0; l30 < 25; l30++) {
+        l8 = xrange(game_radius_x[l30] + x), lc = game_radius_y[l30] + y;
+        if (!on_map(l8, lc)) continue;
+        const struct map_tile *t = tile(l8, lc);
+        int a = alt_of(t);
+        if ((a < ALT_SHORE) != l4c) continue;
+        if ((t->bits & MAP_FUNGUS) && a >= 0x40) continue;
+        if ((t->rocky_lock & 0xc0) > 0x40 && a >= ALT_SHORE) continue;
+        if (t->region != region || (t->bits & 0x2000)) continue;
+        if (base_territory(faction, l8, lc) >= 0) continue;
+        if (triad == TRIAD_LAND) {
+            if (!(F->region_flags[region] & 0x80) && !is_coast(l8, lc, 0) &&
+                (int)(game_continents[region].open_terrain - F->region_good_base_tiles[region]) < 0x14)
+                continue;
+        } else if (triad == TRIAD_SEA) {
+            int bad = 0;
+            for (l34 = 0; l34 < 0x144; l34 += 4) {
+                int j = l34 / 4;
+                int nx = xrange(game_radius_x[j] + l8), ny = game_radius_y[j] + lc;
+                if (!on_map(nx, ny)) continue;
+                int b = base_at(nx, ny);
+                if (b >= 0 && game_bases[b].faction != faction && (F->diplo_status[game_bases[b].faction] & 0x10) &&
+                    (is_port(b, 0) || l30 < 0x15)) {
+                    bad = 1;
+                    break;
+                }
+                l20 = stack_fix(veh_at(nx, ny));
+                if (l20 >= 0 && game_vehs[l20].faction != faction && (F->diplo_status[game_vehs[l20].faction] & 0x10) &&
+                    stack_check(l20, 2, 6, -1, -1)) {
+                    bad = 1;
+                    break;
+                }
+            }
+            if (bad) continue;
+        }
+        int site = game_site_at(l8, lc, 0);
+        if (site <= l28) continue;
+        base_find(l8, lc);
+        if (site < (8 - *game_base_find_dist) * 2 && F->region_total_bases[region] && F->base_count >= 2) {
+            int lim = region_plan != 8 ? 4 : 1;
+            if (F->region_best_site[region] > lim) lim = F->region_best_site[region];
+            if (site < lim) {
+                if (plan != PLAN_COLONIZATION || V->order == ORDER_MOVE_TO) continue;
+                if (game_continents[region].open_terrain >= (F->region_total_bases[region] + 1) * 6) continue;
+            }
+        }
+        l28 = site;
+        dir84 = l30;
+    }
+    if (!l28) goto at_570002;
+    if (!dir84 && plan == PLAN_COLONIZATION) l28 += ++V->movement_turns;
+    if (!l28 || dir84 < 0) goto at_570002;
+    if (zocm && !(F->diplo_status[zocm - 1] & 7)) goto at_570002;
+    if (plan != PLAN_COLONIZATION) {
+        if (dir84 >= 9) goto at_570002;
+        l8 = xrange(game_radius_x[dir84] + x), lc = game_radius_y[dir84] + y;
+        l24 = l28 < 6 ? 1 : 2;
+        if (near_dist >= 0) {
+            l3c = (abs(lc - game_bases[near_base].y) + x_dist(l8, game_bases[near_base].x)) >> 1;
+            if (l3c <= 4) l24 = 1;
+            if (l3c >= 6 && l3c < 12 && l28 >= 10) l24 = 3;
+        }
+        del_site(faction, 8, x, y, 2);
+        add_site(faction, 8, l24, l8, lc);
+        goto at_570002;
+    }
+    if (!dir84) {
+        if (net_own) {
+            game_log_say(text(0x68e9a4), veh, faction, 0);
+            game_message_base(0x2408, veh, text(0x93fc30), 0);
+            goto net_exec;
+        }
+        em_build(veh);
+        if (F->base_count != 1) return 1;
+        for (int u = 0; u < *game_veh_count; u++)
+            if (game_vehs[u].faction == faction && proto_of(game_vehs[u].proto)->plan == PLAN_TERRAFORMING)
+                go_to(u, 'C', x, y);
+        return 1;
+    }
+    V->status_icon = 'b';
+    if (dir84 < 9) {
+        dir84--;
+        goto at_578b26;
+    }
+    go_to(veh, 'b', xrange(game_radius_x[dir84] + x), game_radius_y[dir84] + y);
+    goto at_57000c;
+at_570002:
+    if (plan != PLAN_COLONIZATION) {
+        if (plan == PLAN_RECONNAISSANCE) goto at_5702f7;
+        goto at_5702ed_speed;
+    }
+at_57000c:
+    if (triad == TRIAD_SEA && V->order != ORDER_MOVE_TO && at_sea) {
+        // A sea colony pod: the best site in its sea away from enemies.
+        l2c = 0;
+        for (lc = 0; lc < *game_map_height; lc++) {
+            for (l8 = lc & 1; l8 < *game_map_width; l8 += 2) {
+                if (!on_map(l8, lc) || tile(l8, lc)->region != region || anything_at(l8, lc) >= 0) continue;
+                if ((tile(l8, lc)->bits & MAP_FUNGUS) && alt_of(tile(l8, lc)) >= 0x40) continue;
+                int s = game_site_at(l8, lc, 0);
+                int d = vector_dist_offset(x_dist(x, l8), abs(y - lc));
+                l24 = s * 10000 / (d + 1);
+                l28 = base_find(l8, lc);
+                if (l28 >= 0 && game_bases[l28].faction != faction && (F->diplo_status[game_bases[l28].faction] & 0x10))
+                    l24 /= 2;
+                if (l2c > l24) continue;
+                int bad = 0;
+                for (l4c = 0; l4c < 0x144; l4c += 4) {
+                    int j = l4c / 4;
+                    int nx = xrange(game_radius_x[j] + l8), ny = game_radius_y[j] + lc;
+                    if (!on_map(nx, ny) || alt_of(tile(nx, ny)) >= ALT_SHORE) continue;
+                    l28 = base_at(nx, ny);
+                    if (l28 >= 0 && game_bases[l28].faction != faction &&
+                        (game_factions[game_bases[l28].faction].diplo_status[faction] & 0x10)) {
+                        bad = 1;
+                        break;
+                    }
+                    l20 = stack_fix(veh_at(nx, ny));
+                    if (l20 >= 0 && game_vehs[l20].faction != faction &&
+                        (game_factions[game_vehs[l20].faction].diplo_status[faction] & 0x10)) {
+                        bad = 1;
+                        break;
+                    }
+                }
+                if (bad) continue;
+                l2c = l24;
+                go_to(veh, 'c', l8, lc);
+            }
+        }
+    }
+at_5702f7:
+    if ((V->order != ORDER_MOVE_TO || !near_dist) && triad == TRIAD_LAND && !at_sea) {
+        // Exploration and the faction's base sites on its continent.
+        l34 = 0, l4c = 0;
+        for (int k = 0; k < 25; k++) {
+            const struct goal *G = &F->sites[k];
+            if (G->type != plan || G->priority <= 0) continue;
+            if (tile(G->x, G->y)->region != region) continue;
+            l34++;
+            if (plan == PLAN_RECONNAISSANCE) {
+                if (!goody_at(G->x, G->y)) continue;
+                l4c++;
+            } else {
+                int u = F->region_best_site[region] < 9 ? F->region_best_site[region] : 8;
+                if (region_plan != 8 && u < 4) u = 4;
+                if (game_site_at(G->x, G->y, 0) < u) continue;
+                l4c++;
+            }
+        }
+        l30 = V->order == ORDER_MOVE_TO;
+        terr = 0;
+        if (!l34 || !((*game_current_turn + faction) & (l4c ? 15 : 3)) || !near_dist) {
+            l2c = 0;
+            for (lc = 0; lc < *game_map_height; lc++) {
+                for (l8 = lc & 1; l8 < *game_map_width; l8 += 2) {
+                    if (!on_map(l8, lc) || tile(l8, lc)->region != region) continue;
+                    l58 = whose_territory(faction, l8, lc, NULL, 0);
+                    if (!(region_plan == 8 || l58 == faction || l58 < 0)) continue;
+                    if (base_territory(faction, l8, lc) >= 0) continue;
+                    if ((!l34 || !((*game_current_turn + faction) & 15)) &&
+                        (is_known(l8, lc, faction) || (*game_difficulty > 3 && !game_is_human(faction))) &&
+                        goody_at(l8, lc)) {
+                        int b = base_find(l8, lc);
+                        if ((b >= 0 && game_bases[b].faction == faction) || l58 == faction)
+                            add_site(faction, 3, (*game_base_find_dist < 6) + 1, l8, lc);
+                    }
+                    const struct map_tile *t = tile(l8, lc);
+                    int a = alt_of(t);
+                    if (a < ALT_SHORE || ((t->bits & MAP_FUNGUS) && a >= 0x40) || (t->bits & 0x2000) ||
+                        (t->rocky_lock & 0xc0) >= 0x41)
+                        continue;
+                    if ((l58 == faction || l58 < 0) && !is_known(l8, lc, faction)) {
+                        l24 = 0;
+                        int seen = 0;
+                        for (l4c = 0; l4c < 0x54; l4c += 4) {
+                            int j = l4c / 4;
+                            int nx = xrange(game_radius_x[j] + l8), ny = game_radius_y[j] + lc;
+                            if (!on_map(nx, ny) || tile(nx, ny)->region != region) continue;
+                            if (at_site(faction, 3, nx, ny)) {
+                                seen = 1;
+                                break;
+                            }
+                            if (!is_known(nx, ny, faction)) {
+                                l24++;
+                                if (goody_at(nx, ny)) l24++;
+                            } else if ((*game_difficulty > 3 && !game_is_human(faction)) || l4c < 0x24) {
+                                l24 |= 0x20;
+                            }
+                        }
+                        if (!seen && l24 > 0x20) add_site(faction, 3, l24 < 0x28 ? (l24 > 0x22) + 1 : 3, l8, lc);
+                    }
+                    if (region_plan != 8 && l58 != faction) continue;
+                    l4c = region * 2 + faction * 0x20cc;
+                    if (!((F->region_flags[region] & 0x80) || is_coast(l8, lc, 0) ||
+                          (int)(game_continents[region].open_terrain - F->region_good_base_tiles[region]) > 0x13))
+                        continue;
+                    l24 = game_site_at(l8, lc, 0);
+                    int rtb = F->region_total_bases[region];
+                    if (!(l24 && ((8 - *game_base_find_dist) * 2 - (rtb < 2 ? 2 : 0) <= l24 ||
+                                  F->region_best_site[region] <= l24 || !rtb || F->base_count < 2)))
+                        continue;
+                    l5c = 1;
+                    for (terr = 0; terr < 0x60; terr += 4) {
+                        int j = terr / 4 + 1;
+                        int nx = xrange(game_radius_x[j] + l8), ny = game_radius_y[j] + lc;
+                        if (!on_map(nx, ny)) continue;
+                        const struct map_tile *n = tile(nx, ny);
+                        int s2;
+                        if (n->region == region && (!(n->bits & MAP_FUNGUS) || alt_of(n) < 0x40) && !(n->bits & 0x2000) &&
+                            (n->rocky_lock & 0xc0) < 0x41 && base_territory(faction, nx, ny) < 0 && !(n->bits & 0x1000) &&
+                            (s2 = game_site_at(nx, ny, 0)) >= l24 && (s2 != l24 || at_site(faction, 8, nx, ny)) &&
+                            ((F->region_flags[region] & 0x80) || is_coast(nx, ny, 0) ||
+                             (int)(game_continents[region].open_terrain - F->region_good_base_tiles[region]) > 0x13) &&
+                            (region_plan == 8 || whose_territory(faction, nx, ny, NULL, 0) == faction)) {
+                            l5c = 0;
+                            break;
+                        }
+                    }
+                    int v = (l24 << 16) / (((abs(y - lc) + x_dist(x, l8)) >> 1) + 1);
+                    if (!l5c) continue;
+                    if (!(l2c < v || is_known(l8, lc, faction)) && !(*game_difficulty > 3 && !game_is_human(faction)))
+                        continue;
+                    if (path_find_at(game_path, l8, lc, x, y, whose_territory(faction, l8, lc, NULL, 0), faction, 0x201, -1,
+                                     path_stale_next()) < 0)
+                        continue;
+                    if (is_known(l8, lc, faction) || (*game_difficulty > 3 && !game_is_human(faction))) {
+                        del_site(faction, 8, l8, lc, 2);
+                        add_site(faction, 8, 2, l8, lc);
+                        l34++;
+                    }
+                    if (l2c < v) {
+                        l2c = v;
+                        if (!l30 && plan == PLAN_COLONIZATION) go_to(veh, 'c', l8, lc);
+                    }
+                }
+            }
+            if (plan != PLAN_RECONNAISSANCE && !l30) {
+                int n = l34;
+                if (V->order == ORDER_MOVE_TO) {
+                    if (!l34) n = 1;
+                    add_site(faction, 3, 2, V->waypoint_x[0], V->waypoint_y[0]);
+                    if (!is_known(V->waypoint_x[0], V->waypoint_y[0], faction) &&
+                        (*game_difficulty < 4 || game_is_human(faction))) {
+                        V->order = ORDER_NONE;
+                    } else {
+                        del_site(faction, 8, l8, lc, 2);
+                        add_site(faction, 8, 3, V->waypoint_x[0], V->waypoint_y[0]);
+                    }
+                }
+                if (!n) {
+                    F->region_good_tiles[region] -= 10;
+                    *(uint8_t *)&F->region_flags[region] |= 9;
+                    if (region_plan == 8) region_plan = 7, F->region_base_plan[region] = 7;
+                }
+            }
+        }
+    }
+    if (plan == PLAN_COLONIZATION && V->order != ORDER_MOVE_TO && (l74 = whose_territory(faction, x, y, NULL, 0)) >= 0 &&
+        l74 != faction && (F->diplo_status[l74] & 3) && (l28 = base_find_3(x, y, faction, region, -1, -1)) >= 0) {
+        go_to(veh, 'k', game_bases[l28].x, game_bases[l28].y);
+        goto at_57717f;
+    }
+at_5702ed_speed:
+    if (game_rules_basic->move_rate_roads >= veh_speed(veh, 0) && (here->bits & 0x800000) &&
+        triad_of(V->proto) != TRIAD_AIR && near_base >= 0) {
+        l8 = xrange(x + 6);
+        l28 = base_find(l8, y);
+        char *say;
+        if (l28 < 0 || *game_base_find_dist > 2) {
+            if (game_bases[near_base].faction != faction || near_dist > 2) goto at_570df9;
+            if (!net_own) goto at_570dd5;
+            say = text(0x68e9e4);
+        } else {
+            if (!(F->diplo_status[game_bases[l28].faction] & 0x10)) goto at_570df9;
+            if (!net_own) {
+            at_570dd5:
+                em_destroy(veh, 0x800000, -1, -1);
+                return 0;
+            }
+            say = text(0x68e9c4);
+        }
+        game_log_say(say, veh, 0x800000, 0);
+        game_message_data(0x2406, veh, 0x800000, 0, 0, 0);
+        goto net_exec;
+    }
+at_570df9:
+    if (game_rules_basic->move_rate_roads >= veh_speed(veh, 0) && (here->bits & 0x400000) &&
+        triad_of(V->proto) != TRIAD_AIR && near_base >= 0 && near_dist <= 2 && game_bases[near_base].faction != faction &&
+        own_dist >= 4 && (F->diplo_status[game_bases[near_base].faction] & 0x10)) {
+        if (!net_own) {
+            em_destroy(veh, 0x400000, -1, -1);
+            return 0;
+        }
+        game_log_say(text(0x68ea04), veh, 0x400000, 0);
+        game_message_data(0x2406, veh, 0x400000, 0, 0, 0);
+        goto net_exec;
+    }
+    if (game_rules_basic->move_rate_roads >= veh_speed(veh, 0) && near_base >= 0 &&
+        game_is_human(game_bases[near_base].faction) && (F->diplo_status[game_bases[near_base].faction] & 0x10) &&
+        triad != TRIAD_AIR && (alt_of(here) < ALT_SHORE) == (triad == TRIAD_SEA) &&
+        game_weapons[proto_of(V->proto)->weapon].offense && !l88 &&
+        whose_territory(faction, x, y, NULL, 0) == game_bases[near_base].faction &&
+        ((here->bits & 0x81208850) || ((here->bits & 4) && !F->region_total_bases[region]))) {
+        if (!net_own) {
+            game_log_say(text(0x68ea44), veh, x, y);
+            em_destroy(veh, 0, -1, -1);
+            goto finish;
+        }
+        game_log_say(text(0x68ea24), veh, 0, 0);
+        game_message_data(0x2406, veh, 0, 0, 0, 0);
+        goto net_exec;
+    }
+    {
+        int keep = 2;
+        if (region_plan < 3 || (F->region_flags[region] & 0x2000) || zocv || plan > 3 || triad != TRIAD_LAND) {
+            if (triad == TRIAD_AIR) goto at_57137d;
+        } else {
+            V->state |= 0x40000000;
+        }
+        if (plan == PLAN_COLONIZATION || plan == PLAN_TERRAFORMING) goto at_57137d;
+        if (!own_dist && !(V->state & 0x40000000)) {
+            if (plan == PLAN_RECONNAISSANCE) {
+                if (V->home_base != own_base && !zocv) goto at_57117a;
+            } else if (plan != PLAN_DEFENSIVE && plan != 1) {
+                keep = triad == TRIAD_LAND;
+            }
+            if (stack_check(veh, 16, -1, -1, -1) <= keep || zocv) goto at_57137d;
+        }
+    at_57117a:
+        if (l88) goto at_57137d;
+        int c = V->order;
+        if ((c == 0 && plan != PLAN_NAVAL_TRANSPORT) || plan == PLAN_RECONNAISSANCE || (V->state & 0x40000000)) {
+        at_5711c6:
+            if (plan == PLAN_NAVAL_SUPERIORITY && c == ORDER_MOVE_TO) goto at_57137d;
+        at_5711d4:
+            if (*game_current_turn < 100 || l50 || own_dist < 7 || c != ORDER_MOVE_TO || V->status_icon == 'X' ||
+                (V->state & 0x40000000) || plan == PLAN_RECONNAISSANCE) {
+                // A supply pod near.
+                l58 = 25;
+                if (plan == PLAN_RECONNAISSANCE || triad == TRIAD_SEA) l58 = 49;
+                if (plan == PLAN_NAVAL_TRANSPORT && (stack_check(veh, 2, 8, -1, -1) || hurt > 1)) l58 = 9;
+                if ((plan != PLAN_NAVAL_SUPERIORITY ? 100 : 400) <= *game_current_turn && V->order == ORDER_MOVE_TO &&
+                    V->status_icon != 'X' && plan != PLAN_RECONNAISSANCE)
+                    l58 = 9;
+                for (l30 = 1; l30 < l58; l30++) {
+                    l8 = xrange(game_radius_x[l30] + x), lc = game_radius_y[l30] + y;
+                    if (!on_map(l8, lc) || !goody_at(l8, lc)) continue;
+                    if (!is_known(l8, lc, faction) && !(*game_difficulty > 3 && !game_is_human(faction))) continue;
+                    if ((alt_of(tile(l8, lc)) < ALT_SHORE) != (triad == TRIAD_SEA) || tile(l8, lc)->region != region)
+                        continue;
+                    if (V->state & 0x40000000) F->region_flags[region] |= 0x2000;
+                    go_to(veh, 'G', l8, lc);
+                    goto at_57707f;
+                }
+            }
+        } else if (triad != TRIAD_LAND) {
+            if (plan != PLAN_NAVAL_TRANSPORT) goto at_5711c6;
+            if (!(V->state & 0x20000000)) goto at_57137d;
+            goto at_5711d4;
+        }
+    }
+at_57137d:
+    dir84 = -1;
+    goto at_57138d;
+at_hurt:
+    // Home for repairs: an airbase or base, a monolith, a transport.
+    if ((!near_dist || (triad == TRIAD_AIR && (here->bits & 0x40000))) &&
+        ((!(V->state & 8) && !(game_bases[near_base].state & 0x200000)) ||
+         (hurt > 3 && veh_moves(veh) <= game_rules_basic->move_rate_roads))) {
+        V->status_icon = 'd';
+        l90 = 1, lb8 = 1;
+        goto at_57138d;
+    }
+    if (has_project(0x16, faction) && !l88 && triad != TRIAD_AIR && !V->moves_spent && (!zocm || hurt > 3) &&
+        !(V->state & 8)) {
+        V->status_icon = 'd';
+        l90 = 1;
+        goto at_56d919;
+    }
+    if (own_dist == 1 && (hurt > 3 || !(game_bases[own_base].state & 0x200000))) {
+        go_to(veh, 'd', game_bases[own_base].x, game_bases[own_base].y);
+        goto finish;
+    }
+    if (near_dist <= (triad + 1) * (triad + 1) * hurt * 2 && !(game_bases[near_base].state & 0x200000) &&
+        get_there(veh, game_bases[near_base].x, game_bases[near_base].y) && near_base == own_base) {
+    at_56da06:
+        go_to(veh, 'd', game_bases[near_base].x, game_bases[near_base].y);
+        goto at_56d919;
+    }
+    l5c = near_base * (int)sizeof(struct base);
+    l34 = faction * 0x833;
+    if (F->diplo_status[game_bases[near_base].faction] & TREATY_PACT) goto at_56da06;
+    if (hurt > 2 && game_weapons[proto_of(V->proto)->weapon].offense && !l88 && near_dist && triad == TRIAD_LAND) {
+        for (int i = 0; i < 9; i++) {
+            l8 = xrange(game_radius_x[i] + x), lc = game_radius_y[i] + y;
+            if (!on_map(l8, lc) || alt_of(tile(l8, lc)) < ALT_SHORE || !(tile(l8, lc)->bits & 0x2000)) continue;
+            if (*game_expansion && (V->proto == 16 || V->proto == 17 || V->proto == 18)) continue;
+            l74 = anything_at(l8, lc);
+            if (!(l74 < 0 || l74 == faction || (F->diplo_status[l74] & TREATY_PACT))) continue;
+            if (!i) {
+                l90 = 1;
+                V->status_icon = 'd';
+                V->damage = 0;
+            } else {
+                go_to(veh, 'd', l8, lc);
+            }
+            goto at_57708a;
+        }
+    }
+    if (hurt > 3 && !l88 && near_dist && !V->moves_spent && !game_chassis[proto_of(V->proto)->chassis].range) {
+        if (veh_moves(veh) == game_rules_basic->move_rate_roads && !zocm && !(V->state & 8) &&
+            speed_proto(V->proto) > game_rules_basic->move_rate_roads && V->proto != 16 && V->proto != 17 &&
+            V->proto != 18) {
+            V->status_icon = 'd';
+            if (triad != TRIAD_SEA) goto at_578b34;
+            l90 = 1;
+            goto at_574a88;
+        }
+    }
+    if (hurt > 2 && !l88 && triad == TRIAD_LAND && near_dist && !veh_cargo(veh) && !(V->state & 8)) {
+        for (int i = 0; i < 8; i++) {
+            l8 = xrange(game_radius_near_x[i] + x), lc = game_radius_near_y[i] + y;
+            if (!on_map(l8, lc) || alt_of(tile(l8, lc)) >= ALT_SHORE) continue;
+            for (l20 = stack_fix(veh_at(l8, lc)); l20 >= 0; l20 = game_vehs[l20].next_in_stack) {
+                if (game_vehs[l20].faction == faction && proto_of(game_vehs[l20].proto)->plan == PLAN_NAVAL_TRANSPORT &&
+                    stack_check(l20, 8, -1, -1, -1) > 0) {
+                    V->status_icon = 'd';
+                    dir84 = i;
+                    goto at_578b26;
+                }
+            }
+        }
+    }
+    if (hurt < 3 || !at_sea || triad != TRIAD_LAND) goto at_56deb8;
+    if (near_dist) {
+        int ok = 1;
+        for (l20 = veh_top(veh); l20 >= 0; l20 = game_vehs[l20].next_in_stack)
+            if (proto_of(game_vehs[l20].proto)->plan == PLAN_NAVAL_TRANSPORT &&
+                proto_power(l20) / 3 < game_vehs[l20].damage)
+                ok = 0;
+        if (!ok) goto at_56deb8;
+    }
+    V->status_icon = 'd';
+    goto at_578b34;
+at_56deb8:
+    if (!l50) {
+        int bf = game_bases[l5c / (int)sizeof(struct base)].faction;
+        if ((F->diplo_status[bf] & 2) && !(F->diplo_status[bf] & TREATY_PACT) && reputation(bf, faction) <= 5)
+            goto at_56df59;
+    }
+    if (!V->moves_spent && !zocv && triad_of(V->proto) == TRIAD_LAND && !(V->state & 8) &&
+        (hurt > 1 || has_project(0x16, faction))) {
+        V->status_icon = 'd';
+        goto at_578b34;
+    }
+at_56df59:
+    if (hurt >= 3 && triad != TRIAD_LAND) {
+        action_home(veh, 2);
+        if (V->order == ORDER_MOVE_TO) {
+            V->status_icon = 'd';
+            goto at_56d919;
+        }
+    }
+    if (own_base < 0 || (!(V->state & 8) && !zocv) || hurt < 4 ||
+        !get_there(veh, game_bases[own_base].x, game_bases[own_base].y))
+        goto at_56e011;
+    go_to(veh, 'd', game_bases[own_base].x, game_bases[own_base].y);
+at_56d919:
+    if (triad != TRIAD_SEA) goto at_57707f;
+    goto at_574a88;
+at_57138d:
+    l6c = human_bit;
+    if (!game_is_human(faction) && !own_dist && !forced && zocv) {
+        // Obliterating a former base of a human that wronged it.
+        if (!is_objective(own_base) &&
+            (region_plan == 2 || F->region_total_bases[region] == 1 || (F->flags & 0x2000000))) {
+            int ff = game_bases[own_base].faction_former;
+            l74 = ff;
+            if (stack_check(veh, 1, -1, -1, -1) <= (game_bases[own_base].pop_size + 1) / 2 &&
+                stack_check(veh, 16, -1, -1, -1) < (V->damage != 0) + 2 && ff != faction && game_is_human(ff)) {
+                uint32_t st = F->diplo_status[ff];
+                if ((st & 0x20) && !(st & 3) &&
+                    ((st & 0x40000) || game_factions[ff].integrity_blemishes > 5 ||
+                     F->ai_fight * -2 + 3 < F->diplo_betrayed[ff])) {
+                    game_log_say(text(0x68ea70), veh, x, y);
+                    em_oblit(veh, own_base);
+                    return 1;
+                }
+            }
+        }
+    }
+    if (near_dist || (own_dist && !hurt) || exploring) goto at_571977;
+    {
+        // The garrison its base wants.
+        l4c = garrison_check(near_base);
+        int dc = defensive_check(near_base);
+        l34 = stack_check(veh, 11, 0x10000000, 0x10000000, -1);
+        int n = game_range(stack_check(veh, 2, 2, faction, -1), 0, dc) + l34;
+        if (V->state & 0x10000000) {
+            int t = l4c - dc;
+            if (t < 1) t = 1;
+            if (l34 <= t) plan = PLAN_DEFENSIVE;
+        }
+        if (region_plan == 2 || region_plan == 8) {
+            n += stack_check(veh, 2, 1, faction, -1);
+            if (plan == 1) plan = PLAN_DEFENSIVE;
+        }
+        if (!n) n = stack_check(veh, 2, 3, faction, -1);
+        if (!st4 && !st6) l4c += stack_check(veh, 11, 0x40000, 0x40000, -1);
+        if (!zoc_veh(x, y, faction) && region_plan > 2) {
+            if (forced) goto at_571723;
+            if (plan != PLAN_RECONNAISSANCE) {
+                if (plan > 2) goto at_57172c;
+                if (F->region_total_combat_units[region] >= 2) goto at_571723;
+            }
+            if (!(F->region_flags[region] & 0x2000)) goto at_571982;
+        }
+    at_571723:
+        if (plan == PLAN_DEFENSIVE) goto at_571853;
+    at_57172c:
+        if (plan == PLAN_RECONNAISSANCE || (plan == 1 && (region_plan == 2 || region_plan == 8))) goto at_571853;
+        if (stack_check(veh, 2, 2, faction, -1) || stack_check(veh, 2, 3, faction, -1) ||
+            stack_check(veh, 2, 1, faction, -1) > (plan == 1))
+            goto at_571977;
+        add_goal(faction, 2, stack_check(veh, game_range(game_bases[near_base].pop_size, 1, 3), -1, -1, -1), x, y, -1);
+        if (!game_weapons[proto_of(V->proto)->weapon].offense && !zoc_sea(x, y, faction)) goto at_571977;
+        lb8 = 1, l90 = 1;
+        if (forced) return 1;
+        goto at_57707f;
+    at_571853:
+        if (n < l4c) add_goal(faction, 2, 2, x, y, -1);
+        if (((n > l4c && (plan != PLAN_DEFENSIVE || !l34 || n > 2)) || st4 || st6) && n > 1 && (!l48 || !zocv))
+            goto at_571977;
+        if (!own_dist && V->home_base >= 0 && !game_is_human(faction)) V->home_base = (int16_t)own_base;
+        V->order = ORDER_NONE;
+        l90 = 1;
+        lb8 = (n <= 1) + 1;
+        if (forced) return 1;
+        if (plan == PLAN_DEFENSIVE && region_plan > 2 && n >= l4c && !(game_bases[own_base].state & 0x4000000) &&
+            (n > 1 || (!game_factions[0].region_total_combat_units[region] && !(F->flags & 0x10000))))
+            goto at_571982;
+        goto at_57707f;
+    }
+at_571977:
+    if (forced) return 0;
+at_571982:
+    if (V->order != ORDER_MOVE_TO && (l48 || plan == PLAN_DEFENSIVE)) {
+        // A monolith, or a native or weak enemy unit in its territory.
+        V->order = ORDER_NONE;
+        for (forced = 0; forced < 0x484; forced += 4) {
+            int i = forced / 4;
+            l8 = xrange(game_radius_x[i] + x), lc = game_radius_y[i] + y;
+            if (!on_map(l8, lc) || tile(l8, lc)->region != region) continue;
+            if (whose_territory(faction, l8, lc, NULL, 0) != faction) continue;
+            l3c = vector_dist_offset(x_dist(x, l8), abs(y - lc));
+            l20 = stack_fix(veh_at(l8, lc));
+            if (l20 < 0 || game_vehs[l20].faction == faction) {
+                if (!(tile(l8, lc)->bits & 0x2000) || (V->state & 0x100) || !want_monolith(veh)) continue;
+                l3c += 1000;
+            } else {
+                const struct veh *U = &game_vehs[l20];
+                if (!l48 || !(!U->faction || (stack_check(l20, 1, -1, -1, -1) < 2 && (F->diplo_status[U->faction] & 0x10) &&
+                                              game_weapons[proto_of(U->proto)->weapon].offense < 0)) ||
+                    triad_of(U->proto) != TRIAD_LAND)
+                    continue;
+            }
+            if (l3c < 9999) {
+                l3c = 9999;
+                int c = 'F';
+                if (V->home_base >= 0 && (l28 = V->home_base, game_bases[l28].state & 0x4000000) && V->status_icon != 'F')
+                    c = 'y';
+                go_to(veh, c, l8, lc);
+            }
+        }
+        if (V->order == ORDER_MOVE_TO) {
+            l90 = 0, lb8 = 0;
+            goto at_57707f;
+        }
+        if (lb8) goto at_57707f;
+        if (l48) {
+            for (l28 = 0; l28 < *game_base_count; l28++) {
+                const struct base *B = &game_bases[l28];
+                if (B->faction != faction || tile(B->x, B->y)->region != region) continue;
+                l3c = vector_dist_offset(x_dist(x, B->x), abs(y - B->y));
+                if (l28 != V->home_base) l3c += 1000;
+                int v = l3c;
+                if (stack_check(veh_at(B->x, B->y), 0x11, 0x13, faction, -1)) v *= 2, l3c = v;
+                if (v < 9999) {
+                    l3c = 9999;
+                    go_to(veh, 'f', B->x, B->y);
+                }
+            }
+        }
+    }
+    // A gate to a base of its own on a continent that wants it.
+    if (plan != region_plan && region_plan > 2 && !own_dist && has_fac(0x21, own_base, 0) &&
+        !(game_bases[own_base].state & 0x20000000)) {
+        for (l28 = 0; l28 < *game_base_count; l28++) {
+            const struct base *B = &game_bases[l28];
+            if (B->faction != faction || !has_fac(0x21, own_base, 0) || (B->state & 0x20000000)) continue;
+            int r = tile(B->x, B->y)->region;
+            if (r == region) continue;
+            int rp = F->region_base_plan[r];
+            if (rp != plan && !(plan < 3 && rp < 3)) continue;
+            if (!net_own) {
+                game_log_say(text(0x68ea84), veh, l28, 0);
+                em_gate(veh, l28);
+                return 1;
+            }
+            if (!game_net_add_lock(game_net_daemon, 0, B->x, B->y)) {
+                game_message_veh(0x2410, veh, l28, 0);
+                goto net_exec;
+            }
+        }
+    }
+    if (!st4 && !st6 && x == F->target_x && y == F->target_y) {
+        const struct unit_proto *P = proto_of(V->proto);
+        if ((P->plan == 0 || P->plan == 1) && triad_of(V->proto) == TRIAD_LAND && !has_abil(V->proto, ABL_DROP_POD))
+            V->state |= 0x40000;
+    }
+    if (!((plan > 1 && !st6) || V->order != ORDER_MOVE_TO)) goto at_after_72922;
+at_572922:
+    if (exploring || (plan & 0xf) != PLAN_TERRAFORMING) goto at_5741cf;
+    if (zocv == 1 || (zocv && game_is_human(faction) && (F->diplo_status[zocv - 1] & 0x10))) goto at_57707f;
+    {
+        int auto3 = (V->state & 0x200) && proto_of(V->proto)->plan == PLAN_TERRAFORMING && V->order_auto_type == 3;
+        l34 = auto3;
+        l50 = 0;
+        if (V->order == ORDER_MOVE_TO) goto at_572cd3;
+        // The base whose work it does: its home, or the nearest of its own.
+        if (auto3 || own_base < 0) {
+            if (!auto3) {
+                l28 = V->home_base;
+                goto at_5729eb_tail;
+            }
+            l28 = V->home_base;
+            if (l28 < 0) l28 = own_base;
+        } else {
+            l28 = own_base;
+        at_5729eb_tail:
+            if (V->home_base >= 0 && l28 != V->home_base) {
+                if (l28 < 0) goto at_572cd6_out;
+                int hb = V->home_base;
+                if (vector_dist_offset(x_dist(x, game_bases[hb].x), abs(y - game_bases[hb].y)) < own_dist * 2) l28 = hb;
+            }
+        }
+        if (l28 >= 0) {
+            // The faction's terraforming goals near that base.
+            for (l48 = 0; l48 < 75; l48++) {
+                const struct goal *G = &F->goals[l48];
+                if (G->type < 0 || (G->type & 0xf) != 9 || G->type == 0x29) continue;
+                if (!on_map(G->x, G->y) || !G->priority) continue;
+                terr = G->x;
+                int d = vector_dist_offset(x_dist(terr, game_bases[l28].x), abs(G->y - game_bases[l28].y));
+                if (!(d < 3 || (!l34 && G->base == l28))) continue;
+                terr = abs(y - G->y);
+                if (!((terr + x_dist(x, G->x)) & ~1)) {
+                    V->order = ORDER_NONE;
+                    l50 = 1;
+                    if (!own_dist) goto at_578b34;
+                    break;
+                }
+                const struct map_tile *t = tile(G->x, G->y);
+                int sea = alt_of(t) < ALT_SHORE;
+                if (sea != (triad == TRIAD_SEA) || (t->region != region && at_sea == sea)) continue;
+                l74 = anything_at(G->x, G->y);
+                if (!(l74 < 0 || l74 == faction || (F->diplo_status[l74] & TREATY_PACT))) continue;
+                for (l20 = 0; l20 < *game_veh_count; l20++) {
+                    const struct veh *U = &game_vehs[l20];
+                    if (U->faction == faction && proto_of(U->proto)->plan == PLAN_TERRAFORMING && l20 != veh &&
+                        ((U->x == G->x && U->y == G->y) ||
+                         (U->order == ORDER_MOVE_TO && U->waypoint_x[0] == G->x && U->waypoint_y[0] == G->y)))
+                        break;
+                }
+                if (l20 < *game_veh_count) continue;
+                go_to(veh, 'g', F->goals[l48].x, F->goals[l48].y);
+                goto at_572cd3;
+            }
+        }
+        goto at_572cd6;
+    at_572cd3:
+    at_572cd6:
+        if (l34 && !l50) {
+            l50 = abs(y - game_bases[l28].y);
+            if (((l50 + x_dist(x, game_bases[l28].x)) & ~1) > 4 && V->order != ORDER_MOVE_TO) {
+                go_to(veh, 'h', game_bases[l28].x, game_bases[l28].y);
+                if (V->order == ORDER_MOVE_TO) goto at_57707f;
+            }
+        }
+    at_572cd6_out:
+        if (triad == TRIAD_SEA && V->order != ORDER_MOVE_TO) {
+            // A sea former: the nearest shelf square to improve near its
+            // bases.
+            l2c = 9999999;
+            for (l28 = 0; l28 < *game_base_count; l28++) {
+                const struct base *B = &game_bases[l28];
+                if (B->faction != faction) continue;
+                if (l34 && l28 != (V->home_base >= 0 ? V->home_base : own_base)) continue;
+                for (forced = 0; forced < 0x54; forced += 4) {
+                    int i = forced / 4;
+                    l8 = xrange(game_radius_x[i] + B->x), lc = game_radius_y[i] + B->y;
+                    if (!on_map(l8, lc)) continue;
+                    int a = alt_of(tile(l8, lc));
+                    if (a >= ALT_SHORE || a < 0x40) continue;
+                    l74 = anything_at(l8, lc);
+                    if (!(l74 < 0 || l74 == faction || (F->diplo_status[l74] & TREATY_PACT))) continue;
+                    if (!can_terraform(faction, l8, lc, 0, l28)) continue;
+                    l3c = vector_dist_offset(x_dist(x, l8), abs(y - lc)) * 8;
+                    if (alt_of(tile(B->x, B->y)) < ALT_SHORE) l3c /= 2;
+                    if (l28 == V->home_base) l3c /= 2;
+                    int v = l3c;
+                    if (bonus_at(l8, lc, 0)) v /= 2, l3c = v;
+                    for (l20 = 0; l20 < *game_veh_count; l20++) {
+                        const struct veh *U = &game_vehs[l20];
+                        if (U->faction == faction && proto_of(U->proto)->plan == PLAN_TERRAFORMING && l20 != veh &&
+                            ((U->x == l8 && U->y == lc) ||
+                             (U->order == ORDER_MOVE_TO && U->waypoint_x[0] == l8 && U->waypoint_y[0] == lc)))
+                            break;
+                    }
+                    if (l20 < *game_veh_count) continue;
+                    if (v < l2c) {
+                        l2c = v;
+                        go_to(veh, 'o', l8, lc);
+                    }
+                }
+            }
+        }
+        l50 = 0;
+        if (!F->base_count) {
+            // No base yet: to a colony pod of its own.
+            for (l20 = 0; l20 < *game_veh_count; l20++)
+                if (game_vehs[l20].faction == faction && proto_of(game_vehs[l20].proto)->plan == PLAN_COLONIZATION) {
+                    go_to(veh, '#', game_vehs[l20].x, game_vehs[l20].y);
+                    goto at_57707f;
+                }
+        }
+        l48 = can_terraform(faction, x, y, at_goal(faction, 9, x, y) || l34, own_base);
+        if (!l88 && (triad_of(V->proto) == TRIAD_AIR || at_sea == (triad_of(V->proto) == TRIAD_SEA)) && own_dist) {
+            // Work where it stands: the faction's goals first.
+            del_site(faction, at_sea ? 0x19 : 9, x, y, 0);
+            if (at_goal(faction, 0x79, x, y) && !is_sensor(x, y)) {
+                V->order = 0xd;
+                goto finish;
+            }
+            if (at_goal(faction, 0x29, x, y) && !l34 && alt < 6) {
+                int ec = F->energy_credits;
+                int cost = game_range(terraform_cost(x, y, faction), 0, ec / 4);
+                F->energy_credits = game_range(F->energy_credits - cost, 0, 99999);
+                V->order = 0x14;
+                del_site(faction, 8, x, y, 1);
+                goto finish;
+            }
+            if (at_goal(faction, 0x49, x, y) && game_terrain_avail(0xc, at_sea, faction)) {
+                V->order = 0x10;
+                goto finish;
+            }
+            if (at_goal(faction, 0xd, x, y) && game_terrain_avail(0xd, at_sea, faction)) {
+                V->order = 0x11;
+                goto finish;
+            }
+            if (at_goal(faction, 0x69, x, y) && game_terrain_avail(0xe, at_sea, faction)) {
+                V->order = 0x12;
+                goto finish;
+            }
+            if (!at_sea && !l34 && !game_is_human(faction) && game_terrain_avail(0x10, 0, faction) &&
+                (game_continents[region].tile_count < 0x32 ||
+                 (game_continents[region].tile_count < 0x96 && *game_base_find_dist > 3)) &&
+                near_dist > 1 && alt_of(here) < 0xc0) {
+                int high = 0;
+                for (int i = 0; i < 49; i++) {
+                    l8 = xrange(game_radius_x[i] + x), lc = game_radius_y[i] + y;
+                    if (on_map(l8, lc) && alt_of(tile(l8, lc)) >= 0xc0) {
+                        high = 1;
+                        break;
+                    }
+                }
+                if (!high) {
+                    V->order = 0x14;
+                    goto finish;
+                }
+            }
+            if (own_dist < 3) {
+                uint32_t bits = here->bits;
+                if (((bits & 0x10) || (bits & 0x200000)) && !(bits & 4) &&
+                    (!(bits & MAP_FUNGUS) || alt_of(here) < 0x40) && !at_sea &&
+                    (!game_is_human(faction) || !(*game_more_preferences & 0x400000))) {
+                    V->order = 9;
+                    goto finish;
+                }
+                if (own_dist > 2) {
+                    l58 = 0;
+                } else {
+                    l58 = radius_move(game_bases[own_base].x, game_bases[own_base].y, x, y, 0x15);
+                }
+            } else {
+                l58 = 0;
+            }
+            if (!at_goal(faction, at_sea ? 0x19 : 9, x, y) && (x != V->waypoint_x[0] || y != V->waypoint_y[0]) &&
+                !stack_check(veh, 9, 3, -1, -1) && (!l58 || !(game_bases[own_base].worked_tiles & (1u << (l58 & 31)))))
+                l30 = 0;
+            else
+                l30 = 1;
+            if ((here->bits & MAP_FUNGUS) && alt_of(here) >= 0x40 && l48 &&
+                (has_abil(V->proto, 0x2000) || has_tech(tf_preq(10, alt_of(here) < ALT_SHORE), faction)) &&
+                (l30 || (own_dist < 3 && (game_bases[own_base].eco_damage || game_bases[own_base].pop_size > 5)))) {
+                V->order = 0xe;
+                goto finish;
+            }
+            if (l48 == 4 && (l30 || (l58 && game_bases[own_base].worked_tiles && (1u << (l58 & 31)) != 0))) {
+                V->order = 4;
+                V->status_icon = '+';
+                goto finish;
+            }
+            if (!at_sea && (!game_is_human(faction) || !(*game_more_preferences & 0x400000))) {
+                uint32_t bits;
+                if (l30) goto at_5736cb;
+                if (own_dist > 2) goto at_573762;
+                bits = here->bits;
+                if ((bits & 0x10) || (bits & 0x8000)) goto at_5736cb;
+                if (!(bits & 0x200000) && !l48) goto at_573762_skip;
+                if ((bits & MAP_FUNGUS) && alt_of(here) >= 0x40) goto at_573762;
+            at_5736cb:
+                bits = here->bits;
+                if (!(bits & 4)) {
+                    if (!(bits & MAP_FUNGUS) || alt_of(here) < 0x40 ||
+                        has_tech(game_rules_basic->tech_improve_fungus, faction)) {
+                        V->order = 9;
+                        V->status_icon = 'r';
+                        goto finish;
+                    }
+                } else if (has_tech(game_terraform[6].preq_tech, faction) && l30 && !(bits & 8)) {
+                    V->order = 9;
+                    V->status_icon = 'R';
+                    goto finish;
+                }
+            }
+        at_573762:
+            if (l48 && (own_dist < 3 || stack_check(veh, 9, 3, -1, -1)) && (l30 || !V->order)) {
+                V->order = (uint8_t)l48;
+                V->status_icon = '+';
+                goto finish;
+            }
+        at_573762_skip:
+            if (game_is_human(faction) && !(*game_more_preferences & 0x20)) goto at_5739aa;
+            if (!l30 && V->order) goto at_5739aa;
+            if (is_sensor(x, y) && whose_territory(faction, x, y, NULL, 0) == faction && own_dist > 1 &&
+                !(here->bits & 0x800) && has_tech(game_terraform[7].preq_tech, faction)) {
+                V->order = 0xb;
+                goto finish;
+            }
+            if (good_sensor(faction, x, y)) {
+                V->order = 0xd;
+                goto finish;
+            }
+            if (own_dist > 1 && own_dist < 4 && (here->bits & 4) && !(here->bits & 0x800) &&
+                has_tech(game_terraform[7].preq_tech, faction)) {
+                int near = 0;
+                for (int i = 0; i < 9; i++) {
+                    l8 = xrange(game_radius_x[i] + x), lc = game_radius_y[i] + y;
+                    if (on_map(l8, lc) && (tile(l8, lc)->bits & 0x800)) {
+                        near = 1;
+                        break;
+                    }
+                }
+                if (!near) {
+                    V->order = 0xb;
+                    goto finish;
+                }
+            }
+            if (l30 && has_tech(game_terraform[9].preq_tech, faction)) {
+                l8 = x, lc = y;
+                l50 = 1;
+                if (!game_path_sensors(game_path, faction, &l8, &lc) && x == l8 && y == lc) {
+                    V->order = 0xd;
+                    goto finish;
+                }
+            }
+        }
+    at_5739aa:
+        if (V->order != ORDER_MOVE_TO && !l88) {
+            int i;
+            if (!l34) {
+                // The base with fewest formers for its distance.
+                l28 = own_base;
+                if (!(V->state & 0x200)) {
+                    alt = x, l5c = y;
+                } else {
+                    alt = game_bases[own_base].x, l5c = game_bases[own_base].y;
+                }
+                l24 = 0;
+                terr = own_base * (int)sizeof(struct base);
+                for (i = 0; i < 20; i++) {
+                    const struct base *O = &game_bases[terr / (int)sizeof(struct base)];
+                    l8 = xrange(game_radius_x[i + 1] + O->x), lc = game_radius_y[i + 1] + O->y;
+                    if (on_map(l8, lc) && tile(l8, lc)->region == region && (l20 = veh_at(l8, lc)) >= 0 &&
+                        game_vehs[l20].faction == faction) {
+                        l24 += stack_check(l20, 2, 9, -1, -1);
+                        if (l8 == x && lc == y) l24--;
+                    }
+                }
+                if (l24) {
+                    l2c = 9999;
+                    for (l58 = 0; l58 < *game_base_count; l58++) {
+                        const struct base *B = &game_bases[l58];
+                        if (B->faction != faction || tile(B->x, B->y)->region != region) continue;
+                        int n = 0;
+                        for (l48 = 0; l48 < 100; l48 += 4) {
+                            int j = l48 / 4;
+                            int nx = xrange(game_radius_x[j] + B->x), ny = game_radius_y[j] + B->y;
+                            if (on_map(nx, ny) && tile(nx, ny)->region == region && (l20 = veh_at(nx, ny)) >= 0)
+                                n += stack_check(l20, 2, 9, -1, -1);
+                        }
+                        if (n < l24) {
+                            l3c = vector_dist_offset(x_dist(x, B->x), abs(y - B->y)) * (n + 1) * (n + 1);
+                            if (l3c < l2c) l28 = l58, l2c = l3c;
+                        }
+                    }
+                }
+            } else {
+                l28 = V->home_base;
+                alt = game_bases[l28].x, l5c = game_bases[l28].y;
+            }
+            if (l28 >= 0) {
+                l2c = 9999;
+                for (l30 = 1; l30 < 21; l30++) {
+                    int k = (l30 + *game_current_turn) % 21;
+                    l8 = xrange(game_radius_x[k] + alt), lc = game_radius_y[k] + l5c;
+                    if (!on_map(l8, lc) || base_who(l8, lc) >= 0) continue;
+                    const struct map_tile *t = tile(l8, lc);
+                    int sea = alt_of(t) < ALT_SHORE;
+                    if (sea != (triad == TRIAD_SEA) || (t->region != region && at_sea == sea)) continue;
+                    if (zoc_move(l8, lc, faction)) continue;
+                    l20 = veh_at(l8, lc);
+                    if (l20 >= 0 && (game_vehs[l20].faction != faction || stack_check(l20, 2, 9, -1, -1))) continue;
+                    if (!can_terraform(faction, l8, lc, game_is_human(faction) && l34, l28)) continue;
+                    l24 = vector_dist_offset(x_dist(game_bases[l28].x, l8), abs(game_bases[l28].y - lc));
+                    if (l24 >= 3) continue;
+                    if (!(game_bases[l28].worked_tiles & (1u << (l30 & 31))) && (!(t->bits & MAP_FUNGUS) || alt_of(t) < 0x40))
+                        l24 *= 3;
+                    if (l24 >= l2c) continue;
+                    for (l20 = 0; l20 < *game_veh_count; l20++) {
+                        const struct veh *U = &game_vehs[l20];
+                        if (U->faction == faction && proto_of(U->proto)->plan == PLAN_TERRAFORMING && l20 != veh &&
+                            ((U->x == l8 && U->y == lc) ||
+                             (U->order == ORDER_MOVE_TO && U->waypoint_x[0] == l8 && U->waypoint_y[0] == lc)))
+                            break;
+                    }
+                    if (l20 < *game_veh_count) continue;
+                    l2c = l24;
+                    go_to(veh, 'w', l8, lc);
+                }
+                if (V->order == ORDER_MOVE_TO) goto at_57707f;
+            }
+            if (!l50 && (!game_is_human(faction) || (*game_more_preferences & 0x20))) {
+                l8 = x, lc = y;
+                if (!game_path_sensors(game_path, faction, &l8, &lc)) {
+                    if (l8 == x && lc == y) {
+                        V->order = 0xd;
+                        goto finish;
+                    }
+                    if (l34 && vector_dist_offset(x_dist(x, l8), abs(y - lc)) > 2) goto at_57408e;
+                    for (l20 = 0; l20 < *game_veh_count; l20++) {
+                        const struct veh *U = &game_vehs[l20];
+                        if (U->faction == faction && proto_of(U->proto)->plan == PLAN_TERRAFORMING && l20 != veh &&
+                            ((U->x == l8 && U->y == lc) ||
+                             (U->order == ORDER_MOVE_TO && U->waypoint_x[0] == l8 && U->waypoint_y[0] == lc)))
+                            goto at_57408e;
+                    }
+                    go_to(veh, 's', l8, lc);
+                    goto at_57707f;
+                }
+            }
+        at_57408e:
+            if (own_dist && !at_sea && F->region_total_bases[region]) {
+                int b = V->home_base < 0 ? own_base : V->home_base;
+                if (b >= 0) {
+                    if (tile(game_bases[b].x, game_bases[b].y)->region != region) b = own_base;
+                    if (b >= 0) {
+                        int d = vector_dist_offset(x_dist(x, game_bases[b].x), abs(y - game_bases[b].y));
+                        if ((*game_current_turn < 0x33) + 3 < d || zocm) {
+                            go_to(veh, 'b', game_bases[b].x, game_bases[b].y);
+                            goto at_57707f;
+                        }
+                    }
+                }
+            }
+            if (l34 && !V->order) {
+                V->state &= ~0x200u;
+                V->order = ORDER_NONE;
+                return 0;
+            }
+        }
+    }
+at_5741cf:
+    // Patrolling its borders, or the faction's territory most at risk.
+    if (region_plan > 2 && game_continents[region].tile_count <= F->region_visible_tiles[region] && plan < 4 &&
+        triad == TRIAD_LAND && V->order != ORDER_MOVE_TO && !at_sea) {
+        if (coast_or_border(x, y, x, y, faction)) {
+            int d = ((int8_t)V->unk_29 + 4) % 8;
+            l8 = xrange(game_radius_near_x[d] + x), lc = game_radius_near_y[d] + y;
+            if (!coast_or_border(l8, lc, l8, lc, faction)) {
+                if (!(veh & 1)) V->state &= 0x7fffffffu;
+                else V->state |= 0x80000000u;
+            }
+            l34 = 0;
+            forced = 0;
+            for (l50 = 3;;) {
+                int k = V->state & 0x80000000u ? forced - 3 : l50;
+                int dd = ((int8_t)V->unk_29 + 8 + k) % 8;
+                l8 = xrange(game_radius_near_x[dd] + x), lc = game_radius_near_y[dd] + y;
+                if (!l34) {
+                    if (on_map(l8, lc)) {
+                        if (!(tile(l8, lc)->region == region && whose_territory(faction, l8, lc, NULL, 0) == faction))
+                            l34 = 1;
+                    }
+                } else if (on_map(l8, lc) && tile(l8, lc)->region == region &&
+                           whose_territory(faction, l8, lc, NULL, 0) == faction) {
+                    V->status_icon = 'p';
+                    dir84 = dd;
+                    goto at_578b26;
+                }
+                forced++;
+                if (--l50 < -4) break;
+            }
+        }
+        l2c = 0;
+        for (lc = 0; lc < *game_map_height; lc++) {
+            for (l8 = lc & 1; l8 < *game_map_width; l8 += 2) {
+                if (tile(l8, lc)->region != region || whose_territory(faction, l8, lc, NULL, 0) != faction) continue;
+                l24 = 1;
+                for (l5c = 0; l5c < 0x24; l5c += 4) {
+                    int j = l5c / 4;
+                    int nx = xrange(game_radius_x[j] + l8), ny = game_radius_y[j] + lc;
+                    if (!on_map(nx, ny)) continue;
+                    if (tile(nx, ny)->region == region) {
+                        if (whose_territory(faction, nx, ny, NULL, 0) != faction) l24 += 3;
+                        if (anything_at(nx, ny) == faction) l24 -= 6;
+                    } else {
+                        l24++;
+                    }
+                }
+                int v = ((abs(y - lc) + x_dist(x, l8)) >> 1) * l24;
+                if (*game_veh_count > 0) {
+                    for (int u = 0; u < *game_veh_count; u++)
+                        if (game_vehs[u].faction == faction && game_vehs[u].waypoint_x[0] == l8 &&
+                            game_vehs[u].waypoint_y[0] == lc)
+                            v /= 2;
+                    l50 = 0, l20 = *game_veh_count;
+                }
+                if (v <= l2c) continue;
+                l2c = v;
+                go_to(veh, 'P', l8, lc);
+            }
+        }
+    }
+    if (!exploring && !(plan == PLAN_RECONNAISSANCE && *game_current_turn < 100)) goto at_574a7e;
+at_57460a:
+    // Exploring: the unknown squares worth the trip, ring by ring.
+    if (triad != TRIAD_AIR && (V->order != ORDER_MOVE_TO || V->status_icon != '/')) {
+        l50 = 0, l2c = 0, terr = 0;
+        for (l58 = 0; l58 < 9; l58++) {
+            l48 = 0;
+            for (l30 = l58 ? game_radius_count[l58 - 1] : 0; l30 < game_radius_count[l58]; l30++) {
+                l8 = xrange(game_radius_x[l30] + x), lc = game_radius_y[l30] + y;
+                if (!on_map(l8, lc) || tile(l8, lc)->region != region) continue;
+                l74 = whose_territory(faction, l8, lc, NULL, 0);
+                if (!(l74 < 0 || l74 == faction || !(F->diplo_status[l74] & 7))) continue;
+                unsigned v = is_known(l8, lc, faction) ? (goody_at(l8, lc) ? 0x200 : 0) : 0;
+                for (l34 = 0; l34 < 9; l34++) {
+                    int nx = xrange(game_radius_x[l30] + l8), ny = game_radius_y[l30] + lc;
+                    if (!on_map(nx, ny)) continue;
+                    if (!is_known(nx, ny, faction)) {
+                        v += tile(nx, ny)->region == region ? 0x10 : 1;
+                    } else {
+                        l74 = veh_who(nx, ny);
+                        if (l74 >= 0 && l74 != faction) {
+                            v = 0;
+                            break;
+                        }
+                    }
+                }
+                const struct map_tile *t = tile(l8, lc);
+                if ((t->bits & MAP_FUNGUS) && alt_of(t) >= 0x40 && F->se_pending[7] < 1) v = (int)v / 2;
+                alt = (int)v;
+                if (own_base >= 0) {
+                    l5c = abs(lc - game_bases[own_base].y);
+                    int d = 0x10 - ((l5c + x_dist(l8, game_bases[own_base].x)) >> 1);
+                    v += d < 0 ? 0 : d;
+                }
+                l5c = abs(y - lc);
+                l24 = (int)(v << 8) / (((l5c + x_dist(x, l8)) >> 1) + 2);
+                if (l48 < l24) l48 = l24;
+                if (l2c >= l24) continue;
+                int taken = 0;
+                for (l20 = 0; l20 < *game_veh_count; l20++) {
+                    const struct veh *U = &game_vehs[l20];
+                    if (U->faction != faction || l20 == veh || U->order != ORDER_MOVE_TO) continue;
+                    l3c = (abs(lc - U->waypoint_y[0]) + x_dist(l8, U->waypoint_x[0])) >> 1;
+                    if (l3c < 2) {
+                        int mine = (abs(y - lc) + x_dist(x, l8)) >> 1;
+                        l5c = abs(U->y - lc);
+                        if (((l5c + x_dist(U->x, l8)) >> 1) - 1 <= mine) {
+                            taken = 1;
+                            break;
+                        }
+                    }
+                }
+                if (taken) continue;
+                if (l24) {
+                    l50 = alt;
+                    l2c = l24;
+                    go_to(veh, '/', l8, lc);
+                }
+            }
+            if (V->order == ORDER_MOVE_TO && l48 < terr && l50 > 0xf) break;
+            terr = l48;
+        }
+        if (V->order == ORDER_MOVE_TO) goto at_57707f;
+    }
+at_574a7e:
+    if (triad != TRIAD_SEA) {
+        if (lbc) return 0;
+        goto at_57707f;
+    }
+at_574a88:
+    if (plan == PLAN_NAVAL_SUPERIORITY) del_site(faction, 6, x, y, 0);
+    forced = 0, l48 = 0, l30 = 0, l58 = 0, l34 = 0;
+    // Transports (PLAN_NAVAL_TRANSPORT) are left to the original from the
+    // start (em_ours()), so the original's section for them isn't here.
+    if (l90) goto at_577071;
+    if (V->order == ORDER_MOVE_TO && V->status_icon == 'd') goto at_577071;
+    if (plan == PLAN_NAVAL_SUPERIORITY) {
+        if (proto_of(V->proto)->group == GROUP_NO_GOALS) {
+            // An escort: to the nearest transport at sea, the fewer escorts
+            // with it the better.
+            l2c = 9999;
+            for (l20 = 0; l20 < *game_veh_count; l20++) {
+                const struct veh *U = &game_vehs[l20];
+                if (U->faction != faction || proto_of(U->proto)->plan != PLAN_NAVAL_TRANSPORT) continue;
+                lc = U->y, l8 = U->x;
+                if (alt_of(tile(l8, lc)) >= ALT_SHORE || base_who(l8, lc) >= 0) continue;
+                int d = (abs(y - lc) + x_dist(x, l8)) >> 1;
+                l3c = d;
+                if (d) {
+                    if (stack_check(l20, 2, 6, -1, -1)) continue;
+                    l3c = d / stack_check(l20, 1, -1, -1, -1);
+                }
+                if (l3c < l2c) {
+                    l2c = l3c;
+                    go_to(veh, 'C', l8, lc);
+                }
+            }
+            if (V->order == ORDER_MOVE_TO) {
+                if (!l3c) goto at_578b34;
+                goto at_577071;
+            }
+            goto at_576847;
+        }
+        if (V->order != ORDER_MOVE_TO || V->status_icon == '6') {
+        at_576847:
+            if (game_faction_defs[faction].rule_flags & 0x100) {
+                // Raiding: the biggest enemy port in reach, fewer warships
+                // of its own about.
+                l2c = 0, l7c = -1;
+                for (l28 = 0; l28 < *game_base_count; l28++) {
+                    const struct base *B = &game_bases[l28];
+                    if (B->faction == faction || !(F->diplo_status[B->faction] & 0x10)) continue;
+                    if (!(own_dist ? base_on_sea(own_base, region) : port_to_port(own_base, l28))) continue;
+                    l50 = B->x;
+                    l24 = B->pop_size * B->pop_size * 0x20 / (((abs(y - B->y) + x_dist(x, l50)) >> 1) + 1);
+                    for (l20 = 0; l20 < *game_veh_count; l20++) {
+                        const struct veh *U = &game_vehs[l20];
+                        if (l20 == veh || U->faction != faction || proto_of(U->proto)->plan != PLAN_NAVAL_SUPERIORITY)
+                            continue;
+                        l50 = abs(U->y - B->y);
+                        if (((l50 + x_dist(U->x, B->x)) & ~1) < 5 ||
+                            (U->status_icon == '6' && U->waypoint_x[0] == B->x && U->waypoint_y[0] == B->y))
+                            l24 /= 2;
+                    }
+                    if (l2c < l24) {
+                        l7c = l28, l2c = l24;
+                        go_to(veh, '6', B->x, B->y);
+                    }
+                }
+                if (l7c >= 0 &&
+                    ((abs(y - game_bases[l7c].y) + x_dist(x, game_bases[l7c].x)) & ~1) < 3) {
+                    V->order = ORDER_NONE;
+                    goto at_577071;
+                }
+            }
+        }
+        if (V->order != ORDER_MOVE_TO && !((*game_current_turn + veh) & 3)) {
+            // A strait between continents the enemy wants to cross.
+            l2c = -9999;
+            for (lc = 0; lc < *game_map_height; lc++) {
+                for (l8 = lc & 1; l8 < *game_map_width; l8 += 2) {
+                    const struct map_tile *t = tile(l8, lc);
+                    if (alt_of(t) >= ALT_SHORE) continue;
+                    if (!own_dist ? !base_on_sea(own_base, t->region) : t->region != region) continue;
+                    if (((abs(y - lc) + x_dist(x, l8)) & ~1) <= 0xf) continue;
+                    for (l20 = 0; l20 < *game_veh_count; l20++)
+                        if (game_vehs[l20].faction == faction && l20 != veh && game_vehs[l20].waypoint_x[0] == l8 &&
+                            game_vehs[l20].waypoint_y[0] == lc)
+                            break;
+                    if (l20 < *game_veh_count) continue;
+                    l24 = 0;
+                    for (l48 = 0; l48 < 0x120; l48 += 4) {
+                        int j = l48 / 4 + 9;
+                        int nx = xrange(game_radius_x[j] + l8), ny = game_radius_y[j] + lc;
+                        if (!on_map(nx, ny) || alt_of(tile(nx, ny)) < ALT_SHORE) continue;
+                        int mx = xrange(l8 - game_radius_x[j]);
+                        l50 = lc - game_radius_y[j];
+                        if (!on_map(mx, l50) || alt_of(tile(mx, l50)) < ALT_SHORE) continue;
+                        int rn = tile(nx, ny)->region, rm = tile(mx, l50)->region;
+                        if (F->region_total_bases[rn] <= 1 || F->region_total_bases[rm] >= 2) continue;
+                        for (l74 = 1; l74 < 8; l74++)
+                            if (l74 != faction && (F->diplo_status[l74] & 0xc10) &&
+                                game_factions[l74].region_total_bases[rn] < 2 && game_factions[l74].region_total_bases[rm] > 1)
+                                l24++;
+                    }
+                    if (l24) {
+                        int v = (l24 << 8) / vector_dist_offset(x_dist(x, l8), abs(y - lc));
+                        if (l2c < v) {
+                            l2c = v;
+                            go_to(veh, 'D', l8, lc);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if ((V->order != ORDER_MOVE_TO || ((F->flags & 0x20000000) && stack_check(veh, 1, -1, -1, -1) == 1)) &&
+        !((*game_current_turn + veh) & 3)) {
+        // Seas to explore.
+        l2c = -9999;
+        for (lc = 0; lc < *game_map_height; lc++) {
+            for (l8 = lc & 1; l8 < *game_map_width; l8 += 2) {
+                if (!is_known(l8, lc, faction)) continue;
+                const struct map_tile *t = tile(l8, lc);
+                if (alt_of(t) >= ALT_SHORE) continue;
+                if (!own_dist ? !base_on_sea(own_base, t->region) : t->region != region) continue;
+                l24 = 0;
+                if (F->flags & 0x20000000) {
+                    uint32_t bits = t->bits;
+                    if (!(bits & 0x100000)) {
+                        l24 = 1;
+                        if ((bits & MAP_FUNGUS) && alt_of(t) >= 0x40) l24 = 2;
+                        if (bits & 0x2000) l24++;
+                    }
+                }
+                for (int j = 0; j < 8; j++) {
+                    int nx = xrange(game_radius_near_x[j] + l8), ny = game_radius_near_y[j] + lc;
+                    if (!on_map(nx, ny)) continue;
+                    if (!(F->flags & 0x20000000) || (tile(nx, ny)->bits & 0x100000)) {
+                        if (is_known(nx, ny, faction)) continue;
+                    }
+                    l24 += 1 < ny && ny < *game_map_height - 3 ? 6 : 2;
+                }
+                if (!l24) continue;
+                int d = own_base < 0 ? vector_dist_offset(x_dist(x, l8), abs(y - lc))
+                                     : vector_dist_offset(x_dist(game_bases[own_base].x, l8),
+                                                          abs(game_bases[own_base].y - lc));
+                if (d) {
+                    int v = (l24 << 8) / d;
+                    if (l2c < v) {
+                        l2c = v;
+                        go_to(veh, 'X', l8, lc);
+                    }
+                }
+            }
+        }
+    }
+at_577071:
+    if (lbc) return 0;
+    goto at_57707f;
+at_after_72922:
+    l50 = abs(y - V->waypoint_y[0]);
+    if (((l50 + x_dist(x, V->waypoint_x[0])) & ~1) != 4) goto at_572922;
+    l28 = base_at(V->waypoint_x[0], V->waypoint_y[0]);
+    if (l28 < 0) goto at_572922;
+    {
+        // An attack on an enemy base two squares off, with the faction's
+        // other units round it.
+        struct base *B = &game_bases[l28];
+        forced = l28 * (int)sizeof(struct base);
+        l34 = faction * 0x833;
+        if (!(F->diplo_status[B->faction] & 0x10)) goto at_572922;
+        B->event |= (uint32_t)l6c;
+        l30 = 0, l58 = 0, l48 = 0;
+        for (int i = 1; i < 9; i++) {
+            l8 = xrange(game_radius_x[i] + B->x), lc = game_radius_y[i] + B->y;
+            if (!on_map(l8, lc) || (l20 = stack_fix(veh_at(l8, lc))) < 0) continue;
+            for (l20 = veh_top(l20); l20 >= 0; l20 = game_vehs[l20].next_in_stack)
+                if (game_vehs[l20].faction == faction && proto_of(game_vehs[l20].proto)->plan <= 1 &&
+                    !has_abil(game_vehs[l20].proto, ABL_ARTILLERY))
+                    l30++;
+        }
+        for (int i = 9; i < 25; i++) {
+            l8 = xrange(game_radius_x[i] + B->x), lc = game_radius_y[i] + B->y;
+            if (!on_map(l8, lc) || (l20 = stack_fix(veh_at(l8, lc))) < 0) continue;
+            for (l20 = veh_top(l20); l20 >= 0; l20 = game_vehs[l20].next_in_stack) {
+                const struct veh *U = &game_vehs[l20];
+                if (U->faction == faction && proto_of(U->proto)->plan <= 1 && !has_abil(U->proto, ABL_ARTILLERY) &&
+                    ((U->status_icon > 0x32 && U->status_icon < 0x36) ||
+                     (U->waypoint_x[0] == V->waypoint_x[0] && U->waypoint_y[0] == V->waypoint_y[0]))) {
+                    if (!U->moves_spent) l58++;
+                    else l48++;
+                }
+            }
+        }
+        for (int i = 25; i < 25 + 0x90; i++) {
+            l8 = xrange(game_radius_x[i] + B->x), lc = game_radius_y[i] + B->y;
+            if (!on_map(l8, lc) || (l20 = stack_fix(veh_at(l8, lc))) < 0) continue;
+            for (l20 = veh_top(l20); l20 >= 0; l20 = game_vehs[l20].next_in_stack) {
+                const struct veh *U = &game_vehs[l20];
+                if (U->faction == faction && proto_of(U->proto)->plan < 2 && !has_abil(U->proto, ABL_ARTILLERY) &&
+                    ((U->status_icon > 0x32 && V->status_icon < 0x36) ||
+                     ((base_who(l8, lc) < 0 || (U->state & 0x10000)) && U->waypoint_x[0] == V->waypoint_x[0] &&
+                      U->waypoint_y[0] == V->waypoint_y[0])))
+                    l48++;
+            }
+        }
+        if (l58 + l30 > 7 || l48 <= l30) {
+            // Enough of them: the best square next to the base to attack from.
+            if (!zoc_move(x, y, faction)) {
+                l2c = -9999;
+                for (l30 = 0; l30 < 8; l30++) {
+                    l8 = xrange(game_radius_near_x[l30] + x), lc = game_radius_near_y[l30] + y;
+                    if (!on_map(l8, lc) || alt_of(tile(l8, lc)) < ALT_SHORE) continue;
+                    if (((abs(lc - B->y) + x_dist(l8, B->x)) & ~1) != 2) continue;
+                    l24 = defense_value(faction, l8, lc, veh, -1) << 3;
+                    for (int j = 0; j < 8; j++) {
+                        int nx = xrange(game_radius_near_x[j] + l8), ny = game_radius_near_y[j] + lc;
+                        if (!on_map(nx, ny) || (nx == B->x && ny == B->y)) continue;
+                        l20 = stack_fix(veh_at(nx, ny));
+                        if (l20 >= 0 && game_vehs[l20].faction != faction &&
+                            !(F->diplo_status[game_vehs[l20].faction] & 7) && stack_check(l20, 4, -1, -1, -1))
+                            l24 /= 2;
+                    }
+                    int v = l24;
+                    if (!V->moves_spent && (here->bits & 4) && (tile(l8, lc)->bits & 4))
+                        v = game_chassis[proto_of(V->proto)->chassis].speed < 2 ? l24 + 8 : l24 + 0x100;
+                    const struct map_tile *t = tile(l8, lc);
+                    if ((t->bits & MAP_FUNGUS) && alt_of(t) >= 0x40) {
+                        if (!has_project(8, faction) && (game_weapons[proto_of(V->proto)->weapon].offense >= 0 || proto > 0x3f)) {
+                            if (!has_tech(game_rules_basic->tech_ease_fungus_move, faction)) v -= 0x100;
+                        } else if (V->proto < 0x40 && (game_weapons[proto_of(V->proto)->weapon].offense < 0 || V->proto == 15)) {
+                            v += 0x100;
+                        } else {
+                            v += 8;
+                        }
+                    }
+                    l20 = veh_at(l8, lc);
+                    v -= stack_check(l20, 1, -1, -1, -1) * 8;
+                    if (l2c <= v) dir84 = l30, l2c = v;
+                }
+                if (dir84 >= 0) {
+                    V->status_icon = '3';
+                    goto at_578b26;
+                }
+            }
+            goto at_572922;
+        }
+        // Too few: wait two squares off for the rest.
+        int n = stack_check(veh, 2, 1, -1, -1) + stack_check(veh, 2, 0, -1, -1);
+        l34 = n;
+        if (zoc_move(x, y, faction) || n < 2) {
+            l90 = 1;
+            V->status_icon = '4';
+            goto at_57707f;
+        }
+        l7c = -1, l2c = 0;
+        for (l30 = 0; l30 < 8; l30++) {
+            l8 = xrange(game_radius_near_x[l30] + x), lc = game_radius_near_y[l30] + y;
+            if (!on_map(l8, lc) || alt_of(tile(l8, lc)) < ALT_SHORE) continue;
+            if (((abs(lc - B->y) + x_dist(l8, B->x)) & ~1) != 4) continue;
+            l74 = anything_at(l8, lc);
+            if (l74 >= 0 && l74 != faction) continue;
+            int v = 10;
+            if (zoc_sea(l8, lc, faction)) {
+                if (hex_cost(proto, faction, x, y, l8, lc, 0) >= veh_moves(veh) - 1) continue;
+                v = 0x14;
+            }
+            int u = veh_at(l8, lc);
+            if (u >= 0) {
+                int c = stack_check(u, 2, 1, -1, -1) + stack_check(u, 2, 0, -1, -1);
+                if (c >= l34) continue;
+                v -= c;
+            }
+            if (v > l2c) l2c = v, l7c = l30;
+        }
+        if (l7c < 0) {
+            l90 = 1;
+            V->status_icon = '4';
+            goto at_57707f;
+        }
+        dir84 = l7c;
+        V->status_icon = '5';
+        goto at_578b26;
+    }
+at_air:
+    if (!planet_buster(veh) || triad != TRIAD_AIR) {
+        int r = em_air_power(veh, own_dist, zocm, &x, &y);
+        here = tile(x, y);
+        if (r == -5) return 1;
+        if (r == -1) {
+            if (V->x == V->waypoint_x[0] && V->y == V->waypoint_y[0]) {
+                l90 = 1;
+            } else {
+                l74 = anything_at(V->waypoint_x[0], V->waypoint_y[0]);
+                if ((l74 >= 0 && l74 == faction) || (F->diplo_status[l74] & TREATY_PACT)) goto finish;
+            }
+        } else if (r == -2) {
+            if (V->x != V->waypoint_x[0] || V->y != V->waypoint_y[0]) goto finish;
+            l90 = 1;
+        } else if (r == -4) {
+            l90 = 1;
+        } else {
+            if (r == -3) {
+                if ((V->state & 0x200) && V->order_auto_type == 10) {
+                    V->order = ORDER_NONE;
+                    V->state &= ~0x200u;
+                    return 0;
+                }
+            } else if (r >= 0) {
+                dir84 = r;
+            }
+            goto at_578b29;
+        }
+        goto at_57707f;
+    }
+    dir84 = enemy_planet_buster(veh);
+    x = V->x, y = V->y;
+    here = tile(x, y);
+    goto at_578b29;
+at_57707f:
+    if (triad == TRIAD_LAND) {
+    at_57708a:
+        // A coast to be shipped from, for a continent without bases.
+        if (plan != PLAN_COLONIZATION && !F->region_total_bases[region] && !(F->region_flags[region] & 6) &&
+            F->region_base_plan[region] > 2 && ((y > 0 && y < *game_map_height - 1) || plan == PLAN_ALIEN_ARTIFACT)) {
+            for (int i = 0; i < 8; i++) {
+                l8 = xrange(game_radius_near_x[i] + x), lc = game_radius_near_y[i] + y;
+                if (on_map(l8, lc) && alt_of(tile(l8, lc)) < ALT_SHORE) {
+                    add_goal(faction, 7, 1, l8, lc, -1);
+                    lc4 = 1;
+                    break;
+                }
+            }
+        }
+    }
+at_57717f:
+    // On its way: the next step, unless it leads into an enemy's zone.
+    if (V->order == ORDER_MOVE_TO &&
+        (!game_weapons[proto_of(V->proto)->weapon].offense ||
+         (V->moves_spent && veh_speed(veh, 0) > game_rules_basic->move_rate_roads && plan == 0 && triad == TRIAD_LAND)) &&
+        !(V->state & 8)) {
+        l50 = abs(y - V->waypoint_y[0]);
+        if (((l50 + x_dist(x, V->waypoint_x[0])) & ~1) < 3) goto at_577361;
+        dir84 = path_move(game_path, veh, faction);
+        if (dir84 < 0) {
+            if (zocv == 1) {
+                V->order = ORDER_NONE;
+                V->state &= 0xfcffbdffu;
+            }
+        } else {
+            l8 = xrange(game_radius_near_x[dir84] + x), lc = game_radius_near_y[dir84] + y;
+            l74 = zoc_sea(l8, lc, faction);
+            if (l74 == 1) goto at_5772f1;
+            if (l74 > 1 && (F->diplo_status[l74] & 0x10)) {
+                if (plan == PLAN_INFO_WARFARE &&
+                    veh_moves(veh) - hex_cost(proto, faction, x, y, l8, lc, 0) > 0)
+                    goto at_577361;
+            at_5772f1:
+                if (!zocv || (plan != PLAN_INFO_WARFARE && !game_weapons[proto_of(V->proto)->weapon].offense))
+                    V->order = ORDER_NONE;
+                if (!zocv) goto at_578b34;
+            }
+        }
+    }
+at_577361:
+    if (V->order == ORDER_MOVE_TO && !l88 && !l90) {
+        if (!zoc_veh(x, y, faction)) goto finish;
+        l50 = abs(y - V->waypoint_y[0]);
+        if (((l50 + x_dist(x, V->waypoint_x[0])) & ~1) == 2 &&
+            (l74 = anything_at(V->waypoint_x[0], V->waypoint_y[0])) >= 0 && l74 != faction &&
+            !(F->diplo_status[l74] & TREATY_PACT) && V->status_icon != 'p')
+            V->order = ORDER_NONE;
+        if (V->order == ORDER_MOVE_TO) lc8 = 1;
+    }
+    l2c = -9999;
+    alt = 0;
+    if (zoc_sea(x, y, faction) || lc8 || st4 || st6 || (st4 = 1, plan == PLAN_ALIEN_ARTIFACT)) st4 = 0;
+    // The best of the nine squares round it (its own included), in an
+    // order starting at random.
+    l48 = game_rnd(9);
+    for (forced = 0; forced < 9; forced++) {
+        l30 = (forced + l48) % 9;
+        l8 = xrange(game_radius_x[l30] + x), lc = game_radius_y[l30] + y;
+        if (!on_map(l8, lc)) continue;
+        if (!l30 && !zocv && plan != PLAN_DEFENSIVE) continue;
+        const struct map_tile *t = tile(l8, lc);
+        l88 = alt_of(t) < ALT_SHORE;
+        l20 = stack_fix(veh_at(l8, lc));
+        l28 = base_at(l8, lc);
+        l6c = t->region;
+        if (triad == TRIAD_SEA && !l88) {
+            if (l20 >= 0 && l74 != faction && at_sea) goto at_57762a;
+            continue;
+        }
+        if (!(at_sea || l88 || !zocm || triad != TRIAD_LAND || l20 >= 0 || (proto_of(V->proto)->abilities & 4) ||
+              proto_of(V->proto)->plan == PLAN_INFO_WARFARE || !zoc_move(l8, lc, faction)))
+            continue;
+    at_57762a:
+        if (!game_weapons[proto_of(V->proto)->weapon].offense && (l20 < 0 || !l30) && l28 < 0 && !(V->state & 8)) {
+            l74 = zoc_sea(l8, lc, faction);
+            if (l74 > 0) {
+                if (l74 == 1 || ((F->diplo_status[l74 - 1] & TREATY_PACT) && (F->diplo_status[l74 - 1] & 0x2000000)))
+                    continue;
+                if (plan != PLAN_INFO_WARFARE ||
+                    (V->moves_spent && veh_moves(veh) - hex_cost(proto, faction, x, y, l8, lc, 0) < 1)) {
+                    if (F->diplo_status[l74 - 1] & 0x10) continue;
+                }
+            }
+        }
+        l24 = game_rnd(6);
+        if (l88 && triad == TRIAD_LAND) {
+            // A land unit and a sea square: a base it can sail from, or a
+            // transport of its own with room.
+            if (l28 >= 0 && has_abil(V->proto, 8)) goto at_577865;
+            if (l20 < 0 || game_vehs[l20].faction != faction || stack_check(l20, 8, -1, -1, -1) <= 0 ||
+                game_vehs[l20].damage > proto_of(game_vehs[l20].proto)->reactor * 2)
+                continue;
+            if (plan == PLAN_ALIEN_ARTIFACT) {
+                l24 += 99;
+                goto at_577865;
+            }
+            if (plan == PLAN_COLONIZATION) {
+                if (F->region_base_plan[region] != 7) continue;
+            } else if (plan == PLAN_TERRAFORMING ||
+                       !((F->region_base_plan[region] == 7 && plan < 2) ||
+                         (!F->region_total_bases[region] && !(F->region_flags[region] & 6) &&
+                          F->region_base_plan[region] > 2))) {
+                continue;
+            }
+            l24 += 0x10;
+        }
+    at_577865:
+        if (at_sea && !l88 && triad == TRIAD_LAND && !own_dist && !has_abil(V->proto, 8) &&
+            !stack_check(veh, 2, 7, -1, -1))
+            continue;
+        if (at_sea == l88 && (V->state & 0x10000) && (!zocv || (zocv > 1 && (F->diplo_status[zocv - 1] & 7)))) {
+            if (!l30) {
+                l24 -= 12;
+            } else {
+                int t29 = (int8_t)V->unk_29 - l30 + 1;
+                if (t29 < 0) t29 = l30 - (int8_t)V->unk_29 - 1;
+                if (t29 > 4) t29 = 8 - t29;
+                l24 -= t29 * 4;
+                if (t29 == 4) l24 -= 0x100;
+            }
+        }
+        if (plan == PLAN_ALIEN_ARTIFACT) {
+            int p = 0;
+            if (zoc_veh(l8, lc, faction)) p = -0x20;
+            if (!is_coast(l8, lc, 0)) p -= 0x20;
+            if (!l30 && !p) {
+                l24 += (lc4 ? 0x18 : 0) + 8;
+                base_find_2(l8, lc, faction);
+                if (*game_base_find_dist <= own_dist) l24 += 8;
+            }
+            l24 += p;
+        } else if (lc4 && !l30) {
+            l24 += 8;
+        }
+        if (F->flags & 0x20000000) {
+            uint32_t bits = t->bits;
+            if (!(bits & 0x100000)) {
+                l24 += (bits & MAP_FUNGUS) && alt_of(t) >= 0x40 ? 0x10 : 8;
+                if (bits & 0x2000) l24 += 8;
+            }
+        }
+        l74 = whose_territory(faction, l8, lc, NULL, 0);
+        if (l74 >= 0 && l74 != faction && proto_of(V->proto)->plan != PLAN_INFO_WARFARE) {
+            uint32_t st = F->diplo_status[l74];
+            if (!(st & 0xc10)) {
+                if ((F->diplo_agenda[l74] & 2) || (st & 0x100000)) continue;
+                if (st & 4) l24 -= 6;
+                if (st & 2) {
+                    l24 -= 12;
+                    if (!(st & 1) && (at_sea || !(st & 0x2020) || *game_sunspot_duration > 0)) continue;
+                }
+            }
+        }
+        if (st6 && plan == PLAN_DEFENSIVE && l20 >= 0 && l74 == faction && zoc_veh(l8, lc, faction))
+            l24 -= stack_check(veh, 1, -1, -1, -1) * 2;
+        if (at_sea && triad == TRIAD_LAND && own_dist) {
+            int b = F->region_base_plan[l6c];
+            if (b == plan) l24 += 0x20;
+            if (b != 7) l24 += 0x20;
+            base_find(l8, lc);
+            l24 = l24 + (0x20 - *game_base_find_dist) - stack_check(l20, 1, -1, -1, -1);
+        }
+        if (goody_at(l8, lc)) {
+            if (plan == PLAN_NAVAL_TRANSPORT && stack_check(veh, 1, -1, -1, -1) > 1) continue;
+            l24 += 99;
+        }
+        {
+            int score_type = 1;
+            if (!at_sea && !l88 && region != l6c && F->region_total_bases[region]) {
+                score_type = 0;
+                if (!game_weapons[proto_of(V->proto)->weapon].offense) {
+                    if (plan == PLAN_COLONIZATION && !F->region_best_site[region]) score_type = 1;
+                } else if (plan == PLAN_RECONNAISSANCE || (region_plan > 2 && !(F->region_flags[region] & 0x20))) {
+                    score_type = 1;
+                }
+            }
+            if (score_type && (!st4 || !exploring)) {
+                lbc = st6 ? 2 : plan;
+                const struct veh *S = game_vehs + l20;
+                int friendly = !(l20 < 0 || (S->faction != faction && !(F->diplo_status[S->faction] & TREATY_PACT)));
+                if (!l30 && stack_check(l20, 1, l20, -1, -1) == 1) friendly = 0;
+                if (at_sea && triad == TRIAD_LAND && lbc != 8 && S->faction == faction) {
+                    if (stack_check(l20, 2, 8, -1, -1)) l24 += 8;
+                    if (lbc < 2 || lbc == 11) {
+                        if (F->region_flags[l6c] & 0x20) l24 += 0x10;
+                        if (F->region_flags[l6c] & 0x40) l24 += 0x10;
+                    }
+                }
+                switch (lbc) {
+                case 0:
+                    if (friendly && !st4) l24 += stack_check(l20, 2, 2, -1, -1) * 4;
+                    l24 = l24 - stack_check(l20, 2, 0, -1, -1) * 2 -
+                          hex_cost(proto, faction, x, y, l8, lc, 0) / game_rules_basic->move_rate_roads;
+                    break;
+                case 1:
+                    if (zoc_veh(l8, lc, faction)) l24 += defense_value(faction, l8, lc, veh, -1) * 2;
+                    break;
+                case 2:
+                    if (zoc_veh(l8, lc, faction)) l24 += defense_value(faction, l8, lc, veh, -1) * 2;
+                    if (friendly && !st4) {
+                        int a = stack_check(l20, 2, 0, -1, -1), d = stack_check(l20, 2, 2, -1, -1);
+                        l24 = l24 + a * 4 - d * 2;
+                    }
+                    break;
+                case 3:
+                    l24 -= hex_cost(proto, faction, x, y, l8, lc, 0) / game_rules_basic->move_rate_roads;
+                    break;
+                case 6:
+                    l24 += stack_check(l20, 2, 7, -1, -1) * 4;
+                    l24 -= stack_check(l20, 2, 6, -1, -1) * 2;
+                    break;
+                case 7:
+                    if (!st4) l24 += stack_check(l20, 2, 6, -1, -1) * 4;
+                    l24 -= stack_check(l20, 2, 7, -1, -1) * 8;
+                    break;
+                case 8:
+                    if (at_sea && zoc_sea(l8, lc, faction)) continue;
+                    if (l74 >= 0 && l74 != faction && (F->diplo_status[l74] & 3) && V->order != ORDER_MOVE_TO) l24 -= 0x10;
+                    if (at_sea && F->region_base_plan[l6c] == 8) {
+                        l24 = l24 + 0x10 + game_continents[l6c].open_terrain;
+                        if (!(F->region_flags[l6c] & 0x20)) l24 += 8;
+                        if (!(F->region_flags[l6c] & 0x10)) l24 += 0x10;
+                    }
+                    break;
+                case 11:
+                    if (friendly) l24 += stack_check(l20, 14, -1, -1, -1) * 2;
+                    break;
+                }
+                if (alt_of(here) < alt_of(t) &&
+                    (game_rules_basic->combat_atk_higher || game_rules_basic->combat_pen_atk_lower))
+                    l24 += 2;
+            }
+        }
+        l4c = 0;
+        if (l20 < 0) {
+            if (!(l28 < 0 || game_bases[l28].faction == faction || (F->diplo_status[l74] & TREATY_PACT))) {
+                // A base of another faction's: taken if the AI may.
+                if (plan == PLAN_INFO_WARFARE && !(proto_of(V->proto)->abilities & 0x10000000) &&
+                    has_project(15, game_bases[l28].faction))
+                    continue;
+                uint32_t st = F->diplo_status[l74];
+                if ((st & 7) && !(st & 0x800)) {
+                    if (!(st & 0x20)) continue;
+                    if (st & 2) {
+                        int r = game_rnd(6);
+                        if (reputation(l74, faction) < r - F->ai_fight) continue;
+                    }
+                }
+                if (!game_weapons[proto_of(V->proto)->weapon].offense) continue;
+                l4c = 1;
+                l24 += 9999;
+            }
+            if ((t->bits & 0x2000) && want_monolith(veh)) l24 += 99;
+            goto at_57883f;
+        }
+        {
+            // A stack: its own, to share; or an enemy's, to attack.
+            int vf = game_vehs[l20].faction;
+            l74 = vf;
+            if (triad == TRIAD_AIR && game_chassis[proto_of(V->proto)->chassis].range && V->movement_turns &&
+                V->order == ORDER_MOVE_TO && (V->waypoint_x[0] != l8 || V->waypoint_y[0] != lc))
+                continue;
+            if (stack_check(l20, 1, -1, -1, -1) == 1 && !(F->diplo_status[vf] & 0x11) &&
+                proto_of(game_vehs[l20].proto)->plan == PLAN_ALIEN_ARTIFACT &&
+                game_weapons[proto_of(V->proto)->weapon].offense && l28 < 0) {
+                // A lone artifact to take.
+                if ((F->diplo_status[vf] & 0x20) || whose_territory(faction, l8, lc, NULL, 0) == faction || game_rnd(2)) {
+                    l4c = 1;
+                    l24 += 8;
+                    goto at_57883f;
+                }
+                continue;
+            }
+            if (plan == PLAN_INFO_WARFARE) {
+                if (vf != faction) {
+                    if (!stack_check(l20, 2, 11, -1, -1) ||
+                        ((F->diplo_status[vf] & TREATY_PACT) && (F->diplo_status[vf] & 0x2000000)))
+                        goto at_5782ee;
+                    l4c = 1;
+                    int r = em_odds(veh, l30 - 1, &l20);
+                    if (whose_territory(faction, l8, lc, NULL, 0) == faction) r *= 2;
+                    else if (l28 < 0 && (F->diplo_status[vf] & 7)) r /= 2;
+                    if (r < 8) {
+                        if (l28 < 0) continue;
+                    } else {
+                        l24 += r;
+                    }
+                }
+                goto at_57883f;
+            }
+        at_5782ee:
+            if (vf == faction || (l50 = vf + faction * 0x833, F->diplo_status[vf] & TREATY_PACT)) goto at_57883f;
+            if (at_sea && !l88 && triad == TRIAD_SEA && !can_arty(proto, 1)) continue;
+            if (stack_check(l20, 1, -1, -1, -1) == 1 && proto_of(game_vehs[l20].proto)->plan == PLAN_INFO_WARFARE &&
+                (F->diplo_status[game_vehs[l20].faction] & 6) &&
+                whose_territory(faction, game_vehs[l20].x, game_vehs[l20].y, NULL, 0) == faction) {
+                // An enemy probe team in its territory.
+                l4c = 1;
+                l24 += 99;
+                goto at_57883f;
+            }
+            if (plan == PLAN_NAVAL_TRANSPORT) {
+                if (stack_check(veh, 1, -1, -1, -1) >= 2) continue;
+            } else if (!(plan < 8 || plan == PLAN_INFO_WARFARE)) {
+                continue;
+            }
+            if (!((!at_sea || triad != TRIAD_LAND || has_abil(V->proto, 8)) &&
+                  (!stack_check(l20, 3, 2, -1, -1) || has_abil(V->proto, 0x20) || l28 >= 0 || (t->bits & 0x40000) ||
+                   stack_check(l20, 6, 0x80, -1, -1))))
+                continue;
+            if (plan == PLAN_INFO_WARFARE) {
+                if (stack_check(l20, 1, -1, -1, -1) < 2) {
+                    int n = *game_veh_count;
+                    if (base_who(game_vehs[l20].x, game_vehs[l20].y) < 0 && em_probe(veh, l20)) {
+                        if (n != *game_veh_count) return 1;
+                        l2c = 999;
+                        dir84 = l30 - 1;
+                        alt = 1;
+                    }
+                }
+                continue;
+            }
+            if (!game_weapons[proto_of(V->proto)->weapon].offense || !(F->diplo_status[vf] & 0x810)) continue;
+            l4c = 1;
+            int r = em_odds(veh, l30 - 1, &l20);
+            if (!lb8 && (veh_moves(veh) >= game_rules_basic->move_rate_roads || proto == 8) && (own_dist || plan < 1))
+                goto at_57868c;
+            {
+                int d = em_odds(l20, (l30 + 3) & 7, NULL);
+                if (!d) {
+                    if (stack_check(veh, 1, -1, -1, -1) != 1 || proto_of(game_vehs[l20].proto)->plan == PLAN_INFO_WARFARE)
+                        goto at_57868c;
+                } else {
+                    int k = lb8 ? lb8 + 1 : 0;
+                    if (r * 4 <= (4 - k) * d && d > 7 && lb8 + 6 <= r) goto at_57868c;
+                }
+                continue;
+            }
+        at_57868c:
+            r = compute_odds(r, faction, veh, l20, l28);
+            if (!l74 && (own_base < 0 || !game_bases[own_base].eco_damage) &&
+                game_vehs[l20].order_auto_type != faction)
+                r = F->se[7] < 3 ? r * 2 : r << 3;
+            if (r <= 7) continue;
+            l24 += r;
+        }
+    at_57883f:
+        if ((st4 || exploring) && l30 && (triad == TRIAD_AIR || l88 == (triad == TRIAD_SEA))) {
+            // Exploring: the unknown squares further on in that direction.
+            if (exploring) {
+                base_find_2(l8, lc, faction);
+                l24 += *game_base_find_dist * 2;
+            }
+            for (l34 = 0; l34 < 8; l34++) {
+                l50 = xrange(game_radius_x[l30] * l34 + l8);
+                terr = game_radius_y[l30] * l34 + lc;
+                if (!on_map(l50, terr) || !(triad == TRIAD_AIR || (alt_of(tile(l50, terr)) < ALT_SHORE) == (triad == TRIAD_SEA)))
+                    continue;
+                for (l5c = 0; l5c < 0x20; l5c += 4) {
+                    int j = l5c / 4;
+                    int nx = xrange(game_radius_near_x[j] + l50), ny = game_radius_near_y[j] + terr;
+                    if (!on_map(nx, ny)) continue;
+                    if (F->flags & 0x20000000) {
+                        uint32_t bits = tile(nx, ny)->bits;
+                        if (!(bits & 0x100000)) {
+                            l24 += (bits & MAP_FUNGUS) && alt_of(tile(nx, ny)) >= 0x40 ? 0x10 : 8;
+                            if (bits & 0x2000) l24 += 8;
+                        }
+                    }
+                    if (!is_known(nx, ny, faction)) {
+                        l24 += 2 + exploring * 2;
+                        if (triad == TRIAD_SEA && alt_of(tile(nx, ny)) >= ALT_SHORE &&
+                            !F->region_total_bases[tile(nx, ny)->region])
+                            l24 += 8;
+                    }
+                    if (goody_at(nx, ny)) l24 += 2 + exploring * 2;
+                    if (plan == PLAN_COLONIZATION) {
+                        l74 = whose_territory(faction, nx, ny, NULL, 0);
+                        if (l74 >= 0 && l74 != faction && (F->diplo_status[l74] & 3)) l24 -= 6;
+                    }
+                }
+            }
+        }
+        if (l2c < l24) {
+            dir84 = l30 - 1;
+            l2c = l24;
+            alt = l4c;
+        }
+    }
+    if (!alt) {
+        if (l90) {
+            dir84 = -1;
+            V->order = ORDER_NONE;
+        }
+        if (lc8 && V->order == ORDER_MOVE_TO) goto finish;
+        if (can_arty(proto, 1) && !V->order && (triad == TRIAD_SEA || alt_of(here) >= ALT_SHORE || !near_dist)) {
+            // Nothing better: improvements to shell.
+            for (l50 = 0; l50 < 100; l50 += 4) {
+                int i = l50 / 4;
+                l8 = xrange(game_radius_x[i] + x), lc = game_radius_y[i] + y;
+                if (!on_map(l8, lc) || alt_of(tile(l8, lc)) < ALT_SHORE || anything_at(l8, lc) >= 0) continue;
+                int o = whose_territory(faction, l8, lc, NULL, 0);
+                if (o < 0 || o == faction || !(F->diplo_status[o] & 0x10)) continue;
+                int r = tile(l8, lc)->region;
+                if ((!F->region_total_bases[r] || F->region_base_plan[r] == 2 || triad != TRIAD_LAND) &&
+                    (here->bits & 0x1000) && (here->bits & MAP_ARTY_TARGETS)) {
+                    if (!net_own) {
+                        game_log_say(text(0x68eae0), veh, l8, lc);
+                        em_destroy(veh, 0, l8, lc);
+                        return 1;
+                    }
+                    game_log_say(text(0x68eac0), veh, l8, lc);
+                    game_message_data(0x2413, veh, l8, lc, 0, 0);
+                    goto net_exec;
+                }
+            }
+        }
+    } else if (planet_buster(veh)) {
+        dir84 = -1;
+        V->order = ORDER_NONE;
+    }
+    V->status_icon = 'x';
+at_578b26:
+at_578b29:
+    if (dir84 >= 0) {
+        l8 = xrange(game_radius_near_x[dir84] + x), lc = game_radius_near_y[dir84] + y;
+        V->order = ORDER_AI_MOVE_TO;
+        V->waypoint_x[0] = (int16_t)l8, V->waypoint_y[0] = (int16_t)lc;
+        goto finish;
+    }
+at_578b34:
+    V->state &= ~0x10000u;
+    V->order = ORDER_NONE;
+finish:
+    if ((int8_t)V->order < ORDER_MOVE_TO) V->state &= ~0x10000u;
+    if (V->order == ORDER_NONE || V->order == 2) {
+        if (triad == TRIAD_AIR && own_dist && !(tile(x, y)->bits & 0x40000)) {
+            action_home(veh, 0);
+        } else {
+            V->order = !game_is_human(faction) || (V->state & 0x200) ? 2 : 0;
+            veh_skip(veh);
+        }
+    }
+    if (V->order == ORDER_MOVE_TO && V->waypoint_x[0] == x && V->waypoint_y[0] == y) {
+        V->order = ORDER_NONE;
+        veh_skip(veh);
+    }
+    {
+        uint8_t o = V->order;
+        if ((o == ORDER_MOVE_TO || o == ORDER_AI_MOVE_TO) && (plan == PLAN_TERRAFORMING || plan == PLAN_COLONIZATION)) {
+            // A former or colony pod doesn't step next to an enemy.
+            int d = path_move(game_path, veh, o & 0x40 ? -1 : V->faction);
+            if (d < 0) {
+                V->order = ORDER_NONE;
+                return 0;
+            }
+            l8 = xrange(game_radius_near_x[d] + x), lc = game_radius_near_y[d] + y;
+            if (base_who(l8, lc) >= 0) return 0;
+            for (int j = 0; j < 8; j++) {
+                int nx = xrange(game_radius_near_x[j] + l8), ny = game_radius_near_y[j] + lc;
+                if (!on_map(nx, ny) || (alt_of(tile(nx, ny)) < ALT_SHORE) != (alt_of(tile(l8, lc)) < ALT_SHORE)) continue;
+                l50 = abs(ny - y);
+                if (((l50 + x_dist(nx, x)) & ~1) <= 2) continue;
+                l20 = stack_fix(veh_at(nx, ny));
+                if (l20 >= 0 && game_vehs[l20].faction != faction && (F->diplo_status[game_vehs[l20].faction] & 0x10) &&
+                    (game_weapons[proto_of(game_vehs[l20].proto)->weapon].offense || stack_check(l20, 14, -1, -1, -1))) {
+                    V->order = ORDER_NONE;
+                    return 0;
+                }
+            }
+            return 0;
+        }
+    }
+    return 0;
+net_exec:
+    game_net_await_exec(game_net_daemon, 1);
+    return 1;
+}
+
+// The original reads one of its locals ([ebp-0x38]) before it has set it,
+// when an automated former looks for fungus to clear: whatever lies 0x3c
+// bytes below its entry stack pointer. The entry passes that word on.
+int enemy_move_at(int veh, int32_t stale);
+// fn(veh) with `stale` where enemy_move reads it.
+int em_call_stale(int (*fn)(int), int veh, int32_t stale);
+__asm__(".text\n"
+        ".globl em_call_stale\n"
+        "em_call_stale:\n"
+        "    movl 4(%esp), %eax\n"    // fn
+        "    movl 8(%esp), %edx\n"    // veh
+        "    movl 12(%esp), %ecx\n"   // stale
+        "    pushl %edx\n"
+        "    movl %ecx, -0x40(%esp)\n"  // fn's entry stack pointer will be 4 below this one
+        "    call *%eax\n"
+        "    addl $4, %esp\n"
+        "    ret\n"
+        ".globl enemy_move\n"
+        "enemy_move:\n"
+        "    movl -0x3c(%esp), %eax\n"
+        "    pushl %eax\n"
+        "    pushl 8(%esp)\n"
+        "    call enemy_move_at\n"
+        "    addl $8, %esp\n"
+        "    ret\n");
+int enemy_move_at(int veh, int32_t stale) {
+    int v = veh < 0 ? -1 - veh : veh;
+    if (!em_ours(v)) return em_call_stale(orig_enemy_move, veh, stale);
+    return em_body(veh, stale);
+}
+
 // ---- The AI's turn around its units ---------------------------------------------
 
 // One unit's move. A unit already on its way (moved this turn, on a go-to
@@ -1429,10 +4388,10 @@ static int shadow_alien_move(int veh) {
     return check_alien_move(veh, 1);
 }
 
-// A unit's move and the faction's turn around its units run the game's
-// enemy_move(), with all it sets off (fights, steps, messages): the game's
-// calls run the original, and the sweep checks them with enemy_move held
-// (shadow_enemy_move, below) and the steps held.
+// A unit's move and the faction's turn around its units call enemy_move()
+// through the game's pointer, with all it sets off (fights, steps,
+// messages): the game's calls run the original, and the sweep checks them
+// with enemy_move held (shadow_enemy_move, below) and the steps held.
 static int (*orig_enemy_veh)(int veh) __attribute__((used));
 static void (*orig_enemy_turn)(int faction) __attribute__((used));
 static struct hook_stats stats_enemy_veh = {"enemy_veh"}, stats_enemy_turn = {"enemy_turn"};
@@ -1544,8 +4503,7 @@ static uint32_t mix(uint32_t a) {
 // unit is killed.
 static int holding_moves __attribute__((used));
 static uint32_t hold_seed;
-static int (*orig_enemy_move)(int veh) __attribute__((used));
-static struct hook_stats stats_enemy_move = {"(held enemy_move)"};
+static struct hook_stats stats_enemy_move = {"enemy_move"};
 static void replay_none(const struct hook_ui_call *c) { (void)c; }
 // Not held, the game's calls go straight to the original (shadow_enemy_move,
 // in assembly, leaves the stack alone).
@@ -1596,12 +4554,101 @@ int held_enemy_move(int veh) {
     }
     return 0;
 }
+
+// ---- A unit's move: checks ----------------------------------------------------------
+//
+// A game's call of enemy_move is checked when the move only chooses: a run
+// of ours first, on a protected copy of the game, sees whether it would
+// carry a move out (em_risky: a fight, an attack on a square, an air drop,
+// a probe team's mission, a base founded, a unit given away, an artifact
+// studied, any aircraft's move); then the original runs unchecked. The
+// rest are checked on all of the game, with both runs given the same word
+// where the original reads its unset local, and the original's run kept.
+// The sweep checks the rest of the choices in made-up situations.
+static unsigned long long enemy_move_unchecked;
+static int32_t em_arg_veh __attribute__((used)), em_arg_stale __attribute__((used)), em_ret __attribute__((used));
+static void probe_enemy_move(int veh, int32_t stale) {
+    struct hook_writes w_ = {0};
+    writes_paths(&w_, game_path);
+    hooks_writes_begin(&w_);
+    em_probing = 1, em_risky = 0;
+    em_body(veh, stale);
+    em_probing = 0;
+    hooks_writes_abandon(&w_);
+}
+static int check_enemy_move(int veh, int32_t stale) {
+    struct hook_writes w_ = {0};
+    check_begin(&w_);
+    int want = em_call_stale(orig_enemy_move, veh, stale);
+    check_middle(&w_);
+    em_probing = 1, em_risky = 0;
+    int got = em_body(veh, stale);
+    em_probing = 0;
+    path_stale_stop();
+    const char *diff_ = hooks_writes_end(&w_, got, want);
+    if (!diff_ && em_risky) diff_ = "would carry a move out";
+    if (diff_) hooks_mismatch(&stats_enemy_move, "(%d, stale %d) %s", veh, stale, diff_);
+    hooks_ui_release();
+    return want;
+}
+// What a check can't run: network games.
+static int em_checkable(int veh) {
+    (void)veh;
+    return !*game_net_multiplayer && !*game_pbem;
+}
+// The game's call (from shadow_enemy_move): 0 to run the original, 1 ours,
+// 2 done (a check ran the original; its result in em_ret).
+int ai_pre_enemy_move(void);
+int ai_pre_enemy_move(void) {
+    int veh = em_arg_veh;
+    int32_t stale = em_arg_stale;
+    if (shadow_bypass()) return 1;
+    stats_enemy_move.calls++;
+    shadow_tick(AI);
+    int v = veh < 0 ? -1 - veh : veh;
+    if (!em_ours(v) || !em_checkable(v)) {
+        enemy_move_unchecked++;
+        return 0;
+    }
+    probe_enemy_move(veh, stale);
+    if (em_risky) {
+        enemy_move_unchecked++;
+        return 0;
+    }
+    em_ret = check_enemy_move(veh, stale);
+    return 2;
+}
+// The entry: the unit and the word below the stack noted; held in the
+// sweep's checks of enemy_veh and enemy_turn; else the 64 KB below the
+// stack kept while ai_pre_enemy_move() checks the call, as for enemy_veh.
 void shadow_enemy_move(void);
 __asm__(".text\n"
         "shadow_enemy_move:\n"
+        "    movl -0x3c(%esp), %eax\n"
+        "    movl %eax, em_arg_stale\n"
+        "    movl 4(%esp), %eax\n"
+        "    movl %eax, em_arg_veh\n"
         "    cmpl $0, holding_moves\n"
         "    jne held_enemy_move\n"
-        "    jmp *orig_enemy_move\n");
+        "    cmpl $0, hooks_nested\n"
+        "    jne 2f\n"
+        "    cmpl $0, stack_keeping\n"
+        "    jne 3f\n"
+        "    movl $1, stack_keeping\n"
+        KEEP_SAVE
+        "    call ai_pre_enemy_move\n"
+        KEEP_RESTORE
+        "    movl $0, stack_keeping\n"
+        "4:  testl %eax, %eax\n"
+        "    jz 2f\n"
+        "    cmpl $1, %eax\n"
+        "    je 1f\n"
+        "    movl em_ret, %eax\n"
+        "    ret\n"
+        "2:  jmp *orig_enemy_move\n"
+        "1:  jmp enemy_move\n"
+        "3:  call ai_pre_enemy_move\n"
+        "    jmp 4b\n");
 
 // ---- Sweep ------------------------------------------------------------------------
 //
@@ -2057,11 +5104,158 @@ static void sweep_enemy_turn(void) {
     move_hold_steps(0);
 }
 
+// A prototype for a unit of the faction on its square (land or sea), of
+// a kind enemy_move handles and of the plan wanted (or any, -1): a basic
+// one or the faction's own; or -1.
+static int pick_proto(int faction, int sea, int plan) {
+    for (int k = 0; k < 64; k++) {
+        int p = rnd(2) ? rnd(BASIC_PROTOS) : faction * BASIC_PROTOS + rnd(BASIC_PROTOS);
+        const struct unit_proto *P = proto_of(p);
+        if (!P->name[0] || P->plan == PLAN_NAVAL_TRANSPORT || triad_of(p) == TRIAD_AIR) continue;
+        if ((triad_of(p) == TRIAD_SEA) != sea || (plan >= 0 && P->plan != plan)) continue;
+        return p;
+    }
+    return -1;
+}
+
+// A unit's move, of AI units of every kind and the player's automated
+// ones, with their orders, state, damage and surroundings varied, and the
+// faction's plans for the continent; with the step held. Moves carried
+// out (see probe_enemy_move) are left out.
+static unsigned em_swept, em_swept_risky;
+static void sweep_enemy_move(void) {
+    static const uint8_t icons[] = {0, 'F', 'd', 'X', '/', '6', '-', 'p', '3', '4', '5', 'b', 'R'};
+    static const uint32_t states[] = {0x200, 0x4000, 0x40000, 0x60000, 0x10000, 0x10000000, 0x40000000, 0x100, 0x8,
+                                      0x20000000, 0x1000200, 0x2000200, 0x80000000u, 0x20};
+    move_hold_steps(1);
+    for (int k = 0; k < 48; k++) {
+        int v = pick_unit(1 + rnd(FACTION_COUNT - 1));
+        if (v < 0) break;
+        struct veh *V = &game_vehs[v];
+        int f = V->faction;
+        if (!f) continue;
+        struct hook_writes w;
+        case_begin(&w);
+        struct faction_data *F = &game_factions[f];
+        // Its kind, and where it is.
+        if (rnd(3) && *game_base_count) {
+            const struct base *B = &game_bases[rnd(*game_base_count)];
+            int x, y;
+            near_square(B->x, B->y, rnd(4), &x, &y);
+            if (!occupied(tile(x, y), MAP_BASE) || tile(x, y)->owner_site % 16 == f) put(v, x, y);
+        }
+        // Each kind in turn: formers (automated ones too), convoys,
+        // artifacts, probe teams, colony pods, scouts, combat units,
+        // defenders, warships; or any.
+        static const int kinds[] = {9, 9, 9, 10, 12, 11, 8, 8, 3, 1, 2, 6, 0, -1};
+        int kind = kinds[k % 14];
+        int sea = alt_of(tile(V->x, V->y)) < ALT_SHORE;
+        if (sea && kind >= 0 && kind != PLAN_NAVAL_SUPERIORITY && *game_base_count) {
+            const struct base *B = &game_bases[rnd(*game_base_count)];
+            for (int j = 0; j < 8; j++) {
+                int x, y;
+                near_square(B->x, B->y, 1 + rnd(3), &x, &y);
+                if (alt_of(tile(x, y)) >= ALT_SHORE && !occupied(tile(x, y), MAP_BASE)) {
+                    put(v, x, y);
+                    break;
+                }
+            }
+            sea = alt_of(tile(V->x, V->y)) < ALT_SHORE;
+        }
+        int p = pick_proto(f, sea, kind);
+        if (p < 0 && rnd(4)) p = pick_proto(f, sea, -1);
+        if (p >= 0) V->proto = (int16_t)p;
+        if (!em_ours(v)) {
+            hooks_writes_abandon(&w);
+            continue;
+        }
+        // Its orders and state.
+        switch (rnd(7)) {
+        case 0: V->order = ORDER_NONE; break;
+        case 1: V->order = 2; break;
+        case 2: V->order = 3, V->order_auto_type = (uint8_t)rnd(4); break;
+        case 3: V->order = (uint8_t)(4 + rnd(0x14)); break;
+        case 4: V->order = (uint8_t)(0x1b + rnd(2)); break;
+        default: {
+            V->order = ORDER_MOVE_TO;
+            int x, y;
+            near_square(V->x, V->y, 1 + rnd(3), &x, &y);
+            V->waypoint_x[0] = (int16_t)x, V->waypoint_y[0] = (int16_t)y;
+        }
+        }
+        for (int j = rnd(4); j > 0; j--) V->state ^= states[rnd(14)];
+        if (V->state & 0x200) V->order_auto_type = (uint8_t)rnd(12);
+        int plan = proto_of(V->proto)->plan;
+        if (plan == PLAN_TERRAFORMING && rnd(2)) {
+            static const uint8_t autos[] = {1, 2, 3, 4, 5, 6, 7};
+            V->state |= 0x200, V->order_auto_type = autos[rnd(7)];
+            if (rnd(2)) V->order = ORDER_NONE;
+        }
+        if (plan == PLAN_SUPPLY_CONVOY && rnd(2)) V->order = rnd(2) ? 3 : ORDER_NONE, V->order_auto_type = (uint8_t)rnd(3);
+        if ((plan == PLAN_ALIEN_ARTIFACT || plan == PLAN_SUPPLY_CONVOY) && rnd(2) && *game_base_count) {
+            int b = rnd(*game_base_count);
+            if (game_bases[b].faction == f) put(v, game_bases[b].x, game_bases[b].y);
+            if (rnd(2)) game_bases[b].queue[0] = -(70 + rnd(64));
+            if (rnd(2)) game_bases[b].minerals = rnd(200);
+        }
+        if ((plan == PLAN_RECONNAISSANCE || plan <= 1) && rnd(2)) V->state ^= 0x4000;
+        if (rnd(4) == 0) V->order = ORDER_NONE;
+        if ((V->state & 0x3000000) && rnd(2)) {
+            V->waypoint_count = (uint8_t)rnd(4), V->patrol_point = (uint8_t)rnd(4);
+            for (int j = 0; j < 4; j++) {
+                int x, y;
+                near_square(V->x, V->y, 1 + rnd(3), &x, &y);
+                V->waypoint_x[j] = (int16_t)x, V->waypoint_y[j] = (int16_t)y;
+            }
+        }
+        if (rnd(5) == 0) V->flags ^= 0x800;
+        if (rnd(8) == 0) V->flags ^= 0x20;
+        if (rnd(10) == 0) V->flags ^= 0x440;
+        V->moves_spent = (uint8_t)(rnd(3) ? 0 : rnd(10));
+        V->damage = (uint8_t)(rnd(3) ? 0 : rnd(1 + game_range(proto_of(V->proto)->reactor, 1, 100) * 10));
+        V->status_icon = icons[rnd(13)];
+        if (rnd(4) == 0) V->home_base = (int16_t)(rnd(5) ? rnd(*game_base_count + 1) - 1 : -1);
+        V->movement_turns = (uint8_t)rnd(8);
+        V->unk_29 = (uint8_t)(rnd(9) - 1);
+        // Its faction's plans and its neighbours'.
+        int region = tile(V->x, V->y)->region;
+        if (rnd(3) == 0) F->region_base_plan[region] = (uint8_t)rnd(9);
+        if (rnd(4) == 0) F->region_flags[region] ^= (uint16_t)(1u << rnd(16));
+        if (rnd(4) == 0) F->region_total_bases[region] = (uint8_t)rnd(4);
+        if (rnd(5) == 0) F->target_x = V->x, F->target_y = V->y;
+        if (rnd(4) == 0) F->flags ^= rnd(2) ? 0x20000000u : rnd(2) ? 0x2000000u : 0x10000u;
+        if (rnd(4) == 0) *game_more_preferences ^= rnd(2) ? 8 : rnd(2) ? 0x20 : 0x400000;
+        if (rnd(6) == 0) *game_human_factions ^= (uint8_t)(1u << f);
+        if (rnd(4) == 0) *game_current_turn = rnd(300);
+        if (rnd(5) == 0) *game_difficulty = rnd(6);
+        if (rnd(3) == 0) {
+            int o = 1 + rnd(FACTION_COUNT - 1);
+            static const uint32_t treaty[] = {TREATY_PACT, TREATY_TREATY, TREATY_TRUCE, TREATY_VENDETTA, 0x20, 0x800};
+            if (o != f) F->diplo_status[o] ^= treaty[rnd(6)];
+        }
+        if (rnd(3) == 0) {
+            // Another faction's unit next to it.
+            int u = pick_unit(-1), x, y;
+            near_square(V->x, V->y, 1 + rnd(2), &x, &y);
+            if (u >= 0 && u != v && !occupied(tile(x, y), MAP_BASE)) put(u, x, y);
+        }
+        vary_squares(V->x, V->y);
+        int veh = rnd(10) ? v : -1 - v;
+        int32_t stale = rnd(3) ? 0 : rnd(3) ? 1 : (int32_t)rnd32();
+        em_swept++;
+        probe_enemy_move(veh, stale);
+        if (em_risky) em_swept_risky++;
+        else check_enemy_move(veh, stale);
+        hooks_writes_abandon(&w);
+    }
+    move_hold_steps(0);
+}
+
 // Once a turn, on a protected copy of the game: the bases native life
 // heads for, its moves (natives of every kind, transports with worms
 // aboard, spore launchers among improvements, near humans' bases), air
 // units' moves, planet busters near their targets, units' moves and
-// factions' turns.
+// factions' turns, and enemy_move's choices for units of every kind.
 static void ai_sweep(void) {
     if (!*game_map || !game_path->x || !game_path->map || *game_veh_count <= 0) return;
     int sweeping = hooks_sweeping;
@@ -2076,24 +5270,26 @@ static void ai_sweep(void) {
     sweep_planet_buster();
     sweep_enemy_veh();
     sweep_enemy_turn();
+    sweep_enemy_move();
     hooks_writes_abandon(&outer);
     hooks_sweeping = sweeping;
     if (*game_turn % 25 == 0)
         fprintf(stderr, "chiron: alien_move: %llu of %llu game calls run unchecked (fights, attacks on squares)\n",
                 alien_move_unchecked, stats_alien_move.calls);
+    if (*game_turn % 25 == 0)
+        fprintf(stderr,
+                "chiron: enemy_move: %llu of %llu game calls run unchecked (moves carried out); swept %u, %u carried out\n",
+                enemy_move_unchecked, stats_enemy_move.calls, em_swept, em_swept_risky);
 }
 
 #define PUSH_EBP_MOV_EBP_ESP 0x55, 0x8b, 0xec
-#define HELD_HOOK(addr, name, ...)                                                                      \
-    {addr, (const uint8_t[]){__VA_ARGS__}, sizeof((const uint8_t[]){__VA_ARGS__}), NULL, (void *)shadow_##name, \
-     (void **)&orig_##name, &stats_##name, 1}
 static const struct hook ai_hooks[] = {
     HOOK(0x579510, enemy_turn, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),            // sub esp, 8
     HOOK(0x579240, enemy_veh, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x58),             // sub esp, 0x58
     HOOK(0x5665d0, alien_base, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10),            // sub esp, 16
     HOOK(0x566810, alien_move, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x2c),            // sub esp, 0x2c
     HOOK(0x56a8a0, enemy_planet_buster, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x54),   // sub esp, 0x54
-    HELD_HOOK(0x56b5b0, enemy_move, PUSH_EBP_MOV_EBP_ESP, 0x81, 0xec, 0xc4, 0x02, 0x00, 0x00),  // sub esp, 0x2c4
     HOOK(0x5678c0, air_power, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x48),             // sub esp, 0x48
+    HOOK(0x56b5b0, enemy_move, PUSH_EBP_MOV_EBP_ESP, 0x81, 0xec, 0xc4, 0x02, 0x00, 0x00),  // sub esp, 0x2c4
 };
 struct hook_module ai_module = {"ai", ai_hooks, HOOK_COUNT(ai_hooks), ai_sweep, NULL, -1};

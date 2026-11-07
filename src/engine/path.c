@@ -547,7 +547,7 @@ __asm__(".text\n"
 static int32_t move_stale = 1;
 // A check of a caller that moves many units (ai.c) hands ours the words
 // the original's Path_find calls found, in order (path_stale_record).
-enum { STALE_LOG = 512 };
+enum { STALE_LOG = 8192 };  // enemy_move's site searches make thousands
 static int32_t stale_log[STALE_LOG];
 static int stale_logging, stale_replaying, stale_n, stale_next;
 static int32_t stale_for_move(void) {
@@ -911,6 +911,7 @@ void path_stale_put(int32_t saved) { move_stale = saved; }
 void path_stale_record(void) { stale_logging = 1, stale_replaying = 0, stale_n = 0; }
 void path_stale_replay(void) { stale_logging = 0, stale_replaying = 1, stale_next = 0; }
 void path_stale_stop(void) { stale_logging = stale_replaying = 0; }
+int32_t path_stale_next(void) { return stale_for_move(); }
 
 // Path_sensors: each run gets its own copy of the square, and the
 // original's goes back to the caller.

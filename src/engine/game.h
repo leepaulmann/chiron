@@ -1266,6 +1266,15 @@ extern void (*game_del_site)(int faction, int type, int x, int y, int unk);
 // control and fungus met and its flag for fractional moves seen.
 extern int (*game_probe)(int veh, int base, int veh_target, int unk);
 extern int (*game_supply_options)(int veh, int base);
+// The AI's units' moves (ai.c): a unit given to another faction, dropped by
+// air, a base site's worth, an aircraft's move, a network lock, a base
+// message to the other players.
+extern void (*game_action_give)(int veh, int faction);
+extern int (*game_action_airdrop)(int veh, int x, int y, int flags);
+extern int (*game_site_at)(int x, int y, int unk);
+extern int (*game_air_power)(int veh, int base_dist, int zoc, int *x, int *y);
+extern int(__attribute__((thiscall)) * game_net_add_lock)(void *daemon, int unk, int x, int y);
+extern void (*game_message_base)(int type, int veh, char *text, int unk);
 extern void (*game_capture_base)(int base, int faction, int probe);
 extern int (*game_goody_box)(int veh, int goody);
 extern void (*game_monolith)(int veh);

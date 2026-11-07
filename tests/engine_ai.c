@@ -403,6 +403,25 @@ static void test_air_power(void) {
     EXPECT(vehs[0].order, 0);
 }
 
+// A unit's move: a hidden AI unit waits; the player's automated former,
+// told to farm a square below the hills, gives up its automation.
+static void test_enemy_move(void) {
+    land();
+    protos[4] = (struct unit_proto){.chassis = 0, .weapon = 2, .armor = 1, .plan = 9, .reactor = 1};
+    put_unit(0, 4, 4, 2, 1);
+    vehs[0].flags = 0x440;
+    EXPECT(enemy_move(0), 0);
+    EXPECT(vehs[0].moves_spent > 0, 1);
+    land();
+    humans = 1 << 2;
+    put_unit(0, 4, 4, 2, 4);
+    at(4, 4)->climate = 1 << 5;
+    vehs[0].state = 0x200, vehs[0].order_auto_type = 4;
+    EXPECT(enemy_move(0), 0);
+    EXPECT(vehs[0].order, 0);
+    EXPECT(vehs[0].state & 0x200, 0);
+}
+
 int main(void) {
     game_map = &tiles_ptr, game_map_width = &width, game_map_height = &height, game_map_half_width = &half_width;
     game_map_area = &area, game_map_flat = &flat, game_bases = bases, game_base_count = &base_count;
@@ -433,6 +452,7 @@ int main(void) {
     test_planet_buster();
     test_turn();
     test_air_power();
+    test_enemy_move();
     if (failures) return 1;
     printf("engine_ai: ok\n");
     return 0;
