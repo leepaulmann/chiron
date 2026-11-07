@@ -63,6 +63,7 @@ static int drawn_map, console_updates, goal_here;
 static void draw_map_stub(int u) { drawn_map++; }
 static void __attribute__((thiscall)) console_update_stub(void *c, int u) { console_updates++; }
 static int at_goal_stub(int f, int type, int x, int y) { return goal_here; }
+static int satan_stub(int f, int aggressive) { return 0; }
 
 int main(void) {
     game_map = &tiles_ptr, game_map_width = &width, game_map_height = &height, game_map_half_width = &half_width;
@@ -1040,6 +1041,50 @@ int main(void) {
         suggestion = (struct design_suggestion){0};
         memset(protos, 0, sizeof protos);
         bases[0] = (struct base){0};
+
+        // The AI's new designs, with only the slowest land chassis, three
+        // weapons, two armors and no abilities: its offensive design
+        // takes the better weapon, and a defender gets the better armor
+        // and no weapon that costs it more; the design workshop records
+        // the first proposal and makes nothing.
+        static int32_t passes[11];
+        game_proposal_passes = passes, game_great_satan = satan_stub;
+        memset(achieved, 0, sizeof achieved);
+        memset(weapons, 0, sizeof weapons), memset(armor, 0, sizeof armor);
+        for (int i = 0; i < WEAPON_COUNT; i++) weapons[i].preq_tech = TECH_DISABLED, weapons[i].short_name = "Gun";
+        for (int i = 0; i < ARMOR_COUNT; i++) armor[i].preq_tech = TECH_DISABLED, armor[i].short_name = "Plate";
+        for (int i = 1; i < CHASSIS_COUNT; i++) chassis[i].preq_tech = TECH_DISABLED;
+        for (int i = 0; i < 32; i++) abilities[i].preq_tech = TECH_DISABLED;
+        chassis[0].preq_tech = TECH_NONE, chassis[0].cost = 1;
+        rules_basic.tech_two_special = TECH_DISABLED;
+        for (int i = 0; i < 3; i++) weapons[i] = (struct rules_weapon){.short_name = "Gun", .offense = (int8_t)(1 << i),
+                                                                       .cost = (uint8_t)(1 << i), .preq_tech = TECH_NONE};
+        armor[0] = (struct rules_armor){.short_name = "Plate", .defense = 1, .cost = 1, .preq_tech = TECH_NONE};
+        armor[1] = (struct rules_armor){.short_name = "Plate", .defense = 2, .cost = 2, .preq_tech = TECH_NONE};
+        factions[1] = (struct faction_data){.diff_level = 3, .ai_fight = 1};
+        protos[64] = (struct unit_proto){.weapon = 1, .reactor = 1, .plan = PLAN_OFFENSIVE, .group = 1,
+                                         .flags = PROTO_FLAG_ACTIVE | PROTO_FLAG_BUILT};
+        protos[65] = (struct unit_proto){.weapon = 0, .armor = 0, .reactor = 1, .plan = PLAN_DEFENSIVE, .group = 2,
+                                         .flags = PROTO_FLAG_ACTIVE | PROTO_FLAG_BUILT};
+        static struct unit_proto before[PROTO_COUNT];
+        memcpy(before, protos, sizeof before);
+        suggestion.mode = 1, suggestion.plan = -1;
+        consider_designs(1);
+        EXPECT(memcmp(before, protos, sizeof before), 0);
+        EXPECT(suggestion.mode * 100 + suggestion.plan * 10 + suggestion.weapon, 312);
+        suggestion = (struct design_suggestion){0};
+        consider_designs(1);
+        EXPECT(first_new >= 64, 1);
+        int upgraded = 0, defender = -1;
+        for (int p = 64; p < 128; p++) {
+            const struct unit_proto *P = &protos[p];
+            if (!(P->flags & PROTO_FLAG_ACTIVE)) continue;
+            if (P->group == 1 && P->weapon == 2 && P->armor == 0) upgraded = 1;
+            if (P->group == 2 && P->armor == 1 && P->weapon != 1) defender = P->weapon;
+        }
+        EXPECT(upgraded, 1);
+        EXPECT(defender, 0);
+        memset(protos, 0, sizeof protos);
     }
     if (failures) return 1;
     printf("engine_veh: all tests passed\n");

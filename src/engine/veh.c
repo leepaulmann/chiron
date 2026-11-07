@@ -14,6 +14,7 @@
 #include <string.h>
 
 #include "base.h"
+#include "council.h"
 #include "game.h"
 #include "map.h"
 #include "score.h"
@@ -3284,6 +3285,619 @@ int propose_proto(int faction, int chassis, int weapon, int armor, uint32_t abil
     return best;
 }
 
+// ---- The AI's new designs ------------------------------------------------------
+
+enum {
+    ABL_SUPER_FORMER = 0x1, ABL_CLOAKED = 0x4, ABL_FUNGICIDAL = 0x2000, ABL_CLEAN_REACTOR = 0x10000,
+    ABL_NERVE_GAS = 0x100000, WEAPON_TERRAFORM_UNIT = 18, PLAN_NAVAL_SUPERIORITY = 6,
+};
+
+// What consider_designs works out first and its later phases use. The
+// numbers it hands propose_proto as a design's plan are the AI's groups
+// (make_proto's for the common kinds, and its own for the rest).
+struct designs {
+    int faction, reactor;
+    int scale;   // 2 << reactor
+    int threat;  // how much rivals have earned a nerve gas attack
+    int psi;     // rivals' psi to fear: 1 attack, 2 defense
+    // A ratio the upgrade pass sets when it looks at a combat design (1,
+    // or 2 with the first reactor) and the land attacker reads. The
+    // original keeps it in a stack slot that the armor loop before has
+    // left at its count, 14, which is what the attacker gets otherwise.
+    int ratio;
+};
+
+// The score the faction `of` has run up in its current conflict with
+// `against` (Thinker's diplo_combat_count, at 0x1ac in the faction).
+static int combat_count(int of, int against) {
+    return ((const int32_t *)((const char *)&game_factions[of] + 0x1ac))[against];
+}
+
+static int abil_tech(uint32_t ability, int faction) {
+    return has_tech(game_abilities[__builtin_ctz(ability)].preq_tech, faction);
+}
+// Whether a design with these abilities may take one more.
+static int may_add(uint32_t abilities, int faction) {
+    return !abilities || has_tech(game_rules_basic->tech_two_special, faction);
+}
+// The Council has repealed the charter more often than it reinstated it.
+static int charter_repealed(void) {
+    return game_proposal_passes[PROP_REPEAL_CHARTER] > game_proposal_passes[PROP_REINSTATE_CHARTER];
+}
+
+// How much its rivals have earned a nerve gas attack: a third (rounded
+// up) of the atrocities of each that it has suffered atrocities from; for
+// each it wants revenge on, a quarter of one less than its broken
+// treaties, and with intense rivalry one more for a human rival that ranks
+// above it or is winning their current conflict.
+static int design_threat(int f) {
+    const struct faction_data *F = &game_factions[f];
+    int v = 0;
+    for (int i = 1; i < FACTION_COUNT; i++) {
+        if (i == f) continue;
+        const struct faction_data *G = &game_factions[i];
+        uint32_t d = F->diplo_status[i];
+        if (d & TREATY_ATROCITY_VICTIM) {
+            v += (G->atrocities + 2) / 3;
+        } else if (d & TREATY_WANT_REVENGE) {
+            if (game_is_human(i) && (G->ranking > F->ranking || combat_count(i, f) > combat_count(f, i)))
+                v += (*game_rules & RULES_INTENSE_RIVALRY) != 0;
+            v += (G->integrity_blemishes - 1) / 4;
+        }
+    }
+    return v;
+}
+
+// Whether a design counts for the upgrade pass: one the faction has and
+// can build, not obsolete for it.
+static int design_counts(int p, int f) {
+    const struct unit_proto *P = proto_of(p);
+    if (!(P->flags & PROTO_FLAG_ACTIVE) || (P->obsolete_factions & (1u << f))) return 0;
+    return p >= BASIC_PROTOS || has_tech(P->preq_tech, f);
+}
+
+// The best weapon the faction has (neither psi, a planet buster nor the
+// conventional payload) that one of its designs (not missiles) lacks: a
+// weapon that some design met earlier in the list is weaker than, until
+// one as strong turns up, so a stronger design later in the list doesn't
+// undo it. A weapon weaker than the one found isn't looked at. -1 for
+// none.
+static int better_weapon(int f) {
+    int best = -1;
+    for (int w = 0; w < WEAPON_COUNT; w++) {
+        if (!has_tech(game_weapons[w].preq_tech, f)) continue;
+        int off = game_weapons[w].offense;
+        if (off <= 0 || off >= 99 || w == WEAPON_CONVENTIONAL_PAYLOAD) continue;
+        if (best >= 0 && game_weapons[best].offense > off) continue;
+        for (int j = 0; j < 2 * BASIC_PROTOS; j++) {
+            int p = j < BASIC_PROTOS ? j : f * BASIC_PROTOS + j - BASIC_PROTOS;
+            if (!design_counts(p, f) || game_chassis[proto_of(p)->chassis].missile) continue;
+            if (game_weapons[proto_of(p)->weapon].offense >= off) break;
+            best = w;
+        }
+    }
+    return best;
+}
+
+// The same for armor better than 1, missiles counted too.
+static int better_armor(int f) {
+    int best = -1;
+    for (int a = 0; a < ARMOR_COUNT; a++) {
+        if (!has_tech(game_armor[a].preq_tech, f)) continue;
+        int def = game_armor[a].defense;
+        if (def <= 1) continue;
+        if (best >= 0 && game_armor[best].defense > def) continue;
+        for (int j = 0; j < 2 * BASIC_PROTOS; j++) {
+            int p = j < BASIC_PROTOS ? j : f * BASIC_PROTOS + j - BASIC_PROTOS;
+            if (!design_counts(p, f)) continue;
+            if (game_armor[proto_of(p)->armor].defense >= def) break;
+            best = a;
+        }
+    }
+    return best;
+}
+
+// The armor a combat design may carry with a weapon: the ratio times
+// four times the reactor's scale over the weapon's offense, at most that
+// offense; 2 when either is below 2.
+static int combat_armor_cap(const struct designs *D, int offense) {
+    int q = D->ratio * D->scale * 4 / offense;
+    if (q < 2 || offense < 2) return 2;
+    return q > offense ? offense : q;
+}
+
+// Phase 1: the faction's own designs (not missiles) again with the better
+// weapon or armor and its best reactor, by plan. Offensive and air
+// superiority designs take the weapon; defensive ones the armor; combat
+// ones the weapon, and the armor too if combat_armor_cap allows it (with
+// no better weapon, the armor alone if it allows that). Naval ones take
+// whichever keeps the cost within their power and growth priorities plus
+// the reactor squared (at least 5), the armor tried with the new weapon;
+// and with no armor to take, only a new weapon.
+static void upgrade_designs(struct designs *D) {
+    int f = D->faction, r = D->reactor;
+    int bw = better_weapon(f), ba = better_armor(f);
+    if (bw < 0 && ba < 0) return;
+    const struct faction_data *F = &game_factions[f];
+    int budget = r * r < 5 ? 5 : r * r;
+    for (int p = f * BASIC_PROTOS; p < (f + 1) * BASIC_PROTOS; p++) {
+        const struct unit_proto *P = proto_of(p);
+        if (!(P->flags & PROTO_FLAG_ACTIVE) || (P->obsolete_factions & (1u << f))) continue;
+        int c = P->chassis;
+        if (game_chassis[c].missile) continue;
+        switch (P->plan) {
+        case PLAN_OFFENSIVE:
+        case PLAN_AIR_SUPERIORITY:
+            if (bw >= 0) propose_proto(f, c, bw, P->armor, P->abilities, r, P->group, NULL);
+            break;
+        case PLAN_COMBAT:
+            if (bw >= 0) {
+                int a = P->armor;
+                if (ba >= 0) {
+                    D->ratio = r != 1 ? 1 : 2;
+                    if (game_armor[ba].defense <= combat_armor_cap(D, game_weapons[bw].offense)) a = ba;
+                }
+                propose_proto(f, c, bw, a, P->abilities, r, P->group, NULL);
+            } else {
+                D->ratio = r != 1 ? 1 : 2;
+                if (game_armor[ba].defense > combat_armor_cap(D, game_weapons[P->weapon].offense)) break;
+                propose_proto(f, c, P->weapon, ba, P->abilities, r, P->group, NULL);
+            }
+            break;
+        case PLAN_DEFENSIVE:
+            if (ba >= 0) propose_proto(f, c, P->weapon, ba, P->abilities, r, P->group, NULL);
+            break;
+        case PLAN_NAVAL_SUPERIORITY: {
+            int w = P->weapon, a = P->armor;
+            if (bw >= 0 && proto_cost(c, bw, a, P->abilities, r) <= F->ai_power + F->ai_growth + budget) w = bw;
+            if (ba >= 0 && proto_cost(c, w, ba, P->abilities, r) <= F->ai_power + F->ai_growth + budget) a = ba;
+            else if (a != ba && w != bw) break;
+            propose_proto(f, c, w, a, P->abilities, r, P->group, NULL);
+            break;
+        }
+        }
+    }
+}
+
+// Which psi to fear from human rivals, for an AI faction without a psi
+// bonus of its own: rivals far ahead, or any it wants revenge on (or has
+// a vendetta with, at a high difficulty or with intense rivalry). 1 for
+// one with a psi bonus or the Dream Twister, 2 for one with a psi bonus
+// or the Neural Amplifier.
+static int psi_threats(int f) {
+    if (game_faction_defs[f].rule_psi > 0 || game_is_human(f)) return 0;
+    const struct faction_data *F = &game_factions[f];
+    int flags = 0;
+    for (int i = 1; i < FACTION_COUNT; i++) {
+        if (!game_is_human(i)) continue;
+        if (!game_great_satan(i, 0)) {
+            uint32_t mask = TREATY_WANT_REVENGE;
+            if (F->diff_level >= 4 || (*game_rules & RULES_INTENSE_RIVALRY)) mask |= TREATY_VENDETTA;
+            if (!(F->diplo_status[i] & mask)) continue;
+        }
+        int psi = game_faction_defs[i].rule_psi > 0;
+        if (psi || owns_project(SP_DREAM_TWISTER, i)) flags |= 1;
+        if (psi || owns_project(SP_NEURAL_AMPLIFIER, i)) flags |= 2;
+    }
+    return flags;
+}
+
+// Phase 2: a land defender (group 2) of the slowest chassis, the best
+// armor, and the strongest weapon that adds nothing to its cost. Its
+// ability (add_abil gives only the first): comm jammer; trained when it
+// doesn't mean to fight, for an AI with poor MORALE ahead, or a faction
+// of poor soldiers; for an AI trance against strong enemy psi attack or a
+// feared one. Trance as a second ability for an AI that fears psi or has
+// the minerals and no MORALE ahead. Made with armor better than 1 (or
+// for the design workshop); then for the AI with trance alone (group 18)
+// on the same grounds, and with AAA alone (group 20) against enemy
+// aircraft or missiles.
+static void design_defenders(const struct designs *D) {
+    int f = D->faction, r = D->reactor, c = pick_chassis(f, TRIAD_LAND, 1);
+    if (c < 0) return;
+    const struct faction_data *F = &game_factions[f];
+    int a = armor_budget(f, 99), human = game_is_human(f);
+    uint32_t abl = 0;
+    add_abil(&abl, ABL_COMM_JAMMER, f);
+    if (F->ai_fight < 0 || (F->se_pending[SE_MORALE] < 0 && !human) || game_faction_defs[f].rule_morale < 0)
+        add_abil(&abl, ABL_HIGH_MORALE, f);
+    if (!human && (F->enemy_best_psi_offense >= F->enemy_best_weapon_value * 2 || (D->psi & 1)))
+        add_abil(&abl, ABL_TRANCE, f);
+    int rich = F->clean_minerals >= 4 && F->se_pending[SE_MORALE] <= 0;
+    if (abil_tech(ABL_TRANCE, f) && may_add(abl, f) && !human && (D->psi || rich)) abl |= ABL_TRANCE;
+    int w = weapon_budget(f, 1, 0);
+    for (int cost = 2;; cost++) {
+        int w2 = weapon_budget(f, cost, 0);
+        if (w2 == w || proto_cost(c, w2, a, abl, r) > proto_cost(c, w, a, abl, r)) break;
+        w = w2;
+    }
+    if (game_armor[a].defense > 1 || game_design_suggestion->mode) propose_proto(f, c, w, a, abl, r, 2, NULL);
+    if (abil_tech(ABL_TRANCE, f) && !(abl & ABL_TRANCE) && !human && (rich || D->psi))
+        propose_proto(f, c, w, a, ABL_TRANCE, r, 18, NULL);
+    if (abil_tech(ABL_AAA, f) && !human && (F->enemy_air_attackers || F->enemy_missiles))
+        propose_proto(f, c, w, a, ABL_AAA, r, 20, NULL);
+}
+
+// Phase 3: a land attacker (group 3) of the slowest chassis. A budget
+// grows while what it buys over twice the reactor's scale stays within
+// the power priority plus 5; the weapon is the best of that budget (99
+// for a human), the armor the best of combat_armor_cap (with the upgrade
+// pass's ratio) or half the budget, 1 to 99; then the weapon is the best
+// of what its offense, raised one at a time, buys on that armor within
+// the same bound. Its ability, for the AI: AAA against many enemy
+// aircraft; nerve gas with the charter repealed and fighting or power a
+// priority, or against rivals that have earned it; empath against strong
+// enemy psi defense or feared psi. For anyone: a clean reactor for a
+// large, leading faction with wealth or research a priority; trained for
+// poor soldiers; comm jammer for armor better than 1 against fast, strong
+// enemies when research is a priority; trained when it doesn't mean to
+// fight or (an AI) has poor MORALE ahead; antigrav struts, as another
+// ability if allowed. Made with a weapon of 2 and armor better than 1, a
+// weapon of 3, or for the design workshop; then as drop pods (group 11)
+// and amphibious (group 12), keeping its ability only with the tech for
+// two.
+static void design_attackers(const struct designs *D) {
+    int f = D->faction, r = D->reactor, c = pick_chassis(f, TRIAD_LAND, 1);
+    if (c < 0) return;
+    const struct faction_data *F = &game_factions[f];
+    int d = 2 * D->scale, k = 1, power = F->ai_power + 5, human = game_is_human(f);
+    if (2 / d <= power) {
+        int s = 2;
+        do k++, s++;
+        while ((s + 1) / 2 * s / d <= power);
+    }
+    int w = weapon_budget(f, human ? 99 : k, 0), off = game_weapons[w].offense;
+    int cap = combat_armor_cap(D, off);
+    if (cap <= k / 2) cap = k / 2;
+    int a = armor_budget(f, cap < 1 ? 1 : cap > 99 ? 99 : cap), def = game_armor[a].defense;
+    int n = off, m = (off + 1) * def;
+    if (m / d <= power) {
+        do n++, m += def;
+        while (m / d <= power);
+    }
+    w = weapon_budget(f, n, 0);
+    uint32_t abl = 0;
+    if (!human && F->enemy_air_attackers > F->air_offense * 2 && F->enemy_air_attackers > 1
+        && F->enemy_air_attackers > F->air_superiority)
+        add_abil(&abl, ABL_AAA, f);
+    if (charter_repealed() && F->ai_fight + F->ai_power > 0 && !human) add_abil(&abl, ABL_NERVE_GAS, f);
+    if (D->threat && D->threat > 1 - F->ai_fight && F->ai_fight >= 0 && !human) add_abil(&abl, ABL_NERVE_GAS, f);
+    if (!human
+        && ((F->enemy_best_psi_defense >= F->best_armor_value * 3 / 2
+             && F->enemy_best_psi_defense > game_weapons[w].offense / 2)
+            || D->psi))
+        add_abil(&abl, ABL_EMPATH, f);
+    if (F->base_count >= 8 && F->ranking >= 6 && (F->ai_wealth || F->ai_tech)) add_abil(&abl, ABL_CLEAN_REACTOR, f);
+    if (game_faction_defs[f].rule_morale < 0) add_abil(&abl, ABL_HIGH_MORALE, f);
+    if (game_armor[a].defense > 1 && !abl && F->ai_tech > 0 && F->enemy_best_land_speed > 1
+        && F->enemy_best_weapon_value >= F->best_armor_value * 2)
+        add_abil(&abl, ABL_COMM_JAMMER, f);
+    if (!abl && (F->ai_fight < 0 || (F->se_pending[SE_MORALE] < 0 && !human))) add_abil(&abl, ABL_HIGH_MORALE, f);
+    if (abil_tech(ABL_ANTIGRAV_STRUTS, f) && may_add(abl, f)) abl |= ABL_ANTIGRAV_STRUTS;
+    off = game_weapons[w].offense;
+    if (!((off > 1 && game_armor[a].defense > 1) || off > 2 || game_design_suggestion->mode)) return;
+    propose_proto(f, c, w, a, abl, r, 3, NULL);
+    abl &= ~(uint32_t)ABL_ANTIGRAV_STRUTS;
+    if (!has_tech(game_rules_basic->tech_two_special, f)) abl = 0;
+    if (abil_tech(ABL_DROP_POD, f)) propose_proto(f, c, w, a, abl | ABL_DROP_POD, r, 11, NULL);
+    if (abil_tech(ABL_AMPHIBIOUS, f)) propose_proto(f, c, w, a, abl | ABL_AMPHIBIOUS, r, 12, NULL);
+}
+
+// Phase 4: artillery (group 1), with the strongest weapon and the
+// cheapest armor, once the faction has artillery. Up to 100 rounds: a
+// slow chassis gives way to one of speed 2 that costs no more, or no
+// more than one more (two for odd factions) and at most the reactor plus
+// 5; the armor steps up to the best costing no more than the current
+// one's defense plus one, if the design costs no more with it. It stops
+// at a round that changes neither. With the tech for two abilities the
+// first of blink displacer, antigrav struts and deep radar goes with the
+// artillery.
+static void design_artillery(const struct designs *D) {
+    int f = D->faction, r = D->reactor, w = weapon_budget(f, 99, 0);
+    if (!abil_tech(ABL_ARTILLERY, f)) return;
+    int c = pick_chassis(f, TRIAD_LAND, 1);
+    if (c < 0) return;
+    uint32_t abl = 0;
+    int a = armor_budget(f, 1);
+    for (int n = 0; n < 100; n++) {
+        int moved = 0;
+        if (game_chassis[c].speed == 1) {
+            int c2 = pick_chassis(f, TRIAD_LAND, 2);
+            if (c2 >= 0 && c2 != c) {
+                int cost = proto_cost(c2, w, a, abl, r), was = proto_cost(c, w, a, abl, r);
+                if ((cost <= r + 5 && cost <= was + (f & 1) + 1) || cost <= was) c = c2, moved = 1;
+            }
+        }
+        int a2 = armor_budget(f, game_armor[a].defense + 1);
+        if (game_armor[a2].defense > game_armor[a].defense
+            && proto_cost(c, w, a2, abl, r) <= proto_cost(c, w, a, abl, r)) {
+            a = a2;
+            continue;
+        }
+        if (!moved) break;
+    }
+    // (The original works out the design's cost here and doesn't use it.)
+    if (!abil_tech(ABL_ARTILLERY, f) || has_tech(game_rules_basic->tech_two_special, f)) {
+        add_abil(&abl, ABL_BLINK_DISPLACER, f);
+        add_abil(&abl, ABL_ANTIGRAV_STRUTS, f);
+        add_abil(&abl, ABL_DEEP_RADAR, f);
+    }
+    if (abil_tech(ABL_ARTILLERY, f)) abl |= ABL_ARTILLERY;
+    if (game_weapons[w].offense < game_armor[a].defense * 3 && !abil_tech(ABL_ARTILLERY, f)
+        && !game_design_suggestion->mode)
+        return;
+    propose_proto(f, c, w, a, abl, r, 1, NULL);
+}
+
+// Phase 5: a fast attacker (group 4) of a land chassis of speed 3 (else
+// 2). Its weapon budget counts the steps of two whose cost over the
+// reactor's scale stays within its power and fight priorities plus twice
+// the reactor plus 3 (99 for a human). From the cheapest armor, up to 100
+// times while short of the weapon's offense less one, the armor steps up
+// to the best of half that offense (or its defense plus one), if better
+// and the design stays within those priorities plus the reactor plus 3.
+// Abilities: for an AI nerve gas as for the land attacker (a threat over
+// 3 less the fight priority) and empath against feared psi defense;
+// trained for poor soldiers, an industrious faction that means to fight,
+// or an AI with poor MORALE ahead; antigrav struts.
+static void design_raiders(const struct designs *D) {
+    int f = D->faction, r = D->reactor, c = pick_chassis(f, TRIAD_LAND, 3);
+    if (c < 0) c = pick_chassis(f, TRIAD_LAND, 2);
+    if (c < 0) return;
+    const struct faction_data *F = &game_factions[f];
+    int a = armor_budget(f, 1), n = 0, human = game_is_human(f);
+    int lim = F->ai_power + r * 2 + F->ai_fight + 3;
+    for (int s = 2;;) {
+        s += 2, n++;
+        if (s / D->scale > lim) break;
+    }
+    int w = weapon_budget(f, human ? 99 : n, 0);
+    uint32_t abl = 0;
+    for (int k = 0; k < 100; k++) {
+        int off = game_weapons[w].offense, def = game_armor[a].defense;
+        if (def >= off - 1) break;
+        int a2 = armor_budget(f, off / 2 > def + 1 ? off / 2 : def + 1);
+        if (game_armor[a2].defense <= def) break;
+        if (proto_cost(c, w, a2, abl, r) > F->ai_power + F->ai_fight + r + 3) break;
+        a = a2;
+    }
+    if (D->threat && D->threat > 3 - F->ai_fight && F->ai_fight >= 0 && !human) add_abil(&abl, ABL_NERVE_GAS, f);
+    if (charter_repealed() && F->ai_power + F->ai_fight > 0 && !human) add_abil(&abl, ABL_NERVE_GAS, f);
+    if (!human && (D->psi & 2)) add_abil(&abl, ABL_EMPATH, f);
+    if (game_faction_defs[f].rule_morale < 0 || (F->ai_fight > 0 && F->se_pending[SE_INDUSTRY] >= 0)
+        || (F->se_pending[SE_MORALE] < 0 && !human))
+        add_abil(&abl, ABL_HIGH_MORALE, f);
+    if (abil_tech(ABL_ANTIGRAV_STRUTS, f) && may_add(abl, f)) abl |= ABL_ANTIGRAV_STRUTS;
+    propose_proto(f, c, w, a, abl, r, 4, NULL);
+}
+
+// Phase 6: a scout (group 10) of the fastest land chassis (speed 3, else
+// 2, else 1 with antigrav struts), with the cheapest weapon and armor:
+// once a weapon of 2 costs no more than 2, for the design workshop, or
+// for an AI with empath song. An AI's has empath song, and with the tech
+// for two abilities antigrav struts or else trained; anyone else's deep
+// radar or else cloaking, then antigrav struts (alone, without the tech
+// for two). Group 19 with trance, which it never has.
+static void design_scouts(const struct designs *D) {
+    int f = D->faction, r = D->reactor, human = game_is_human(f);
+    uint32_t abl = 0;
+    int c = pick_chassis(f, TRIAD_LAND, 3);
+    if (c < 0) c = pick_chassis(f, TRIAD_LAND, 2);
+    if (c < 0) {
+        c = pick_chassis(f, TRIAD_LAND, 1);
+        add_abil(&abl, ABL_ANTIGRAV_STRUTS, f);
+        if (c < 0) return;
+    }
+    if (game_weapons[weapon_budget(f, 2, 0)].offense < 2 && !game_design_suggestion->mode
+        && (!abil_tech(ABL_EMPATH, f) || human))
+        return;
+    int w = weapon_budget(f, 1, 0), a = armor_budget(f, 1);
+    if (abil_tech(ABL_EMPATH, f) && !human) {
+        abl |= ABL_EMPATH;
+        if (has_tech(game_rules_basic->tech_two_special, f)) {
+            if (abil_tech(ABL_ANTIGRAV_STRUTS, f)) abl |= ABL_ANTIGRAV_STRUTS;
+            else if (abil_tech(ABL_HIGH_MORALE, f)) abl |= ABL_HIGH_MORALE;
+        }
+    } else {
+        add_abil(&abl, ABL_DEEP_RADAR, f);
+        add_abil(&abl, ABL_CLOAKED, f);
+        if (abil_tech(ABL_ANTIGRAV_STRUTS, f))
+            abl = has_tech(game_rules_basic->tech_two_special, f) ? abl | ABL_ANTIGRAV_STRUTS : ABL_ANTIGRAV_STRUTS;
+    }
+    propose_proto(f, c, w, a, abl, r, (abl & ABL_TRANCE) ? 19 : 10, NULL);
+}
+
+// What a warship may cost above its power and growth priorities: twice
+// the reactor less half of it, at least 5.
+static int naval_budget(int r) { return r * 2 - r / 2 < 5 ? 5 : r * 2 - r / 2; }
+
+// Phase 7: warships of the fastest sea chassis. AAA against more enemy
+// aircraft than its own (an AI's), else deep radar or AAA; trance as
+// another ability against feared psi attack; then AAA and deep radar,
+// each while it has fewer than two abilities and may add one. From the
+// cheapest weapon and armor, up to 100 rounds: the weapon steps up to the
+// first different best of a budget of its offense plus 1 to 3, if the
+// design without abilities stays within naval_budget; the armor the same
+// way by defense, with the abilities; it stops at a round that changes
+// neither. Group 6, with a combat weapon (a human's strongest). Then for
+// the AI one with the cheapest weapon and best armor (group 21), AAA and,
+// with the tech for two, deep radar, if that armor is better than 1.
+static void design_warships(const struct designs *D) {
+    int f = D->faction, r = D->reactor, c = pick_chassis(f, TRIAD_SEA, 0);
+    if (c < 0) return;
+    const struct faction_data *F = &game_factions[f];
+    int human = game_is_human(f);
+    uint32_t abl = 0;
+    if (F->enemy_air_attackers > F->air_superiority && F->enemy_air_attackers > F->air_offense && !human)
+        add_abil(&abl, ABL_AAA, f);
+    add_abil(&abl, ABL_DEEP_RADAR, f);
+    add_abil(&abl, ABL_AAA, f);
+    if ((D->psi & 1) && abil_tech(ABL_TRANCE, f) && may_add(abl, f)) abl |= ABL_TRANCE;
+    if (abil_tech(ABL_AAA, f) && !(abl & ABL_AAA) && game_bit_count(abl) < 2 && may_add(abl, f)) abl |= ABL_AAA;
+    if (abil_tech(ABL_DEEP_RADAR, f) && !(abl & ABL_DEEP_RADAR) && game_bit_count(abl) < 2 && may_add(abl, f))
+        abl |= ABL_DEEP_RADAR;
+    int w = weapon_budget(f, 1, 0), a = armor_budget(f, 1);
+    for (int n = 0; n < 100; n++) {
+        int moved = 0, w2 = w, a2 = a;
+        for (int i = 1; i < 4 && w2 == w; i++) w2 = weapon_budget(f, game_weapons[w].offense + i, 0);
+        if (w2 != w && proto_cost(c, w2, a, 0, r) <= F->ai_power + F->ai_growth + naval_budget(r)) w = w2, moved = 1;
+        for (int i = 1; i < 4 && a2 == a; i++) a2 = armor_budget(f, game_armor[a].defense + i);
+        if (a2 != a && game_armor[a2].defense > game_armor[a].defense
+            && proto_cost(c, w, a2, abl, r) <= F->ai_power + F->ai_growth + naval_budget(r)) {
+            a = a2;
+            continue;
+        }
+        if (!moved) break;
+    }
+    int pw = human ? weapon_budget(f, 99, 0) : w;
+    if (game_weapons[pw].offense >= 1) propose_proto(f, c, pw, a, abl, r, 6, NULL);
+    if (human) return;
+    w = weapon_budget(f, 1, 0), a = armor_budget(f, 99), abl = 0;
+    add_abil(&abl, ABL_AAA, f);
+    if (abil_tech(ABL_DEEP_RADAR, f) && has_tech(game_rules_basic->tech_two_special, f)) abl |= ABL_DEEP_RADAR;
+    if (game_armor[a].defense > 1) propose_proto(f, c, w, a, abl, r, 21, NULL);
+}
+
+// Phase 8: on the fastest sea chassis a transport (group 7, its best armor
+// against more enemy aircraft than its own); then on a foil where it has
+// one, a former (group 15: super former, else fungicidal tanks, both with
+// the tech for two) and a colony ship (group 16). weapon_budget gives 0,
+// not -1, for a mode the faction lacks, so these are made anyway, with
+// hand weapons.
+static void design_ships(const struct designs *D) {
+    int f = D->faction, r = D->reactor, c = pick_chassis(f, TRIAD_SEA, 0);
+    if (c < 0) return;
+    const struct faction_data *F = &game_factions[f];
+    int a = armor_budget(f, 1), w = weapon_budget(f, -WMODE_TRANSPORT, 0);
+    if (F->enemy_air_attackers > F->air_superiority && F->enemy_air_attackers > F->air_offense) a = armor_budget(f, 99);
+    propose_proto(f, c, w, a, 0, r, 7, NULL);
+    if (c != CHASSIS_FOIL && has_tech(game_chassis[CHASSIS_FOIL].preq_tech, f)) c = CHASSIS_FOIL;
+    a = armor_budget(f, 1);
+    w = weapon_budget(f, -WMODE_TERRAFORM, 0);
+    uint32_t abl = 0;
+    add_abil(&abl, ABL_SUPER_FORMER, f);
+    add_abil(&abl, ABL_FUNGICIDAL, f);
+    if (abl == ABL_SUPER_FORMER && abil_tech(ABL_FUNGICIDAL, f) && has_tech(game_rules_basic->tech_two_special, f))
+        abl |= ABL_FUNGICIDAL;
+    if (w >= 0) propose_proto(f, c, w, a, abl, r, 15, NULL);
+    w = weapon_budget(f, -WMODE_COLONY, 0);
+    if (w >= 0) propose_proto(f, c, w, a, 0, r, 16, NULL);
+}
+
+// A bomber's ability: a clean reactor for a leading faction with wealth
+// or research a priority that doesn't mean to fight; empath against
+// feared psi defense; for an AI nerve gas against rivals that have
+// earned more than `threat_over` less the fight priority, or with the
+// charter repealed and fighting or power a priority; deep radar.
+static uint32_t bomber_abilities(const struct designs *D, int threat_over) {
+    int f = D->faction, human = game_is_human(f);
+    const struct faction_data *F = &game_factions[f];
+    uint32_t abl = 0;
+    if (F->ranking >= 6 && (F->ai_wealth || F->ai_tech) && (!F->ai_power || F->ai_fight < 1))
+        add_abil(&abl, ABL_CLEAN_REACTOR, f);
+    if (D->psi & 2) add_abil(&abl, ABL_EMPATH, f);
+    if (D->threat && D->threat > threat_over - F->ai_fight && F->ai_fight >= 0 && !human)
+        add_abil(&abl, ABL_NERVE_GAS, f);
+    if (charter_repealed() && F->ai_fight + F->ai_power > 0 && !human) add_abil(&abl, ABL_NERVE_GAS, f);
+    if (abil_tech(ABL_DEEP_RADAR, f) && may_add(abl, f)) abl |= ABL_DEEP_RADAR;
+    return abl;
+}
+
+// Phase 9: aircraft of the fastest air chassis with the strongest weapon
+// and cheapest armor: a bomber (group 8, a threat over 5) and an
+// interceptor (group 9) with air superiority and, with the tech for two,
+// deep radar, or else trance against feared psi attack.
+static void design_aircraft(const struct designs *D) {
+    int f = D->faction, r = D->reactor, c = pick_chassis(f, TRIAD_AIR, 0);
+    if (c < 0) return;
+    int w = weapon_budget(f, 99, 0), a = armor_budget(f, 1);
+    propose_proto(f, c, w, a, bomber_abilities(D, 5), r, 8, NULL);
+    w = weapon_budget(f, 99, 0);
+    uint32_t abl = ABL_AIR_SUPERIORITY;
+    if (abil_tech(ABL_DEEP_RADAR, f) && has_tech(game_rules_basic->tech_two_special, f))
+        abl |= ABL_DEEP_RADAR;
+    else if ((D->psi & 1) && abil_tech(ABL_TRANCE, f) && has_tech(game_rules_basic->tech_two_special, f))
+        abl |= ABL_TRANCE;
+    propose_proto(f, c, w, a, abl, r, 9, NULL);
+}
+
+// Phase 10: the same bomber on an air chassis of range 1 (group 17, a
+// threat over 4).
+static void design_copters(const struct designs *D) {
+    int f = D->faction, c = pick_chassis(f, TRIAD_AIR, -2);
+    if (c < 0) return;
+    int w = weapon_budget(f, 99, 0), a = armor_budget(f, 1);
+    propose_proto(f, c, w, a, bomber_abilities(D, 4), D->reactor, 17, NULL);
+}
+
+// Phase 11: missiles with the cheapest armor: the conventional (group
+// 13), tectonic (22) and fungal (23) payloads it has, and the first planet
+// buster (14).
+static void design_missiles(const struct designs *D) {
+    int f = D->faction, r = D->reactor, c = pick_chassis(f, TRIAD_AIR, -1);
+    if (c < 0) return;
+    int a = armor_budget(f, 1);
+    if (has_tech(game_weapons[WEAPON_CONVENTIONAL_PAYLOAD].preq_tech, f))
+        propose_proto(f, c, WEAPON_CONVENTIONAL_PAYLOAD, a, 0, r, 13, NULL);
+    if (has_tech(game_weapons[WEAPON_TECTONIC_PAYLOAD].preq_tech, f))
+        propose_proto(f, c, WEAPON_TECTONIC_PAYLOAD, a, 0, r, 22, NULL);
+    if (has_tech(game_weapons[WEAPON_FUNGAL_PAYLOAD].preq_tech, f))
+        propose_proto(f, c, WEAPON_FUNGAL_PAYLOAD, a, 0, r, 23, NULL);
+    for (int w = 0; w < WEAPON_COUNT; w++)
+        if (has_tech(game_weapons[w].preq_tech, f) && game_weapons[w].offense >= 99) {
+            propose_proto(f, c, w, a, 0, r, 14, NULL);
+            break;
+        }
+}
+
+// Phase 12: a land former (no group asked for). With the first reactor
+// and no super formers, one of the slowest chassis with fungicidal tanks,
+// if it has them; else one of a chassis of speed 2 with super former and
+// fungicidal tanks (as a second ability given the tech for two).
+static void design_formers(const struct designs *D) {
+    int f = D->faction, r = D->reactor;
+    if (r <= 1 && !abil_tech(ABL_SUPER_FORMER, f)) {
+        if (!abil_tech(ABL_FUNGICIDAL, f)) return;
+        int c = pick_chassis(f, TRIAD_LAND, 1);
+        if (c < 0) return;
+        propose_proto(f, c, WEAPON_TERRAFORM_UNIT, armor_budget(f, 1), ABL_FUNGICIDAL, r, -1, NULL);
+        return;
+    }
+    int c = pick_chassis(f, TRIAD_LAND, 2);
+    if (c < 0) return;
+    int a = armor_budget(f, 1);
+    uint32_t abl = 0;
+    if (abil_tech(ABL_SUPER_FORMER, f)) abl |= ABL_SUPER_FORMER;
+    if (abil_tech(ABL_FUNGICIDAL, f) && may_add(abl, f)) abl |= ABL_FUNGICIDAL;
+    propose_proto(f, c, WEAPON_TERRAFORM_UNIT, a, abl, r, -1, NULL);
+}
+
+// The AI's pass over its designs (also run for the design workshop, where
+// propose_proto records its first suggestion instead): the enemies'
+// capabilities brought up to date, the faction's designs upgraded, then a
+// design proposed for each role, which propose_proto finds among the
+// faction's own or gives a slot. OpenSMACX and Thinker call the original.
+void consider_designs(int faction) {
+    *game_first_new_proto = -1;
+    struct designs D = {.faction = faction, .threat = design_threat(faction), .ratio = ARMOR_COUNT};
+    enemy_capabilities(faction);
+    D.reactor = best_reactor(faction);
+    D.scale = 2 << D.reactor;
+    upgrade_designs(&D);
+    D.psi = psi_threats(faction);
+    design_defenders(&D);
+    design_attackers(&D);
+    design_artillery(&D);
+    design_raiders(&D);
+    design_scouts(&D);
+    design_warships(&D);
+    design_ships(&D);
+    design_aircraft(&D);
+    design_copters(&D);
+    design_missiles(&D);
+    design_formers(&D);
+}
+
 extern struct hook_module veh_module;
 #define VEH (&veh_module)
 
@@ -3479,6 +4093,20 @@ static int shadow_propose_proto(int a, int b, int c, int d, uint32_t e, int f, i
     stats_propose_proto.calls++;
     shadow_tick(VEH);
     return check_propose_proto(a, b, c, d, e, f, g, h);
+}
+SHADOW_WRITER_CHECK(void, consider_designs, (int a), (a), orig_consider_designs(a), hooks_writes_game(&w_), "%d", a)
+static void shadow_consider_designs(int a) {
+    if (hooks_nested || (asks_player(a) && !shadow_bypass())) {
+        orig_consider_designs(a);
+        return;
+    }
+    if (shadow_bypass()) {
+        consider_designs(a);
+        return;
+    }
+    stats_consider_designs.calls++;
+    shadow_tick(VEH);
+    check_consider_designs(a);
 }
 
 // Upgrades write the factions' energy and unit counts, units, the bases'
@@ -4541,11 +5169,96 @@ static void sweep_propose(void) {
     }
 }
 
+// The AI's new designs: every AI faction as it stands; then two of them
+// (by turn) with every tech, none, or half again as many, with their
+// priorities (some far larger than the game's), MORALE, minerals and
+// standing turned about, rivals that have earned nerve gas, enemy
+// aircraft and psi, a human rival to fear for psi, the charter repealed,
+// and for the design workshop.
+static void sweep_consider(void) {
+    int t = *game_turn;
+    for (int f = 1; f < FACTION_COUNT; f++)
+        if (!game_is_human(f)) check_consider_designs(f);
+    static struct faction_data factions[FACTION_COUNT];
+    static struct faction_def defs[FACTION_COUNT];
+    uint8_t achieved[TECH_COUNT], human = *game_human_factions;
+    int32_t projects[SP_COUNT], passes[PROP_COUNT];
+    uint32_t rules = *game_rules;
+    struct design_suggestion *S = game_design_suggestion, kept = *S;
+    memcpy(factions, game_factions, sizeof factions);
+    memcpy(defs, game_faction_defs, sizeof defs);
+    memcpy(achieved, game_tech_achieved, sizeof achieved);
+    memcpy(projects, game_secret_projects, sizeof projects);
+    memcpy(passes, game_proposal_passes, sizeof passes);
+    for (int k = 0; k < 2; k++) {
+        int f = (t * 3 + k * 5) % 7 + 1;
+        if (game_is_human(f)) continue;
+        struct faction_data *F = &game_factions[f];
+        for (int v = 0; v < 6; v++) {
+            int s = t + v * 3 + k;
+            // Techs: all, none, or every other one added.
+            for (int i = 0; i < TECH_COUNT; i++) {
+                int has = v % 3 == 0 || (v % 3 == 2 && (i + s) % 2) ? 1 : v % 3 == 1 ? 0 : (achieved[i] >> f) & 1;
+                game_tech_achieved[i] = (uint8_t)((achieved[i] & ~(1u << f)) | (unsigned)has << f);
+            }
+            if (v >= 2) {
+                F->ai_fight = s % 3 - 1, F->ai_power = (s >> 1) & 1, F->ai_growth = (s >> 2) & 1;
+                F->ai_tech = (s + 1) & 1, F->ai_wealth = (s >> 3) & 1;
+                if (v == 4) F->ai_power = s % 12, F->ai_growth = s % 7;  // budgets the game never gives
+                F->se_pending[SE_MORALE] = s % 5 - 2, F->se_pending[SE_INDUSTRY] = s % 3 - 1;
+                F->clean_minerals = s % 6 + 1, F->base_count = s % 12, F->ranking = s % 8;
+                F->diff_level = 3 + (s & 1);
+                F->enemy_air_attackers = s % 4, F->enemy_missiles = (s >> 2) & 1;
+                F->air_offense = s % 3 / 2, F->air_superiority = (s >> 1) % 2;
+                game_faction_defs[f].rule_morale = (s & 2) ? -1 : 1;
+                game_proposal_passes[PROP_REPEAL_CHARTER] = (s >> 1) & 1;
+                game_proposal_passes[PROP_REINSTATE_CHARTER] = 0;
+                *game_rules = (s & 4) ? rules | RULES_INTENSE_RIVALRY : rules & ~(uint32_t)RULES_INTENSE_RIVALRY;
+            }
+            if (v >= 3) {
+                // Rivals: atrocities suffered or revenge wanted, strong psi
+                // and weapons with a vendetta, one of them human with psi
+                // (a bonus or a project).
+                for (int g = 1; g < FACTION_COUNT; g++) {
+                    if (g == f) continue;
+                    struct faction_data *G = &game_factions[g];
+                    uint32_t d = (g + s) % 3 == 0 ? TREATY_ATROCITY_VICTIM : (g + s) % 3 == 1 ? TREATY_WANT_REVENGE : 0;
+                    F->diplo_status[g] = (F->diplo_status[g] & ~(uint32_t)(TREATY_ATROCITY_VICTIM | TREATY_WANT_REVENGE))
+                                         | d | TREATY_VENDETTA;
+                    G->atrocities = (g + s) % 7, G->integrity_blemishes = (g * 3 + s) % 9;
+                    G->ranking = (g + s) % 8;
+                    G->best_psi_offense = (g + s) % 4 * 4, G->best_psi_defense = (g + s) % 5 * 3;
+                    G->best_weapon_value = (g + s) % 3 * 3 + 1;
+                    ((int32_t *)((char *)G + 0x1ac))[f] = (g + s) % 4;
+                }
+                int g = f % 7 + 1;
+                *game_human_factions = (uint8_t)(human | 1u << g);
+                game_faction_defs[g].rule_psi = (s & 1) ? 25 : 0;
+                for (int b = 0; b < *game_base_count; b++)
+                    if (game_bases[b].faction == g) {
+                        game_secret_projects[(s & 2) ? SP_DREAM_TWISTER : SP_NEURAL_AMPLIFIER] = b;
+                        break;
+                    }
+            }
+            if (v == 5 || (v == 2 && (s & 1))) S->mode = 1, S->plan = -1;
+            check_consider_designs(f);
+            *S = kept;
+            memcpy(game_factions, factions, sizeof factions);
+            memcpy(game_faction_defs, defs, sizeof defs);
+            memcpy(game_secret_projects, projects, sizeof projects);
+            memcpy(game_proposal_passes, passes, sizeof passes);
+            *game_human_factions = human, *game_rules = rules;
+        }
+    }
+    memcpy(game_tech_achieved, achieved, sizeof achieved);
+}
+
 static void sweep_protos(void) {
     sweep_names();
     sweep_retire();
     sweep_prune();
     sweep_propose();
+    sweep_consider();
 }
 
 // Every design against every faction and a spread of bases, units and
@@ -4742,5 +5455,6 @@ static const struct hook veh_hooks[] = {
     HOOK(0x57f1d0, retire_proto, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10),             // sub esp, 16
     HOOK(0x57f4b0, prune_protos, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x30),             // sub esp, 48
     HOOK(0x580860, propose_proto, PUSH_EBP_MOV_EBP_ESP, 0x81, 0xec, 0x1c, 0x01, 0x00, 0x00),  // sub esp, 0x11c
+    HOOK(0x581260, consider_designs, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x3c),         // sub esp, 60
 };
 struct hook_module veh_module = {"veh", veh_hooks, HOOK_COUNT(veh_hooks), veh_sweep, NULL, -1};

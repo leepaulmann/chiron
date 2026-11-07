@@ -107,3 +107,4 @@ int name_proto(char *name, int proto, int faction, int chassis, int weapon, int 
 void retire_proto(int proto, int faction);
 void prune_protos(int faction, int proto, int unk);
 int propose_proto(int faction, int chassis, int weapon, int armor, uint32_t abilities, int reactor, int plan, char *name);
+void consider_designs(int faction);
