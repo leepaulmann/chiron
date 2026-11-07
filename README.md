@@ -224,6 +224,8 @@ module at a time. So far:
   attacks that break treaties, interceptors scrambled, orbital defenses
   shooting down a missile, planet busters, and probe teams' odds and
   their thefts of techs and energy;
+- what units find on the map: supply and unity pods with all their
+  outcomes, monoliths, and artifacts studied at a Network Node;
 - the path finder: the route search behind every unit's moves (with its
   costs for terrain, roads, fungus, zones of control and borders), a
   unit's next step towards its waypoint, zones of control, the AI's choice
