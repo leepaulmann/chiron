@@ -231,6 +231,12 @@ HELD_THIS(base_win_check_loc, (void *self, int x, int y, int unk), (self, x, y, 
 HELD_THIS(netmsg_pop, (void *self, char *label, int delay, int unk, char *sound), (self, label, delay, unk, sound),
           (hooks_ui_text(&c_, 0, label), hooks_ui_text(&c_, 1, sound), c_.arg[0] = delay, c_.arg[1] = unk),
           orig_netmsg_pop(SELF, TEXT(0), a_[0], a_[1], TEXT(1)))
+// Combat: an interceptor shown flying to its target, which waits on the
+// clock, and a sound effect (a planet buster's).
+HELD(void, veh_scoot, (void)0, (int veh, int x, int y, int dir, int unk), (veh, x, y, dir, unk),
+     (c_.arg[0] = veh, c_.arg[1] = x, c_.arg[2] = y, c_.arg[3] = dir, c_.arg[5] = unk),
+     orig_veh_scoot(a_[0], a_[1], a_[2], a_[3], a_[5]))
+HELD_THIS(fx_play, (void *self, int id), (self, id), c_.arg[0] = id, orig_fx_play(SELF, a_[0]))
 // Movies and help for secret projects.
 HELD(void, amovie_project, (void)0, (int project), (project), (c_.arg[0] = project), orig_amovie_project(a_[0]))
 HELD(void, amovie_project_2, (void)0, (char *name), (name), (hooks_ui_text(&c_, 0, name)), orig_amovie_project_2(TEXT(0)))
@@ -375,5 +381,7 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x41a620, base_win_base_killed, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x57, 0x8b, 0xf1),  // push ebx, esi, edi; mov esi, ecx
     QUIET_HOOK(0x41a7e0, base_win_check_loc, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x8b, 0xd9),        // push ebx; mov ebx, ecx
     QUIET_HOOK(0x47a890, netmsg_pop, SEH_PROLOGUE),
+    QUIET_HOOK(0x55a150, veh_scoot, SEH_PROLOGUE),
+    QUIET_HOOK(0x446a00, fx_play, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0x90, 0x64, 0x9a, 0x00),  // mov eax, [0x9a6490]
 };
 struct hook_module quiet_module = {"quiet", quiet_hooks, HOOK_COUNT(quiet_hooks), NULL, NULL, -1};

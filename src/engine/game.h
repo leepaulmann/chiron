@@ -182,7 +182,7 @@ struct faction_data {
     int32_t enemy_transports, enemy_naval_reactors, enemy_air_attackers, unk_84c, enemy_missiles;
     GAME_PAD(0x854, 0x858);
     uint8_t units_active[512], units_queue[512];  // per prototype (PROTO_COUNT): its units, and those being built
-    GAME_PAD(0xc58, 0x1058);
+    int16_t units_lost[512];  // per prototype: its units killed in combat
     int32_t total_combat_units;
     int32_t base_count;
     int32_t mil_strength;  // military strength, for the AI's diplomacy
@@ -1339,6 +1339,30 @@ struct game_path {
 };
 _Static_assert(sizeof(struct game_path) == 0x2c, "game_path size");
 extern struct game_path *game_path;
+
+// Combat and probe teams (combat.c).
+enum { FACTION_FLAG_UNK_1000 = 0x1000 };  // faction_data.flags: its unit killed the Assistant Worm
+enum { BASE_STATE_UNK_40000 = 0x40000 };  // the home of a unit that killed the Assistant Worm
+enum { VEH_STATE_UNK_800000 = 0x800000 };  // the Assistant Worm
+// A probe team's action: whether it has the algorithmic enhancement, the
+// faction it acts against, and whether that faction has the Hunter-Seeker
+// Algorithm.
+extern int32_t *game_probe_algo, *game_probe_target, *game_probe_target_hsa;
+extern int32_t *game_pb_reactor;  // a planet buster's reactor, for its explosion
+// The sound effects: each a 0x6c-byte object, whose method at 0x5c says
+// whether it is playing.
+enum { FX_SIZE = 0x6c, FX_PB_BLAST = 59, FX_PB_AFTER = 60 };
+extern void *game_fx;
+extern void(__attribute__((thiscall)) * game_fx_play)(void *fx, int id);
+extern int (*game_do_task)(void);  // the message pump, once
+// A unit shown moving a square in a direction (an animation only).
+extern void (*game_veh_scoot)(int veh, int x, int y, int dir, int unk);
+// The tech a faction would take from another, or negative; `label` names
+// the window that lets a human choose.
+extern int (*game_tech_pick)(int faction, int unk, int other, char *label);
+extern void (*game_double_cross)(int faction, int other, int unk);  // a treaty broken by an attack
+extern void (*game_major_atrocity)(int faction, int victim);
+extern void (*game_tech_achieve)(int faction, int tech, int from, int steal);  // tech_achieved()
 
 // Point the variables above at a loaded terranx.exe.
 void game_bind(struct pe_image *exe);

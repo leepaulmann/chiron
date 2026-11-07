@@ -324,6 +324,17 @@ int (*game_abil_index)(uint32_t flag);
 int (*game_can_terraform)(int faction, int x, int y, int unk, int base);
 int (*game_terrain_avail)(int terraform, int sea, int faction);
 
+int32_t *game_probe_algo, *game_probe_target, *game_probe_target_hsa;
+int32_t *game_pb_reactor;
+void *game_fx;
+void(__attribute__((thiscall)) * game_fx_play)(void *fx, int id);
+int (*game_do_task)(void);
+void (*game_veh_scoot)(int veh, int x, int y, int dir, int unk);
+int (*game_tech_pick)(int faction, int unk, int other, char *label);
+void (*game_double_cross)(int faction, int other, int unk);
+void (*game_major_atrocity)(int faction, int victim);
+void (*game_tech_achieve)(int faction, int tech, int from, int steal);
+
 void game_bind(struct pe_image *exe) {
     game_tech = (struct rules_tech *)code_at(exe, 0x94f358);
     game_tech_achieved = code_at(exe, 0x9a6670);
@@ -760,4 +771,16 @@ void game_bind(struct pe_image *exe) {
     game_abil_index = (void *)code_at(exe, 0x581170);
     game_can_terraform = (void *)code_at(exe, 0x565320);
     game_terrain_avail = (void *)code_at(exe, 0x5bab40);
+    game_probe_algo = (int32_t *)code_at(exe, 0x945b30);
+    game_probe_target = (int32_t *)code_at(exe, 0x945b34);
+    game_probe_target_hsa = (int32_t *)code_at(exe, 0x945b38);
+    game_pb_reactor = (int32_t *)code_at(exe, 0x90f7d4);
+    game_fx = code_at(exe, 0x749cf8);
+    game_fx_play = (void *)code_at(exe, 0x446a00);
+    game_do_task = (void *)code_at(exe, 0x5fc7f0);
+    game_veh_scoot = (void *)code_at(exe, 0x55a150);
+    game_tech_pick = (void *)code_at(exe, 0x5beb70);
+    game_double_cross = (void *)code_at(exe, 0x50bcc0);
+    game_major_atrocity = (void *)code_at(exe, 0x55f450);
+    game_tech_achieve = (void *)code_at(exe, 0x5bb000);
 }
