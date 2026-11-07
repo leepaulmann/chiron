@@ -663,7 +663,8 @@ struct rules_basic {
     // from lower ground.
     int32_t combat_base_def, combat_atk_road, combat_atk_higher, combat_pen_atk_lower;
     int32_t tech_orbital_insert;  // lets air drops reach anywhere without the Space Elevator
-    GAME_PAD(0x94, 0x9c);
+    GAME_PAD(0x94, 0x98);
+    int32_t minerals_harvesting_forest;  // a base's minerals from a forest its faction clears
     int32_t territory_max_dist;  // how far a base's territory reaches over land; half that at sea
     int32_t turns_corner_market;  // from cornering the energy market to the win
     int32_t tech_mining_platform_bonus;
@@ -684,8 +685,12 @@ struct rules_basic {
     int32_t retool_exemption;  // the most minerals a human's base carries over after building
     GAME_PAD(0xfc, 0x114);
     int32_t warming_num, warming_den;  // how fast ecological damage warms the planet
+    GAME_PAD(0x11c, 0x128);
+    int32_t oblit_atrocity;  // non-zero: obliterating a base is an atrocity
 };
 GAME_AT(struct rules_basic, warming_num, 0x114);
+GAME_AT(struct rules_basic, minerals_harvesting_forest, 0x98);
+GAME_AT(struct rules_basic, oblit_atrocity, 0x128);
 GAME_AT(struct rules_basic, retool_strictness, 0xf0);
 GAME_AT(struct rules_basic, mine_road_limit, 0x24);
 GAME_AT(struct rules_basic, tech_three_nutrients, 0x4c);
@@ -1233,6 +1238,28 @@ extern int(__attribute__((thiscall)) * game_net_await_exec)(void *daemon, int un
 extern int(__attribute__((thiscall)) * game_net_await_synch)(void *daemon);
 extern void(__attribute__((thiscall)) * game_net_unlock_veh)(void *daemon);
 extern void (*game_del_site)(int faction, int type, int x, int y, int unk);
+// Units' other actions (move.c): a fight started from the map, a missile's
+// target faction given its chance to shoot it down, an atrocity and a
+// broken treaty noted, a colony's monument, a sound at a square, the
+// tutorial's notes on the map (and which it has shown, by land and sea),
+// the base window told of a unit, and a network game's locks and messages.
+extern int (*game_battle_fight)(int veh, int dir, int unk1, int unk2, int unk3);
+extern int (*game_shoot_it)(int faction, int other, int x, int y, int fungal);
+extern void (*game_atrocity)(int faction, int other, int type, int unk);
+extern void (*game_double_cross)(int faction, int other, int unk);
+extern void (*game_mon_colony_founded)(int faction, char *name);
+extern void *game_fx;
+extern int(__attribute__((thiscall)) * game_fx_play_loc)(void *fx, int sound, int x, int y);
+extern void *game_tut_win;
+extern int(__attribute__((thiscall)) * game_tut_map)(void *win, char *label, int x, int y, int veh, void *sprite, int a,
+                                                       int b, int c);
+extern int32_t *game_tut_map_seen;  // [2] bit per terraform shown, on land and at sea
+extern void *game_sprite_farm, *game_sprite_soil, *game_sprite_mine, *game_sprite_solar;
+extern void(__attribute__((thiscall)) * game_base_win_check_veh)(void *win, int veh);
+extern int32_t *game_veh_attack_flags, *game_terraform_sound_played;
+extern int(__attribute__((thiscall)) * game_net_lock_veh)(void *daemon, int *veh, int type, int x, int y, int unk);
+extern int(__attribute__((thiscall)) * game_net_maybe_lock)(void *daemon, int *veh, int a, int b, int x, int y, int type);
+extern void (*game_message_veh)(int type, int veh, int dir, int unk);
 extern void (*game_x_pop)(char *label, int unk);  // a popup from script.txt
 // base_at(): set while its "Base Bits Error" is being reported, and the two
 // flags that decide whether the popup shows and the Ctrl key is read.
@@ -1289,9 +1316,12 @@ struct rules_terraform {
     char *name, *name_sea;
     int32_t preq_tech, preq_tech_sea;
     uint32_t bit;  // the map_tile.bits it makes
-    GAME_PAD(0x14, 0x20);
+    uint32_t bit_incompatible;  // the map_tile.bits it clears
+    int32_t rate;  // turns of a former's work
+    GAME_PAD(0x1c, 0x20);
 };
 _Static_assert(sizeof(struct rules_terraform) == 0x20, "rules_terraform size");
+GAME_AT(struct rules_terraform, rate, 0x18);
 enum { TERRAFORM_COUNT = 19 };
 extern struct rules_terraform *game_terraform;  // [TERRAFORM_COUNT]
 extern int32_t *game_climate_level;            // warming from ecological damage, towards the next sea rise

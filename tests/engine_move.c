@@ -34,6 +34,7 @@ static void *map_wins[1] = {map_win};
 static uint8_t humans, achieved[TECH_COUNT];
 static char battle_text[256], road_done[] = "ROAD", tube_done[] = "TUBE";
 static int failures;
+static int32_t sound_played;
 
 #define EXPECT(expr, want)                                                       \
     do {                                                                         \
@@ -296,6 +297,148 @@ static void test_passengers(void) {
     EXPECT(factions[1].goals[0].type, 2);
 }
 
+// Stand-ins for the actions' drawing, sounds and diplomacy.
+static int draws, atrocities, last_atrocity_type, waves, popps;
+static void draw_(int x, int y, int unk) { (void)x, (void)y, (void)unk, draws++; }
+static void __attribute__((thiscall)) win_veh_(void *win, int veh) { (void)win, (void)veh; }
+static void __attribute__((thiscall)) win_loc_(void *win, int x, int y, int unk) { (void)win, (void)x, (void)y, (void)unk; }
+static void __attribute__((thiscall)) win_redraw_(void *win) { (void)win; }
+static void wave_(int sound) { (void)sound, waves++; }
+static int ambience_(int sound) { return (void)sound, 0; }
+static void atrocity_(int faction, int other, int type, int unk) {
+    (void)faction, (void)other, (void)unk;
+    atrocities++, last_atrocity_type = type;
+}
+static int popp_(char *file, char *label, int flags, char *picture, int unk) {
+    (void)file, (void)label, (void)flags, (void)picture, (void)unk;
+    return popps++, 0;
+}
+
+static void test_terraform_cost(void) {
+    land();
+    put_base(0, 5, 3, 1);
+    // Land at the shore line: 2 squared, twice, by the 2 squares to the
+    // faction's base, halved.
+    EXPECT(terraform_cost(1, 3, 1), 8);
+    // Another faction's big base nearer than the faction's own (4 squares
+    // off): by the distance to the faction's base and the other's size
+    // (16), over the distance to the other's and the faction's size (1).
+    land();
+    put_base(0, 9, 3, 1);
+    put_base(1, 5, 3, 2);
+    bases[1].pop_size = 10;
+    EXPECT(terraform_cost(1, 3, 1), 256);
+    factions[1].diplo_status[2] = TREATY_PACT;  // not with a pact
+    EXPECT(terraform_cost(1, 3, 1), 16);
+    factions[1].diplo_status[2] = 0;
+    faction_defs[1].rule_flags = 0x2000;  // the terraforming bonus
+    EXPECT(terraform_cost(1, 3, 1), 128);
+    faction_defs[1].rule_flags = 0;
+    // Deep sea with no base: 4 squared, twice, twice at sea and twice more
+    // while no one knows tech 39, halved.
+    land();
+    at(1, 3)->climate = 1 << 5;
+    EXPECT(terraform_cost(1, 3, 1), 64);
+    achieved[39] = 1;
+    EXPECT(terraform_cost(1, 3, 1), 32);
+    achieved[39] = 0;
+}
+
+static void test_can_terraform(void) {
+    land();
+    put_base(0, 5, 3, 1);
+    EXPECT(can_terraform(1, 5, 3, 0, 0), 0);  // a base
+    // Deep sea: raised, with the tech.
+    at(1, 3)->climate = 1 << 5;
+    EXPECT(can_terraform(1, 1, 3, 0, -1), 0);
+    achieved[7] = 1 << 1;
+    EXPECT(can_terraform(1, 1, 3, 0, -1), 20);
+    // The shelf: a farm first, then a mine for a base that wants minerals.
+    at(1, 3)->climate = 2 << 5;
+    achieved[8] = 1 << 1;
+    EXPECT(can_terraform(1, 1, 3, 0, 0), 4);
+    at(1, 3)->bits |= 0x8000;
+    EXPECT(can_terraform(1, 1, 3, 0, 0), 0);
+    achieved[9] = 1 << 1;
+    bases[0].state = 0x2000;
+    EXPECT(can_terraform(1, 1, 3, 0, 0), 6);
+    // Sea fungus: cleared by the AI, not for a human who hasn't asked.
+    at(1, 3)->bits = MAP_FUNGUS;
+    EXPECT(can_terraform(1, 1, 3, 0, -1), 0);
+    achieved[10] = 1 << 1;
+    EXPECT(can_terraform(1, 1, 3, 0, -1), 14);
+    humans = 1 << 1;
+    EXPECT(can_terraform(1, 1, 3, 0, -1), 0);
+    humans = 0;
+    for (int i = 7; i <= 10; i++) achieved[i] = 0;
+    bases[0].state = 0;
+}
+
+static void test_terraform_work(void) {
+    land();
+    put_unit(0, 1, 3, 1, 3);
+    // A road: two turns' work (four parts) at two parts a turn.
+    vehs[0].moves_spent = 0;
+    EXPECT(action_terraform(0, 5, 0), 1);  // this turn's work counts
+    vehs[0].moves_spent = 255;
+    EXPECT(action_terraform(0, 5, 0), 2);
+    // Another former on the same order in the stack hands over its work.
+    put_unit(1, 1, 3, 1, 3);
+    vehs[0].next_in_stack = 1, vehs[1].prev_in_stack = 0;
+    vehs[1].order = 9, vehs[1].movement_turns = 1;
+    vehs[0].movement_turns = 1;
+    EXPECT(action_terraform(0, 5, 1), 1);
+    EXPECT(at(1, 3)->bits & MAP_ROAD, MAP_ROAD);
+    EXPECT(vehs[0].order, 0);
+    EXPECT(vehs[1].order, 0);
+    EXPECT(vehs[1].movement_turns, 0);
+    EXPECT(vehs[0].movement_turns, 0);
+    EXPECT(sound_played, 1);  // the player's former: a sound, once a turn
+    EXPECT(waves, 1);
+    // Unfinished: the order kept, the work stored.
+    vehs[1].prev_in_stack = vehs[0].next_in_stack = -1;
+    at(3, 3)->bits = 0;
+    vehs[0].x = 3;
+    EXPECT(action_terraform(0, 5, 1), 0);
+    EXPECT(vehs[0].order, 9);
+    EXPECT(vehs[0].movement_turns, 2);
+    // In a base the work stops.
+    put_base(0, 3, 3, 1);
+    EXPECT(action_terraform(0, 0, 1), 0);
+    EXPECT(vehs[0].order, 0);
+}
+
+static void test_action(void) {
+    land();
+    put_unit(0, 1, 3, 1, 0);
+    vehs[0].order = 0x1a;
+    EXPECT(action(0), 0);
+    // The AI's go to: a step, and the order ends.
+    vehs[0].order = 0x58, vehs[0].waypoint_x[0] = 5, vehs[0].waypoint_y[0] = 3;
+    int n = steps;
+    EXPECT(action(0), 1);
+    EXPECT(steps, n + 1);
+    EXPECT(vehs[0].order, 0);
+}
+
+static void test_staple(void) {
+    land();
+    put_base(0, 5, 3, 2);
+    bases[0].state = BASE_STATE_DRONE_RIOT, bases[0].faction_former = 3;
+    action_staple(0);
+    EXPECT(bases[0].state, 0);
+    EXPECT(bases[0].nerve_staple_turns, 10);
+    EXPECT(bases[0].nerve_staple_count, 1);
+    EXPECT(atrocities, 1);
+    EXPECT(last_atrocity_type, 1);  // the worse, against its former owner
+    // After the eighth time it fails.
+    bases[0].nerve_staple_count = 8, bases[0].state = BASE_STATE_DRONE_RIOT;
+    action_staple(0);
+    EXPECT(bases[0].state, BASE_STATE_DRONE_RIOT);
+    EXPECT(bases[0].nerve_staple_turns, 10);
+    EXPECT(atrocities, 2);
+}
+
 int main(void) {
     game_map = &tiles_ptr, game_map_width = &width, game_map_height = &height, game_map_half_width = &half_width;
     game_map_area = &area, game_map_flat = &flat, game_state = &state;
@@ -316,11 +459,24 @@ int main(void) {
     game_order_veh = order_veh_, game_action_terraform = action_terraform_, game_say_loc = say_loc_;
     game_parse_says = parse_says_, game_netmsg_pop = netmsg_pop_, game_contiguous = contiguous_;
     for (int i = 0; i < SP_COUNT; i++) projects[i] = -1;
+    static int32_t find_dist, difficulty, prefs, more_prefs, tut_seen[2], rain_base = -1, rain_faction = -1, gender, plural;
+    game_parse_gender = &gender, game_parse_plural = &plural;
+    static struct res_info res = {.forest = {1, 2, 0, 0}};
+    static char *script = "script";
+    game_base_find_dist = &find_dist, game_difficulty = &difficulty, game_preferences = &prefs;
+    game_more_preferences = &more_prefs, game_tut_map_seen = tut_seen, game_terraform_sound_played = &sound_played;
+    game_rain_base = &rain_base, game_rain_faction = &rain_faction, game_res_info = &res, game_script_file = &script;
+    game_draw_tile = draw_, game_draw_tiles = draw_, game_base_win_check_veh = win_veh_, game_base_win_check_loc = win_loc_;
+    game_graphic_win_redraw = win_redraw_, game_wave_it = wave_, game_ambience = ambience_, game_atrocity = atrocity_;
+    game_popp = popp_;
     static struct rules_tech techs[TECH_COUNT];
     game_tech = techs;
     static struct rules_terraform terraform[TERRAFORM_COUNT];
     game_terraform = terraform;
     terraform[10].preq_tech = 4, terraform[6].preq_tech = 5;
+    terraform[16].preq_tech_sea = 7, terraform[0].preq_tech_sea = 8, terraform[2].preq_tech_sea = 9;
+    terraform[10].preq_tech_sea = 10, terraform[3].preq_tech_sea = terraform[1].preq_tech_sea = TECH_NONE - 1;
+    terraform[5].rate = terraform[6].rate = 2, terraform[0].rate = 4, terraform[5].bit = MAP_ROAD, terraform[0].bit = 0x8000;
     rules.move_rate_roads = 3, rules.tech_road_fungus = TECH_NONE;
     chassis[0] = (struct rules_chassis){.speed = 1, .triad = TRIAD_LAND};
     chassis[1] = (struct rules_chassis){.speed = 4, .triad = TRIAD_SEA, .cargo = 4};
@@ -334,6 +490,11 @@ int main(void) {
     test_go_to();
     test_road_to();
     test_passengers();
+    test_terraform_cost();
+    test_can_terraform();
+    test_terraform_work();
+    test_action();
+    test_staple();
     if (failures) return 1;
     printf("engine_move: ok\n");
     return 0;

@@ -116,6 +116,20 @@ HELD(int, pop2, 0, (char *label, char *picture, int base), (label, picture, base
 HELD(void, boom, (void)0, (int x, int y, int flags), (x, y, flags), (c_.arg[0] = x, c_.arg[1] = y, c_.arg[2] = flags),
      orig_boom(a_[0], a_[1], a_[2]))
 HELD(void, clock_wait, (void)0, (int ms), (ms), (c_.arg[0] = ms), orig_clock_wait(a_[0]))
+HELD(int, ambience, 0, (int sound), (sound), (c_.arg[0] = sound), orig_ambience(a_[0]))
+// A sound at a square, as a missile's launch: held, it answers 0.
+static int(__attribute__((thiscall)) * orig_fx_play_loc)(void *fx, int sound, int x, int y);
+static struct hook_stats stats_fx_play_loc = {"(held fx_play_loc)"};
+static void replay_fx_play_loc(const struct hook_ui_call *c) {
+    orig_fx_play_loc((void *)(intptr_t)c->arg[3], c->arg[0], c->arg[1], c->arg[2]);
+}
+static int __attribute__((thiscall)) shadow_fx_play_loc(void *fx, int sound, int x, int y) {
+    if (!hooks_protecting()) return orig_fx_play_loc(fx, sound, x, y);
+    stats_fx_play_loc.calls++;
+    struct hook_ui_call c = {.name = "fx_play_loc", .replay = replay_fx_play_loc, .arg = {sound, x, y, (int)(intptr_t)fx}};
+    hooks_ui_hold(&c);
+    return 0;
+}
 
 // Moving the map to a square: held, it answers 0 (not already in view).
 static int(__attribute__((thiscall)) * orig_console_focus)(void *console, int x, int y, int faction);
@@ -227,6 +241,8 @@ HELD_THIS(base_win_zoom, (void *self, int base, int unk), (self, base, unk), (c_
 HELD_THIS(base_win_check_base, (void *self, int base), (self, base), c_.arg[0] = base, orig_base_win_check_base(SELF, a_[0]))
 HELD_THIS(base_win_check_loc, (void *self, int x, int y, int unk), (self, x, y, unk),
           (c_.arg[0] = x, c_.arg[1] = y, c_.arg[2] = unk), orig_base_win_check_loc(SELF, a_[0], a_[1], a_[2]))
+// And of a unit whose state changed, as a former's work.
+HELD_THIS(base_win_check_veh, (void *self, int veh), (self, veh), c_.arg[0] = veh, orig_base_win_check_veh(SELF, a_[0]))
 // A notice in the message bar, such as a unit's promotion.
 HELD_THIS(netmsg_pop, (void *self, char *label, int delay, int unk, char *sound), (self, label, delay, unk, sound),
           (hooks_ui_text(&c_, 0, label), hooks_ui_text(&c_, 1, sound), c_.arg[0] = delay, c_.arg[1] = unk),
@@ -260,6 +276,8 @@ HELD(void, mon_secret_project, (void)0, (int faction, int project), (faction, pr
      (c_.arg[0] = faction, c_.arg[1] = project), orig_mon_secret_project(a_[0], a_[1]))
 HELD(void, mon_winning_trans, (void)0, (int faction, int other), (faction, other),
      (c_.arg[0] = faction, c_.arg[1] = other), orig_mon_winning_trans(a_[0], a_[1]))
+HELD(void, mon_colony_founded, (void)0, (int faction, char *name), (faction, name),
+     (c_.arg[0] = faction, c_.arg[1] = (int)(intptr_t)name), orig_mon_colony_founded(a_[0], PTR(1)))
 
 // A tech given away (by a secret project), with its announcement and the
 // window that shows it, which allocates as the monuments do.
@@ -383,5 +401,9 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x47a890, netmsg_pop, SEH_PROLOGUE),
     QUIET_HOOK(0x55a150, veh_scoot, SEH_PROLOGUE),
     QUIET_HOOK(0x446a00, fx_play, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0x90, 0x64, 0x9a, 0x00),  // mov eax, [0x9a6490]
+    QUIET_HOOK(0x476b70, mon_colony_founded, MON_PROLOGUE),
+    QUIET_HOOK(0x446b40, ambience, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0x90, 0x64, 0x9a, 0x00),     // mov eax, [0x9a6490]
+    QUIET_HOOK(0x446960, fx_play_loc, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0x90, 0x64, 0x9a, 0x00),  // mov eax, [0x9a6490]
+    QUIET_HOOK(0x41a8b0, base_win_check_veh, PUSH_EBP_MOV_EBP_ESP, 0x56, 0x57, 0x8b, 0xf1),  // push esi; push edi; mov esi, ecx
 };
 struct hook_module quiet_module = {"quiet", quiet_hooks, HOOK_COUNT(quiet_hooks), NULL, NULL, -1};
