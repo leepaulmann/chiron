@@ -1070,6 +1070,7 @@ extern int (*game_stack_fix)(int veh);
 extern int (*game_veh_kill)(int veh);
 extern int (*game_veh_init)(int unit, int faction, int x, int y);
 extern void(__attribute__((thiscall)) * game_map_win_clear_terrain)(void *win);
+extern void(__attribute__((thiscall)) * game_map_win_draw_map)(void *win, int unk);  // redraws the whole map
 extern void(__attribute__((thiscall)) * game_world_win_clear_terrain)(void *win);
 extern void (*game_draw_map)(int unk);
 extern void (*game_draw_tile)(int x, int y, int unk);
@@ -1287,16 +1288,18 @@ extern int (*game_can_terraform)(int faction, int x, int y, int unk, int base);
 extern int (*game_terrain_avail)(int terraform, int sea, int faction);
 // The path finder's object: a table the size of the map, and the x and y
 // lists it uses as a queue (squares are added at `tail` and taken from
-// `head`).
+// `head`). Path_find keeps the table it filled from a destination, and the
+// destination, flags, faction and unit type it filled it for, to reuse it.
+// `faction` is the owner of the last unit Path_move moved.
 struct game_path {
     int32_t *map;
     int16_t *x, *y;
     int32_t tail, head;
     int32_t faction;
     int32_t x_dst, y_dst;
-    int32_t unk_20;
+    int32_t flags;
     int32_t faction2;
-    int32_t veh;
+    int32_t proto;
 };
 _Static_assert(sizeof(struct game_path) == 0x2c, "game_path size");
 extern struct game_path *game_path;
