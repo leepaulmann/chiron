@@ -56,6 +56,11 @@ static int base_find_stub(int x, int y) { return found_base; }
 static int base_find3_stub(int x, int y, int f, int r, int o, int s) { return -1; }
 static void spot_all_stub(int v, int u) { spotted = v; }
 static int rand_stub(void) { return rand_value; }
+static int base_here = -1;
+static int base_at_stub(int x, int y) { return base_here; }
+static char *label_list[400], **labels_ptr = label_list;
+static int32_t mod_counts[4], mods[8], morales[2];
+static char mod_labels[8][80], *terrain;
 
 int main(void) {
     game_map = &tiles_ptr, game_map_width = &width, game_map_height = &height, game_map_half_width = &half_width;
@@ -576,6 +581,97 @@ int main(void) {
     protos[3].weapon = 1, protos[3].flags = PROTO_FLAG_ACTIVE;
     EXPECT(wants_prototype(3, 1), 0);
     protos[3] = (struct unit_proto){0};
+
+    // The battle report: up to 4 non-zero modifiers a side.
+    game_battle_mod_count = mod_counts, game_battle_mod = mods, game_battle_mod_label = mod_labels;
+    game_battle_state = &mod_counts[2], game_battle_terrain = &terrain, game_battle_morale = morales;
+    game_labels = &labels_ptr, game_base_at = base_at_stub;
+    label_list[91] = "Rocky", label_list[338] = "Fungus", label_list[291] = "Forest";
+    mod_counts[0] = 3, mod_counts[2] = 1;
+    battle_init();
+    EXPECT(mod_counts[0] + mod_counts[2], 0);
+    add_bat(1, 25, "Rocky");
+    add_bat(1, 0, "None");
+    EXPECT(mod_counts[1], 1);
+    EXPECT(mods[4], 25);
+    EXPECT(strcmp(mod_labels[4], "Rocky"), 0);
+    mod_counts[0] = 4;
+    add_bat(0, 10, "Full");
+    EXPECT(mod_counts[0], 4);
+    EXPECT(mods[3], 0);
+
+    // Terrain in combat: rocks, fungus (more for a faction with the Pholus
+    // Mutagen, none against native life), forest against land units only.
+    veh_count = 2;
+    vehs[0] = (struct veh){.x = 4, .y = 2, .proto = 64, .faction = 1, .home_base = -1, .next_in_stack = -1, .prev_in_stack = -1};
+    vehs[1] = (struct veh){.x = 5, .y = 3, .proto = 64, .faction = 2, .home_base = -1, .next_in_stack = -1, .prev_in_stack = -1};
+    struct map_tile *sq = &tiles[2 + 2 * (W / 2)];
+    EXPECT(defense_value(1, 4, 2, 0, 1), 2);
+    sq->rocky_lock = 0x80;
+    EXPECT(defense_value(1, 4, 2, 0, 1), 3);
+    EXPECT(strcmp(terrain, "Rocky"), 0);
+    sq->rocky_lock = 0, sq->bits = MAP_FUNGUS;
+    EXPECT(defense_value(1, 4, 2, 0, 1), 3);
+    EXPECT(strcmp(terrain, "Fungus"), 0);
+    projects[16] = 1;  // the Pholus Mutagen, faction 1's
+    EXPECT(defense_value(1, 4, 2, 0, 1), 4);
+    EXPECT(defense_value(2, 4, 2, 1, 0), 2);  // its units attack in fungus as natives do
+    EXPECT(defense_value(2, 4, 2, 1, -1), 3);
+    projects[16] = -1, vehs[1].faction = 0;
+    EXPECT(defense_value(1, 4, 2, 0, 1), 2);
+    vehs[1].faction = 2, sq->bits = MAP_FOREST;
+    EXPECT(defense_value(1, 4, 2, 0, -1), 3);
+    vehs[1].proto = 65;
+    EXPECT(defense_value(1, 4, 2, 0, 1), 2);
+    sq->climate = 2 << 5;
+    EXPECT(defense_value(1, 4, 2, 0, -1), 2);
+    sq->climate = 3 << 5, sq->bits = 0, vehs[1].proto = 64;
+
+    // Strengths: the weapon or armor times morale plus 6; a Children's
+    // Creche at the base takes MORALE off, softened.
+    int m = morale_veh(0, 1, 0);
+    EXPECT(get_basic_offense(0, 1, 0, 0, 0), offense_proto(64, 1, 0) * (m + 6) * 4);
+    EXPECT(morales[0], m);
+    base_here = 1, bases[1].facilities_built[0] = 1 << 2, factions[1].se[SE_MORALE] = -3;
+    m = morale_veh(0, 1, 0);
+    EXPECT(get_basic_offense(0, 1, 0, 0, 0), offense_proto(64, 1, 0) * (m + 1 + 2 + 6) * 4);
+    EXPECT(morales[0], m + 3);
+    factions[1].se_pending[SE_MORALE] = 2;
+    int b1 = m + 4 > 6 ? 6 : m + 4;
+    EXPECT(get_basic_offense(0, 1, 0, 0, 1), offense_proto(64, 1, 0) * (b1 + 6) * 4);
+    EXPECT(morales[1], b1);
+    base_here = -1, bases[1].facilities_built[0] = 0, factions[1].se[SE_MORALE] = 0, factions[1].se_pending[SE_MORALE] = 0;
+    m = morale_veh(1, 1, 0);
+    m = m < 1 ? 1 : m;
+    EXPECT(get_basic_defense(1, 0, 0, 0), armor_proto(64, 0, 0) * (m + 6));
+    EXPECT(morales[1], m);
+    protos[64].plan = 12;  // an alien artifact
+    EXPECT(get_basic_defense(1, 0, 0, 0), 1);
+    protos[64].plan = 0;
+
+    // Moves: a road's cost along roads, none between bases, rocks and
+    // forest unless fast, and fungus.
+    struct map_tile *to = &tiles[2 + 3 * (W / 2)];  // (5, 3), next to (4, 2)
+    EXPECT(hex_cost(64, 1, 4, 2, 5, 3, 0), 3);
+    sq->bits = to->bits = MAP_ROAD;
+    EXPECT(hex_cost(64, 1, 4, 2, 5, 3, 0), 1);
+    EXPECT(hex_cost(64, 0, 4, 2, 5, 3, 0), 3);
+    sq->bits = MAP_BASE, to->bits = 0x8;  // a mag tube
+    EXPECT(hex_cost(64, 1, 4, 2, 5, 3, 0), 0);
+    sq->bits = 0, to->bits = MAP_FOREST, to->rocky_lock = 0x80;
+    EXPECT(hex_cost(64, 1, 4, 2, 5, 3, 0), 9);
+    EXPECT(hex_cost(64, 1, 4, 2, 5, 3, 1), 3);
+    to->bits = MAP_FUNGUS, to->rocky_lock = 0;
+    EXPECT(hex_cost(64, 1, 4, 2, 5, 3, 0), 9);
+    EXPECT(hex_cost(64, 0, 4, 2, 5, 3, 0), 1);
+    factions[1].se[SE_PLANET] = 1;
+    EXPECT(hex_cost(64, 1, 4, 2, 5, 3, 0), speed_proto(64));
+    factions[1].se[SE_PLANET] = 0, to->bits = MAP_RIVER, sq->bits = MAP_RIVER;
+    EXPECT(hex_cost(64, 1, 4, 2, 5, 3, 0), 1);
+    sq->bits = 0, to->bits = 0, to->climate = 2 << 5;
+    EXPECT(hex_cost(65, 1, 4, 2, 5, 3, 0), 3);
+    to->climate = 3 << 5;
+    veh_count = 0;
     if (failures) return 1;
     printf("engine_veh: all tests passed\n");
     return 0;

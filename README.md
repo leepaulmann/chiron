@@ -172,7 +172,9 @@ module at a time. So far:
   transports and carriers, for the player and the AI; creating units, and
   the AI's choice of new units to send against its target; whether a unit
   stops on spotting another, waking units on board, and whether a faction
-  wants a new design.
+  wants a new design; an attacker's and a defender's strength with their
+  morale in battle, the terrain's defense, the modifiers a battle report
+  lists, and what each move costs.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once

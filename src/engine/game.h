@@ -806,6 +806,14 @@ extern int32_t *game_halted;                  // non-zero: don't redraw
 extern int32_t *game_current_faction;         // the faction the player is
 extern int32_t *game_control_turn;
 extern int32_t *game_battle_state;            // non-zero: no messages now
+// A battle's report: the modifiers listed for each side (count, then up to 4
+// values and 80-byte labels each, attacker first), the defender's terrain
+// label, and both sides' morale as get_basic_offense and _defense found it.
+extern int32_t *game_battle_mod_count;        // [2], followed by game_battle_state and one more flag
+extern int32_t *game_battle_mod;              // [2 * 4]
+extern char (*game_battle_mod_label)[80];     // [2 * 4]
+extern char **game_battle_terrain;
+extern int32_t *game_battle_morale;           // [2]
 extern uint32_t *game_fungus_clears;          // map_tile.bits fungus removes
 // world_rainfall(): a base near a square whose rainfall changed, and the
 // faction of a base near one that got drier; -1 for none.

@@ -32,7 +32,8 @@ enum {  // unit_proto.abilities
 };
 enum {
     BSC_LOCUSTS_OF_CHIRON = 10, BSC_SEALURK = 14, BSC_SPORE_LAUNCHER = 15, BSC_FUNGAL_TOWER = 19,
-    BSC_UNITY_MINING_LASER = 20, BASIC_PROTOS = 64,
+    BSC_UNITY_MINING_LASER = 20, BASIC_PROTOS = 64, BSC_MIND_WORMS = 8, BSC_ISLE_OF_THE_DEEP = 9,
+    CHASSIS_HOVERTANK = 2, MAP_MAGTUBE = 0x8,
     WEAPON_PROBE = 11, WEAPON_TECTONIC = 21, WMODE_TRANSPORT = 7, WMODE_PROBE = 11,
     MAP_AIRBASE = 0x40000, VEH_STATE_UNK_4000000 = 0x4000000, VEH_STATE_MONOLITH_USED = 0x100,
     VEH_STATE_UNK_200 = 0x200, VEH_STATE_UNK_10000 = 0x10000, VEH_STATE_UNK_20000 = 0x20000, VEH_STATE_UNK_40000 = 0x40000,
@@ -980,6 +981,194 @@ int wants_prototype(int proto, int faction) {
     return 1;
 }
 
+// ---- Combat strengths and moves ------------------------------------------------
+
+// Clears a battle report: the modifiers listed for each side, and the two
+// flags after them (game_battle_state, which keeps messages back while a
+// battle runs, among them).
+void battle_init(void) {
+    game_battle_mod_count[0] = game_battle_mod_count[1] = 0;
+    game_battle_state[0] = game_battle_state[1] = 0;
+}
+
+// Lists a non-zero modifier with its label on one side of the battle
+// report, up to 4 for each side. Each label has 80 bytes, where OpenSMACX
+// counts 20.
+void add_bat(int side, int value, const char *label) {
+    int n = game_battle_mod_count[side];
+    if (!value || n >= 4) return;
+    game_battle_mod_count[side] = n + 1;
+    game_battle_mod[side * 4 + n] = value;
+    strcpy(game_battle_mod_label[side * 4 + n], label);
+}
+
+// Whether the unit's design is a basic psi unit, read even when negative.
+static int psi_basic(int proto) { return game_weapons[proto_of(proto)->weapon].offense < 0 && proto < BASIC_PROTOS; }
+
+// The defender's terrain in combat, in halves: 2 at sea, in a base, and in
+// fungus on land against native life, a faction with the Pholus Mutagen or
+// a basic psi unit; otherwise 3 on rocky ground; in fungus on land, for a
+// unit that doesn't fly, 3, or 4 for a basic psi unit or a faction with the
+// Pholus Mutagen; and 3 in a forest against a land unit or none. The
+// terrain's label for the battle report is left in game_battle_terrain
+// ("Rocky" unless fungus or forest counted).
+int defense_value(int faction, int x, int y, int veh_def, int veh_att) {
+    const struct map_tile *t = square(x, y);
+    int alt = t->climate & 0xe0;
+    if (alt < ALT_SHORE_LINE << 5) return 2;
+    if ((t->bits & MAP_BASE) && (t->owner_site & 0xf) < FACTION_COUNT) return 2;
+    const struct veh *A = &game_vehs[veh_att];
+    int fungus = (t->bits & MAP_FUNGUS) && alt >= 0x40;
+    if (fungus && veh_att >= 0 && (!A->faction || owns_project(SP_PHOLUS_MUTAGEN, A->faction) || psi_basic(A->proto)))
+        return 2;
+    *game_battle_terrain = (*game_labels)[91];
+    int d = (t->rocky_lock & 0xc0) > 0x40;
+    if (fungus && !d && triad(game_vehs[veh_def].proto) != TRIAD_AIR
+        && !(veh_att >= 0 && (psi_basic(A->proto) || owns_project(SP_PHOLUS_MUTAGEN, A->faction)))) {
+        *game_battle_terrain = (*game_labels)[338];
+        d = owns_project(SP_PHOLUS_MUTAGEN, faction) || psi_basic(game_vehs[veh_def].proto) ? 2 : 1;
+    }
+    if ((t->bits & MAP_FOREST) && !d && (veh_att < 0 || triad(A->proto) == TRIAD_LAND)) {
+        *game_battle_terrain = (*game_labels)[291];
+        d = 1;
+    }
+    return d + 2;
+}
+
+// MORALE as a Children's Creche or Brood Pit softens it, between -4 and
+// `most`, less one when it is -2 or below.
+static int morale_softened(int faction, int most) {
+    int m = game_factions[faction].se[SE_MORALE];
+    m = m < -4 ? -4 : m > most ? most : m;
+    return m <= -2 ? m + 1 : m;
+}
+
+// A unit's morale in its base: a Children's Creche adds one and takes
+// MORALE (softened) off, as does a Brood Pit for a native unit; with both,
+// a native unit only gets one more.
+static int morale_at_home(int m, int base, int faction, int proto, int creche_most) {
+    if (built(base, FAC_CHILDREN_CRECHE)) {
+        m += 1 - morale_softened(faction, creche_most);
+        if (built(base, FAC_BROOD_PIT) && native(proto)) m++;
+    } else if (built(base, FAC_BROOD_PIT) && native(proto)) {
+        m += 1 - morale_softened(faction, 4);
+    }
+    return m;
+}
+
+// An attacker's strength: its weapon's (with PSI and the Dream Twister in
+// psi combat) times its morale plus 6, times 4. In a battle (`battle`)
+// morale counts a pending MORALE of 2 or 3 and native defenders as one
+// more and soporific gas as two less when the attacker is in a base, and
+// is held between 1 and 6. The morale is left in game_battle_morale.
+int get_basic_offense(int veh_att, int veh_def, int psi, int bombard, int battle) {
+    const struct veh *A = &game_vehs[veh_att];
+    int f = A->faction;
+    int m = f ? morale_veh(veh_att, 1, 0) : morale_alien(veh_att, veh_def >= 0 ? game_vehs[veh_def].faction : -1);
+    int b = game_base_at(A->x, A->y);
+    if (b >= 0) {
+        m = morale_at_home(m, b, f, A->proto, 4);
+        if (battle) {
+            int p = game_factions[f].se_pending[SE_MORALE];
+            if (p >= 2 && p <= 3) m++;
+            if (veh_def >= 0) {
+                const struct veh *D = &game_vehs[veh_def];
+                if (!D->faction)
+                    m++;
+                else if (!native(A->proto) && !has_abil(A->proto, ABL_DISSOCIATIVE_WAVE)
+                         && has_abil(D->proto, ABL_SOPORIFIC_GAS))
+                    m -= 2;
+            }
+        }
+    }
+    if (battle) m = m < 1 ? 1 : m > 6 ? 6 : m;
+    game_battle_morale[battle != 0] = m;
+    int v = offense_proto(A->proto, veh_def, bombard);
+    if (psi) v = psi_factor(v, f, 1, 0);
+    return v * (m + 6) * 4;
+}
+
+// A defender's strength: its armor's (with PSI, the Neural Amplifier and,
+// for a fungal tower, half again in psi combat) times its morale plus 6.
+// Morale in a base counts a pending MORALE of 2 or 3 and a native attacker
+// as one more (OpenSMACX adds a headquarters, which the original doesn't);
+// soporific gas takes two off anywhere; it is held between 1 and 6 and left
+// in game_battle_morale. An alien artifact, and a probe team with armor 1
+// against anything but a probe team, defend at 1; that test reads the
+// attacker even when there is none.
+int get_basic_defense(int veh_def, int veh_att, int psi, int bombard) {
+    const struct veh *D = &game_vehs[veh_def], *A = &game_vehs[veh_att];
+    int f = D->faction;
+    int m = f ? morale_veh(veh_def, 1, 0) : morale_alien(veh_def, veh_att >= 0 ? A->faction : -1);
+    int b = game_base_at(D->x, D->y);
+    if (b >= 0) {
+        m = morale_at_home(m, b, f, D->proto, 0);
+        int p = game_factions[f].se_pending[SE_MORALE];
+        if (p >= 2 && p <= 3) m++;
+        if (veh_att >= 0 && !A->faction) m++;
+    }
+    if (veh_att >= 0 && A->faction && !native(D->proto) && !has_abil(D->proto, ABL_DISSOCIATIVE_WAVE)
+        && has_abil(A->proto, ABL_SOPORIFIC_GAS))
+        m -= 2;
+    m = m < 1 ? 1 : m > 6 ? 6 : m;
+    game_battle_morale[1] = m;
+    const struct unit_proto *P = proto_of(D->proto);
+    if (P->plan == PLAN_ARTIFACT) return 1;
+    if (P->plan == PLAN_PROBE && game_armor[P->armor].defense == 1 && proto_of(A->proto)->plan != PLAN_PROBE) return 1;
+    int v = armor_proto(D->proto, veh_att, bombard);
+    if (psi) v = psi_factor(v, f, 0, D->proto == BSC_FUNGAL_TOWER);
+    return v * (m + 6);
+}
+
+// What moving from one square to the next costs a design (or none, -1),
+// in the rules' road moves. Ships pay three in fungus on the shelf, but
+// not an isle of the deep (OpenSMACX also spares the sealurk) or with the
+// Xenoempathy Dome; anything else at sea, from the sea, or not on land
+// pays one move. On land, for a faction other than native life: none
+// between bases and mag tubes; a road's cost along roads and bases (and
+// from fungus with the Dome); and along a river diagonally. Fungus costs
+// the road's with the Dome, for native life and for mind worms and spore
+// launchers. Hovertanks and antigrav units pay one move; others one more
+// each for rocks and forest unless `fast`, and in fungus, unless they are
+// basic psi units, two more, or (for formers, artifacts or with PLANET
+// above 0) at least their speed.
+int hex_cost(int proto, int faction, int xs, int ys, int xd, int yd, int fast) {
+    const struct map_tile *s = square(xs, ys), *t = square(xd, yd);
+    uint32_t from = s->bits, to = t->bits;
+    int mr = game_rules_basic->move_rate_roads;
+    int alt = t->climate & 0xe0;
+    if (alt < ALT_SHORE_LINE << 5) {
+        if ((to & MAP_FUNGUS) && alt == 0x40 && triad(proto) == TRIAD_SEA && proto != BSC_ISLE_OF_THE_DEEP
+            && !owns_project(SP_XENOEMPATHY_DOME, faction))
+            return mr * 3;
+        return mr;
+    }
+    if ((s->climate & 0xe0) < ALT_SHORE_LINE << 5) return mr;
+    if (proto >= 0 && triad(proto) != TRIAD_LAND) return mr;
+    if ((from & (MAP_BASE | MAP_MAGTUBE)) && (to & (MAP_BASE | MAP_MAGTUBE)) && faction) return 0;
+    if (((from & (MAP_BASE | MAP_ROAD)) || ((from & MAP_FUNGUS) && faction > 0 && owns_project(SP_XENOEMPATHY_DOME, faction)))
+        && (to & (MAP_BASE | MAP_ROAD)) && faction)
+        return 1;
+    if (faction >= 0
+        && (owns_project(SP_XENOEMPATHY_DOME, faction) || !faction || proto == BSC_MIND_WORMS || proto == BSC_SPORE_LAUNCHER)
+        && (to & MAP_FUNGUS))
+        return 1;
+    if ((from & MAP_RIVER) && (to & MAP_RIVER) && x_dist(xs, xd) == 1 && (ys - yd == 1 || yd - ys == 1) && faction)
+        return 1;
+    const struct unit_proto *P = proto_of(proto);
+    if (P->chassis == CHASSIS_HOVERTANK || has_abil(proto, ABL_ANTIGRAV_STRUTS)) return mr;
+    int cost = mr;
+    if ((t->rocky_lock & 0xc0) > 0x40 && !fast) cost += mr;
+    if ((to & MAP_FOREST) && !fast) cost += mr;
+    if (faction && (to & MAP_FUNGUS) && !psi_basic(proto)) {
+        if (P->plan != PLAN_TERRAFORM && P->plan != PLAN_ARTIFACT && game_factions[faction].se[SE_PLANET] <= 0)
+            return cost + 2 * mr;
+        int sp = speed_proto(proto);
+        return cost > sp ? cost : sp;
+    }
+    return cost;
+}
+
 // A transport's cargo: the units of its faction on its square that it can
 // carry (land units that aren't transports themselves, and for a carrier
 // air units that aren't carriers), up to its capacity (any number for the
@@ -1334,6 +1523,18 @@ SHADOW1(VEH, int, want_monolith, int)
 SHADOW3(VEH, int, want_to_wake, int, int, int)
 SHADOW_WRITER(VEH, void, wake_stack, (int a), (a), WRITES_STACKS, "%d", a)
 SHADOW2(VEH, int, wants_prototype, int, int)
+SHADOW_WRITER(VEH, void, battle_init, (void), (), WRITES(game_battle_mod_count, 16), "%s", "")
+SHADOW_WRITER(VEH, void, add_bat, (int a, int b, const char *c), (a, b, c),
+              (WRITES(game_battle_mod_count, 8), WRITES(game_battle_mod, 8 * 4), WRITES(game_battle_mod_label, 8 * 80)),
+              "%d, %d, \"%s\"", a, b, c)
+SHADOW_WRITER(VEH, int, defense_value, (int a, int b, int c, int d, int e), (a, b, c, d, e), WRITES(game_battle_terrain, 4),
+              "%d, %d, %d, %d, %d", a, b, c, d, e)
+SHADOW_WRITER(VEH, int, get_basic_offense, (int a, int b, int c, int d, int e), (a, b, c, d, e),
+              WRITES(game_battle_morale, 8), "%d, %d, %d, %d, %d", a, b, c, d, e)
+SHADOW_WRITER(VEH, int, get_basic_defense, (int a, int b, int c, int d), (a, b, c, d), WRITES(game_battle_morale, 8),
+              "%d, %d, %d, %d", a, b, c, d)
+SHADOW_FN(VEH, int, hex_cost, (int a, int b, int c, int d, int e, int f, int g), (a, b, c, d, e, f, g),
+          "%d, %d, %d, %d, %d, %d, %d", a, b, c, d, e, f, g)
 // Killing a unit renumbers units all over the game's memory.
 SHADOW_WRITER(VEH, int, veh_init, (int a, int b, int c, int d), (a, b, c, d), hooks_writes_game(&w_), "%d, %d, %d, %d", a,
               b, c, d)
@@ -1506,6 +1707,7 @@ static const int varied_projects[] = {SP_COMMAND_NEXUS, SP_XENOEMPATHY_DOME, SP_
                                       SP_DREAM_TWISTER, SP_TELEPATHIC_MATRIX, SP_VOICE_OF_PLANET,
                                       SP_NETHACK_TERMINUS, SP_CLOUDBASE_ACADEMY, SP_SPACE_ELEVATOR};
 enum { VARIED = sizeof varied_projects / sizeof varied_projects[0] };
+static void sweep_battle(int v, int o, int k);
 static void sweep_varied(void) {
     static const int psi[5] = {0, 10, 25, -20, 50};
     struct saved {
@@ -1600,6 +1802,19 @@ static void sweep_varied(void) {
         C->missile = missile;
         V->proto = proto;
     }
+    // Units in battle, some of them as native life's designs, for the
+    // Brood Pit.
+    for (int v = (t & 3); v < *game_veh_count; v += 4) {
+        if (!stack_sound(v)) continue;
+        struct veh *V = &game_vehs[v];
+        int o = (v * 7 + t) % *game_veh_count;
+        sweep_battle(v, o, v + t);
+        int16_t proto = V->proto;
+        V->proto = (v & 4) ? BSC_SPORE_LAUNCHER : BSC_MIND_WORMS;
+        check_get_basic_offense(v, o, 1, 0, v & 8);
+        check_get_basic_defense(v, o, 1, 0);
+        V->proto = proto;
+    }
     for (int i = 0; i < VARIED; i++) game_secret_projects[varied_projects[i]] = held[i];
     for (int b = 0; b < bases; b++) memcpy(game_bases[b].facilities_built, facilities[b], sizeof facilities[b]);
     for (int f = 0; f < FACTION_COUNT; f++) {
@@ -1609,6 +1824,40 @@ static void sweep_varied(void) {
         F->se[SE_MORALE] = saved[f].se_morale, F->se[SE_PROBE] = saved[f].se_probe;
         F->se_pending[SE_MORALE] = saved[f].pending_morale, F->se_pending[SE_SUPPORT] = saved[f].pending_support;
     }
+}
+
+// A unit's strengths against another unit and none, its terrain's defense
+// there and around it, and its moves out of its square (also as native
+// life and with no design).
+static void sweep_battle(int v, int o, int k) {
+    const struct veh *V = &game_vehs[v];
+    check_get_basic_offense(v, o, k & 1, (k >> 1) & 1, 1);
+    check_get_basic_offense(v, o, 0, 0, 0);
+    check_get_basic_offense(v, -1, (k >> 2) & 1, 0, k & 2);
+    check_get_basic_defense(v, o, k & 1, (k >> 1) & 1);
+    check_get_basic_defense(v, -1, (k >> 2) & 1, 0);
+    check_defense_value(V->faction, V->x, V->y, v, o);
+    check_defense_value(V->faction, V->x, V->y, v, -1);
+    for (int i = 1; i <= 8; i++) {
+        int x = xrange(V->x + game_radius_x[i]), y = V->y + game_radius_y[i];
+        if (!on_map_(x, y)) continue;
+        check_hex_cost(V->proto, V->faction, V->x, V->y, x, y, (k + i) & 1);
+        check_hex_cost(game_vehs[o].proto, (k + i) % FACTION_COUNT, V->x, V->y, x, y, 0);
+        if (i & 1) check_hex_cost(i & 2 ? -1 : V->proto, 0, x, y, V->x, V->y, 0);
+        if (!(i & 3)) check_defense_value((k + i) % FACTION_COUNT, x, y, v, i & 4 ? o : -1);
+    }
+}
+
+// The battle report: each side's modifiers from empty to full.
+static void sweep_battle_report(void) {
+    int32_t held[2] = {game_battle_mod_count[0], game_battle_mod_count[1]};
+    check_battle_init();
+    for (int n = 0; n <= 5; n++)
+        for (int side = 0; side < 2; side++) {
+            game_battle_mod_count[side] = n;
+            check_add_bat(side, n - 2, "Chiron");
+        }
+    game_battle_mod_count[0] = held[0], game_battle_mod_count[1] = held[1];
 }
 
 // Waking: some units spotting others for each faction, under each of the
@@ -1735,6 +1984,9 @@ static void veh_sweep(void) {
         check_abil_index(1u << i);
         check_abil_index((1u << i) | 0x80000000u | (uint32_t)turn << 16);
     }
+    for (int v = ((turn + 2) & 3); v < vehs; v += 4)
+        if (stack_sound(v)) sweep_battle(v, (v * 5 + turn) % vehs, v * 3 + turn);
+    sweep_battle_report();
     sweep_wake();
     sweep_varied();
     sweep_stacks();
@@ -1802,6 +2054,12 @@ static const struct hook veh_hooks[] = {
     HOOK(0x5b5ea0, want_to_wake, PUSH_EBP_MOV_EBP_ESP, 0x56, 0x57),                   // push esi; push edi
     HOOK(0x5b6060, wake_stack, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),               // mov eax, [ebp+8]
     HOOK(0x5be100, wants_prototype, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),          // sub esp, 12
+    HOOK(0x501d30, battle_init, 0x33, 0xc0, 0xa3, 0x14, 0x56, 0x91, 0x00),             // xor eax, eax; mov [...], eax
+    HOOK(0x501d50, add_bat, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x55, 0x0c),                 // mov edx, [ebp+12]
+    HOOK(0x5010c0, defense_value, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0xf0, 0xfa, 0x68, 0x00),  // mov eax, [map_half_width]
+    HOOK(0x5015b0, get_basic_offense, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),        // sub esp, 12
+    HOOK(0x501940, get_basic_defense, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),        // sub esp, 8
+    HOOK(0x593510, hex_cost, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x0d, 0xf0, 0xfa, 0x68, 0x00),  // push ecx; mov ecx, [...]
     HOOK(0x5c03d0, veh_init, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),                 // sub esp, 8
     HOOK(0x5b8ee0, stack_veh, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x28),                // sub esp, 40
     HOOK(0x5c08c0, veh_kill, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),                 // sub esp, 8
