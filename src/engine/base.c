@@ -13,6 +13,7 @@
 
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "game.h"
@@ -1581,6 +1582,269 @@ void base_mark(int base) {
     for (int f = 0; f < FACTION_COUNT; f++) game_del_site(f, 8, x, y, 3);
 }
 
+static inline char *text(uint32_t addr) { return (char *)game_at(addr); }
+
+static void set_facility(struct base *b, int fac) {
+    int offset;
+    uint32_t mask;
+    bitmask(fac, &offset, &mask);
+    b->facilities_built[offset] |= (uint8_t)mask;
+}
+
+// Founds a base for the faction at (x, y): the square marked and owned, the
+// faction's counts raised, the base's fields set (size 3 with the
+// Planetary Transit System, else 1), a name from the faction's file, its
+// first production, and the facilities it starts with. On the first turn
+// its first unit is half paid for (a colony pod, or for higher difficulty
+// levels a formers unit, unless it can build the first design); later a
+// faction not short of SUPPORT starts with the minerals the rules let it
+// keep. A faction's first base gets headquarters, and a size and further
+// facilities by how late it is founded (by the faction's rules in a
+// network game). Sea bases get a pressure dome, and the faction's free
+// facilities (outright, or once their tech is known) and those its techs
+// grant are built. Then its radius is marked, territory redone and the
+// base worked out as the current base. Its number, or -1 at the limit.
+int base_init(int faction, int x, int y) {
+    if (*game_base_count >= BASE_COUNT) return -1;
+    struct map_tile *t = tile(x, y);
+    int region = t->region;
+    bit_set(x, y, MAP_BASE, 1);
+    owner_set(x, y, faction);
+    synch_bit(x, y, faction);
+    int id = (*game_base_count)++;
+    struct faction_data *F = &game_factions[faction];
+    const struct faction_def *D = &game_faction_defs[faction];
+    F->base_count++;
+    F->region_total_bases[region]++;
+    game_replay_base(0, x, y, faction);
+    struct base *N = &game_bases[id];
+    N->x = (int16_t)x, N->y = (int16_t)y;
+    N->faction_former = (uint8_t)faction, N->faction = (uint8_t)faction;
+    N->nerve_staple_turns = 0, N->assimilation_turns = 0, N->ai_plan = 0;
+    int pts = game_secret_projects[SP_PLANETARY_TRANSIT_SYSTEM];
+    N->pop_size = pts >= 0 && game_bases[pts].faction == faction ? 3 : 1;
+    t = tile(x, y);
+    N->visibility = (uint8_t)(t->visibility | 1u << faction);
+    N->name[0] = 0;
+    name_base(faction, N->name, 1, (t->climate & 0xe0) < 0x60);
+    N->state = 0, N->event = 0, N->governor = F->base_governor_adv;
+    N->minerals = 0, N->nutrients = 0, N->nerve_staple_count = 0;
+    N->autoforward[0] = N->autoforward[1] = N->autoforward[2] = -1;
+    N->queue_size = 0;
+    base_first(id);
+    if (!*game_turn) {
+        int item = has_tech(game_protos[1].preq_tech, faction) ? 1 : F->diff_level > 1 ? 2 : 0;
+        N->queue[0] = item;
+        N->minerals = cost_factor(faction, 1, -1) * game_protos[item].cost / 2;
+    } else {
+        N->minerals = F->se[SE_SUPPORT] < -1 ? 0 : game_rules_basic->retool_exemption;
+    }
+    N->worked_tiles = 0, N->specialist_total = 0, N->specialist_adjust = 0, N->eco_damage = 0;
+    N->terraform_y = -1, N->terraform_x = -1;
+    memset(N->facilities_built, 0, 9);
+    N->random_event_turns = 0, N->nerve_staple_count = 0;
+    N->unused_12c[0] = N->unused_12c[1] = 0;
+    if (F->base_count == 1) {
+        set_facility(N, FAC_HEADQUARTERS);
+        if (*game_net_multiplayer) {
+            N->pop_size = 3;
+            if (D->rule_talent || F->se_base[SE_PLANET] > 0) N->pop_size = 4;
+            if (D->rule_drone || D->rule_population) N->pop_size--;
+            set_facility(N, FAC_RECYCLING_TANKS);
+            if (*game_difficulty >= 3) set_facility(N, FAC_RECREATION_COMMONS);
+            if (F->se_base[SE_ECONOMY] > 0) set_facility(N, FAC_ENERGY_BANK);
+        } else {
+            int turn = *game_turn, size = (turn + 49) / 50;
+            N->pop_size = (int8_t)(size < 1 ? 1 : size > 5 ? 5 : size);
+            if (turn >= 75) set_facility(N, FAC_RECYCLING_TANKS);
+            if (turn >= 100) set_facility(N, FAC_RECREATION_COMMONS);
+            if (turn >= 150) set_facility(N, FAC_ENERGY_BANK);
+        }
+    }
+    if ((tile(x, y)->climate & 0xe0) < 0x60) set_facility(N, FAC_PRESSURE_DOME);
+    for (int f = 0; f < FACTION_COUNT; f++)
+        N->pop_seen[f] = f == faction || (N->visibility & 1u << f) ? N->pop_size : 0;
+    for (int i = 0; i < D->bonus_count; i++)
+        if (D->bonus_id[i] == BONUS_FACILITY) set_facility(N, game_range(D->bonus_val1[i], 1, 69));
+    for (int i = 0; i < D->bonus_count; i++)
+        if (D->bonus_id[i] == BONUS_FREEFAC && has_tech(game_facilities[D->bonus_val1[i]].preq_tech, faction))
+            set_facility(N, game_range(D->bonus_val1[i], 1, 69));
+    for (int fac = 1; fac < 70; fac++)
+        if (has_tech(game_facilities[fac].free_tech, faction)) set_facility(N, fac);
+    N->production_last = N->queue[0];
+    N->minerals_2 = N->minerals;
+    N->mineral_surplus_final = 0;
+    base_mark(id);
+    reset_territory();
+    *game_current_base_id = id, *game_current_base = N, *game_computed_base_id = id;
+    base_support();
+    base_yield();
+    base_nutrient();
+    base_minerals();
+    base_energy();
+    *game_draw_state |= 2;
+    return id;
+}
+
+// Removes a message list node and the message it holds; the list is told
+// first, and both are deleted as the game deletes its objects.
+static void delete_object(void *obj) {
+    char *sub = (char *)obj + (*(int32_t **)obj)[1];
+    void(__attribute__((thiscall)) * destroy)(void *, int) = **(void ***)sub;
+    destroy(sub, 1);
+}
+
+// Takes the messages about a base off the main interface's list, and
+// renumbers those about later bases, starting from the list's cursor.
+static void unlist_base(int base) {
+    struct game_list *L = game_message_list();
+    int32_t key = base | 0x40000000;
+    if (!L->head) return;
+    for (int i = 0; i < L->count; i++) {
+        struct game_list_node *n = L->cursor;
+        if (n->key == key) {
+            n->next->prev = n->prev;
+            n->prev->next = n->next;
+            if (n == L->head) L->head = n->next;
+            L->cursor = n->next;
+            void *item = n->item;
+            ((void(__attribute__((thiscall)) *)(void *, void *))L->vtbl[1])(L, item);
+            if (item) delete_object(item);
+            n->item = NULL;
+            delete_object(n);
+            L->count--;
+            i--;
+        } else {
+            if (n->key > key) n->key--;
+            L->cursor = L->cursor->next;
+        }
+    }
+    if (!L->count) L->head = NULL;
+    L->pos = L->count - 1;
+}
+
+// Whether any message on the main interface's list is about the base or
+// a later one: what base_kill() would delete or renumber.
+int base_listed(int base) {
+    struct game_list *L = game_message_list();
+    if (!L->head) return 0;
+    struct game_list_node *n = L->cursor;
+    for (int i = 0; i < L->count; i++, n = n->next)
+        if (n->key >= (base | 0x40000000)) return 1;
+    return 0;
+}
+
+// Whether the unit is on (x, y) or next to it, not diagonally.
+static int near(const struct veh *V, int x, int y) {
+    int dx = abs(V->x - x);
+    if (!(*game_map_flat & 1) && dx > *game_map_half_width) dx = *game_map_width - dx;
+    return ((dx + abs(V->y - y)) & ~1) == 0;
+}
+
+// Destroys a base. If it held headquarters while the faction is cornering
+// the energy market, the attempt fails (and is announced). Its units go to
+// the faction's nearest base, or die (another faction's units just lose
+// their home); every later base, and the bases kept by number (units'
+// homes, convoys' destinations, secret projects, the factions' targets but
+// the natives', messages), move down. Its radius is cleared, with the squares
+// its faction worked; native transports next to a sea base are taken off
+// their stack, and land units next to it (but those on board) die, while
+// ships next to a land base die. Then every radius is marked again and
+// territory redone.
+void base_kill(int base) {
+    struct base *K = &game_bases[base];
+    int x = K->x, y = K->y, faction = K->faction;
+    struct faction_data *F = &game_factions[faction];
+    if (game_has_facility(K, FAC_HEADQUARTERS) && F->corner_market_turn > *game_turn && F->corner_market_cost) {
+        F->corner_market_turn = 0, F->corner_market_cost = 0;
+        if (faction == *game_current_faction) {
+            game_popp(*game_script_file, text(0x689410), 0, text(0x689400), 0);
+        } else {
+            game_parse_says(0, game_faction_defs[faction].adjective, -1, -1);
+            game_popp(*game_script_file, text(0x689430), 0, text(0x689420), 0);
+        }
+    }
+    if (K->pop_size < 0) K->pop_size = 0;
+    game_replay_base(2, x, y, faction);
+    int region = tile(x, y)->region;
+    F->base_count--;
+    F->region_total_bases[region]--;
+    for (int v = *game_veh_count - 1; v >= 0; v--) {
+        if (v >= *game_veh_count) continue;
+        struct veh *V = &game_vehs[v];
+        if (V->home_base != base) continue;
+        if (V->faction != faction) {
+            V->home_base = -1;
+            continue;
+        }
+        K->faction = 0xff;
+        int best = 9999, pick = -1;
+        for (int i = 0; i < *game_base_count; i++) {
+            const struct base *O = &game_bases[i];
+            if (O->faction != faction) continue;
+            int d = vector_dist(x, y, O->x, O->y);
+            if (d <= best) best = d, pick = i;
+        }
+        if (pick >= 0) *game_base_find_dist = best;
+        K->faction = (uint8_t)faction;
+        if (pick >= 0) V->home_base = (int16_t)pick;
+        else kill(v);
+    }
+    bit_set(x, y, MAP_BASE, 0);
+    int n = *game_base_count;
+    if (base < n - 1) memmove(K, K + 1, (size_t)(n - 1 - base) * sizeof *K);
+    *game_base_count = --n;
+    if (base == *game_computed_base_id) *game_computed_base_id = -1;
+    for (int v = 0; v < *game_veh_count; v++)
+        if (game_vehs[v].home_base > base) game_vehs[v].home_base--;
+    for (int i = 0; i < n; i++)
+        for (int k = 0; k < 3; k++) {
+            int16_t *a = &game_bases[i].autoforward[k];
+            if (*a == base) *a = -1;
+            else if (*a > base) (*a)--;
+        }
+    unlist_base(base);
+    game_listbox_update_changes(game_message_box);
+    for (int sp = 0; sp < SP_COUNT; sp++) {
+        if (game_secret_projects[sp] == base) game_secret_projects[sp] = -2;
+        else if (game_secret_projects[sp] > base) game_secret_projects[sp]--;
+    }
+    for (int f = 1; f < FACTION_COUNT; f++) {
+        int32_t *a = &game_factions[f].attack_target_base;
+        if (*a == base) *a = -1;
+        else if (*a > base) (*a)--;
+    }
+    for (int i = 0; i < BASE_RADIUS_OUTER; i++) {
+        int w = *game_map_width, sx = game_radius_x[i] + x, sy = game_radius_y[i] + y;
+        if (!(*game_map_flat & 1)) {
+            if (sx < 0) sx += w;
+            else if (sx >= w) sx -= w;
+        }
+        if (sy < 0 || sy >= *game_map_height || sx < 0 || sx >= w) continue;
+        site_set(sx, sy, 0);
+        if (i >= BASE_RADIUS_INNER) continue;
+        bit_set(sx, sy, MAP_BASE_RADIUS, 0);
+        if ((tile(sx, sy)->rocky_lock & 7) == faction) using_set(sx, sy, 0);
+    }
+    int sea = (tile(x, y)->climate & 0xe0) < 0x60;
+    if (sea)
+        for (int v = 0; v < *game_veh_count; v++) {
+            const struct veh *V = &game_vehs[v];
+            if (game_protos[V->proto].plan == PLAN_NAVAL_TRANSPORT && near(V, x, y)) stack_veh(v, 0);
+        }
+    for (int v = *game_veh_count; v >= 0; v--) {
+        const struct veh *V = &game_vehs[v];
+        int triad = game_chassis[game_protos[V->proto].chassis].triad;
+        if (sea ? triad == TRIAD_LAND && near(V, x, y) && !(V->order == ORDER_SENTRY_BOARD && V->waypoint_x[0] >= 0)
+                : triad == TRIAD_SEA && near(V, x, y))
+            kill(v);
+    }
+    game_base_win_base_killed(game_base_win, base);
+    for (int i = 0; i < *game_base_count; i++) base_mark(i);
+    reset_territory();
+    *game_draw_state |= 2;
+}
+
 // The minerals a human's base loses by switching production to another
 // kind of item, beyond what the rules let it keep.
 int base_lose_minerals(int base) {
@@ -1737,6 +2001,54 @@ SHADOW2(BASE, int, has_fac_announced, int, int)
 SHADOW_WRITER(BASE, void, set_fac_announced, (int a, int b, int c), (a, b, c), WRITES(game_factions[a].facility_announced, 12),
               "%d, %d, %d", a, b, c)
 SHADOW_WRITER(BASE, void, base_first, (int a), (a), WRITES(&game_bases[a].queue[0], 4), "%d", a)
+// Founding a base names it from its faction's file, which a check can't
+// open: the original's name is found first (checked on its own) and both
+// runs take it.
+SHADOW_WRITER_CHECK(int, base_init, (int a, int b, int c), (a, b, c), orig_base_init(a, b, c), hooks_writes_game(&w_),
+                    "%d, %d, %d", a, b, c)
+static int checked_base_init(int faction, int x, int y) {
+    if (*game_base_count < BASE_COUNT) {
+        char name[sizeof game_bases[0].name];
+        memcpy(name, game_bases[*game_base_count].name, sizeof name);
+        name[0] = 0;
+        name_base_hold(faction, name, (tile(x, y)->climate & 0xe0) < 0x60);
+    }
+    int r = check_base_init(faction, x, y);
+    name_base_release();
+    return r;
+}
+static int shadow_base_init(int faction, int x, int y) {
+    if (hooks_nested) return orig_base_init(faction, x, y);
+    if (shadow_bypass()) return base_init(faction, x, y);
+    stats_base_init.calls++;
+    shadow_tick(BASE);
+    return checked_base_init(faction, x, y);
+}
+// Destroying a base deletes and renumbers messages on the main interface's
+// list, which live on the heap a check can't put back: with any such
+// message the original runs unchecked. The base window and the list box
+// are left alone while state is protected (quiet.c), so they are told
+// afterwards.
+SHADOW_WRITER_CHECK(void, base_kill, (int a), (a), orig_base_kill(a), hooks_writes_game(&w_), "%d", a)
+static void shadow_base_kill(int a) {
+    if (hooks_nested) {
+        orig_base_kill(a);
+        return;
+    }
+    if (shadow_bypass()) {
+        base_kill(a);
+        return;
+    }
+    stats_base_kill.calls++;
+    shadow_tick(BASE);
+    if (base_listed(a)) {
+        orig_base_kill(a);
+        return;
+    }
+    check_base_kill(a);
+    game_base_win_base_killed(game_base_win, a);
+    game_listbox_update_changes(game_message_box);
+}
 SHADOW_WRITER(BASE, void, make_base_unique, (int a), (a), WRITES(game_bases[a].name, sizeof game_bases[a].name), "%d", a)
 SHADOW2(BASE, int, has_project, int, int)
 SHADOW1(BASE, int, base_project, int)
@@ -2042,6 +2354,45 @@ static void sweep_lookups(void) {
     B->x = bx, B->y = by;
 }
 
+// Destroying a base or two (the second as every faction's target, or with
+// a target after it), and founding bases on free squares near the
+// bases (on land and at sea): as things stand, as a faction's first base
+// (late in the game too), and on the first turn. The network game's first
+// base is left out, as a check must not reach the network.
+static void sweep_found(void) {
+    int bases = *game_base_count, t = *game_turn;
+    if (!bases) return;
+    for (int k = 0; k < 2; k++) {
+        int b = (t * 7 + k * 5) % bases;
+        if (base_listed(b)) continue;
+        int32_t targets[FACTION_COUNT];
+        for (int f = 0; f < FACTION_COUNT; f++) {
+            targets[f] = game_factions[f].attack_target_base;
+            if (k) game_factions[f].attack_target_base = (f + t) & 1 ? b : bases - 1;
+        }
+        check_base_kill(b);
+        for (int f = 0; f < FACTION_COUNT; f++) game_factions[f].attack_target_base = targets[f];
+    }
+    int found = 0;
+    for (int i = 0; i < 3 * bases && found < 6; i++) {
+        const struct base *B = &game_bases[(t + i) % bases];
+        int r = (t * 3 + i * 11) % BASE_RADIUS_OUTER, w = *game_map_width;
+        int x = B->x + game_radius_x[r], y = B->y + game_radius_y[r];
+        if (!(*game_map_flat & 1)) x = x < 0 ? x + w : x >= w ? x - w : x;
+        if (y < 0 || y >= *game_map_height || x < 0 || x >= w || base_at(x, y) >= 0) continue;
+        if (((tile(x, y)->climate & 0xe0) < 0x60) != (found % 3 == 2)) continue;
+        int faction = found & 1 ? B->faction : (t + found) % (FACTION_COUNT - 1) + 1;
+        struct faction_data *F = &game_factions[faction];
+        int32_t count = F->base_count, turn = *game_turn;
+        if (found == 1 || found == 3) F->base_count = 0;
+        if (found == 4) *game_turn = 0;
+        if (found == 3) *game_turn = turn + 150;
+        checked_base_init(faction, x, y);
+        F->base_count = count, *game_turn = turn;
+        found++;
+    }
+}
+
 static void base_sweep(void) {
     slice++;
     if (!*game_map || *game_map_width <= 0 || *game_map_height <= 0) return;
@@ -2050,6 +2401,7 @@ static void base_sweep(void) {
     sweep_yields();
     sweep_bases();
     sweep_lookups();
+    sweep_found();
     hooks_sweeping = sweeping;
 }
 
@@ -2068,6 +2420,8 @@ static const struct hook base_hooks[] = {
     HOOK(0x4e4900, has_fac_announced, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x45, 0x0c),       // push ecx; mov eax, [ebp+12]
     HOOK(0x4e4960, set_fac_announced, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x55, 0x0c),       // push ecx; mov edx, [ebp+12]
     HOOK(0x4e4aa0, base_first, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),                    // sub esp, 8
+    HOOK(0x4e4b80, base_init, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),                     // sub esp, 12
+    HOOK(0x4e5250, base_kill, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x2c),                     // sub esp, 44
     HOOK(0x4f7fe0, make_base_unique, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x54),              // sub esp, 84
     HOOK(0x4f80d0, has_project, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                   // mov eax, [ebp+8]
     HOOK(0x4f8110, base_claimed, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x10),                  // mov eax, [ebp+16]

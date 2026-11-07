@@ -132,7 +132,9 @@ module at a time. So far:
   finding bases (on a square, the nearest, by faction, region and
   pacts), marking a new base's radius, its first production and a unique
   name, facilities and secret projects held, and minerals lost to
-  retooling; and
+  retooling; founding a base and destroying one (its units rehomed or
+  lost, the bases after it renumbered everywhere); the AI's road goals
+  between its bases; and
   the base's turn that runs all of these, with its energy and trade
   going into the faction's reserves; and the faction's turn around them:
   loans, the AI's maintenance discount, interest, the first turn's free

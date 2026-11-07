@@ -75,8 +75,15 @@ void base_hurry(void);
 void base_ecology(void);
 // A new base's name, from its faction's file.
 void name_base(int faction, char *name, int save, int sea);
+// Shadow mode: holds the name the faction's next base gets (from a buffer as
+// it stands), so a check can name a base without the file.
+void name_base_hold(int faction, const char *name, int sea);
+void name_base_release(void);
 // The AI's terraforming plans for the current base.
 void base_terraform(int instant);
+// A road goal (or sensor goal) towards the current base's other bases, at
+// `priority`; 1 if one was set.
+int base_connect(int priority);
 // A base's turn at the end of its faction's; 1 if the base was lost.
 int base_upkeep(int base);
 // A faction's turn for its bases, loans and reserves.
@@ -109,3 +116,10 @@ int base_project(int sp);
 int base_claimed(int item, int score, int a, int b, int c, int d);
 int has_fac_built(int fac);
 uint32_t has_treaty(int faction, int other, uint32_t bits);
+// Founds a base; its number, or -1 at the limit.
+int base_init(int faction, int x, int y);
+// Destroys a base; later bases move down.
+void base_kill(int base);
+// Whether a message on the main interface's list is about the base or a
+// later one.
+int base_listed(int base);

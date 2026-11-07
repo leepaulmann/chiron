@@ -99,6 +99,8 @@ void (*game_do_all_non_input)(void);
 int (*game_best_specialist)(void);
 int (*game_has_abil)(int proto, uint32_t ability);
 void(__attribute__((thiscall)) * game_path_continents)(void *path);
+int(__attribute__((thiscall)) * game_path_find)(void *path, int x1, int y1, int x2, int y2, int veh, int faction, int flags, int unk);
+int(__attribute__((thiscall)) * game_path_sensors)(void *path, int faction, int *x, int *y);
 void *game_path;
 void (*game_draw_radius)(int x, int y, int radius, int unk);
 int (*game_base_find2)(int x, int y, int faction);
@@ -213,6 +215,9 @@ int (*game_propose_proto)(int faction, int chassis, int weapon, int armor, uint3
                           char *name);
 void(__attribute__((thiscall)) * game_map_win_set_center)(void *win, int x, int y, int unk);
 void *game_base_win;
+void *game_message_box;
+int(__attribute__((thiscall)) * game_listbox_update_changes)(void *box);
+void(__attribute__((thiscall)) * game_base_win_base_killed)(void *win, int base);
 int32_t *game_base_win_redraw_base;
 void(__attribute__((thiscall)) * game_base_win_on_redraw)(void *win);
 void(__attribute__((thiscall)) * game_base_win_zoom)(void *win, int base, int unk);
@@ -285,7 +290,6 @@ struct rules_ability *game_abilities;
 int (*game_abil_index)(uint32_t flag);
 int (*game_can_terraform)(int faction, int x, int y, int unk, int base);
 int (*game_terrain_avail)(int terraform, int sea, int faction);
-void (*game_base_connect)(int level);
 
 void game_bind(struct pe_image *exe) {
     game_tech = (struct rules_tech *)code_at(exe, 0x94f358);
@@ -450,6 +454,8 @@ void game_bind(struct pe_image *exe) {
     game_best_specialist = (void *)code_at(exe, 0x4e4020);
     game_has_abil = (void *)code_at(exe, 0x5bf1f0);
     game_path_continents = (void *)code_at(exe, 0x59c790);
+    game_path_find = (void *)code_at(exe, 0x59a530);
+    game_path_sensors = (void *)code_at(exe, 0x59cca0);
     game_path = code_at(exe, 0x945b00);
     game_draw_radius = (void *)code_at(exe, 0x46aef0);
     game_base_find2 = (void *)code_at(exe, 0x4e3c60);
@@ -577,6 +583,9 @@ void game_bind(struct pe_image *exe) {
     game_propose_proto = (void *)code_at(exe, 0x580860);
     game_map_win_set_center = (void *)code_at(exe, 0x46b1f0);
     game_base_win = code_at(exe, 0x6a7628);
+    game_message_box = code_at(exe, 0x7f685c);
+    game_listbox_update_changes = (void *)code_at(exe, 0x60c9b0);
+    game_base_win_base_killed = (void *)code_at(exe, 0x41a620);
     game_base_win_redraw_base = (int32_t *)code_at(exe, 0x6e8134);
     game_base_win_on_redraw = (void *)code_at(exe, 0x41e790);
     game_base_win_zoom = (void *)code_at(exe, 0x41a920);
@@ -664,5 +673,4 @@ void game_bind(struct pe_image *exe) {
     game_abil_index = (void *)code_at(exe, 0x581170);
     game_can_terraform = (void *)code_at(exe, 0x565320);
     game_terrain_avail = (void *)code_at(exe, 0x5bab40);
-    game_base_connect = (void *)code_at(exe, 0x4ec3f0);
 }

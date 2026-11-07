@@ -167,6 +167,10 @@ QUIET_THIS(void, base_pop_init, (void)0, (void *pop, int a, int b), (pop, a, b))
 QUIET_THIS(void, base_pop_set_width, (void)0, (void *pop, int w), (pop, w))
 QUIET_THIS(void, base_pop_string, (void)0, (void *pop, char *s), (pop, s))
 QUIET_THIS(int, base_pop_exec_3, 0, (void *pop, int a, int b), (pop, a, b))
+// A list box shown again after its list changed (base_kill's messages),
+// and the base window told a base is gone.
+QUIET_THIS(int, listbox_update_changes, 7, (void *box), (box))
+QUIET_THIS(void, base_win_base_killed, (void)0, (void *win, int base), (win, base))
 // A picture for such a dialog: reported missing, as loading it would
 // allocate from the game's heap.
 static int (*orig_pcx_dimensions)(char *file, int *w, int *h);
@@ -359,6 +363,8 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x41e790, base_win_on_redraw, 0xa1, 0x2c, 0x39, 0x7d, 0x00, 0x56, 0x8b, 0xf1),  // mov eax, [0x7d392c]; push esi; mov esi, ecx
     QUIET_HOOK(0x41a920, base_win_zoom, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10, 0x53, 0x56),  // sub esp, 16; push ebx; push esi
     QUIET_HOOK(0x41a7a0, base_win_check_base, PUSH_EBP_MOV_EBP_ESP, 0x56, 0x8b, 0xf1),       // push esi; mov esi, ecx
+    QUIET_HOOK(0x60c9b0, listbox_update_changes, 0xa1, 0x28, 0x7b, 0x9b, 0x00, 0x53),        // mov eax, [0x9b7b28]; push ebx
+    QUIET_HOOK(0x41a620, base_win_base_killed, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x57, 0x8b, 0xf1),  // push ebx, esi, edi; mov esi, ecx
     QUIET_HOOK(0x41a7e0, base_win_check_loc, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x8b, 0xd9),        // push ebx; mov ebx, ecx
 };
 struct hook_module quiet_module = {"quiet", quiet_hooks, HOOK_COUNT(quiet_hooks), NULL, NULL, -1};

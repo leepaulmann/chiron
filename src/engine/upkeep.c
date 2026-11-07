@@ -983,7 +983,24 @@ static void take_name(char *name) {
 // the first, in an order shuffled by the map's seed), then the shared list,
 // and failing those its noun and a number. `save` counts the name as used.
 // As the original has it, a section that runs out leaves the file open.
+// Shadow mode only: while a check of base_init runs, naming can't open its
+// file (see check_name_base), so the name is found beforehand and both runs
+// take it as it was found.
+static struct {
+    int on, faction, sea;
+    char name[25];
+    int32_t land, seas;
+} held_name;
+static int name_held(int faction, char *name, int save, int sea) {
+    if (!held_name.on || faction != held_name.faction || sea != held_name.sea || !save) return 0;
+    memcpy(name, held_name.name, sizeof held_name.name);
+    game_factions[faction].base_name_offset = held_name.land;
+    game_factions[faction].base_sea_name_offset = held_name.seas;
+    return 1;
+}
+
 void name_base(int faction, char *name, int save, int sea) {
+    if (name_held(faction, name, save, sea)) return;
     struct faction_data *f = &game_factions[faction];
     struct faction_def *d = &game_faction_defs[faction];
     if (sea && !game_text_open(d->filename, text(0x6893b0))) {
@@ -1049,6 +1066,114 @@ static int clamp(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; 
 static int dry_or_rocky(const struct map_tile *t) {
     int rocky = t->rocky_lock & 0xc0, rain = t->climate & 0x18;
     return !rain + (rocky == 0x80) + (!rocky && rain < 0x10);
+}
+
+enum { MAP_MAG_TUBE = 0x8, TERRAFORM_MAG_TUBE = 6 };
+
+// The game's path finder from (x, y) towards (tx, ty), for no unit: the
+// first step's direction, or -1. Without the tech to build roads through
+// fungus, the path avoids it.
+static int road_step(int faction, int x, int y, int tx, int ty) {
+    int flags = has_tech(game_rules_basic->tech_road_fungus, faction) ? 0 : 4;
+    return game_path_find(game_path, x, y, tx, ty, 0, -1, flags, -1);
+}
+
+// A former's goal on the way to the current base's other bases (land bases
+// only). It walks the path finder's route to each base in its region (a
+// pact partner's within 5 squares, counted as a map width further; one of
+// its own more than 8 away only if it is the largest there and none has
+// headquarters, or it has them itself), and the first square of each route
+// it could build a road on (no base, fungus it can clear, no unit of a
+// faction without a pact, no enemy zone, no territory of a faction that
+// has no pact with it) and that has none yet, or a mag tube where it
+// has their tech, as the original has it; the nearest such base gives the
+// goal, at `priority`. A route that arrives on roads all the way is a
+// connected base: then the AI, or a human allowing it, instead sends a
+// former to a sensor site found by the path finder if one is nearer. With
+// no route at all the sensor site is the goal. 1 if a goal was set.
+int base_connect(int priority) {
+    struct base *C = B;
+    int faction = C->faction;
+    const struct map_tile *home = tile(C->x, C->y);
+    if (altitude(home) < ALT_LAND) return 0;
+    int region = home->region, best = 9999, gx = -1, gy = -1, connected = 0;
+    const struct faction_data *F = &game_factions[faction];
+    for (int i = 0; i < *game_base_count; i++) {
+        if (i == ID) continue;
+        const struct base *T = &game_bases[i];
+        if (tile(T->x, T->y)->region != region) continue;
+        int dx = abs(C->x - T->x);
+        if (!(*game_map_flat & 1) && dx > *game_map_half_width) dx = *game_map_width - dx;
+        int d = (abs(C->y - T->y) + dx) >> 1;
+        if (T->faction != C->faction) {
+            if (d > 5 || !(F->diplo_status[T->faction] & TREATY_PACT)) continue;
+            d += *game_map_width;
+        } else if (d > 8 && !game_has_facility(T, FAC_HEADQUARTERS)) {
+            int skip = 0;
+            for (int j = 0; j < *game_base_count && !skip; j++) {
+                const struct base *O = &game_bases[j];
+                if (O->faction != C->faction || tile(O->x, O->y)->region != region) continue;
+                skip = O->pop_size > T->pop_size || game_has_facility(O, FAC_HEADQUARTERS);
+            }
+            if (skip) continue;
+        }
+        if (d >= best) continue;
+        int x = C->x, y = C->y;
+        int dir = road_step(faction, x, y, T->x, T->y);
+        for (int steps = 0; dir >= 0;) {
+            x += game_radius_near_x[dir];
+            if (!(*game_map_flat & 1)) {
+                if (x < 0) x += *game_map_width;
+                else if (x >= *game_map_width) x -= *game_map_width;
+            }
+            y += game_radius_near_y[dir];
+            if (y < 0 || y >= *game_map_height || x < 0 || x >= *game_map_width) break;
+            if (x == T->x && y == T->y) {
+                connected = 1;
+                break;
+            }
+            const struct map_tile *t = tile(x, y);
+            int owner = t->owner_site & 0xf;
+            int usable = !((t->bits & MAP_BASE) && owner < 8);
+            if (usable && is_fungus(t))
+                usable = has_tech(game_rules_basic->tech_road_fungus, faction) ||
+                         has_tech(game_terraform[TERRAFORM_FUNGUS_TECH].preq_tech, faction);
+            t = tile(x, y);
+            owner = t->owner_site & 0xf;
+            if (usable && (t->bits & MAP_UNIT) && owner < 8 && owner != faction &&
+                !(F->diplo_status[owner] & TREATY_PACT))
+                usable = 0;
+            if (usable && zoc_sea(x, y, faction) >= 1) usable = 0;
+            if (usable) {
+                int w = whose_territory(faction, x, y, NULL, 0);
+                if (w >= 0 && w != faction && !(game_factions[w].diplo_status[faction] & TREATY_PACT)) usable = 0;
+            }
+            if (usable) {
+                uint32_t bits = tile(x, y)->bits;
+                if (!(bits & MAP_ROAD) ||
+                    ((bits & MAP_MAG_TUBE) && has_tech(game_terraform[TERRAFORM_MAG_TUBE].preq_tech, faction))) {
+                    best = d, gx = x, gy = y;
+                    break;
+                }
+            }
+            if (++steps >= *game_map_width) break;
+            dir = road_step(faction, x, y, T->x, T->y);
+        }
+    }
+    int x = C->x, y = C->y;
+    int sensors = !is_human(faction) || (*game_more_preferences & 0x20);
+    if (gy >= 0 && gy < *game_map_height && gx >= 0 && gx < *game_map_width) {
+        if (connected && sensors && !game_path_sensors(game_path, faction, &x, &y) &&
+            vector_dist(C->x, C->y, x, y) < vector_dist(C->x, C->y, gx, gy)) {
+            game_add_goal(faction, GOAL_TERRAFORM, priority, x, y, ID);
+            return 1;
+        }
+        game_add_goal(faction, GOAL_TERRAFORM, priority, gx, gy, ID);
+        return 1;
+    }
+    if (!sensors || game_path_sensors(game_path, faction, &x, &y)) return 0;
+    game_add_goal(faction, GOAL_TERRAFORM, priority, x, y, ID);
+    return 1;
 }
 
 // For the AI (and a human's governor): what the base needs most, energy,
@@ -1408,7 +1533,7 @@ void base_terraform(int instant) {
         if (bact == 9) game_add_goal(faction, GOAL_FOREST, 2, x, y, ID);
         else if (bact != 5 && !game_can_terraform(faction, x, y, 1, ID)) level = 2;
         else game_add_goal(faction, GOAL_TERRAFORM, 2, x, y, ID);
-        if (connect) game_base_connect(level);
+        if (connect) base_connect(level);
         if (instant) {
             struct map_tile *t = tile(x, y);
             t->bits &= ~(uint32_t)MAP_FUNGUS;
@@ -1436,7 +1561,7 @@ void base_terraform(int instant) {
             }
         }
     } else if (connect) {
-        game_base_connect(2);
+        base_connect(2);
     }
 
     // Then one of a borehole, a condenser or raised land, for a base whose
@@ -2049,6 +2174,7 @@ static void check_name_base(int faction, char *name, int save, int sea) {
     memcpy(name, want, sizeof want);
 }
 static void shadow_name_base(int faction, char *name, int save, int sea) {
+    if (name_held(faction, name, save, sea)) return;
     if (hooks_nested) {
         orig_name_base(faction, name, save, sea);
         return;
@@ -2061,6 +2187,19 @@ static void shadow_name_base(int faction, char *name, int save, int sea) {
     shadow_tick(UPKEEP);
     check_name_base(faction, name, save, sea);
 }
+// Names the buffer as a new base's name (checked), and holds that name for
+// the next calls naming one for the faction, until released.
+void name_base_hold(int faction, const char *name, int sea) {
+    struct faction_data *f = &game_factions[faction];
+    int32_t land = f->base_name_offset, seas = f->base_sea_name_offset;
+    held_name.on = 0;
+    memcpy(held_name.name, name, sizeof held_name.name);
+    check_name_base(faction, held_name.name, 1, sea);
+    held_name.land = f->base_name_offset, held_name.seas = f->base_sea_name_offset;
+    f->base_name_offset = land, f->base_sea_name_offset = seas;
+    held_name.faction = faction, held_name.sea = sea, held_name.on = 1;
+}
+void name_base_release(void) { held_name.on = 0; }
 // Goals, roads and (instantly) the map: all of the game's state, and the
 // tables of the game's path finder (from the heap, sized by the map), which
 // base_connect() leaves its last search in and reads again.
@@ -2072,6 +2211,7 @@ static void writes_path(struct hook_writes *w) {
     if (p->y) hooks_writes_add(w, p->y, area * 2);
 }
 SHADOW_WRITER(UPKEEP, void, base_terraform, (int a), (a), (hooks_writes_game(&w_), writes_path(&w_)), "%d", a)
+SHADOW_WRITER(UPKEEP, int, base_connect, (int a), (a), (hooks_writes_game(&w_), writes_path(&w_)), "%d", a)
 // Fungus, native life, the sea and volcanoes write widely.
 SHADOW_WRITER(UPKEEP, void, base_ecology, (void), (), hooks_writes_game(&w_), "%s", "")
 // A base's turn writes all over the game, the path finder's tables too
@@ -2384,6 +2524,39 @@ static void upkeep_sweep(void) {
             *game_human_factions = human, *game_preferences = prefs, *game_more_preferences = more;
             *base = saved;
         }
+        // Roads to its other bases: for the AI, for a human with and without
+        // sensor sites allowed, with a pact with every other faction, and
+        // with only distant bases of its own.
+        if ((b + slice) % 3 == 0) {
+            uint8_t human = *game_human_factions;
+            int32_t more = *game_more_preferences;
+            uint32_t diplo[FACTION_COUNT];
+            check_base_connect(1 + slice % 3);
+            *game_human_factions |= (uint8_t)(1 << base->faction);
+            *game_more_preferences ^= 0x20;
+            check_base_connect(2);
+            *game_more_preferences ^= 0x20;
+            check_base_connect(1);
+            *game_human_factions = human, *game_more_preferences = more;
+            memcpy(diplo, f->diplo_status, sizeof diplo);
+            for (int g = 1; g < FACTION_COUNT; g++)
+                if (g != base->faction) f->diplo_status[g] |= TREATY_PACT;
+            check_base_connect(2);
+            memcpy(f->diplo_status, diplo, sizeof diplo);
+            // With its sisters within 8 squares given to another faction for
+            // the moment, so that only distant bases compete.
+            uint8_t owners[BASE_COUNT];
+            for (int j = 0; j < *game_base_count; j++) {
+                struct base *O = &game_bases[j];
+                owners[j] = O->faction;
+                int dx = abs(O->x - base->x);
+                if (!(*game_map_flat & 1) && dx > *game_map_half_width) dx = *game_map_width - dx;
+                if (j != b && O->faction == base->faction && (dx + abs(O->y - base->y)) >> 1 <= 8)
+                    O->faction = (uint8_t)(base->faction % (FACTION_COUNT - 1) + 1);
+            }
+            check_base_connect(3);
+            for (int j = 0; j < *game_base_count; j++) game_bases[j].faction = owners[j];
+        }
     }
     B = current;
     ID = current_id;
@@ -2403,6 +2576,7 @@ static const struct hook upkeep_hooks[] = {
     HOOK(0x4f3fe0, base_hurry, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x1c),            // sub esp, 28
     HOOK(0x4f67f0, base_ecology, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x3c),          // sub esp, 60
     HOOK(0x4e4090, name_base, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x54),             // sub esp, 84
+    HOOK(0x4ec3f0, base_connect, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x3c),                   // sub esp, 60
     HOOK(0x4ecbf0, base_terraform, PUSH_EBP_MOV_EBP_ESP, 0x81, 0xec, 0x04, 0x01, 0x00, 0x00),  // sub esp, 0x104
     HOOK(0x4f79c0, base_upkeep, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),           // sub esp, 12
     HOOK(0x526e70, production_phase, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53, 0x8b, 0x5d, 0x08),  // push ecx; push ebx; mov ebx, [ebp+8]

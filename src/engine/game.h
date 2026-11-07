@@ -945,6 +945,11 @@ extern int (*game_has_abil)(int proto, uint32_t ability);
 extern void (*game_add_goal)(int faction, int type, int priority, int x, int y, int base);
 extern int (*game_stack_check)(int veh, int type, int cond1, int cond2, int cond3);
 extern void(__attribute__((thiscall)) * game_path_continents)(void *path);  // finds the regions
+// The first step from (x1, y1) towards (x2, y2), as a direction, or -1.
+extern int(__attribute__((thiscall)) * game_path_find)(void *path, int x1, int y1, int x2, int y2, int veh, int faction,
+                                                     int flags, int unk);
+// A square near (*x, *y) for the faction's next sensor, into *x, *y; nonzero for none.
+extern int(__attribute__((thiscall)) * game_path_sensors)(void *path, int faction, int *x, int *y);
 extern void (*game_draw_radius)(int x, int y, int radius, int unk);           // redraws squares
 extern int (*game_base_find2)(int x, int y, int faction);  // the nearest base of the faction, or -1
 extern void (*game_delete_landmark)(int x, int y);
@@ -1059,6 +1064,28 @@ extern void(__attribute__((thiscall)) * game_map_win_set_center)(void *win, int 
 // The base window, and a base it is redrawn for after the base's upkeep
 // (Thinker's BaseUpkeepDrawID); its redraw, and opening it on a base.
 extern void *game_base_win;
+extern void(__attribute__((thiscall)) * game_base_win_base_killed)(void *win, int base);  // a base is gone
+// The main interface's list box of messages, and the list it shows: each
+// node's key names what the message is about (0x40000000 | base for a
+// base), and its item is the message, an object of the game's own.
+extern void *game_message_box;
+extern int(__attribute__((thiscall)) * game_listbox_update_changes)(void *box);
+struct game_list_node {
+    void *vtbl;
+    int32_t key;
+    void *item;
+    struct game_list_node *next, *prev;
+};
+struct game_list {
+    void **vtbl;  // [1]: told of an item about to go
+    int32_t unk_4;
+    struct game_list_node *head, *cursor;
+    int32_t count, pos;
+};
+static inline struct game_list *game_message_list(void) {
+    char *box = game_message_box;
+    return (struct game_list *)(box + 0xbc + (*(int32_t **)box)[2]);
+}
 extern int32_t *game_base_win_redraw_base;
 extern void(__attribute__((thiscall)) * game_base_win_on_redraw)(void *win);
 extern void(__attribute__((thiscall)) * game_base_win_zoom)(void *win, int base, int unk);
@@ -1186,7 +1213,6 @@ extern struct rules_ability *game_abilities;
 extern int (*game_abil_index)(uint32_t flag);
 extern int (*game_can_terraform)(int faction, int x, int y, int unk, int base);
 extern int (*game_terrain_avail)(int terraform, int sea, int faction);
-extern void (*game_base_connect)(int level);  // roads to the faction's other bases
 extern void *game_path;
 
 // Point the variables above at a loaded terranx.exe.

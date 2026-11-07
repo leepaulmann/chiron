@@ -64,10 +64,10 @@ static int great_satan_stub(int faction, int aggressive) {
     return satan;
 }
 static int32_t reserved, square_flags[25];
-static int goals, hostile;
+static int goals, hostile, goal_x, goal_y, goal_priority;
 static void add_goal_stub(int faction, int type, int priority, int x, int y, int base) {
-    (void)faction, (void)type, (void)priority, (void)x, (void)y, (void)base;
-    goals++;
+    (void)faction, (void)type, (void)base;
+    goals++, goal_x = x, goal_y = y, goal_priority = priority;
 }
 static int stack_check_stub(int veh, int type, int c1, int c2, int c3) {
     (void)veh, (void)type, (void)c1, (void)c2, (void)c3;
@@ -166,7 +166,17 @@ static char *text_item_stub(void) { return file_buffer; }
 static void text_close_stub(void) { file_section = -1; }
 static int can_terraform_value = 1, connects;
 static int can_terraform_stub(int faction, int x, int y, int unk, int base) { return can_terraform_value; }
-static void base_connect_stub(int level) { connects++; }
+// base_connect()'s routes: none, or every step in direction route_dir;
+// its sensor search counts the calls.
+static int route_dir = -1;
+static int __attribute__((thiscall)) path_find_stub(void *path, int x1, int y1, int x2, int y2, int veh, int faction, int flags,
+                                                    int unk) {
+    return route_dir;
+}
+static int __attribute__((thiscall)) path_sensors_stub(void *path, int faction, int *x, int *y) {
+    connects++;
+    return 1;
+}
 static int terrain_avail_stub(int terraform, int sea, int faction) { return 0; }
 static int abil_index_stub(uint32_t flag) { return 0; }
 static int rand_value, rand_calls, replays, spotted, proposed, centred, territory;
@@ -212,6 +222,16 @@ static int breeds;
 static int cargo_stub(int veh) { return 0; }
 static int breed_stub(int base, int faction) { return breeds; }
 static void draws_stub(void) {}
+// The message list's calls, as base_kill() makes them.
+static int *notify_count, *delete_count, *update_count;
+static void __attribute__((thiscall)) notify_stub(void *list, void *item) { (*notify_count)++; }
+static void __attribute__((thiscall)) delete_stub(void *obj, int flags) { (*delete_count)++; }
+static int __attribute__((thiscall)) update_stub(void *box) { return (*update_count)++, 0; }
+static void __attribute__((thiscall)) base_killed_stub(void *win, int base) {}
+static uint32_t draw_state;
+static void del_site_stub(int f, int t, int x, int y, int u) {}
+static int world_site_stub(int x, int y, int unk) { return 0; }
+static int32_t goody_mult[2] = {5, 3};
 
 int main(void) {
     game_map = &tiles_ptr;
@@ -1517,7 +1537,7 @@ int main(void) {
     memcpy(t_tiles, tiles, sizeof tiles);
     game_continents = regions, game_abilities = abilities, game_radius_count = counts, game_cloud_cover = &cloud;
     game_map_area = &area, game_terraform = terraform;
-    game_can_terraform = can_terraform_stub, game_base_connect = base_connect_stub;
+    game_can_terraform = can_terraform_stub, game_path_find = path_find_stub, game_path_sensors = path_sensors_stub;
     game_terrain_avail = terrain_avail_stub, game_abil_index = abil_index_stub;
     for (int y = 0; y < H; y++)
         for (int x = y & 1; x < W; x += 2) put(x, y, 3, 1, 0, 0), at(x, y)->territory = 1;
@@ -1801,6 +1821,138 @@ int main(void) {
     EXPECT(strcmp(bases[2].name, "Chiron-2"), 0);
     for (int i = 0; i < 3; i++) at(bases[i].x, bases[i].y)->bits &= ~(uint32_t)MAP_BASE;
     bases[0] = kept[0], bases[1] = kept[1], bases[2] = kept[2], base_count = kept_bases_count;
+
+    // Destroying base 0 of three: its own units go home to faction 1's other
+    // base, another faction's lose their home; later bases move down, and
+    // the numbers kept elsewhere with them (secret projects, convoys, the
+    // factions' targets but the natives', messages, of which the one
+    // about base 0 goes); its square is no longer a base.
+    {
+        struct base saved[3] = {bases[0], bases[1], bases[2]};
+        int32_t saved_count = base_count, saved_vehs = veh_count;
+        struct veh saved_veh[2] = {vehs[0], vehs[1]};
+        struct faction_data saved_f[2] = {factions[1], factions[0]};
+        base_count = 3, veh_count = 2;
+        bases[0].x = 2, bases[0].y = 2, bases[0].faction = 1;
+        bases[1].x = 6, bases[1].y = 2, bases[1].faction = 2;
+        bases[2].x = 4, bases[2].y = 4, bases[2].faction = 1;
+        for (int i = 0; i < 3; i++) {
+            at(bases[i].x, bases[i].y)->bits |= MAP_BASE;
+            bases[i].pop_size = 2, memset(bases[i].autoforward, 0xff, sizeof bases[i].autoforward);
+        }
+        bases[1].autoforward[0] = 0, bases[2].autoforward[1] = 2;
+        memset(vehs, 0, 2 * sizeof vehs[0]);
+        vehs[0].x = 0, vehs[0].y = 0, vehs[0].faction = 1, vehs[0].home_base = 0;
+        vehs[1].x = 0, vehs[1].y = 6, vehs[1].faction = 3, vehs[1].home_base = 0;
+        projects[3] = 0, projects[4] = 2;
+        factions[1].attack_target_base = 2, factions[0].attack_target_base = 2;
+        // The message list: a node about base 0 and one about base 2.
+        static int32_t box_vbt[3], node_vbt[2];
+        static char box[0xbc + sizeof(struct game_list)];
+        static struct game_list_node nodes[2];
+        static int notified, deleted, updated;
+        struct game_list *L = (struct game_list *)(box + 0xbc);
+        *(int32_t **)box = box_vbt;
+        game_message_box = box;
+        node_vbt[0] = (int32_t)(intptr_t)delete_stub;
+        static void *list_vtbl[2] = {NULL, (void *)notify_stub};
+        L->vtbl = list_vtbl, L->head = L->cursor = &nodes[0], L->count = 2;
+        nodes[0] = (struct game_list_node){node_vbt, 0x40000000, NULL, &nodes[1], &nodes[1]};
+        nodes[1] = (struct game_list_node){node_vbt, 0x40000002, NULL, &nodes[0], &nodes[0]};
+        notify_count = &notified, delete_count = &deleted, update_count = &updated;
+        game_listbox_update_changes = update_stub, game_base_win_base_killed = base_killed_stub;
+        game_draw_state = &draw_state, game_turn = &turn, game_del_site = del_site_stub;
+        game_world_site = world_site_stub, game_goody_mult = goody_mult;
+        EXPECT(base_listed(0), 1);
+        EXPECT(base_listed(3), 0);
+        base_kill(0);
+        EXPECT(base_count, 2);
+        EXPECT(bases[0].x * 10 + bases[0].y, 62);
+        EXPECT(at(2, 2)->bits & MAP_BASE, 0);
+        EXPECT(vehs[0].home_base, 1);
+        EXPECT(vehs[1].home_base, -1);
+        EXPECT(projects[3], -2);
+        EXPECT(projects[4], 1);
+        EXPECT(bases[0].autoforward[0], -1);
+        EXPECT(bases[1].autoforward[1], 1);
+        EXPECT(factions[1].attack_target_base, 1);
+        EXPECT(factions[0].attack_target_base, 2);
+        EXPECT(L->count, 1);
+        EXPECT(L->head == &nodes[1], 1);
+        EXPECT(nodes[1].key, 0x40000001);
+        EXPECT(notified * 10 + deleted, 11);
+        EXPECT(updated, 1);
+        for (int i = 0; i < 2; i++) at(bases[i].x, bases[i].y)->bits &= ~(uint32_t)MAP_BASE;
+        memset(box, 0, sizeof box);
+        projects[3] = projects[4] = -1;
+        bases[0] = saved[0], bases[1] = saved[1], bases[2] = saved[2], base_count = saved_count;
+        vehs[0] = saved_veh[0], vehs[1] = saved_veh[1], veh_count = saved_vehs;
+        factions[1] = saved_f[0], factions[0] = saved_f[1];
+    }
+
+    // Roads: faction 1's other base 4 squares east is reached by a route
+    // over a square without a road, which becomes the goal; with roads all
+    // the way it is connected, and a sensor site is looked for instead.
+    {
+        struct base saved[2] = {bases[0], bases[1]};
+        int32_t saved_count = base_count;
+        base_count = 2;
+        bases[0].x = 2, bases[0].y = 2, bases[0].faction = 1;
+        bases[1].x = 6, bases[1].y = 2, bases[1].faction = 1;
+        put(2, 2, 3, 1, 0, MAP_BASE), put(4, 2, 3, 1, 0, 0), put(6, 2, 3, 1, 0, MAP_BASE);
+        at(2, 2)->owner_site = at(6, 2)->owner_site = 1, at(4, 2)->owner_site = 0xf;
+        current = &bases[0], current_id = 0, route_dir = 1, goals = 0, connects = 0;
+        EXPECT(base_connect(3), 1);
+        EXPECT(goals * 1000 + goal_x * 100 + goal_y * 10 + goal_priority, 1423);
+        at(4, 2)->bits |= MAP_ROAD;
+        EXPECT(base_connect(3), 0);
+        EXPECT(connects, 1);
+        route_dir = -1;
+        bases[0] = saved[0], bases[1] = saved[1], base_count = saved_count;
+    }
+
+    // Founding a base for faction 2 on land late in the game: marked and
+    // owned, counted, named from its file, with the minerals the rules let
+    // it keep, worked out as the current base; size 3 once another of the
+    // faction's bases holds the Planetary Transit System.
+    {
+        struct base saved[3] = {bases[0], bases[1], bases[2]};
+        int32_t saved_count = base_count, saved_turn = turn;
+        struct faction_data saved_f = factions[2];
+        static struct rules_armor armor_rules[ARMOR_COUNT];
+        game_armor = armor_rules;
+        base_count = 1, turn = 30, replays = 0;
+        bases[0].x = 6, bases[0].y = 2, bases[0].faction = 2;
+        at(6, 2)->bits |= MAP_BASE;
+        factions[2].base_count = 1, factions[2].se[SE_SUPPORT] = 0, factions[2].base_name_offset = 0;
+        rules_basic.retool_exemption = 10;
+        put(4, 4, 3, 1, 0, 0);
+        int region = at(4, 4)->region, before = factions[2].region_total_bases[region];
+        EXPECT(base_init(2, 4, 4), 1);
+        EXPECT(base_count, 2);
+        EXPECT(at(4, 4)->bits & MAP_BASE, MAP_BASE);
+        EXPECT(at(4, 4)->owner_site & 0xf, 2);
+        EXPECT(factions[2].base_count, 2);
+        EXPECT(factions[2].region_total_bases[region], before + 1);
+        EXPECT(replays, 1);
+        EXPECT(bases[1].faction * 10 + bases[1].pop_size, 21);
+        EXPECT(bases[1].name[0] != 0, 1);
+        EXPECT(bases[1].minerals, 10);
+        EXPECT(bases[1].terraform_x, -1);
+        EXPECT(bases[1].autoforward[2], -1);
+        EXPECT(current_id, 1);
+        EXPECT(bases[1].facilities_built[0] & 2, 0);  // not its first: no headquarters
+        factions[2].se[SE_SUPPORT] = -2;
+        projects[SP_PLANETARY_TRANSIT_SYSTEM] = 0;
+        put(2, 4, 3, 1, 0, 0);
+        EXPECT(base_init(2, 2, 4), 2);
+        EXPECT(bases[2].pop_size, 3);
+        EXPECT(bases[2].minerals, 0);
+        projects[SP_PLANETARY_TRANSIT_SYSTEM] = -1;
+        for (int i = 0; i < 3; i++) at(bases[i].x, bases[i].y)->bits &= ~(uint32_t)MAP_BASE;
+        bases[0] = saved[0], bases[1] = saved[1], bases[2] = saved[2], base_count = saved_count, turn = saved_turn;
+        factions[2] = saved_f;
+    }
 
     if (failures) return 1;
     printf("engine_base: all tests passed\n");
