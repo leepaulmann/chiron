@@ -43,3 +43,28 @@ int value_of_base(int base, int faction, int other, int overmatched, int coveted
 void tech_analysis(int player, int rival);
 // Whether `faction` would attack `other` (with `ally` beside it, if above 0).
 int wants_to_attack(int faction, int other, int ally);
+
+// The talks between a player (`faction`) and an AI (`other`).
+// diplomacy_check() weighs how the AI stands towards the player, into the
+// game_diplo_* variables; with `full`, also whom it might mention and its
+// prototypes (scan_prototypes()), which mention_prototypes() brings up.
+void diplomacy_check(int faction, int other, int full);
+void scan_prototypes(int faction, int other);
+void mention_prototypes(int faction, int other);
+// Whether the player takes the call (opening the diplomacy window).
+int wants_to_speak(int faction, int other);
+// Units each side has in the other's bases or territory go home when a
+// pact ends; returns how many of `faction`'s moved.
+int pact_withdraw(int faction, int other);
+void pact_ends(int faction, int other);
+// Whether the player goes ahead with breaking `status` with `other`.
+int break_treaty(int faction, int other, uint32_t status);
+// `faction` turns on `victim`, incited by `other` (or -1).
+void double_cross(int faction, int victim, int other);
+// Two factions meet (`other` 0: native life), at (x, y) or off the map.
+void encounter(int faction, int other, int x, int y, int tower, int native);
+// territory(faction, other, flags, base, count), how far `other` presses
+// into `faction`'s territory, is called through game_territory.
+// Atrocities committed by `faction` against `other`.
+void atrocity(int faction, int other, int always, int alien_too);
+void major_atrocity(int faction, int other);

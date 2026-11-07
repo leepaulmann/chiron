@@ -316,6 +316,43 @@ int32_t *game_diplo_friction_faction, *game_diplo_friction_with;
 int32_t *game_trade_want_tech[4], *game_trade_want_value[4];
 int32_t *game_trade_offer_tech[2], *game_trade_offer_value[2], *game_trade_offer_project[2];
 int32_t *game_trade_project, *game_ambience_flags, *game_multi_win_visible;
+int32_t *game_diplo_second, *game_diplo_tribute, *game_diplo_fear, *game_diplo_conquest_fear, *game_diplo_exposed_bases,
+    *game_diplo_open_base, *game_diplo_captured_bases, *game_diplo_near_endgame, *game_diplo_rival_outranks,
+    *game_diplo_great_satan, *game_diplo_runaway_leader, *game_diplo_reputation, *game_diplo_player_pacts,
+    *game_diplo_rival_pacts, *game_diplo_rival_strong_pacts, *game_diplo_rival_pact_score, *game_diplo_spoke_turn,
+    *game_diplo_enemy_allies, *game_diplo_enemy_ally, *game_diplo_prev_hostility, *game_diplo_goodwill,
+    *game_diplo_help_faction, *game_diplo_unmet_enemy, *game_diplo_player_enemy, *game_diplo_unmet_faction,
+    *game_diplo_mutual_faction, *game_diplo_rival_wars, *game_diplo_can_surrender, *game_diplo_can_betray,
+    *game_diplo_best_proto, *game_diplo_mention_proto, *game_diplo_caption_off, *game_diplo_caption_mode;
+int32_t *game_diplo_region_factions, *game_encounter_x, *game_encounter_y, *game_un_charter_a, *game_un_charter_b;
+int32_t *game_net_income, *game_console_veh_mode;
+void **game_faction_portraits;
+void *game_info_win, *game_diplo_pop, *game_tut_win, *game_pop_wait;
+void (*game_energy_compute)(int faction, int unk);
+void (*game_comm_check)(int faction, int other);
+void (*game_enemies_war)(int faction, int other);
+void (*game_enemies_treaty)(int faction, int other, int trade);
+int (*game_tut_check2)(int bit);
+int(__attribute__((thiscall)) * game_tut_map)(void *win, char *label, int x, int y, int a, void *sprite, int b, int x2,
+                                              int y2);
+void (*game_diplomacy_caption)(int faction, int other);
+char *(*game_get_pact_hood)(int faction, int other);
+char *(*game_get_him_her)(int faction, int unk);
+int (*game_x_pops)(char *label, void *sprite, void *fn);
+int (*game_x_pops_11)(char *label, int flags, void *sprite, void *fn);
+int (*game_wants_prototype)(int proto, int faction);
+void (*game_tech_achieve)(int faction, int tech, int from, int steal);
+void (*game_log_say)(char *format, int a, int b, int c);
+void(__attribute__((thiscall)) * game_net_daemon_await_diplo)(void *daemon, int unk);
+int (*game_spying)(int faction);
+void (*game_set_agenda)(int faction, int other, uint32_t agenda, int on);
+void(__attribute__((thiscall)) * game_console_set_move)(void *console, int unk);
+void(__attribute__((thiscall)) * game_popup_dtor)(void *pop);
+void(__attribute__((thiscall)) * game_diplo_pop_start)(void *pop, int faction);
+void (*game_introduce)(int faction, int other);
+void (*game_report_intel)(int faction);
+void(__attribute__((thiscall)) * game_info_win_set_state)(void *win, int a, int b);
+void(__attribute__((thiscall)) * game_sprite_box_sprite)(void *box, void *sprite, int a, int b);
 int (*game_ambience)(int sound);
 void *game_multi_win;
 struct proposal *game_proposals;
@@ -784,6 +821,56 @@ void game_bind(struct pe_image *exe) {
     game_ambience = (void *)code_at(exe, 0x446b40);
     game_multi_win = code_at(exe, 0x7fd648);
     game_multi_win_visible = (int32_t *)code_at(exe, 0x7fe06c);
+    static const struct {
+        int32_t **p;
+        uint32_t addr;
+    } talk[] = {
+        {&game_diplo_second, 0x93f7cc}, {&game_diplo_tribute, 0x93fa88}, {&game_diplo_fear, 0x93fa98},
+        {&game_diplo_conquest_fear, 0x93fa80}, {&game_diplo_exposed_bases, 0x93fa50}, {&game_diplo_open_base, 0x93fa58},
+        {&game_diplo_captured_bases, 0x93fa2c}, {&game_diplo_near_endgame, 0x93fa64},
+        {&game_diplo_rival_outranks, 0x93fa90}, {&game_diplo_great_satan, 0x93fa3c},
+        {&game_diplo_runaway_leader, 0x93f7f0}, {&game_diplo_reputation, 0x93fa78}, {&game_diplo_player_pacts, 0x93fa54},
+        {&game_diplo_rival_pacts, 0x93f7e0}, {&game_diplo_rival_strong_pacts, 0x93f7fc},
+        {&game_diplo_rival_pact_score, 0x93f7f8}, {&game_diplo_spoke_turn, 0x93f7e4}, {&game_diplo_enemy_allies, 0x93fa4c},
+        {&game_diplo_enemy_ally, 0x93f7b8}, {&game_diplo_prev_hostility, 0x93fa68}, {&game_diplo_goodwill, 0x93fa9c},
+        {&game_diplo_help_faction, 0x93f7e8}, {&game_diplo_unmet_enemy, 0x93f7d4}, {&game_diplo_player_enemy, 0x93f7d8},
+        {&game_diplo_unmet_faction, 0x93fa38}, {&game_diplo_mutual_faction, 0x93f7c8}, {&game_diplo_rival_wars, 0x93f808},
+        {&game_diplo_can_surrender, 0x93fa24}, {&game_diplo_can_betray, 0x93fa70}, {&game_diplo_best_proto, 0x93f804},
+        {&game_diplo_mention_proto, 0x93fa40}, {&game_diplo_caption_off, 0x93fac8}, {&game_diplo_caption_mode, 0x93facc},
+        {&game_diplo_region_factions, 0x93f818}, {&game_encounter_x, 0x68d43c}, {&game_encounter_y, 0x68d440},
+        {&game_un_charter_a, 0x9a6638}, {&game_un_charter_b, 0x9a663c}, {&game_net_income, 0x749c0c},
+        {&game_console_veh_mode, 0x939288},
+    };
+    for (unsigned i = 0; i < sizeof(talk) / sizeof(talk[0]); i++) *talk[i].p = (int32_t *)code_at(exe, talk[i].addr);
+    game_faction_portraits = (void **)code_at(exe, 0x6846d8);
+    game_info_win = code_at(exe, 0x7ad2a0);
+    game_diplo_pop = code_at(exe, 0x733990);
+    game_tut_win = code_at(exe, 0x8c6e68);
+    game_pop_wait = code_at(exe, 0x5398e0);
+    game_energy_compute = (void *)code_at(exe, 0x445130);
+    game_comm_check = (void *)code_at(exe, 0x55c430);
+    game_enemies_war = (void *)code_at(exe, 0x55c840);
+    game_enemies_treaty = (void *)code_at(exe, 0x55d760);
+    game_tut_check2 = (void *)code_at(exe, 0x4ba650);
+    game_tut_map = (void *)code_at(exe, 0x4be650);
+    game_diplomacy_caption = (void *)code_at(exe, 0x5399a0);
+    game_get_pact_hood = (void *)code_at(exe, 0x58fb00);
+    game_get_him_her = (void *)code_at(exe, 0x58fc50);
+    game_x_pops = (void *)code_at(exe, 0x5bf5d0);
+    game_x_pops_11 = (void *)code_at(exe, 0x5bf7d0);
+    game_wants_prototype = (void *)code_at(exe, 0x5be100);
+    game_tech_achieve = (void *)code_at(exe, 0x5bb000);
+    game_log_say = (void *)code_at(exe, 0x6262f0);
+    game_net_daemon_await_diplo = (void *)code_at(exe, 0x5315c0);
+    game_spying = (void *)code_at(exe, 0x55bc00);
+    game_set_agenda = (void *)code_at(exe, 0x55bba0);
+    game_console_set_move = (void *)code_at(exe, 0x511520);
+    game_popup_dtor = (void *)code_at(exe, 0x406c00);
+    game_diplo_pop_start = (void *)code_at(exe, 0x43f2b0);
+    game_introduce = (void *)code_at(exe, 0x53d360);
+    game_report_intel = (void *)code_at(exe, 0x4acbd0);
+    game_info_win_set_state = (void *)code_at(exe, 0x458f10);
+    game_sprite_box_sprite = (void *)code_at(exe, 0x6108e0);
     game_proposals = (struct proposal *)code_at(exe, 0x9a6828);
     game_social_ai = (void *)code_at(exe, 0x5b4790);
     game_call_council = (void *)code_at(exe, 0x52c880);

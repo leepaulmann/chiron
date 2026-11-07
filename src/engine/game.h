@@ -111,9 +111,11 @@ struct faction_data {
     int32_t loan_payment[FACTION_COUNT];  // and paid to it each turn
     GAME_PAD(0x104, 0x124);
     int32_t integrity_blemishes;  // treaties broken
-    GAME_PAD(0x128, 0x12c);
+    int32_t diplo_reputation;     // treaties made, less those broken (never below 0)
     int32_t diplo_gifts[FACTION_COUNT];  // gifts and bribes it has given each faction
-    GAME_PAD(0x14c, 0x1ac);
+    int32_t diplo_wrongs[FACTION_COUNT];    // times it double-crossed each faction
+    int32_t diplo_betrayed[FACTION_COUNT];  // times each faction double-crossed it
+    int32_t diplo_combat_total[FACTION_COUNT];  // its score in all its wars with each
     int32_t diplo_combat_count[FACTION_COUNT];  // its score in the current war with each, reset at a vendetta
     GAME_PAD(0x1cc, 0x1d0);
     uint32_t base_governor_adv;  // the governor settings new bases start with
@@ -1296,6 +1298,49 @@ extern int32_t *game_ambience_flags;  // bit 0: the player is at war, for the mu
 extern int (*game_ambience)(int sound);
 extern void *game_multi_win;  // the multiplayer status window
 extern int32_t *game_multi_win_visible;
+// diplomacy_check()'s findings for a player (`faction`) and a rival
+// (`other`), named as in Thinker, and the rest of the talks' state.
+extern int32_t *game_diplo_second;  // the rival in the talks
+extern int32_t *game_diplo_tribute, *game_diplo_fear, *game_diplo_conquest_fear, *game_diplo_exposed_bases,
+    *game_diplo_open_base, *game_diplo_captured_bases, *game_diplo_near_endgame, *game_diplo_rival_outranks,
+    *game_diplo_great_satan, *game_diplo_runaway_leader, *game_diplo_reputation, *game_diplo_player_pacts,
+    *game_diplo_rival_pacts, *game_diplo_rival_strong_pacts, *game_diplo_rival_pact_score, *game_diplo_spoke_turn,
+    *game_diplo_enemy_allies, *game_diplo_enemy_ally, *game_diplo_prev_hostility, *game_diplo_goodwill,
+    *game_diplo_help_faction, *game_diplo_unmet_enemy, *game_diplo_player_enemy, *game_diplo_unmet_faction,
+    *game_diplo_mutual_faction, *game_diplo_rival_wars, *game_diplo_can_surrender, *game_diplo_can_betray,
+    *game_diplo_best_proto, *game_diplo_mention_proto, *game_diplo_caption_off, *game_diplo_caption_mode;
+extern int32_t *game_diplo_region_factions;  // [REGION_COUNT] bit per faction with its headquarters or many bases there
+extern int32_t *game_encounter_x, *game_encounter_y;  // where two factions met, while they talk
+extern int32_t *game_un_charter_a, *game_un_charter_b;  // the UN Charter stands while a <= b
+extern int32_t *game_net_income;  // energy_compute()'s answer
+extern void **game_faction_portraits;  // [FACTION_COUNT]
+extern int32_t *game_console_veh_mode;  // non-zero while the console moves game_veh_ref_map_1
+extern void *game_info_win, *game_diplo_pop, *game_tut_win, *game_pop_wait;
+extern void (*game_energy_compute)(int faction, int unk);
+extern void (*game_comm_check)(int faction, int other);
+extern void (*game_enemies_war)(int faction, int other);
+extern void (*game_enemies_treaty)(int faction, int other, int trade);
+extern int (*game_tut_check2)(int bit);
+extern int(__attribute__((thiscall)) * game_tut_map)(void *win, char *label, int x, int y, int a, void *sprite, int b,
+                                                     int x2, int y2);
+extern void (*game_diplomacy_caption)(int faction, int other);
+extern char *(*game_get_pact_hood)(int faction, int other);
+extern char *(*game_get_him_her)(int faction, int unk);
+extern int (*game_x_pops)(char *label, void *sprite, void *fn);
+extern int (*game_x_pops_11)(char *label, int flags, void *sprite, void *fn);
+extern int (*game_wants_prototype)(int proto, int faction);
+extern void (*game_tech_achieve)(int faction, int tech, int from, int steal);  // tech_achieved()
+extern void (*game_log_say)(char *format, int a, int b, int c);
+extern void(__attribute__((thiscall)) * game_net_daemon_await_diplo)(void *daemon, int unk);
+extern int (*game_spying)(int faction);
+extern void (*game_set_agenda)(int faction, int other, uint32_t agenda, int on);
+extern void(__attribute__((thiscall)) * game_console_set_move)(void *console, int unk);
+extern void(__attribute__((thiscall)) * game_popup_dtor)(void *pop);
+extern void(__attribute__((thiscall)) * game_diplo_pop_start)(void *pop, int faction);
+extern void (*game_introduce)(int faction, int other);
+extern void (*game_report_intel)(int faction);
+extern void(__attribute__((thiscall)) * game_info_win_set_state)(void *win, int a, int b);
+extern void(__attribute__((thiscall)) * game_sprite_box_sprite)(void *box, void *sprite, int a, int b);
 // Planetary Council proposals.
 struct proposal {
     char *name, *description;

@@ -362,6 +362,290 @@ static void attack_tests(void) {
     base_count = 3;
 }
 
+// ---- The talks ------------------------------------------------------------------
+
+int territory(int faction, int other, int flags, int *base, int *count);
+
+enum { TW = 40, TH = 12 };
+static struct map_tile talk_tiles[TW / 2 * TH], *talk_tiles_ptr = talk_tiles;
+static struct veh talk_vehs[4];
+static struct unit_proto talk_protos[PROTO_COUNT];
+static struct rules_chassis talk_chassis[CHASSIS_COUNT];
+static struct rules_weapon talk_weapons[WEAPON_COUNT];
+static struct rules_armor talk_armor[ARMOR_COUNT];
+static int32_t talk_vars[64], talk_regions[REGION_COUNT], talk_height = TH, talk_veh_count, find_dist;
+static int32_t charter_a, charter_b = 1, expansion, net_income, enc_x = -1, enc_y = -1;
+static int answer, popps, netmsgs, wars, treaties, comm_checks, popups, captions;
+static char talk_text[256];
+static int weap_strat_stub(int weapon, int faction) { return talk_weapons[weapon].offense; }
+static int arm_strat_stub(int armor, int faction) { return armor; }
+static int popp_stub(char *file, char *label, int flags, char *picture, int unk) { return popps++, answer; }
+static void __attribute__((thiscall)) netmsg_stub(void *n, char *label, int delay, int unk, char *sound) { netmsgs++; }
+static char *pact_hood_stub(int f, int o) { return "pact"; }
+static void war_stub(int f, int o) { wars++; }
+static void treaty_stub(int f, int o, int trade) { treaties++; }
+static void comm_check_stub(int f, int o) { comm_checks++; }
+static void energy_stub(int f, int u) {}
+static int contiguous_stub(int f, int o, int r, int s) { return 0; }
+static void caption_stub(int f, int o) { captions++; }
+static void __attribute__((thiscall)) popup_stub(void *pop) { popups++; }
+static uint32_t __attribute__((stdcall)) upper_stub(char *s) { return 0; }
+static uint32_t(__attribute__((stdcall)) * upper_ptr)(char *s) = upper_stub;
+static int parse_num_stub(int slot, int value) { return 0; }
+
+static void talk_setup(void) {
+    memset(factions, 0, sizeof factions);
+    memset(defs, 0, sizeof defs);
+    for (int f = 0; f < FACTION_COUNT; f++) defs[f].ideology_category = -1;
+    humans = 0, turn = 50, rules = 0, sunspots = 0, current = 7, alive = 0xfe, diplo_friction = 0;
+    static int32_t **const vars[] = {
+        &game_diplo_second, &game_diplo_tribute, &game_diplo_fear, &game_diplo_conquest_fear,
+        &game_diplo_exposed_bases, &game_diplo_open_base, &game_diplo_captured_bases, &game_diplo_near_endgame,
+        &game_diplo_rival_outranks, &game_diplo_great_satan, &game_diplo_runaway_leader, &game_diplo_reputation,
+        &game_diplo_player_pacts, &game_diplo_rival_pacts, &game_diplo_rival_strong_pacts,
+        &game_diplo_rival_pact_score, &game_diplo_spoke_turn, &game_diplo_enemy_allies, &game_diplo_enemy_ally,
+        &game_diplo_prev_hostility, &game_diplo_goodwill, &game_diplo_help_faction, &game_diplo_unmet_enemy,
+        &game_diplo_player_enemy, &game_diplo_unmet_faction, &game_diplo_mutual_faction, &game_diplo_rival_wars,
+        &game_diplo_can_surrender, &game_diplo_can_betray, &game_diplo_best_proto, &game_diplo_mention_proto,
+        &game_diplo_caption_off, &game_diplo_caption_mode};
+    for (unsigned i = 0; i < sizeof(vars) / sizeof(vars[0]); i++) *vars[i] = &talk_vars[i];
+    memset(talk_vars, 0, sizeof talk_vars);
+    game_diplo_region_factions = talk_regions, game_encounter_x = &enc_x, game_encounter_y = &enc_y;
+    game_un_charter_a = &charter_a, game_un_charter_b = &charter_b, game_expansion = &expansion;
+    game_net_income = &net_income, game_energy_compute = energy_stub, game_contiguous = contiguous_stub;
+    game_map = &talk_tiles_ptr, game_map_height = &talk_height, game_vehs = talk_vehs, game_veh_count = &talk_veh_count;
+    game_protos = talk_protos, game_chassis = talk_chassis, game_weapons = talk_weapons, game_armor = talk_armor;
+    game_weap_strat = weap_strat_stub, game_arm_strat = arm_strat_stub, game_base_find_dist = &find_dist;
+    game_popp = popp_stub, game_netmsg_pop = netmsg_stub, game_get_pact_hood = pact_hood_stub;
+    game_enemies_war = war_stub, game_enemies_treaty = treaty_stub, game_comm_check = comm_check_stub;
+    game_diplomacy_caption = caption_stub, game_popup_ctor = game_popup_dtor = popup_stub;
+    game_battle_text = talk_text, game_char_upper = &upper_ptr, game_parse_num = parse_num_stub;
+    static char *script = "script";
+    game_script_file = &script;
+    static uint8_t image[0x300000];  // the game's strings, all empty
+    game_test_image = image;
+    // Land everywhere, region 1, faction 1's territory.
+    for (int i = 0; i < TW / 2 * TH; i++)
+        talk_tiles[i] = (struct map_tile){.climate = 0x60, .region = 1, .territory = 1, .owner_site = 0xf};
+    base_count = 3;
+    bases[0] = (struct base){.x = 30, .y = 4, .faction = 2, .faction_former = 2, .pop_size = 2};
+    bases[1] = (struct base){.x = 2, .y = 10, .faction = 2, .faction_former = 2, .pop_size = 4};
+    bases[2] = (struct base){.x = 10, .y = 10, .faction = 1, .faction_former = 1, .pop_size = 3};
+}
+
+static void talks_tests(void) {
+    talk_setup();
+
+    // The rival's designs: a fast attacker and a defender. Its best and the
+    // one it mentions is the attacker, as the player has nothing like it.
+    talk_chassis[1] = (struct rules_chassis){.speed = 2, .triad = TRIAD_LAND};
+    talk_weapons[1].offense = 4, talk_armor[1].defense = 2, talk_armor[2].defense = 3;
+    struct unit_proto *attacker = &talk_protos[2 * 64], *defender = &talk_protos[2 * 64 + 1];
+    *attacker = (struct unit_proto){.chassis = 1, .weapon = 1, .armor = 1, .plan = PLAN_COMBAT, .flags = 0x5};
+    *defender = (struct unit_proto){.chassis = 1, .armor = 2, .plan = PLAN_DEFENSIVE, .flags = 0x5};
+    scan_prototypes(1, 2);
+    EXPECT(*game_diplo_best_proto, 2 * 64);
+    EXPECT(*game_diplo_mention_proto, 2 * 64);
+    // A better attacker of the player's: the rival's is worth a sixteenth
+    // and not mentioned; the defender is.
+    talk_protos[1 * 64] = (struct unit_proto){.chassis = 1, .weapon = 2, .armor = 1, .plan = PLAN_COMBAT, .flags = 0x5};
+    talk_weapons[2].offense = 6;
+    scan_prototypes(1, 2);
+    EXPECT(*game_diplo_best_proto, 2 * 64 + 1);
+    EXPECT(*game_diplo_mention_proto, 2 * 64 + 1);
+    // Already mentioned: nothing to mention.
+    defender->flags |= 0x10;
+    scan_prototypes(1, 2);
+    EXPECT(*game_diplo_mention_proto, -1);
+    // Nothing to mention: mention_prototypes does nothing.
+    *game_diplo_caption_off = *game_diplo_caption_mode = 0, popups = 0;
+    mention_prototypes(1, 2);
+    EXPECT(popups, 0);
+    EXPECT(*game_diplo_second, 2);
+
+    // The call: an answer already given stands (with the popup made and
+    // put away); between an alien and a human faction without Psych, no.
+    *game_diplo_caption_off = 1, *game_diplo_caption_mode = 1;
+    EXPECT(wants_to_speak(1, 2), 1);
+    EXPECT(popups, 2);
+
+    // A unit of 2's in 1's territory, two squares from 1's base: marked,
+    // counting 1; the second time, warned already, 1 more.
+    talk_veh_count = 1;
+    talk_vehs[0] = (struct veh){.x = 10, .y = 8, .faction = 2, .proto = 2 * 64};
+    int base = 0, count = 0;
+    EXPECT(territory(1, 2, 1, &base, &count), 1);
+    EXPECT(base, 2);
+    EXPECT(talk_vehs[0].flags, 3);
+    EXPECT(talk_vehs[0].state, 0xc00);
+    EXPECT(territory(1, 2, 1, &base, &count), 2);
+    EXPECT(count, 1);
+    EXPECT(factions[1].flags, 0x10000);
+    // With a treaty, 5 more; in a pact, none.
+    factions[1].diplo_status[2] = TREATY_TREATY;
+    EXPECT(territory(1, 2, 1, &base, &count), 6);
+    factions[1].diplo_status[2] = TREATY_PACT;
+    EXPECT(territory(1, 2, 1, &base, &count), 0);
+    EXPECT(base, -1);
+    // Far from the base: only counted, unless the friction runs high.
+    factions[1].diplo_status[2] = 0, talk_vehs[0].y = 2, talk_vehs[0].state = 0;
+    EXPECT(territory(1, 2, 1, NULL, NULL), 1);
+    EXPECT(talk_vehs[0].state, 0x400);
+    diplo_friction = 13;
+    EXPECT(territory(1, 2, 1, NULL, NULL), 1);
+    EXPECT(talk_vehs[0].state, 0xc00);
+    diplo_friction = 0, talk_veh_count = 0;
+
+    // Breaking treaties: a pact with a notice; a treaty if the player says
+    // yes; nothing at war.
+    popps = netmsgs = 0;
+    factions[1].diplo_status[2] = TREATY_PACT | TREATY_TREATY;
+    EXPECT(break_treaty(1, 2, TREATY_PACT), 1);
+    EXPECT(netmsgs, 1);
+    factions[1].diplo_status[2] = TREATY_TREATY, answer = 0;
+    EXPECT(break_treaty(1, 2, TREATY_TREATY | TREATY_PACT), 1);
+    answer = 1;
+    EXPECT(break_treaty(1, 2, TREATY_TREATY), 0);
+    EXPECT(popps, 2);
+    factions[1].diplo_status[2] = TREATY_TREATY | TREATY_VENDETTA;
+    EXPECT(break_treaty(1, 2, TREATY_TREATY), 0);
+    factions[1].diplo_status[2] = 0;
+    EXPECT(break_treaty(1, 2, 0x10000), 0);
+    answer = 0;
+    EXPECT(break_treaty(1, 2, 0x4), 0);
+
+    // An atrocity by 1 on 2: 2 wants revenge; 3, in contact with 1 and
+    // minding atrocities, gains friction; the first counts, with ten turns
+    // of sanctions.
+    talk_setup();
+    factions[3].diplo_status[1] = TREATY_COMMLINK | 0x200000;
+    factions[1].diff_level = 3;
+    atrocity(1, 2, 0, 0);
+    EXPECT(factions[2].diplo_status[1], 0x40020);
+    EXPECT(factions[2].diplo_agenda[1], 4);
+    EXPECT(factions[3].diplo_friction[1], 5);
+    EXPECT(factions[3].diplo_status[1] & 0x400000, 0x400000);
+    EXPECT(factions[1].atrocities, 1);
+    EXPECT(factions[1].integrity_blemishes, 1);
+    EXPECT(factions[1].sanction_turns, 10);
+    // Again: not counted, unless always. The blemish depends on the
+    // culprit's own standing towards the victim, not the victim's.
+    atrocity(1, 2, 0, 0);
+    EXPECT(factions[1].atrocities, 1);
+    atrocity(1, 2, 1, 0);
+    EXPECT(factions[1].atrocities, 2);
+    EXPECT(factions[1].integrity_blemishes, 2);
+    factions[1].diplo_status[2] = 0x40000;
+    atrocity(1, 2, 1, 0);
+    EXPECT(factions[1].integrity_blemishes, 2);
+    factions[1].diplo_status[2] = 0, factions[1].atrocities = 2, factions[1].sanction_turns -= 30;
+    EXPECT(factions[1].sanction_turns, 10 + 10 + 20);
+    // Without the UN Charter, only the victim's grudge.
+    charter_a = 2;
+    atrocity(1, 3, 1, 0);
+    EXPECT(factions[1].atrocities, 2);
+    EXPECT(factions[3].diplo_status[1] & 0x40020, 0x40020);
+    charter_a = 0;
+    // Too many make a major atrocity: every other AI declares a vendetta
+    // and 1's integrity is at least 6.
+    factions[1].atrocities = 20;
+    popps = 0;
+    atrocity(1, 2, 1, 0);
+    EXPECT(factions[1].major_atrocities, 1);
+    EXPECT(factions[1].integrity_blemishes, 6);
+    EXPECT(factions[2].diplo_status[1] & 0x80000, 0x80000);
+    EXPECT(factions[3].diplo_status[1] & (TREATY_VENDETTA | TREATY_COMMLINK | TREATY_UNK_40),
+           TREATY_VENDETTA | TREATY_COMMLINK | TREATY_UNK_40);
+    EXPECT(factions[3].diplo_merc[1], 50);
+    EXPECT(factions[1].diplo_spoke[3], turn);
+    EXPECT(popps, 5);  // factions 3 to 7
+    EXPECT(factions[2].diplo_status[1] & TREATY_VENDETTA, 0);
+
+    // 1 breaks a treaty with 2 unprovoked: its reputation falls, its
+    // integrity is blemished twice (once for the wrong), and a vendetta.
+    talk_setup();
+    factions[1].diplo_status[2] = factions[2].diplo_status[1] = TREATY_TREATY | TREATY_COMMLINK;
+    factions[1].diplo_reputation = 2, factions[1].diff_level = 3;
+    factions[2].loan_balance[1] = 100;
+    double_cross(1, 2, -1);
+    EXPECT(factions[2].loan_balance[1], 0);
+    EXPECT(factions[1].diplo_reputation, 1);
+    EXPECT(factions[1].integrity_blemishes, 1);
+    EXPECT(factions[1].diplo_wrongs[2], 1);
+    EXPECT(factions[2].diplo_betrayed[1], 1);
+    EXPECT(factions[1].diplo_status[2] & TREATY_VENDETTA, TREATY_VENDETTA);
+    // Incited by 3, with whom it has a treaty and 2 none: allowed; 3's
+    // friction eases.
+    factions[1].diplo_status[3] = TREATY_TREATY, factions[3].diplo_friction[1] = 10;
+    factions[1].diplo_status[2] = factions[2].diplo_status[1] = 0x4;
+    double_cross(1, 2, 3);
+    EXPECT(factions[1].integrity_blemishes, 1);
+    EXPECT(factions[1].diplo_gifts[3], 1);
+    EXPECT(factions[3].diplo_friction[1], 8);
+    // A human double-crosser: the victim wants revenge, and the betrayal's
+    // mood.
+    humans = 1 << 1;
+    factions[1].diplo_status[2] = factions[2].diplo_status[1] = 0x4;
+    double_cross(1, 2, -1);
+    EXPECT(factions[2].diplo_status[1] & TREATY_WANT_REVENGE, TREATY_WANT_REVENGE);
+    EXPECT(factions[1].diplo_status[2] & TREATY_UNK_40, TREATY_UNK_40);
+    EXPECT(factions[1].diplo_merc[2], 50);
+    humans = 0;
+
+    // Two AIs meet for the first time: a commlink, and a treaty as neither
+    // wants war (each has a single base).
+    talk_setup();
+    comm_checks = wars = treaties = 0;
+    encounter(2, 3, 5, 5, 0, 0);
+    EXPECT(comm_checks, 2);
+    EXPECT(factions[2].diplo_status[3], TREATY_UNK_80000000 | TREATY_UNK_8000000 | TREATY_COMMLINK | 0x40000000);
+    EXPECT(treaties, 1);
+    EXPECT(enc_x, -1);
+    // Met before: only every fourth turn (2 + 3 + 50 & 3 = 3).
+    encounter(2, 3, -1, -1, 0, 0);
+    EXPECT(treaties, 1);
+    // Wanting revenge: war.
+    turn = 51, factions[2].diplo_status[3] |= TREATY_WANT_REVENGE;
+    encounter(2, 3, -1, -1, 0, 0);
+    EXPECT(wars, 1);
+    // Under sunspots only the commlink; on turn 0, nothing.
+    sunspots = 3;
+    encounter(4, 5, -1, -1, 0, 0);
+    EXPECT(factions[4].diplo_status[5], TREATY_UNK_80000000 | TREATY_COMMLINK);
+    sunspots = 0, turn = 0;
+    encounter(4, 6, -1, -1, 0, 0);
+    EXPECT(factions[4].diplo_status[6], 0);
+
+    // The player (1) and an AI (2) at war, with no bases: friction 10, 5
+    // more for its revenge; hostile (4), asking the least tribute, 2 for
+    // each of its ranks (3), times (3 + 1) * (0 + 2) * (15 + 10) / 64 = 18,
+    // made 25 and so 50.
+    talk_setup();
+    base_count = 0, rules = RULES_VICTORY_TRANSCENDENCE;
+    factions[2].diplo_friction[1] = 10, factions[2].diplo_status[1] = TREATY_WANT_REVENGE;
+    factions[2].ranking = 3, factions[1].ranking = 2, factions[1].diff_level = 3;
+    factions[2].alloc_labs = 5, factions[2].best_weapon_value = 2;
+    diplomacy_check(1, 2, 0);
+    EXPECT(*game_diplo_friction, 15);
+    EXPECT(*game_diplo_hostility, 4);
+    EXPECT(*game_diplo_tribute, 50);
+    EXPECT(*game_diplo_rival_outranks, 1);
+    EXPECT(*game_diplo_second, 2);
+    EXPECT(*game_diplo_friction_with, 1);
+    // Without the grudge: no tribute and no hostility; friction 10.
+    factions[2].diplo_status[1] = 0;
+    diplomacy_check(1, 2, 0);
+    EXPECT(*game_diplo_tribute, 0);
+    EXPECT(*game_diplo_hostility, 0);
+    EXPECT(*game_diplo_friction, 10);
+    // A fight to the death: hostile anyway.
+    factions[2].diplo_agenda[1] = 0x8;
+    diplomacy_check(1, 2, 1);
+    EXPECT(*game_diplo_hostility, 1);
+    EXPECT(*game_diplo_can_betray, 0);
+    base_count = 3;
+}
+
 int main(void) {
     game_factions = factions, game_bases = bases, game_base_count = &base_count;
     game_map_width = &width, game_map_half_width = &half_width, game_map_flat = &flat;
@@ -434,6 +718,7 @@ int main(void) {
     diplomacy_tests();
     reckoning_tests();
     attack_tests();
+    talks_tests();
     if (failures) return 1;
     printf("engine_faction: all tests passed\n");
     return 0;

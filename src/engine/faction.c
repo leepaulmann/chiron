@@ -13,6 +13,7 @@
 #include "score.h"
 #include "shadow.h"
 #include "tech.h"
+#include "veh.h"
 
 enum {
     TREATY_SURRENDERED = 0x2000000,
@@ -581,6 +582,1103 @@ int wants_to_attack(int faction, int other, int ally) {
     return 6 * (morale * ours) / (their_morale * theirs) >= c + 6;
 }
 
+// ---- The talks ----------------------------------------------------------------
+
+enum {
+    TREATY_UNK_10000 = 0x10000, TREATY_UNK_200000 = 0x200000, TREATY_UNK_400000 = 0x400000,
+    TREATY_MAJOR_ATROCITY_VICTIM = 0x80000, TREATY_UNK_40000000 = 0x40000000,
+    AGENDA_UNK_1 = 0x1, AGENDA_UNK_4 = 0x4, AGENDA_FIGHT_TO_DEATH = 0x8, AGENDA_UNK_2000 = 0x2000,
+    FACTION_FLAG_COOP_WITH_HUMAN = 0x400000, FACTION_FLAG_UNK_10000 = 0x10000,
+    FACTION_FLAG_WANTON_ATROCITIES = 0x1000000,  // others have seen the player commit atrocities wantonly
+    PROTO_FLAG_MENTIONED = 0x10, PROTO_FLAG_OFFERED = 0x20,
+    TECH_PSYCH = 4, TECH_PRPSYCH = 0x4e,
+    VEH_STATE_UNK_400 = 0x400, VEH_STATE_UNK_800 = 0x800,
+};
+
+static inline int alien(int faction) { return (game_faction_defs[faction].rule_flags & RULE_FLAG_ALIEN) != 0; }
+static inline struct map_tile *tile_at(int x, int y) { return &(*game_map)[(x >> 1) + y * *game_map_half_width]; }
+static inline int un_charter(void) { return *game_un_charter_a <= *game_un_charter_b; }
+// The faction on a square with a unit on it, or -1 (veh_who()).
+static inline int unit_owner(const struct map_tile *t) {
+    return (t->bits & MAP_UNIT) && (t->owner_site & 0xf) < 8 ? t->owner_site & 0xf : -1;
+}
+// A square of a base's radius (game_radius_x/y), wrapped, or 0 off the map.
+static int radius_square(int x, int y, int k, int *rx, int *ry) {
+    x += game_radius_x[k], y += game_radius_y[k];
+    if (!(*game_map_flat & 1)) {
+        if (x < 0) x += *game_map_width;
+        else if (x >= *game_map_width) x -= *game_map_width;
+    }
+    *rx = x, *ry = y;
+    return on_map(x, y);
+}
+
+// A faction's leader's title, the leader's name and the faction's noun, for
+// the next message (with their grammar).
+static void say_title(int slot, int faction) {
+    struct faction_def *d = &game_faction_defs[faction];
+    *game_parse_gender = d->leader_female, *game_parse_plural = 0;
+    game_parse_says(slot, d->leader_title, -1, -1);
+}
+static void say_name(int slot, int faction) {
+    struct faction_def *d = &game_faction_defs[faction];
+    *game_parse_gender = d->leader_female, *game_parse_plural = 0;
+    game_parse_says(slot, d->leader_name, -1, -1);
+}
+static void say_noun(int slot, int faction) {
+    struct faction_def *d = &game_faction_defs[faction];
+    *game_parse_gender = d->noun_gender, *game_parse_plural = d->noun_plural;
+    game_parse_says(slot, d->noun, -1, -1);
+}
+
+// How `other` (the AI) stands towards `faction` (the player) in talks, into
+// the game_diplo_* variables: whether it sees the end coming, is outranked
+// or treats the player as the great satan (or the player as a runaway
+// leader), the friction and reputation, each side's pacts; its fear of the
+// player and the tribute it would ask, from the forces they have on each
+// region, bases left open or exposed, their combat records, arms, planet
+// busters and reserves; its hostility (0 to 4), its chance to attack, the
+// allies it shares enemies with, and its goodwill; whether it would
+// surrender, and with `full` whether it would betray the player, with the
+// factions it might ask for help against or mention, and the prototypes it
+// might show (scan_prototypes). Thinker's diplomacy_check() adds its own
+// biases, and checks the stack it reads next to a base, which the original
+// reads even with no unit there.
+void diplomacy_check(int faction, int other, int full) {
+    struct faction_data *me = &game_factions[faction], *them = &game_factions[other];
+    const uint32_t *their = &them->diplo_status[faction], *agenda = &them->diplo_agenda[faction];
+    const uint32_t *ours = &me->diplo_status[other];
+    int turn = *game_turn;
+    *game_diplo_friction_with = faction, *game_diplo_friction_faction = other, *game_diplo_second = other;
+    *game_diplo_hostility = *game_diplo_attack_chance = *game_diplo_tribute = *game_diplo_fear = 0;
+    *game_diplo_conquest_fear = *game_diplo_exposed_bases = *game_diplo_open_base = *game_diplo_captured_bases = 0;
+    *game_diplo_near_endgame = at_climax(faction);
+    *game_diplo_rival_outranks = them->ranking > me->ranking;
+    *game_diplo_great_satan = great_satan(faction, 0) && them->base_count > 1 &&
+                              (!(*ours & TREATY_PACT) ||
+                               (them->ranking >= 5 && (!(*game_rules & RULES_VICTORY_COOPERATIVE) || turn < 200)));
+    *game_diplo_runaway_leader =
+        game_ranking_scores[game_faction_rankings[7]] > 2 * game_ranking_scores[faction] && them->ranking != 7;
+    if (them->flags & FACTION_FLAG_TEAM_UP_VS_HUMAN) *game_diplo_great_satan = 1, *game_diplo_runaway_leader = 0;
+    if (them->flags & FACTION_FLAG_COOP_WITH_HUMAN) *game_diplo_great_satan = 0, *game_diplo_runaway_leader = 1;
+    *game_diplo_friction = them->diplo_friction[faction];
+    *game_diplo_reputation = reputation(faction, other);
+    // The rival's leader minds the player's choice in its favoured
+    // category, more with agenda bit 1.
+    int ideology = 0;
+    const struct faction_def *def = &game_faction_defs[other];
+    if (def->ideology_category >= 0 && def->ideology_model) {
+        int model = me->se_models_pending[def->ideology_category];
+        if (model && model != def->ideology_model) ideology = *agenda & AGENDA_UNK_1 ? 2 : 1;
+    }
+    int our_record = me->diplo_combat_count[other] + turn / 50 + 1;
+    int their_record = them->diplo_combat_count[faction] + turn / 50 + 1;
+    if (!(*ours & TREATY_VENDETTA)) {
+        our_record += turn / 25 + me->diplo_combat_total[other] + 2;
+        their_record += turn / 25 + them->diplo_combat_total[faction] + 2;
+    }
+    int fight = them->ai_fight;
+    if ((*their & TREATY_WANT_REVENGE) && fight < 0) fight = -fight;
+    *game_diplo_player_pacts = *game_diplo_rival_pacts = *game_diplo_rival_strong_pacts = 0;
+    *game_diplo_rival_pact_score = 0;
+    uint8_t alive = *game_factions_alive;
+    for (int i = 1; i < FACTION_COUNT; i++) {
+        if (!(alive >> i & 1)) continue;
+        if ((me->diplo_status[i] & TREATY_PACT) && !(game_factions[i].diplo_status[faction] & TREATY_SURRENDERED))
+            ++*game_diplo_player_pacts;
+        if (them->diplo_status[i] & TREATY_PACT) {
+            if (game_factions[i].ranking >= 5 && them->ranking < 5 && i != faction && !*game_diplo_runaway_leader)
+                ++*game_diplo_rival_strong_pacts;
+            ++*game_diplo_rival_pacts;
+            *game_diplo_rival_pact_score += game_ranking_scores[i];
+        }
+    }
+    if (full) *game_diplo_spoke_turn = me->diplo_spoke[other];
+    int our_morale = game_faction_defs[faction].rule_morale + clamp(me->se_pending[SE_MORALE], -4, 4) + 16;
+    int their_morale = game_faction_defs[other].rule_morale + clamp(them->se_pending[SE_MORALE], -4, 4) + 16;
+    // The most bases each faction has on a region (at least 1); the
+    // regions where each has its headquarters or near its most.
+    int32_t most[FACTION_COUNT];
+    for (int j = 1; j < FACTION_COUNT; j++) most[j] = 1;
+    int32_t *regions = game_diplo_region_factions;
+    memset(&regions[1], 0, (REGION_COUNT - 1) * sizeof(int32_t));
+    for (int r = 1; r < REGION_COUNT; r++)
+        for (int j = 1; j < FACTION_COUNT; j++)
+            if (most[j] <= game_factions[j].region_total_bases[r]) most[j] = game_factions[j].region_total_bases[r];
+    // Each of the two's bases: the player's bases the rival took, and
+    // outside a pact the player's units next to the rival's empty bases
+    // (which it fears for) and the rival's next to the player's (exposed),
+    // or more of them next to a garrisoned base of the player's (an
+    // opening to attack).
+    for (int b = 0; b < *game_base_count; b++) {
+        const struct base *B = &game_bases[b];
+        if (game_has_facility(B, FAC_HEADQUARTERS)) regions[tile_at(B->x, B->y)->region] |= 1 << B->faction;
+        int owner = B->faction;
+        if (owner == faction) {
+            if (B->faction_former == other) ++*game_diplo_captured_bases;
+        } else if (owner != other) {
+            continue;
+        }
+        if (*ours & TREATY_PACT) continue;
+        const struct map_tile *t = tile_at(B->x, B->y);
+        int x, y;
+        if (unit_owner(t) >= 0) {
+            if (owner != faction) continue;
+            int garrison = game_stack_check(game_veh_at(B->x, B->y), 14, -1, -1, -1), near = 0;
+            for (int k = 0; k < 21; k++) {
+                if (!radius_square(B->x, B->y, k, &x, &y)) continue;
+                int v = game_stack_fix(game_veh_at(x, y));
+                // With no unit there the original reads the word before the units.
+                if (game_vehs[v].faction == other)
+                    near += game_stack_check(v, STACK_PLAN, PLAN_COMBAT, -1, -1) +
+                            game_stack_check(v, STACK_PLAN, PLAN_OFFENSIVE, -1, -1);
+            }
+            if (near > garrison) ++*game_diplo_attack_chance, ++*game_diplo_tribute;
+            continue;
+        }
+        for (int k = 0; k < 21; k++) {
+            if (!radius_square(B->x, B->y, k, &x, &y)) continue;
+            const struct map_tile *n = tile_at(x, y);
+            if (n->region != t->region) continue;
+            if (owner == faction) {
+                if (unit_owner(n) == other) {
+                    ++*game_diplo_exposed_bases;
+                    break;
+                }
+            } else if (unit_owner(n) == faction) {
+                *game_diplo_open_base = b;
+                *game_diplo_fear += 8 * B->pop_size;
+                break;
+            }
+        }
+    }
+    // Their forces on each region where both have units or bases.
+    for (int r = 1; r < REGION_COUNT; r++) {
+        for (int j = 1; j < FACTION_COUNT; j++)
+            if (game_factions[j].region_total_bases[r] >= most[j] - most[j] / 4) regions[r] |= 1 << j;
+        int our_bases = me->region_total_bases[r], their_bases = them->region_total_bases[r];
+        int our_units = me->region_total_combat_units[r], their_units = them->region_total_combat_units[r];
+        if ((!our_units && !our_bases) || (!their_units && !their_bases)) continue;
+        int our_arms = me->best_weapon_value + 1, their_arms = them->best_weapon_value + 1;
+        int our_force = me->region_force_rating[r] * our_morale / their_morale * our_arms / their_arms;
+        int their_force = them->region_force_rating[r] * their_morale / our_morale * their_arms / our_arms;
+        int here = regions[r], theirs_here = here & (1 << other);
+        if (theirs_here) {
+            int against = their_units;
+            if (our_bases) against = their_force / (!(here & (1 << faction)) - them->ai_fight + 2) + their_units;
+            if (our_force > against) {
+                *game_diplo_fear += 32 * (our_force + 1) / clamp(against, 1, 99999);
+                continue;
+            }
+        }
+        *game_diplo_hostility = 1;
+        if (our_bases) {
+            *game_diplo_tribute += their_force;
+            if ((here & (1 << faction)) && their_force > our_units) {
+                *game_diplo_tribute += their_force;
+                if (their_force > 3 * (our_force + our_units) / 2) ++*game_diplo_attack_chance;
+            }
+            if (their_bases || (*ours & TREATY_PACT)) *game_diplo_tribute -= our_force;
+        } else if (their_bases) {
+            *game_diplo_tribute -= (our_force - their_units) / (theirs_here ? 1 : 2);
+        }
+    }
+    *game_diplo_tribute *= *game_diplo_exposed_bases + 1;
+    if (*game_diplo_exposed_bases && !(*ours & (TREATY_PACT | TREATY_TREATY | TREATY_TRUCE))) *game_diplo_hostility = 1;
+    if (*game_diplo_near_endgame && *game_diplo_rival_outranks) *game_diplo_hostility = *game_diplo_great_satan ? 2 : 3;
+    // The tribute grows with the rival's commerce and grudges, or shrinks
+    // with the player's.
+    if (me->base_count && them->base_count) {
+        if (!(*their & TREATY_WANT_REVENGE) && !(*agenda & AGENDA_UNK_200)) {
+            int bonus = clamp(them->ai_wealth - me->tech_commerce_bonus + them->tech_commerce_bonus - fight, 0, 99);
+            *game_diplo_tribute -= me->energy_surplus_total / me->base_count * bonus;
+            if (*their & TREATY_WANT_TO_TALK) *game_diplo_tribute /= 2;
+        } else {
+            int bonus = clamp(me->tech_commerce_bonus - them->tech_commerce_bonus + fight, 0, 99);
+            *game_diplo_tribute = 2 * (*game_diplo_tribute + them->energy_surplus_total * bonus / them->base_count);
+        }
+    }
+    if (me->best_weapon_value >= 3 * them->best_weapon_value / 2 || me->best_weapon_value > 2 * them->best_armor_value)
+        *game_diplo_fear *= 2;
+    if (our_record >= 2 * their_record) *game_diplo_fear *= 2;
+    if (our_record >= 4 * their_record && !(*their & TREATY_WANT_REVENGE) && *game_diplo_fear <= 8) *game_diplo_fear = 8;
+    if (2 * our_record < their_record) *game_diplo_fear /= 2;
+    if (4 * our_record < their_record) *game_diplo_fear /= 2;
+    if (*game_diplo_fear ||
+        (me->diff_level <= (*their & TREATY_WANT_REVENGE ? 2 : 4) && !(*game_rules & RULES_INTENSE_RIVALRY)))
+        *game_diplo_attack_chance = 0;
+    *game_diplo_tribute = (turn / 10 + their_record) * *game_diplo_tribute / (turn / 10 + our_record);
+    // Late enough, a leading player is the great satan to a rival near the
+    // top, or one with strong pacts once they have met.
+    int late = *game_net_multiplayer ? 0 : 25 * (5 - me->diff_level);
+    if (turn >= late + 50 && !*game_diplo_runaway_leader && me->ranking >= (*game_difficulty < 3) + 5) {
+        if (them->ranking >= (me->ranking < 6) + 5)
+            *game_diplo_great_satan = 1;
+        else if (*game_diplo_rival_strong_pacts && (*ours & TREATY_UNK_8000000) && me->ranking >= 6)
+            *game_diplo_great_satan = 1;
+    }
+    if (*game_diplo_great_satan ||
+        (((*their & TREATY_WANT_REVENGE) || (*agenda & AGENDA_UNK_200)) && !*game_diplo_open_base &&
+         (!*game_diplo_fear || 2 * them->mil_strength >= me->mil_strength))) {
+        *game_diplo_fear = 0;
+        *game_diplo_hostility = (*game_diplo_great_satan != 0) + 1;
+        if (*game_diplo_tribute < 2 * them->ranking) *game_diplo_tribute = 2 * them->ranking;
+    }
+    if (them->planet_busters && them->major_atrocities) *game_diplo_fear = 0;
+    if (me->planet_busters && me->major_atrocities) {
+        if (!them->planet_busters) *game_diplo_fear = 32;
+        *game_diplo_tribute = them->planet_busters * *game_diplo_tribute / me->planet_busters;
+    }
+    *game_diplo_conquest_fear = *game_diplo_fear;
+    int pact = *their & TREATY_PACT;
+    if (pact || !*game_diplo_captured_bases) *game_diplo_conquest_fear = 0;
+    int level = *game_rules & RULES_INTENSE_RIVALRY ? 5 : me->diff_level;
+    *game_diplo_fear /= (clamp(me->integrity_blemishes / 2, 1, 99) + 1) * (level + 3) / 2;
+    // Its enemies the player is allied with.
+    *game_diplo_enemy_allies = *game_diplo_enemy_ally = 0;
+    if (!pact || !(*their & TREATY_SURRENDERED)) {
+        for (int i = 1; i < FACTION_COUNT; i++) {
+            uint32_t s = game_factions[i].diplo_status[faction], m = me->diplo_status[i];
+            if ((alive >> i & 1) && i != faction && i != other && (them->diplo_status[i] & TREATY_VENDETTA) &&
+                (!(s & TREATY_PACT) || !(s & TREATY_SURRENDERED)) &&
+                ((m & TREATY_PACT) || ((m & TREATY_TREATY) && fight > 0)))
+                *game_diplo_enemy_ally = i, ++*game_diplo_enemy_allies;
+        }
+    }
+    // The friction in talks.
+    int *fr = game_diplo_friction;
+    *fr += 3 * *game_diplo_enemy_allies;
+    if (pact) *fr -= 5;
+    if (*their & (TREATY_VENDETTA | TREATY_WANT_REVENGE)) *fr += 5;
+    uint32_t a = *agenda;
+    if (a & AGENDA_UNK_400) *fr += 3;
+    if (a & AGENDA_UNK_800) *fr += 3;
+    if (*game_diplo_reputation > 1) *fr += *game_diplo_reputation - 1;
+    int commerce = me->tech_commerce_bonus - them->tech_commerce_bonus;
+    if (commerce < 0) *fr += 2 * commerce;
+    if (commerce > 0) *fr += commerce;
+    if (ideology) {
+        *fr += 5;
+        if (*fr < 5) *fr = 5;
+    }
+    if (ideology > 1 && !*game_diplo_fear) *fr += 5;
+    // Hostility from its agenda, the friction, its betrayal mood and a
+    // rival without labs in a game it can't win by them; none if it fears
+    // the player or the player is much stronger.
+    int grudge = a & AGENDA_UNK_200;
+    if (grudge) *game_diplo_hostility = 1;
+    if (*fr <= 4) *game_diplo_hostility = 0;
+    if (*fr >= 15) *game_diplo_hostility = 4;
+    int betrayal = *their & TREATY_UNK_40;
+    if (betrayal) *game_diplo_hostility = 1;
+    if (!(*game_rules & RULES_VICTORY_TRANSCENDENCE) && !them->alloc_labs) *game_diplo_hostility = 1;
+    if (*game_diplo_fear || me->mil_strength > 3 * them->mil_strength) *game_diplo_hostility = 0;
+    if (me->best_weapon_value >= 2 * them->best_weapon_value) *game_diplo_hostility = 0;
+    // The tribute it asks, in 25s.
+    int value = (int32_t)((uint32_t)(level + 1) * (uint32_t)(*game_diplo_reputation + 2) * (uint32_t)(*fr + 10) *
+                          (uint32_t)(ideology + 1) * (uint32_t)*game_diplo_tribute) >>
+                6;
+    if (betrayal) value *= 2;
+    int credits = me->energy_credits;
+    if (credits >= 2 * them->energy_credits) {
+        if (credits >= 2000) value = 3 * value / 2;
+        if (credits >= 4000) value = 3 * value / 2;
+    }
+    if (*game_diplo_great_satan || (((*their & TREATY_WANT_REVENGE) || grudge) && !*game_diplo_open_base &&
+                                    (!*game_diplo_fear || 2 * them->mil_strength >= me->mil_strength))) {
+        if (me->ranking >= 6) {
+            int least = (me->ranking + them->ranking) * credits / 21;
+            if (value < least) value = least;
+        }
+    }
+    int tribute = 25 * ((value + 24) / 25);
+    if (tribute == 25) tribute = 50;
+    *game_diplo_tribute = tribute;
+    if (tribute > credits && tribute < 2 * credits && credits >= (betrayal ? 100 : 50) &&
+        !(*ours & (TREATY_ATROCITY_VICTIM | TREATY_WANT_REVENGE)))
+        *game_diplo_tribute = tribute = 25 * ((credits + 24) / 25);
+    // No more than five turns of the player's income, if the rival is
+    // well off for its rank.
+    if (!(*their & (TREATY_UNK_40 | TREATY_WANT_REVENGE)) && (!*game_diplo_great_satan || (*their & TREATY_UNK_4000000))) {
+        game_energy_compute(faction, 0);
+        int income = *game_net_income;
+        if (tribute > 5 * income && them->energy_credits >= them->ranking * (2 * me->energy_credits / 3) / me->ranking) {
+            *game_diplo_tribute = tribute = 25 * (5 * income / 25);
+            if (tribute < 50) *game_diplo_tribute = tribute = 50;
+        }
+    }
+    if ((((*their & (TREATY_PACT | TREATY_TREATY | TREATY_TRUCE)) && !(*their & TREATY_UNK_10000)) || *game_diplo_fear) &&
+        !*game_diplo_great_satan && !(*their & TREATY_WANT_REVENGE))
+        *game_diplo_attack_chance = 0;
+    if (!tribute && !*game_diplo_attack_chance && !(*agenda & AGENDA_UNK_200)) *game_diplo_hostility = 0;
+    *game_diplo_prev_hostility = *game_diplo_hostility;
+    *game_diplo_goodwill = 0;
+    if (full) {
+        *game_diplo_help_faction = *game_diplo_unmet_enemy = *game_diplo_player_enemy = 0;
+        *game_diplo_unmet_faction = *game_diplo_mutual_faction = 0;
+    }
+    *game_diplo_rival_wars = 0;
+    // The other factions the rival has a commlink with: its pact partners
+    // stronger than the player, its wars (and whom it would ask for help,
+    // or wants the player to meet), and those the player could meet.
+    for (int i = 1; i < FACTION_COUNT; i++) {
+        if (!(*game_factions_alive >> i & 1) || i == faction || i == other) continue;
+        uint32_t ti = them->diplo_status[i];
+        if (!(ti & TREATY_COMMLINK)) continue;
+        uint32_t mi = me->diplo_status[i];
+        const struct faction_data *I = &game_factions[i];
+        if (full && (mi & TREATY_VENDETTA) && !(ti & TREATY_VENDETTA) && !(mi & TREATY_UNK_10000000))
+            *game_diplo_player_enemy = i;
+        if (ti & TREATY_PACT) {
+            if (I->mil_strength > me->mil_strength) --*game_diplo_goodwill;
+            if ((great_satan(faction, 0) || *game_diplo_great_satan) && (I->diplo_status[faction] & TREATY_VENDETTA)) {
+                int f = *game_diplo_fear - 3;
+                if (f > 9999) {
+                    *game_diplo_fear = 9999;
+                    continue;
+                }
+                *game_diplo_fear = f < 0 ? 0 : f;
+                if (f <= 0)
+                    *game_diplo_conquest_fear = 0, *game_diplo_prev_hostility = *game_diplo_hostility = 2;
+            }
+        } else if (ti & TREATY_VENDETTA) {
+            ++*game_diplo_rival_wars;
+            *game_diplo_goodwill += 2 * (I->mil_strength + them->mil_strength / 2) / (them->mil_strength + 1);
+            mi = me->diplo_status[i];
+            if (game_diplo_state[other] & 0x40) {
+                if ((mi & (TREATY_COMMLINK | TREATY_VENDETTA)) == TREATY_COMMLINK && I->mil_strength > them->mil_strength)
+                    *game_diplo_help_faction = i;
+                continue;
+            }
+            uint32_t s = I->diplo_status[faction];
+            if (!(mi & TREATY_VENDETTA) && ((mi & TREATY_COMMLINK) || (*ours & TREATY_PACT)) &&
+                (!(s & TREATY_PACT) || !(s & TREATY_SURRENDERED))) {
+                *game_diplo_help_faction = i;
+                continue;
+            }
+            if (*game_diplo_help_faction || !full || (mi & TREATY_COMMLINK) || is_human(i)) continue;
+            if (I->mil_strength > them->mil_strength || !wants_to_attack(other, i, 0) || *game_diplo_fear)
+                *game_diplo_unmet_enemy = i;
+        } else if (full && !is_human(i)) {
+            if (mi & TREATY_COMMLINK) {
+                if (!(mi & TREATY_UNK_10000000)) *game_diplo_mutual_faction = i;
+            } else if ((!*game_diplo_unmet_faction || game_contiguous(faction, i, 0, 0)) &&
+                       ((ti & TREATY_TREATY) || !*game_diplo_unmet_faction)) {
+                *game_diplo_unmet_faction = i;
+            }
+        }
+    }
+    // Goodwill.
+    a = *agenda;
+    int32_t *gw = game_diplo_goodwill;
+    if (a & AGENDA_UNK_800) --*gw;
+    if (a & AGENDA_UNK_400) --*gw;
+    int revenge = *their & TREATY_WANT_REVENGE;
+    if (revenge) --*gw;
+    if (a & AGENDA_UNK_200) --*gw;
+    *gw += -*game_diplo_exposed_bases - (*game_diplo_reputation - 1) / 3 - fight;
+    if (them->tech_commerce_bonus > me->tech_commerce_bonus && fight <= 0) ++*gw;
+    if (!(*game_rules & RULES_VICTORY_TRANSCENDENCE) && !them->alloc_labs) --*gw;
+    if (them->mil_strength > me->mil_strength) --*gw;
+    if (them->best_weapon_value > 2 * me->best_armor_value) --*gw;
+    uint32_t t = *their;
+    if (*gw > (int)((*ours >> 4) & 1) && !*game_diplo_great_satan && !(t & (TREATY_UNK_40 | TREATY_PACT)) &&
+        !*game_diplo_attack_chance)
+        *game_diplo_hostility = *game_diplo_tribute = 0;
+    if ((t & TREATY_PACT) && (t & TREATY_SURRENDERED)) {
+        *game_diplo_attack_chance = *game_diplo_exposed_bases = *game_diplo_prev_hostility = *game_diplo_hostility = 0;
+    } else if ((*game_diplo_exposed_bases || *game_diplo_attack_chance) && revenge) {
+        *game_diplo_prev_hostility = *game_diplo_hostility = 1;
+    }
+    // A weak rival, alone, against a great satan may surrender.
+    if (great_satan(faction, 1) && *game_diplo_rival_pacts < 2 &&
+        game_ranking_scores[faction] >= *game_diplo_rival_pact_score + 3 * game_ranking_scores[other] &&
+        them->ranking < 6 && them->mil_strength < me->mil_strength) {
+        *game_diplo_can_surrender = 1;
+        if ((*their & TREATY_VENDETTA) && !(*agenda & AGENDA_FIGHT_TO_DEATH) && !(*their & TREATY_ATROCITY_VICTIM))
+            *game_diplo_hostility = 0;
+    } else {
+        *game_diplo_can_surrender = 0;
+    }
+    // Whether it would betray the player.
+    if (full) {
+        scan_prototypes(faction, other);
+        int shameless = (them->flags_ext & FACTION_FLAG_EXT_SHAMELESS) != 0, host = *game_diplo_hostility;
+        t = *their;
+        *game_diplo_can_betray =
+            (me->diff_level > 1 || shameless) && !*game_diplo_exposed_bases && !(t & TREATY_PACT) &&
+            !(*agenda & AGENDA_FIGHT_TO_DEATH) && (!(t & TREATY_VENDETTA) || *game_diplo_captured_bases > 1 || shameless) &&
+            (*game_diplo_near_endgame || host || ideology || (shameless && !*game_diplo_fear) ||
+             (*game_diplo_enemy_allies && (t & TREATY_UNK_800000) && *fr >= 12)) &&
+            ((t & TREATY_WANT_REVENGE) || (shameless && host) || *game_diplo_reputation > 5 ||
+             ((host || ideology > 1) && (me->mil_strength > them->mil_strength || shameless)));
+    }
+    if ((them->flags & FACTION_FLAG_COOP_WITH_HUMAN) && !(*their & TREATY_WANT_REVENGE)) *game_diplo_hostility = 0;
+    if (*agenda & AGENDA_FIGHT_TO_DEATH) {
+        *game_diplo_hostility = 1;
+    } else if (*game_diplo_can_betray) {
+        *game_diplo_hostility = 0;
+        if (*fr > 6) *fr = 6;
+    }
+    uint32_t o = *ours;
+    int wars = *game_diplo_rival_wars;
+    if ((o & TREATY_PACT) && (!(o & TREATY_WANT_REVENGE) || wars > 1) && (!(o & TREATY_UNK_200) || wars) &&
+        them->ranking < me->ranking && ((*game_rules & RULES_VICTORY_COOPERATIVE) || wars))
+        *game_diplo_hostility = 0;
+    if (*agenda & AGENDA_UNK_2000) {
+        *game_diplo_can_betray = 0;
+        *game_diplo_hostility = (*their & TREATY_VENDETTA) != 0;
+    }
+    if (!*game_diplo_prev_hostility && (*game_diplo_fear || (o & TREATY_PACT)) && *fr > 14) *fr = 14;
+    if ((*game_diplo_hostility || (o & TREATY_VENDETTA) || (*their & TREATY_WANT_REVENGE)) && *fr < 6) *fr = 6;
+}
+
+// The prototypes the rival `other` might show `faction`: its best (by
+// speed, arms and plan; a sixteenth for one `faction` has a match for, of
+// the same plan and triad), and the combat design it would mention, not
+// already mentioned (nor given, in a pact) and unmatched, or in a vendetta
+// a defensive one at a sixteenth. The original rates the armor of both
+// designs by their weapons (arm_strat of the weapon), which Thinker fixes.
+void scan_prototypes(int faction, int other) {
+    *game_diplo_best_proto = *game_diplo_mention_proto = -1;
+    int best = 0, mention = 0;
+    for (int i = 0; i < 64; i++) {
+        int id = other * 64 + i;
+        const struct unit_proto *u = &game_protos[id];
+        if (!(u->flags & PROTO_FLAG_ACTIVE) || !(u->flags & PROTO_FLAG_BUILT) || (u->obsolete_factions & (1 << other)))
+            continue;
+        const struct rules_chassis *ch = &game_chassis[u->chassis];
+        int score = ch->speed + 3 * game_weapons[u->weapon].offense +
+                    4 * (game_armor[u->armor].defense + (7 - u->plan) * (1 << 14));
+        int better = 1;
+        for (int j = 0; j < 64 && better; j++) {
+            const struct unit_proto *p = &game_protos[faction * 64 + j];
+            if (!(p->flags & PROTO_FLAG_ACTIVE) || !(p->flags & PROTO_FLAG_BUILT) ||
+                (p->obsolete_factions & (1 << faction)) || p->plan != u->plan)
+                continue;
+            const struct rules_chassis *pc = &game_chassis[p->chassis];
+            if (pc->triad != ch->triad) continue;
+            if (p->reactor > u->reactor) better = 0;
+            if (pc->speed > ch->speed) better = 0;
+            int pw = game_weap_strat(p->weapon, faction), uw = game_weap_strat(u->weapon, faction);
+            int pa = game_arm_strat(p->weapon, faction), ua = game_arm_strat(u->weapon, faction);
+            if (pc->speed >= ch->speed && pw >= uw && pa >= ua && (pw > uw || pa > ua)) better = 0;
+        }
+        int rated = better ? score : score >> 4;
+        if (rated > best) best = rated, *game_diplo_best_proto = id;
+        uint32_t st = game_factions[faction].diplo_status[other];
+        if (u->flags & (st & TREATY_PACT ? PROTO_FLAG_OFFERED : PROTO_FLAG_MENTIONED | PROTO_FLAG_OFFERED)) continue;
+        if (u->plan > 6 || u->plan == PLAN_RECON) continue;
+        if (!better) score = (st & TREATY_VENDETTA) && u->plan == PLAN_DEFENSIVE ? score >> 4 : 0;
+        if (score > mention) mention = score, *game_diplo_mention_proto = id;
+    }
+}
+
+// The rival mentions the prototype scan_prototypes() chose, if the player
+// will talk: all its designs count as mentioned. In a pact, the original
+// only notes it as offered and puts the text together; otherwise it offers
+// to swap designs, and on a yes each side gets those of the other's it
+// wants. (Thinker restores the pact's offer, which the original never
+// shows.)
+void mention_prototypes(int faction, int other) {
+    *game_diplo_second = other;
+    if (*game_diplo_mention_proto < 0 || !wants_to_speak(faction, other)) return;
+    for (int i = 0; i < 64; i++) game_protos[other * 64 + i].flags |= PROTO_FLAG_MENTIONED;
+    int id = *game_diplo_mention_proto;
+    game_parse_says(0, game_protos[id].name, -1, -1);
+    game_battle_text[0] = 0;
+    game_say_stats_2(game_battle_text, id);
+    game_parse_says(1, game_battle_text, -1, -1);
+    game_protos[id].flags |= PROTO_FLAG_MENTIONED;
+    game_battle_text[0] = 0;
+    strcat(game_battle_text, text(0x68d598));
+    if (game_factions[faction].diplo_status[other] & TREATY_PACT) {
+        game_protos[id].flags |= PROTO_FLAG_OFFERED;
+        strcat(game_battle_text, text(0x68d5a0));
+        return;
+    }
+    strcat(game_battle_text, text(0x68d5a8));
+    if (game_x_pops_11(game_battle_text, 0x100000, game_faction_portraits[other], game_pop_wait)) {
+        for (int j = 0; j < 64; j++) {
+            int mine = faction * 64 + j, theirs = other * 64 + j;
+            if (game_wants_prototype(mine, other)) {
+                if (*game_net_multiplayer) {
+                    game_log_say(text(0x68d4f0), other, mine + 0x61, faction);
+                    game_message_data(0x244b, 0, other, mine + 0x61, faction, 0);
+                    game_net_daemon_await_diplo(game_net_daemon, 0x44b);
+                } else {
+                    game_tech_achieve(other, mine + 0x61, faction, 0);
+                }
+            }
+            game_protos[mine].flags |= PROTO_FLAG_OFFERED;
+            if (game_wants_prototype(theirs, faction)) {
+                if (*game_net_multiplayer) {
+                    game_log_say(text(0x68d4f0), faction, theirs + 0x61, other);
+                    game_message_data(0x244b, 0, faction, theirs + 0x61, other, 0);
+                    game_net_daemon_await_diplo(game_net_daemon, 0x44b);
+                } else {
+                    game_tech_achieve(faction, theirs + 0x61, other, 0);
+                }
+            }
+            game_protos[theirs].flags |= PROTO_FLAG_OFFERED;
+        }
+    }
+    *game_diplo_best_proto = *game_diplo_mention_proto = -1;
+}
+
+// Whether the player (`faction`) takes the rival's call, opening the
+// diplomacy window if so. Without Psych (theirs or Progenitor Psych,
+// between an alien faction and a human one) they can't talk. Once
+// decided, the answer stands (game_diplo_caption_off). A call already
+// taken opens with an urgent message, at 8 and up; otherwise the player
+// is asked, and may first look at the rival's dossier; a rival with planet
+// busters (bit 0x4000 unset) calls urgently instead, which in the original
+// ends the call unanswered. The popup lives where the original's frame
+// keeps it (see wants_to_speak below).
+int wants_to_speak_in(uint8_t *pop, int faction, int other);
+int wants_to_speak_in(uint8_t *pop, int faction, int other) {
+    game_popup_ctor(pop);
+    *game_diplo_second = other;
+    if (alien(faction) != alien(other)) {
+        int psych = alien(faction) ? has_tech(TECH_PRPSYCH, other) || has_tech(TECH_PSYCH, faction)
+                                   : has_tech(TECH_PRPSYCH, faction) || has_tech(TECH_PSYCH, other);
+        if (!psych) {
+            *game_diplo_caption_mode = 0;
+            game_popup_dtor(pop);
+            return 0;
+        }
+    }
+    if (*game_diplo_caption_off) {
+        int mode = *game_diplo_caption_mode;
+        game_popup_dtor(pop);
+        return mode;
+    }
+    if (*game_diplo_caption_mode) {
+        *game_diplo_caption_off = 1;
+        if (*game_diplo_caption_mode >= 8) {
+            diplomacy_check(faction, other, 0);
+            game_diplomacy_caption(faction, other);
+            say_title(0, other), say_name(1, other), say_noun(2, other);
+            game_parse_num(0, game_random(0, 10) + 1);
+            game_parse_says(3, game_get_him_her(other, 0), -1, -1);
+            game_x_pops(text(0x68d654), game_faction_portraits[other], game_pop_wait);
+        }
+    } else {
+        game_info_win_set_state(game_info_win, 2, 1);
+        int urgent = 0;
+        while (!*game_diplo_caption_off) {
+            if (game_factions[other].planet_busters && !(game_factions[other].diplo_status[faction] & 0x4000)) urgent = 1;
+            diplomacy_check(faction, other, 0);
+            int x = *game_encounter_x, y = *game_encounter_y;
+            if (on_map(x, y) && !game_console_focus(game_console, x, y, faction))
+                game_draw_tiles(*game_encounter_x, *game_encounter_y, 2);
+            game_diplomacy_caption(faction, other);
+            say_title(0, other), say_name(1, other), say_noun(2, other);
+            game_parse_num(0, game_random(0, 10) + 1);
+            game_parse_says(3, game_get_him_her(other, 0), -1, -1);
+            if (urgent) {
+                game_x_pops(text(0x68d660), game_faction_portraits[other], game_pop_wait);
+                break;
+            }
+            game_popup_start(pop, game_pop_file, text(0x68d66c), -1, 0, 0, 0);
+            void *portrait = game_faction_portraits[other];  // the popup's icon
+            *(void **)(pop + 0x2144) = *(int32_t *)(pop + 0x2274) ? NULL : portrait;
+            game_sprite_box_sprite(pop + 0x2240, portrait, 0, 0);
+            int choice = game_base_pop_exec_3(pop, 0, (int)(intptr_t)game_pop_wait);
+            if (choice <= 1) {
+                *game_diplo_caption_off = 1;
+                *game_diplo_caption_mode = choice == 0;
+                break;
+            }
+            game_report_intel(other);
+        }
+    }
+    if (*game_diplo_caption_mode) {
+        game_diplo_pop_start(game_diplo_pop, other);
+        game_introduce(faction, other);
+    }
+    int mode = *game_diplo_caption_mode;
+    game_popup_dtor(pop);
+    return mode;
+}
+__asm__(".text\n"
+        ".globl wants_to_speak\n"
+        "wants_to_speak:\n"
+        "    pushl %ebp\n"
+        "    movl %esp, %ebp\n"
+        "    subl $0x5400, %esp\n"
+        "    pushl 12(%ebp)\n"
+        "    pushl 8(%ebp)\n"
+        "    leal -0x5388(%ebp), %eax\n"
+        "    pushl %eax\n"
+        "    call wants_to_speak_in\n"
+        "    movl %ebp, %esp\n"
+        "    popl %ebp\n"
+        "    ret\n");
+
+// When a pact ends, each side's units in the other's bases or territory
+// go to the nearest of their own bases (for a ship, one on the coast and
+// on its sea, unless it is in a port): their orders are cleared, an
+// aircraft's fuel refilled. Returns how many moved. For a ship the
+// original asks whether the base numbered by the candidate base's x is on
+// the coast, with its y as the third argument; Thinker asks of the base.
+int pact_withdraw(int faction, int other) {
+    int moved = 0;
+    for (int v = 0; v < *game_veh_count; v++) {
+        struct veh *V = &game_vehs[v];
+        if (V->faction != faction) continue;
+        int b = base_find(V->x, V->y);
+        if (b < 0) continue;
+        if (game_bases[b].faction != other && whose_territory(faction, V->x, V->y, NULL, 0) != other) continue;
+        int best = -1, best_dist = 9999;
+        for (int i = 0; i < *game_base_count; i++) {
+            const struct base *B = &game_bases[i];
+            if (B->faction != faction) continue;
+            if (game_veh_triad(v) == TRIAD_SEA) {
+                const struct base *Q = &game_bases[B->x];
+                if (!is_coast(Q->x, Q->y, B->y)) continue;
+            }
+            if (game_veh_triad(v) == TRIAD_SEA) {
+                const struct map_tile *t = tile_at(V->x, V->y);
+                if ((t->climate & 0xe0) < 0x60 && !base_on_sea(i, t->region)) continue;
+            }
+            int dist = vector_dist_offset(x_dist(B->x, V->x), B->y - V->y);
+            if (dist < best_dist) best_dist = dist, best = i;
+        }
+        if (best < 0) continue;
+        veh_drop(veh_lift(v), game_bases[best].x, game_bases[best].y);
+        V->order = 0;
+        V->state &= 0xfcffbdffu;
+        if (game_veh_triad(v) == TRIAD_AIR) V->movement_turns = 0;
+        moved++;
+        if (*game_console_veh_mode && v == *game_veh_ref_map_1) game_console_set_move(game_console, 1);
+    }
+    return moved;
+}
+
+// A pact ends: units withdraw both ways, and the player hears of it (with
+// how many of its units came home), or of a pact between others it spies
+// on or is allied with.
+void pact_ends_in(uint8_t *pop, int faction, int other);
+void pact_ends_in(uint8_t *pop, int faction, int other) {
+    game_popup_ctor(pop);
+    *game_diplo_second = other;
+    treaty_off(faction, other, TREATY_PACT);
+    int moved = pact_withdraw(faction, other), moved_back = pact_withdraw(other, faction);
+    game_draw_map(1);
+    int n;
+    if (faction == *game_current_faction) {
+        say_noun(0, other);
+        game_parse_says(1, game_faction_defs[other].adjective, -1, -1);
+        n = moved;
+    } else if (other == *game_current_faction) {
+        say_noun(0, faction);
+        game_parse_says(1, game_faction_defs[faction].adjective, -1, -1);
+        n = moved_back;
+    } else {
+        int player = *game_current_faction;
+        if (game_spying(faction) || game_spying(other) || (*game_state & GAME_STATE_OMNISCIENT) ||
+            (game_factions[player].diplo_status[faction] & TREATY_PACT) ||
+            (game_factions[player].diplo_status[other] & TREATY_PACT)) {
+            say_noun(0, faction), say_noun(1, other);
+            game_parse_says(2, game_get_pact_hood(faction, other), -1, -1);
+            game_x_pop(text(0x68d5c8), 0);
+        }
+        game_popup_dtor(pop);
+        return;
+    }
+    game_parse_num(0, n);
+    game_parse_says(2, game_get_pact_hood(faction, other), -1, -1);
+    int flags = *game_net_multiplayer ? 0 : 0x100000;
+    game_popup_start(pop, game_pop_file, text(0x68d5b0), -1, 0, flags, 0);
+    if (n) game_popup_start(pop, game_pop_file, text(0x68d5bc), -1, 0, flags | 0x80, 0);
+    game_base_pop_exec_3(pop, 0, 0);
+    game_popup_dtor(pop);
+}
+__asm__(".text\n"
+        ".globl pact_ends\n"
+        "pact_ends:\n"
+        "    pushl %ebp\n"
+        "    movl %esp, %ebp\n"
+        "    subl $0x5400, %esp\n"
+        "    pushl 12(%ebp)\n"
+        "    pushl 8(%ebp)\n"
+        "    leal -0x5390(%ebp), %eax\n"
+        "    pushl %eax\n"
+        "    call pact_ends_in\n"
+        "    movl %ebp, %esp\n"
+        "    popl %ebp\n"
+        "    ret\n");
+
+// Whether the player goes ahead with breaking `status` with `other`: a
+// pact is broken with a notice; a treaty, a truce (without 0x10000) or
+// peace (without 0x10000 in `status`) only if the player says yes.
+int break_treaty(int faction, int other, uint32_t status) {
+    uint32_t st = game_factions[faction].diplo_status[other];
+    if ((st & TREATY_VENDETTA) || !(st & status)) return 0;
+    say_title(0, other), say_name(1, other), say_noun(2, other);
+    game_parse_says(3, game_get_pact_hood(faction, other), -1, -1);
+    game_parse_says(4, game_faction_defs[other].adjective, -1, -1);
+    st = game_factions[faction].diplo_status[other];
+    if (st & TREATY_PACT) {
+        game_netmsg_pop(game_netmsg, text(0x68e7b0), -5000, 0, text(0x68e7a0));
+        return 1;
+    }
+    if (st & TREATY_TREATY) return !game_popp(*game_script_file, text(0x68e7d0), 0, text(0x68e7c0), 0);
+    if ((st & TREATY_TRUCE) && !(st & TREATY_UNK_10000))
+        return !game_popp(*game_script_file, text(0x68e7f0), 0, text(0x68e7e0), 0);
+    if (status & TREATY_UNK_10000) return 0;
+    return !game_popp(*game_script_file, text(0x68e810), 0, text(0x68e800), 0);
+}
+
+// The victim wants revenge on a human double-crosser, and remembers it.
+static void wronged(int victim, int faction) {
+    if (game_factions[victim].diplo_agenda[faction] & AGENDA_UNK_400) game_set_agenda(victim, faction, AGENDA_UNK_800, 1);
+    if (game_factions[victim].diplo_status[faction] & TREATY_WANT_REVENGE)
+        game_set_agenda(victim, faction, AGENDA_UNK_400, 1);
+    set_treaty(victim, faction, TREATY_WANT_REVENGE, 1);
+}
+
+// `faction` turns on `victim`, incited by `other` (or -1): loans to it are
+// void, and breaking a pact or treaty costs it reputation and integrity
+// (unless the victim committed atrocities, or `other` has a better treaty
+// with it), the inciter's friction, and the victim's revenge if it is
+// human. A pact ends (with its units withdrawn); then a vendetta, the
+// betrayal's mood between a human and another, and the victim's allies'
+// aid. In a network game the victim's player is told first. The original
+// compares the two factions' human bits as masks, so the mood is set
+// unless both are AIs, where Thinker sets it when only one is human.
+void double_cross(int faction, int victim, int other) {
+    struct faction_data *me = &game_factions[faction], *them = &game_factions[victim];
+    if (*game_net_multiplayer) {
+        if (victim == *game_current_faction && other > 0) {
+            say_title(0, other), say_name(1, other), say_noun(2, other);
+            say_title(3, faction), say_name(4, faction), say_noun(5, faction);
+            game_netmsg_pop(game_netmsg, text(0x68a31c), 5000, 0, NULL);
+        } else if (victim == *game_current_faction && is_human(faction)) {
+            say_title(0, faction), say_name(1, faction), say_noun(2, faction);
+            game_netmsg_pop(game_netmsg, text(0x68a324), 5000, 0, NULL);
+        }
+    }
+    them->loan_balance[faction] = 0;
+    uint32_t st = me->diplo_status[victim];
+    int deserved = (st & TREATY_ATROCITY_VICTIM) || them->major_atrocities, allowed = 0;
+    if (other >= 0) {
+        uint32_t s = me->diplo_status[other];
+        if (s & TREATY_PACT) allowed = !(st & TREATY_PACT);
+        else if (s & TREATY_TREATY) allowed = !(st & TREATY_TREATY);
+        else if (s & TREATY_TRUCE) allowed = !(st & TREATY_TRUCE);
+        me->diplo_gifts[other]++;
+    }
+    st = me->diplo_status[victim];
+    int peace = !(me->diplo_agenda[victim] & AGENDA_UNK_20);
+    if (st & TREATY_PACT) {
+        if (peace) {
+            me->diplo_reputation = me->diplo_reputation - 1 < 0 ? 0 : me->diplo_reputation - 1;
+            if (me->diff_level && !deserved && !allowed) me->integrity_blemishes++, them->diplo_betrayed[faction]++;
+            if (other < 0) {
+                if (!deserved) me->integrity_blemishes++;
+                me->diplo_wrongs[victim]++;
+                them->diplo_betrayed[faction]++;
+            } else {
+                cause_friction(other, faction, -4);
+            }
+            if (is_human(faction)) wronged(victim, faction);
+        }
+        pact_ends(faction, victim);
+        treaty_on(faction, victim, TREATY_VENDETTA);
+        return;
+    }
+    if (peace) {
+        if (st & (TREATY_TREATY | TREATY_TRUCE)) {
+            if (!(st & TREATY_UNK_10000)) {
+                me->diplo_reputation = me->diplo_reputation - 1 < 0 ? 0 : me->diplo_reputation - 1;
+                if ((great_satan(faction, 0) || (me->ranking >= 6 && them->ranking <= 4)) && other < 0 && !deserved)
+                    me->integrity_blemishes++, them->diplo_betrayed[faction]++;
+            }
+            if (me->diff_level && !deserved && !allowed) me->integrity_blemishes++, them->diplo_betrayed[faction]++;
+            if (other < 0) me->diplo_wrongs[victim]++;
+            if (is_human(faction)) wronged(victim, faction);
+            if (other >= 0) cause_friction(other, faction, -2);
+        } else if (other >= 0) {
+            if (is_human(faction)) wronged(victim, faction);
+            cause_friction(other, faction, -2);
+        }
+    }
+    treaty_on(faction, victim, TREATY_VENDETTA);
+    if (!(me->diplo_agenda[victim] & AGENDA_UNK_20)) {
+        if (is_human(faction) || is_human(victim)) {
+            set_treaty(faction, victim, TREATY_UNK_40, 1);
+            me->diplo_spoke[victim] = *game_turn;
+        }
+        intervention(victim, faction);
+    }
+}
+
+// Two factions meet: a commlink between them, and bit 0x40000000 when
+// they met on the map.
+static void meet(int faction, int other, uint32_t status, int x, int y) {
+    treaty_on(faction, other, status);
+    if (on_map(x, y)) treaty_on(faction, other, TREATY_UNK_40000000);
+}
+
+// The tutorial's note on meeting another faction, for the player `self`;
+// `labels` are the five notes' addresses (one set for each order of the
+// two).
+static void meeting_note(int self, int them, int x, int y, const uint32_t labels[5]) {
+    say_noun(0, them);
+    int bit, k;
+    if (!alien(self)) bit = 0x8000, k = !has_tech(TECH_PRPSYCH, self) && !has_tech(TECH_PSYCH, them) ? 0 : 1;
+    else if (alien(them)) bit = 0x10000, k = 2;
+    else bit = 0x4000, k = !has_tech(TECH_PSYCH, self) && !has_tech(TECH_PRPSYCH, them) ? 3 : 4;
+    if (game_tut_check2(bit)) game_tut_map(game_tut_win, text(labels[k]), x, y, -1, NULL, 0, -1, -1);
+}
+
+// Two factions meet, at (x, y) or off the map, or a faction meets native
+// life (`other` 0: a fungal tower or a native unit, which an alien player
+// is told of). Two alien factions open a commlink, with the Caretakers'
+// and the Usurpers' scenes. An alien faction and a human one can't talk
+// without Psych (or the aliens' Progenitor Psych), and the player is told
+// either way. Under sunspots they only open a commlink. Otherwise each may
+// call the other (comm_check), the player may get the tutorial's note on
+// a first meeting with aliens, and two AIs, on their first meeting or
+// every fourth turn, go to war or make a treaty, or trade techs with
+// agenda bit 0x2000.
+void encounter(int faction, int other, int x, int y, int tower, int native) {
+    if (!faction || !*game_turn) return;
+    if (!other) {
+        if (faction == *game_current_faction && alien(faction)) {
+            if (tower) game_interlude(44, NULL, 1, 0);
+            if (native) game_interlude(43, NULL, 1, 0);
+        }
+        return;
+    }
+    if (alien(faction) && alien(other)) {
+        meet(faction, other, TREATY_UNK_80000000 | TREATY_COMMLINK, x, y);
+        game_battle_text[0] = 0;
+        strcat(game_battle_text, game_faction_defs[faction].search_key);
+        (*game_char_upper)(game_battle_text);
+        int caretakers = !strcmp(game_battle_text, text(0x68e698));
+        if (faction == *game_current_faction) game_interlude(caretakers ? 39 : 40, NULL, 1, 0);
+        if (other == *game_current_faction) game_interlude(caretakers ? 40 : 39, NULL, 1, 0);
+        return;
+    }
+    if (alien(faction)) {
+        if (!has_tech(TECH_PRPSYCH, other) && !has_tech(TECH_PSYCH, faction)) {
+            meet(faction, other, TREATY_UNK_80000000 | TREATY_COMMLINK, x, y);
+            if (faction == *game_current_faction) game_interlude(34, NULL, 1, 0);
+            if (other == *game_current_faction) game_interlude(22, NULL, 1, 0);
+            return;
+        }
+        if (faction == *game_current_faction) game_interlude(35, NULL, 1, 0);
+        if (other == *game_current_faction) game_interlude(23, NULL, 1, 0);
+    }
+    if (alien(other)) {
+        if (!has_tech(TECH_PRPSYCH, faction) && !has_tech(TECH_PSYCH, other)) {
+            meet(faction, other, TREATY_UNK_80000000 | TREATY_COMMLINK, x, y);
+            if (faction == *game_current_faction) game_interlude(22, NULL, 1, 0);
+            if (other == *game_current_faction) game_interlude(34, NULL, 1, 0);
+            return;
+        }
+        if (faction == *game_current_faction) game_interlude(23, NULL, 1, 0);
+        if (other == *game_current_faction) game_interlude(35, NULL, 1, 0);
+    }
+    if (*game_sunspot_duration > 0) {
+        meet(faction, other, TREATY_UNK_80000000 | TREATY_COMMLINK, x, y);
+        return;
+    }
+    *game_encounter_x = x, *game_encounter_y = y;
+    game_comm_check(faction, other);
+    game_comm_check(other, faction);
+    *game_encounter_y = *game_encounter_x = -1;
+    uint32_t had = game_factions[faction].diplo_status[other] & TREATY_COMMLINK;
+    if (!had && (alien(faction) || alien(other))) {
+        static const uint32_t first[5] = {0x68e6b0, 0x68e6a4, 0x68e6c4, 0x68e6dc, 0x68e6d0};
+        static const uint32_t second[5] = {0x68e6fc, 0x68e6f0, 0x68e710, 0x68e728, 0x68e71c};
+        if (faction == *game_current_faction) meeting_note(faction, other, x, y, first);
+        else if (other == *game_current_faction) meeting_note(other, faction, x, y, second);
+    }
+    meet(faction, other, TREATY_UNK_80000000 | TREATY_UNK_8000000 | TREATY_COMMLINK, x, y);
+    if (is_human(faction) || is_human(other)) return;
+    if (((*game_turn + faction + other) & 3) && had) return;
+    if (alien(faction) && alien(other)) return;
+    if (game_factions[faction].diplo_agenda[other] & AGENDA_UNK_2000) {
+        game_enemies_trade_tech(faction, other);
+        return;
+    }
+    if (wants_to_attack(faction, other, 0) || wants_to_attack(other, faction, 0)) game_enemies_war(faction, other);
+    else game_enemies_treaty(faction, other, 1);
+}
+
+// How far `other` presses into `faction`'s territory, outside a pact or
+// vendetta (or bit 0x200, unless `flags` has 2): its land units (combat,
+// colony pods, convoys) on `faction`'s land, each counting one more on an
+// improved square, but not on regions where both fight a common enemy
+// (unless `faction` wants revenge or `other` is treacherous). With `flags`
+// 1, a unit within two squares of the base, or anywhere when `faction` is
+// set on betrayal or the friction runs high, is marked; one marked before
+// (not the first time, nor under sunspots) counts 5 more with a treaty,
+// else 1. `base` is the last base pressed, `count` the units warned twice.
+// The original takes the distance as the sum of the two offsets, made even.
+int territory(int faction, int other, int flags, int *base, int *count) {
+    int n = 0;
+    if (base) *base = -1;
+    if (count) *count = 0;
+    uint32_t st = game_factions[faction].diplo_status[other];
+    if (st & (TREATY_PACT | TREATY_VENDETTA)) return 0;
+    if (!(flags & 2) && (st & TREATY_UNK_200)) return 0;
+    int skip[LAND_REGION_COUNT];
+    for (int r = 0; r < LAND_REGION_COUNT; r++) {
+        skip[r] = 0;
+        if ((st & TREATY_WANT_REVENGE) || game_factions[other].integrity_blemishes >= 5) continue;
+        for (int j = 1; j < FACTION_COUNT; j++)
+            if (j != faction && j != other && (game_factions[faction].diplo_status[j] & TREATY_VENDETTA) &&
+                (game_factions[other].diplo_status[j] & TREATY_VENDETTA) && game_factions[j].region_total_bases[r]) {
+                skip[r] = 1;
+                break;
+            }
+    }
+    for (int v = 0; v < *game_veh_count; v++) {
+        struct veh *V = &game_vehs[v];
+        V->state &= ~(uint32_t)VEH_STATE_UNK_400;
+        if (V->faction != other) continue;
+        int plan = game_protos[V->proto].plan;
+        if (plan > PLAN_COLONY && (plan != PLAN_SUPPLY || V->order != ORDER_CONVOY)) continue;
+        const struct map_tile *t = tile_at(V->x, V->y);
+        if ((t->climate & 0xe0) < 0x60 || (t->region < LAND_REGION_COUNT && skip[t->region])) continue;
+        int b;
+        if (whose_territory(other, V->x, V->y, &b, 1) != faction || b < 0) continue;
+        if (base) *base = b;
+        V->state |= VEH_STATE_UNK_400;
+        n++;
+        if (t->bits & 0x81608850) n++;
+        if (!(flags & 1)) continue;
+        const struct base *B = &game_bases[b];
+        if (((x_dist(B->x, V->x) + abs(B->y - V->y)) & ~1) > 4 &&
+            !(game_factions[faction].diplo_status[other] & (TREATY_SHALL_BETRAY | TREATY_UNK_800 | TREATY_WANT_REVENGE)) &&
+            *game_diplo_friction <= 12)
+            continue;
+        if (count && (V->flags & 1)) ++*count;
+        V->flags |= 3;
+        if (!(V->state & VEH_STATE_UNK_800) && *game_sunspot_duration <= 0) {
+            V->state |= VEH_STATE_UNK_800;
+            continue;
+        }
+        n += game_factions[faction].diplo_status[other] & TREATY_TREATY ? 5 : 1;
+    }
+    if (n) game_factions[faction].flags |= FACTION_FLAG_UNK_10000;
+    return n;
+}
+
+// `faction` commits an atrocity against `other`: the victim wants revenge.
+// Under the UN Charter, the factions in contact with the culprit (aliens
+// with a human one only by `alien_too`, in the expansion) take note, those
+// with bit 0x200000 with friction, and an AI may declare a vendetta on a
+// human culprit (sure if it wants revenge; by chance otherwise, likelier
+// against a great satan or on harder levels). The first atrocity, or any
+// with `always`, counts and blemishes the culprit's integrity; too many
+// make a major atrocity, else sanctions for ten turns each. Under sunspots
+// the player only hears that no one saw. The original marks the victim as
+// having seen wanton atrocities by the human bit of faction 8 (its loop's
+// end), always clear, where Thinker tests the victim's.
+void atrocity(int faction, int other, int always, int alien_too) {
+    struct faction_data *me = &game_factions[faction];
+    uint32_t *victim = &game_factions[other].diplo_status[faction];
+    uint32_t was_victim = *victim & TREATY_ATROCITY_VICTIM;
+    *victim |= TREATY_ATROCITY_VICTIM | TREATY_WANT_REVENGE;
+    game_factions[other].diplo_agenda[faction] |= AGENDA_UNK_4;
+    if (!un_charter()) return;
+    if (*game_sunspot_duration > 0) {
+        if (faction == *game_current_faction) game_netmsg_pop(game_netmsg, text(0x68e73c), 5000, 0, NULL);
+        return;
+    }
+    if (*game_expansion && !alien_too && (alien(faction) || alien(other))) return;
+    for (int i = 1; i < FACTION_COUNT; i++) {
+        if (i == faction || i == other) continue;
+        uint32_t *s = &game_factions[i].diplo_status[faction];
+        if (!(*s & TREATY_COMMLINK)) continue;
+        if (*game_expansion && alien_too && !alien(faction) && alien(i)) continue;
+        if (*s & TREATY_UNK_200000) {
+            cause_friction(i, faction, 5);
+            uint32_t mine = me->diplo_status[i];
+            if (!is_human(i) && is_human(faction) && (mine & TREATY_COMMLINK) && !(mine & (TREATY_PACT | TREATY_VENDETTA)) &&
+                !was_victim) {
+                int war;
+                if (*s & TREATY_WANT_REVENGE) {
+                    war = 1;
+                } else if (great_satan(faction, 0)) {
+                    war = game_rand() % 16 - me->atrocities <= 8;
+                } else {
+                    int level = *game_rules & RULES_INTENSE_RIVALRY ? 5 : *game_difficulty;
+                    war = !game_rnd(2 * (8 - level));
+                }
+                if (war) {
+                    if (faction == *game_current_faction) {
+                        say_title(0, faction), say_name(1, faction);
+                        game_diplomacy_caption(faction, i);
+                        game_x_pops(text(0x68e75c), game_faction_portraits[i], NULL);
+                    }
+                    treaty_on(faction, i, TREATY_VENDETTA);
+                    *s |= TREATY_UNK_40;
+                    game_factions[i].diplo_merc[faction] = 50;
+                }
+            }
+        }
+        if (!(*s & TREATY_VENDETTA)) treaty_on(i, faction, TREATY_UNK_400000);
+    }
+    if (always || !me->atrocities) {
+        me->atrocities++;
+        if (!(me->diplo_status[other] & TREATY_ATROCITY_VICTIM)) me->integrity_blemishes++;
+    }
+    if (me->atrocities > 4 * (8 - me->diff_level)) {
+        major_atrocity(faction, other);
+        return;
+    }
+    int turns = 10 * me->atrocities;
+    if (is_human(faction) && !was_victim && me->atrocities >= 5) game_factions[other].flags |= FACTION_FLAG_WANTON_ATROCITIES;
+    say_title(0, faction), say_name(1, faction), say_title(2, other), say_name(3, other);
+    game_parse_num(0, 10 * me->atrocities);
+    game_battle_text[0] = 0;
+    strcat(game_battle_text, text(0x68e76c));
+    if (faction == *game_current_faction) strcat(game_battle_text, text(0x68e778));
+    else if (other == faction) strcat(game_battle_text, text(0x68e77c));
+    if (!alien(faction)) game_netmsg_pop(game_netmsg, game_battle_text, 5000, 0, NULL);
+    me->sanction_turns += turns;
+}
+
+// A major atrocity against `other` (or -1, against everyone): the victim's
+// revenge; under the UN Charter, more blemishes on the culprit's integrity
+// (at least 6, unless the victim already suffered one), and every other AI
+// in the game not already at war with it ends its pact and declares a
+// vendetta, which the player hears of.
+void major_atrocity(int faction, int other) {
+    struct faction_data *me = &game_factions[faction];
+    if (other >= 0) {
+        game_factions[other].diplo_status[faction] |= TREATY_MAJOR_ATROCITY_VICTIM | TREATY_ATROCITY_VICTIM | TREATY_WANT_REVENGE;
+        game_factions[other].diplo_agenda[faction] |= AGENDA_UNK_4;
+    }
+    if (!un_charter()) return;
+    if (other < 0) me->integrity_blemishes += 2;
+    else if (!(me->diplo_status[other] & TREATY_MAJOR_ATROCITY_VICTIM))
+        me->integrity_blemishes = clamp(me->integrity_blemishes + 2, 6, 99);
+    me->major_atrocities++;
+    for (int i = 1; i < FACTION_COUNT; i++) {
+        if (i == faction || i == other || is_human(i) || !(*game_factions_alive >> i & 1)) continue;
+        if (me->diplo_status[i] & TREATY_VENDETTA) continue;
+        if (me->diplo_status[i] & TREATY_PACT) pact_ends(faction, i);
+        treaty_on(i, faction, TREATY_VENDETTA | TREATY_COMMLINK);
+        game_factions[i].diplo_status[faction] |= TREATY_UNK_40;
+        game_factions[i].diplo_merc[faction] = 50;
+        me->diplo_spoke[i] = *game_turn;
+        say_title(0, i), say_name(1, i), say_noun(2, i);
+        say_title(3, faction), say_name(4, faction), say_noun(5, faction);
+        game_battle_text[0] = 0;
+        strcat(game_battle_text, text(0x68e780));
+        strcat(game_battle_text, faction != *game_current_faction ? "1" : "0");
+        game_popp(*game_script_file, game_battle_text, 0, text(0x68e790), 0);
+    }
+}
+
 // ---- Hooks and shadow checks ------------------------------------------------
 
 // stack_fix(), called by mind_control(), changes the stack only in a
@@ -971,6 +2069,78 @@ static void check_diplomacy_with_player(int faction, int human) {
     *game_human_factions = humans, *game_current_faction = current, *game_pbem = pbem;
 }
 
+// The talks write widely (the factions, the talks' variables, units moved
+// home, the game's messages), so most are checked against all of the
+// game's state. Those that would put a question or a window to a human
+// player run the original unchecked when one is involved (`player`):
+// the sweep checks them on a copy, where no question is put.
+#define SHADOW_TALK(ret, name, params, args, player, fmt, ...)                                                  \
+    SHADOW_WRITER_CHECK(ret, name, params, args, orig_##name args, hooks_writes_game(&w_), fmt, __VA_ARGS__)     \
+    static ret shadow_##name params {                                                                         \
+        if (hooks_nested) SHADOW_TAIL_##ret(orig_##name args);                                                \
+        if (shadow_bypass()) SHADOW_TAIL_##ret(name args);                                                    \
+        stats_##name.calls++;                                                                                 \
+        shadow_tick(FACTION);                                                                                 \
+        if (player) SHADOW_TAIL_##ret(orig_##name args);                                                      \
+        SHADOW_TAIL_##ret(check_##name args);                                                                 \
+    }
+// diplomacy_check() asks no one, but energy_compute() writes widely.
+SHADOW_TALK(void, diplomacy_check, (int a, int b, int c), (a, b, c), 0, "%d, %d, %d", a, b, c)
+SHADOW_WRITER(FACTION, void, scan_prototypes, (int a, int b), (a, b),
+              WRITES(game_diplo_best_proto, 4); WRITES(game_diplo_mention_proto, 4), "%d, %d", a, b)
+// Only ever in the player's talks: the swap of designs is the player's to
+// accept, and the call opens the diplomacy window.
+SHADOW_TALK(void, mention_prototypes, (int a, int b), (a, b), 1, "%d, %d", a, b)
+SHADOW_TALK(int, wants_to_speak, (int a, int b), (a, b), 1, "%d, %d", a, b)
+// Units withdrawn home; the console's unit is the player's.
+SHADOW_TALK(int, pact_withdraw, (int a, int b), (a, b), is_human(a), "%d, %d", a, b)
+// The player is told of a pact's end in a popup, which a check would drop.
+SHADOW_TALK(void, pact_ends, (int a, int b), (a, b), is_human(a) || is_human(b), "%d, %d", a, b)
+// The player's answer.
+SHADOW_TALK(int, break_treaty, (int a, int b, uint32_t c), (a, b, c), 1, "%d, %d, %#x", a, b, c)
+SHADOW_TALK(void, double_cross, (int a, int b, int c), (a, b, c), is_human(a) || is_human(b), "%d, %d, %d", a, b, c)
+// A human may be called (comm_check).
+SHADOW_TALK(void, encounter, (int a, int b, int c, int d, int e, int f), (a, b, c, d, e, f), is_human(a) || is_human(b),
+            "%d, %d, %d, %d, %d, %d", a, b, c, d, e, f)
+// A human culprit hears an AI declare war in a window; a major atrocity
+// ends its pacts.
+SHADOW_TALK(void, atrocity, (int a, int b, int c, int d), (a, b, c, d), is_human(a), "%d, %d, %d, %d", a, b, c, d)
+SHADOW_TALK(void, major_atrocity, (int a, int b), (a, b), is_human(a), "%d, %d", a, b)
+
+// territory() also answers in its caller's variables, which are compared
+// apart from the game's state.
+int territory(int faction, int other, int flags, int *base, int *count);
+SHADOW_DECLARE(int, territory, (int a, int b, int c, int *d, int *e))
+static int check_territory(int a, int b, int c, int *base, int *count) {
+    struct hook_writes w_ = {0};
+    WRITES_FACTIONS;
+    WRITES(game_vehs, sizeof(struct veh) * *game_veh_count);
+    hooks_writes_begin(&w_);
+    hooks_nested++;
+    int want_base = -2, want_count = -2, got_base = -2, got_count = -2;
+    int want = orig_territory(a, b, c, base ? &want_base : NULL, count ? &want_count : NULL);
+    hooks_nested--;
+    hooks_writes_middle(&w_);
+    int got = territory(a, b, c, base ? &got_base : NULL, count ? &got_count : NULL);
+    const char *diff = hooks_writes_end(&w_, got, want);
+    if (diff)
+        hooks_mismatch(&stats_territory, "(%d, %d, %d) %s", a, b, c, diff);
+    else if (got_base != want_base || got_count != want_count)
+        hooks_mismatch(&stats_territory, "(%d, %d, %d) base %d count %d, original %d %d", a, b, c, got_base, got_count,
+                       want_base, want_count);
+    hooks_ui_release();
+    if (base) *base = want_base;
+    if (count) *count = want_count;
+    return want;
+}
+static int shadow_territory(int a, int b, int c, int *d, int *e) {
+    if (hooks_nested) return orig_territory(a, b, c, d, e);
+    if (shadow_bypass()) return territory(a, b, c, d, e);
+    stats_territory.calls++;
+    shadow_tick(FACTION);
+    return check_territory(a, b, c, d, e);
+}
+
 // ---- The diplomacy sweep ------------------------------------------------------------
 
 // The sweep's own random numbers, so that the game's are left alone.
@@ -1150,6 +2320,165 @@ static void perturb(void) {
     }
 }
 
+// More of the talks' inputs varied: treaty and agenda bits, rankings
+// (1 to 7), reserves, labs, arms, records, planet busters, atrocities,
+// prototypes mentioned or offered, the AI's flags and moods, sunspots, the
+// UN Charter and the expansion.
+static void perturb_talks(void) {
+    static const uint32_t bits[] = {TREATY_UNK_200, TREATY_WANT_TO_TALK, TREATY_UNK_10000, TREATY_UNK_200000,
+                                    TREATY_MAJOR_ATROCITY_VICTIM, TREATY_UNK_800000, TREATY_UNK_8000000,
+                                    TREATY_UNK_10000000, 0x4000};
+    static const uint32_t agendas[] = {AGENDA_UNK_1, AGENDA_UNK_4, AGENDA_FIGHT_TO_DEATH, AGENDA_UNK_20, AGENDA_UNK_200,
+                                       AGENDA_UNK_400, AGENDA_UNK_800, AGENDA_UNK_2000};
+    for (int i = 1; i < FACTION_COUNT; i++) {
+        struct faction_data *F = &game_factions[i];
+        for (int j = 1; j < FACTION_COUNT; j++) {
+            if (i == j) continue;
+            for (unsigned k = 0; k < sizeof(bits) / sizeof(bits[0]); k++)
+                if (!rnd(6)) F->diplo_status[j] ^= bits[k];
+            for (unsigned k = 0; k < sizeof(agendas) / sizeof(agendas[0]); k++)
+                if (!rnd(7)) F->diplo_agenda[j] ^= agendas[k];
+            if (!rnd(3)) F->diplo_combat_count[j] = rnd(20);
+            if (!rnd(3)) F->diplo_combat_total[j] = rnd(40);
+            if (!rnd(4)) F->diplo_spoke[j] = *game_turn - rnd(40);
+            if (!rnd(5)) game_diplo_state[j] ^= 0x40;
+        }
+        if (rnd(2)) F->energy_credits = rnd(3) ? rnd(800) : 1500 + rnd(4000);
+        if (rnd(2)) F->energy_surplus_total = rnd(200) - 20;
+        if (!rnd(3)) F->alloc_labs = rnd(2) * rnd(6);
+        if (!rnd(3)) F->planet_busters = rnd(3);
+        if (!rnd(3)) F->atrocities = rnd(4) ? rnd(6) : rnd(40);
+        if (!rnd(3)) F->ai_wealth = rnd(3) - 1;
+        if (!rnd(6)) F->flags ^= FACTION_FLAG_COOP_WITH_HUMAN;
+        if (!rnd(6)) F->flags_ext ^= FACTION_FLAG_EXT_SHAMELESS;
+        if (!rnd(3)) F->diplo_reputation = rnd(4);
+        if (!rnd(3)) F->se_models_pending[rnd(4)] = rnd(4);
+        if (!rnd(4)) game_faction_defs[i].ideology_category = rnd(5) - 1, game_faction_defs[i].ideology_model = rnd(4);
+        for (int k = 0; k < 64; k++)
+            if (!rnd(8)) game_protos[i * 64 + k].flags ^= (uint16_t)(rnd(2) ? PROTO_FLAG_MENTIONED : PROTO_FLAG_OFFERED);
+    }
+    // The rankings, 1 to 7, among the factions.
+    if (rnd(2))
+        for (int k = 7; k > 1; k--) {
+            int j = 1 + rnd(k), x = game_factions[k].ranking;
+            game_factions[k].ranking = game_factions[j].ranking, game_factions[j].ranking = x;
+        }
+    if (!rnd(4)) *game_sunspot_duration = rnd(2) ? 0 : 1 + rnd(5);
+    if (!rnd(6)) *game_un_charter_a = *game_un_charter_b + 1;
+    if (!rnd(3)) *game_expansion = !*game_expansion;
+    if (!rnd(3)) *game_rules ^= RULES_VICTORY_TRANSCENDENCE;
+    if (!rnd(5)) *game_state ^= GAME_STATE_OMNISCIENT;
+    if (!rnd(3)) *game_diplo_friction = rnd(25);
+    *game_diplo_can_betray = rnd(2);
+}
+
+// A faction other than those given that isn't human, made the player (the
+// current faction), so that no one human is called; 0 if none.
+static int bystander(int a, int b) {
+    for (int k = 0; k < FACTION_COUNT - 1; k++) {
+        int i = 1 + (k + *game_turn) % (FACTION_COUNT - 1);
+        if (i != a && i != b && !is_human(i)) return i;
+    }
+    return 0;
+}
+
+static int some_faction(void) { return 1 + rnd(FACTION_COUNT - 1); }
+// Two different factions.
+static void some_pair(int *f, int *o) {
+    *f = some_faction();
+    *o = 1 + (*f - 1 + 1 + rnd(FACTION_COUNT - 2)) % (FACTION_COUNT - 1);
+}
+
+// The talks over pairs of factions: in the game as it is (`full`) every
+// pair for diplomacy_check() and territory(), else a sample; the rest over
+// a sample. Questions, popups and messages are held or dropped; a human
+// in the game plays hotseat (game_pbem), with someone else the player.
+static void sweep_talks(int full) {
+    int32_t current = *game_current_faction, pbem = *game_pbem;
+    if (*game_human_factions) {
+        *game_pbem = 1;
+        int p = bystander(0, 0);
+        if (p) *game_current_faction = p;
+    }
+    for (int n = 0; n < (full ? 42 : 6); n++) {
+        int f, o;
+        some_pair(&f, &o);
+        check_scan_prototypes(f, o);
+    }
+    for (int n = 0; n < (full ? 42 : 4); n++) {
+        int f = full ? 1 + n / 6 : some_faction(), o = full ? 1 + n % 6 : some_faction();
+        if (full && o >= f) o++;
+        // The original divides by the player's ranking.
+        if (f == o || !game_factions[f].ranking || !(*game_factions_alive >> f & 1) || !(*game_factions_alive >> o & 1))
+            continue;
+        check_diplomacy_check(f, o, (n + *game_turn) & 1);
+    }
+    for (int n = 0; n < (full ? 42 : 8); n++) {
+        int f, o, base = -1, count = -1, r = rnd(4);
+        some_pair(&f, &o);
+        check_territory(f, o, rnd(4), r & 1 ? &base : NULL, r & 2 ? &count : NULL);
+    }
+    static const uint32_t breaks[] = {TREATY_PACT, TREATY_TREATY, TREATY_TRUCE, TREATY_PACT | TREATY_TREATY | TREATY_TRUCE,
+                                      TREATY_TRUCE | TREATY_UNK_10000, TREATY_UNK_10000, TREATY_VENDETTA};
+    for (int n = 0; n < 6; n++) {
+        int f, o;
+        some_pair(&f, &o);
+        check_break_treaty(f, o, breaks[rnd(sizeof(breaks) / sizeof(breaks[0]))]);
+    }
+    for (int n = 0; n < 2; n++) {
+        int f, o, x = rnd(8) - 2, y = rnd(8) - 2;
+        some_pair(&f, &o);
+        if (!rnd(4)) o = 0;
+        if (o && (is_human(f) || is_human(o))) {
+            int p = bystander(f, o);
+            if (!p) continue;
+            *game_current_faction = p;
+        } else if (rnd(2)) {
+            *game_current_faction = rnd(2) ? f : o;  // the player's scenes and notes
+        }
+        check_encounter(f, o, x, y, rnd(2), rnd(2));
+    }
+    {
+        // A human culprit who is the player would be told in a window.
+        int f, o;
+        some_pair(&f, &o);
+        if (is_human(f) && f == *game_current_faction) *game_current_faction = bystander(f, 0);
+        check_atrocity(f, o, rnd(2), rnd(2));
+        some_pair(&f, &o);
+        check_major_atrocity(f, rnd(4) ? o : -1);
+    }
+    for (int n = 0; n < 2; n++) {
+        int32_t net = *game_net_multiplayer;
+        if (!rnd(6)) *game_net_multiplayer = 1;
+        int f, o, i = rnd(9) - 1;
+        some_pair(&f, &o);
+        check_double_cross(f, o, i == f || i == o ? -1 : i);
+        *game_net_multiplayer = net;
+    }
+    for (int n = 0; n < 3; n++) {
+        int f, o;
+        some_pair(&f, &o);
+        if (n) check_pact_withdraw(f, o);
+        else check_pact_ends(f, o);
+    }
+    // The talks' answers already given, or alien factions that can't talk:
+    // the rest opens the diplomacy window.
+    {
+        int f, o;
+        some_pair(&f, &o);
+        *game_diplo_caption_off = rnd(3) != 0, *game_diplo_caption_mode = rnd(3) ? rnd(2) : 8;
+        if (!*game_diplo_caption_off) game_faction_defs[f].rule_flags ^= RULE_FLAG_ALIEN, *game_diplo_caption_off = 1;
+        check_wants_to_speak(f, o);
+        // mention_prototypes(), unless it would offer to swap designs.
+        some_pair(&f, &o);
+        *game_diplo_mention_proto = rnd(4) ? o * 64 + rnd(64) : -1;
+        *game_diplo_caption_off = 1, *game_diplo_caption_mode = rnd(2);
+        if (*game_diplo_caption_mode && !(game_factions[f].diplo_status[o] & TREATY_PACT)) *game_diplo_caption_mode = 0;
+        check_mention_prototypes(f, o);
+    }
+    *game_current_faction = current, *game_pbem = pbem;
+}
+
 // The game as it is, then variations of it, on a protected copy that is
 // put back after. The music's preference is off meanwhile, so that a
 // vendetta declared in a check plays nothing.
@@ -1158,14 +2487,18 @@ static void diplomacy_sweep(void) {
     hooks_writes_game(&outer);
     hooks_writes_begin(&outer);
     *game_preferences &= ~0x800;
+    *game_console_veh_mode = 0;
     sweep_seed = (uint32_t)*game_turn * 104729u;
     sweep_reckoning(1);
     sweep_treaties();
+    sweep_talks(1);
     for (int v = 0; v < 8; v++) {
         sweep_seed = (uint32_t)*game_turn * 7919u + (uint32_t)v;
         perturb();
+        perturb_talks();
         sweep_reckoning(0);
         sweep_treaties();
+        sweep_talks(0);
     }
     hooks_writes_abandon(&outer);
 }
@@ -1218,5 +2551,17 @@ static const struct hook faction_hooks[] = {
     HOOK(0x55b870, treaty_on, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x0d, 0x84, 0x92, 0x93, 0x00),  // mov ecx, [current_faction]
     HOOK(0x55ba80, agenda_on, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x0c),
     HOOK(0x55bb30, set_treaty, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x14),                  // mov eax, [ebp+20]
+    HOOK(0x53a980, diplomacy_check, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x68),             // sub esp, 0x68
+    HOOK(0x53a4a0, scan_prototypes, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x28),             // sub esp, 0x28
+    HOOK(0x53a230, mention_prototypes, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08, 0xa1, 0x40, 0xfa, 0x93, 0x00),
+    HOOK(0x53dce0, wants_to_speak, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),  // mov eax, fs:[0]
+    HOOK(0x53c370, pact_withdraw, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x1c),               // sub esp, 0x1c
+    HOOK(0x53c650, pact_ends, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),
+    HOOK(0x55f770, break_treaty, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x8b, 0x5d, 0x08),          // push ebx; mov ebx, [ebp+8]
+    HOOK(0x50bcc0, double_cross, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),                // sub esp, 12
+    HOOK(0x55e370, encounter, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56),                         // push ebx; push esi
+    HOOK(0x55eb80, territory, PUSH_EBP_MOV_EBP_ESP, 0x81, 0xec, 0x18, 0x01, 0x00, 0x00),  // sub esp, 0x118
+    HOOK(0x55eee0, atrocity, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),                    // sub esp, 12
+    HOOK(0x55f450, major_atrocity, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x58),              // sub esp, 0x58
 };
 struct hook_module faction_module = {"faction", faction_hooks, HOOK_COUNT(faction_hooks), faction_sweep, NULL, -1};
