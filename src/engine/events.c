@@ -1,5 +1,7 @@
 // What units find on the map: supply and unity pods (goody_box), monoliths,
-// and the alien artifacts they bring home (study_artifact). Reimplemented
+// and the alien artifacts they bring home (study_artifact); the turn's
+// random events (random_events); a faction's end (eliminate_player) and
+// its social choices taking effect (social_set, social_select). Reimplemented
 // from terranx.exe 2.0's disassembly; names follow Thinker (MIT) and
 // OpenSMACX (Brendan Casey, GPL-3.0-or-later). Thinker's goody_box and
 // monolith served as a map of the outcomes; where its versions differ from
@@ -13,6 +15,7 @@
 // question, so shadow mode could not check it.
 #include "events.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -21,7 +24,9 @@
 #include "game.h"
 #include "map.h"
 #include "mapgen.h"
+#include "score.h"
 #include "shadow.h"
+#include "social.h"
 #include "spot.h"
 #include "strategy.h"
 #include "tech.h"
@@ -41,7 +46,7 @@ enum {
     // game_rules: scenario rules that switch outcomes off.
     RULES_FORCE_DIFFICULTY = 0x1000000, RULES_NO_NATIVE_LIFE = 0x200000, RULES_NO_MONOLITHS = 0x20000,
     RULES_NO_RESOURCES = 0x10000, RULES_NO_ARTIFACTS = 0x40000, RULES_NO_TECH = 0x4000000,
-    MORE_RULES_NO_UNITS = 0x1, MORE_RULES_NO_TECH = 0x2,
+    MORE_RULES_NO_UNITS = 0x1, MORE_RULES_NO_TECH = 0x2, MORE_RULES_NO_SOCIAL = 0x8,
     STATE_ALL_ARTIFACTS = 0x40000,  // game_state: a scenario won by collecting every artifact
     // Basic designs a pod brings.
     PROTO_ARTIFACT = 7, PROTO_MIND_WORMS = 8, PROTO_ISLE = 9, PROTO_ROVER = 11, PROTO_CHOPPER = 12, PROTO_FOIL = 13,
@@ -948,6 +953,752 @@ int goody_box(int veh) {
     }
 }
 
+// ---- The turn's random events ------------------------------------------------------
+//
+// Once a turn (flag 0) the timed effects count down first: solar flares,
+// sunspots, the dust cloud of a volcano or a meteor, and the events at
+// bases; the AI is set to watch every human faction it isn't already at
+// odds with; perihelion begins or ends. Then, from turn 75 (less 10 a level
+// of difficulty) and unless the bell curve rule is on, one base may have an
+// event: a base out of 100 (or as many as there are), with more than three
+// citizens, of a faction with another base, and none of the base events
+// under way. game_random() picks both, from a seed of the map's and the
+// turn's on flag 0.
+//
+// Thinker's version (random_events in its gameturn.cpp) fixes several of
+// the original's quirks and keeps its own generator; the original's are
+// kept here and noted at each event.
+
+enum {
+    RULES_DO_OR_DIE = 0x1, RULES_BELL_CURVE = 0x8000,
+    STATE_SCENARIO = 0x10,
+    PREF_PROJECT_MOVIES = 0x10000000,
+    // Base events, and the turns they last.
+    BASE_EVENTS = 0x7e00, BASE_EVENT_TURNS = 10,
+    EV_FAC_CRECHE = 2, EV_FAC_ENERGY_BANK = 7, EV_FAC_NETWORK_NODE = 8, EV_FAC_BIOLOGY_LAB = 9,
+    EV_FAC_RESEARCH_HOSPITAL = 17, EV_FAC_NANOHOSPITAL = 18,
+    // Secret projects: the Human Genome Project, Longevity Vaccine,
+    // Clinical Immortality and the Planetary Energy Grid; their facilities
+    // count from 70.
+    SP_GENOME = 0, SP_LONGEVITY = 14, SP_IMMORTALITY = 26, SP_ENERGY_GRID = 36, FAC_SP_FIRST = 70,
+    MAP2_VOLCANO = 0x2,
+    VK_SHIFT = 0x10,
+    TREATY_INFILTRATOR = 0x1000,
+    F_ELIMINATED = 0x20a0,  // factions it has put out of the game
+};
+
+// Sensors, bores, mirrors, condensers, forest, soil enrichers, farms,
+// bunkers, solar collectors, fungus, mines, tubes and roads.
+#define MAP_LOST_TO_DISASTER 0x81e8887cu
+#define MAP2_VOLCANO_LIVE 0x80000002u  // the volcano landmark, unless disabled
+
+struct event {
+    int base, faction, x, y;
+    struct base *B;
+    struct faction_data *F;
+};
+
+static inline int shift_held(void) { return (game_get_async_key_state(VK_SHIFT) & 0xff00) != 0; }
+// The pauses that animate an event, skipped while shift is held.
+static void pause_unless_shift(int ms) {
+    if (!shift_held() && !*game_net_multiplayer) game_clock_wait(ms);
+}
+static int built(int base, int fac) {
+    int offset;
+    uint32_t mask;
+    bitmask(fac, &offset, &mask);
+    return (game_bases[base].facilities_built[offset] & mask) != 0;
+}
+static inline int fac_name(int fac) { return (int)(intptr_t)game_facilities[fac].name; }
+// Whether the faction knows the square.
+static int knows(int faction, int x, int y) {
+    return (game_factions[faction].flags & FACTION_FLAG_MAP_REVEALED) || (tile(x, y)->visibility & (1u << faction));
+}
+// A square no other faction's territory.
+static int territory_ok(int faction, int x, int y) {
+    int owner = whose_territory(faction, x, y, NULL, 0);
+    return owner < 0 || owner == faction;
+}
+// What faction j last saw of the square's bits, for j of 1 to 7 (j of 0 is
+// the landmark word before them, as the original's arithmetic has it).
+static inline uint32_t *seen_word(struct map_tile *t, int j) { return (uint32_t *)((char *)t + 0xc + 4 * j); }
+static void forget_bits(struct map_tile *t, uint32_t bits) {
+    for (int j = 1; j < 8; j++) *seen_word(t, j) &= ~bits;
+}
+static int event_square(int cx, int cy, int i, int *x, int *y) {
+    *x = xrange(cx + game_radius_x[i]), *y = cy + game_radius_y[i];
+    return on_map(*x, *y);
+}
+// A bad turn falls on a faction from fifth place down (fourth from turn
+// 150).
+static inline int ranked_low(const struct event *e) { return e->F->ranking >= (*game_turn >= 150) + 4; }
+static inline int alien(int faction) { return (game_faction_defs[faction].rule_flags & RULE_FLAG_ALIEN) != 0; }
+// The base's own message: to the player, or anyone in a hotseat game.
+static void base_message(const struct event *e, uint32_t label, uint32_t picture) {
+    if (e->faction != cur_faction() && !*game_pbem) return;
+    game_pop2(text(label), text(picture), e->base);
+}
+// The map moved to the base for the player.
+static void focus_player(const struct event *e) {
+    if (e->faction == cur_faction()) game_console_focus(game_console, e->x, e->y, e->faction);
+}
+
+// 0 to 5: the base events, for ten turns. The good ones (a bumper crop, an
+// industrial boom, a heat wave) pass the faction in first place by, but
+// one time in four or on a human's two lowest difficulties; the bad ones
+// (famine, a bust, cloud cover) fall on a low-ranked faction. The original
+// puts the message's label together first and goes on only if it isn't
+// empty.
+static void base_event(const struct event *e, int good, uint32_t bit, uint32_t label, uint32_t picture) {
+    if (good) {
+        if (game_faction_rankings[7] == e->faction && (!game_is_human(e->faction) || e->F->diff_level > 1) &&
+            game_random(0, 4))
+            return;
+    } else if (!ranked_low(e))
+        return;
+    e->B->event |= bit;
+    strcat(game_battle_text, text(label));
+    if (!strlen(game_battle_text)) return;
+    if (e->B->event & BASE_EVENTS) e->B->random_event_turns = BASE_EVENT_TURNS;
+    if (e->faction != cur_faction() && !*game_pbem) return;
+    game_pop2(game_battle_text, text(picture), e->base);
+}
+
+// 6: a plague, unless the base has a research hospital or nanohospital, or
+// the faction one of three medical projects (each named instead). It halves
+// the bases within half the base's size (rounded up), but those protected
+// so. Its message goes to the last of the player's bases struck, or to base
+// 0 when the player only sees the base: the original keeps the base's
+// number plus one, but starts it at 1 there (Thinker names the base).
+static void plague(const struct event *e) {
+    int f = e->faction;
+    if (built(e->base, EV_FAC_RESEARCH_HOSPITAL) || built(e->base, EV_FAC_NANOHOSPITAL)) {
+        int nano = built(e->base, EV_FAC_NANOHOSPITAL);
+        game_parse_say(1, fac_name(nano ? EV_FAC_NANOHOSPITAL : EV_FAC_RESEARCH_HOSPITAL), -1, -1);
+        if (f == cur_faction()) {
+            game_console_focus(game_console, e->x, e->y, cur_faction());
+            game_pop2(text(0x68b1ac), text(0x68b19c), e->base);
+        } else if (*game_pbem)
+            game_pop2(text(0x68b1c8), text(0x68b1b8), e->base);
+        return;
+    }
+    if (has_project(SP_GENOME, f) || has_project(SP_LONGEVITY, f) || has_project(SP_IMMORTALITY, f)) {
+        int sp = has_project(SP_GENOME, f) ? SP_GENOME : has_project(SP_LONGEVITY, f) ? SP_LONGEVITY : SP_IMMORTALITY;
+        game_parse_say(1, fac_name(FAC_SP_FIRST + sp), -1, -1);
+        if (f == cur_faction()) {
+            game_console_focus(game_console, e->x, e->y, cur_faction());
+            game_pop2(text(0x68b1e4), text(0x68b1d4), e->base);
+        } else if (*game_pbem)
+            game_pop2(text(0x68b200), text(0x68b1f0), e->base);
+        return;
+    }
+    if (!ranked_low(e)) return;
+    int reach = (e->B->pop_size + 1) / 2, shown = 0, cur = cur_faction();
+    game_parse_num(1, reach);
+    if (e->B->faction == cur || (e->B->visibility & (1u << cur))) {
+        shown = 1;
+        game_console_focus(game_console, e->x, e->y, cur);
+    }
+    for (int i = 0; i < *game_base_count; i++) {
+        struct base *B = &game_bases[i];
+        if ((x_dist(B->x, e->B->x) + abs(B->y - e->B->y)) >> 1 > reach) continue;
+        if (built(i, EV_FAC_RESEARCH_HOSPITAL) || built(i, EV_FAC_NANOHOSPITAL)) continue;
+        if (has_project(SP_GENOME, B->faction) || has_project(SP_LONGEVITY, B->faction) ||
+            has_project(SP_IMMORTALITY, B->faction))
+            continue;
+        B->pop_size = (int8_t)((B->pop_size + 1) / 2);
+        game_draw_tile(B->x, B->y, 2);
+        if (B->faction == cur_faction()) {
+            game_console_focus(game_console, B->x, B->y, cur_faction());
+            shown = i + 1;
+        } else if (*game_pbem)
+            shown = i + 1;
+    }
+    if (shown) game_pop2(text(0x68b21c), text(0x68b20c), shown - 1);
+}
+
+// A resource blinked on the map for the player, ten times, ending as it is.
+static void blink_resource(int faction, int x, int y, int ends_on) {
+    game_map_win_set_center(game_map_wins[0], x, y, 1);
+    if (shift_held()) return;
+    for (int k = 0; k < 10; k++) {
+        for (int on = !ends_on, n = 0; n < 2; n++, on = !on) {
+            bit_set(x, y, MAP_RESOURCE, on);
+            synch_bit(x, y, faction);
+            game_draw_tile(x, y, 2);
+            pause_unless_shift(20);
+        }
+    }
+}
+static int resource_name(int kind) { return (int)(intptr_t)game_resource_names[2 * kind + 1]; }
+
+// 7 and 8: a resource near the base peters out (from turn 75), or a new one
+// is found. The first of the nine squares around the base with a resource
+// the faction knows, at sea or in its territory, peters out; else a
+// resource comes up on one of the 20 squares around (known, at sea or in
+// its territory), even where there is one already (Thinker checks first).
+static void resources(const struct event *e) {
+    if (*game_pbem) return;
+    int f = e->faction, pick = game_random(0, 20) + 1, nearby = 0, x, y;
+    for (int i = 0; i < 9; i++) {
+        if (!event_square(e->x, e->y, i, &x, &y) || !bonus_at(x, y, 0) || !knows(f, x, y)) continue;
+        if (!sea_at(tile(x, y)) && !territory_ok(f, x, y)) continue;
+        pick = i, nearby = 1;
+        break;
+    }
+    if (!event_square(e->x, e->y, pick, &x, &y) || !knows(f, x, y)) return;
+    if (!sea_at(tile(x, y)) && !territory_ok(f, x, y)) return;
+    if (nearby && bonus_at(x, y, 0)) {
+        if (*game_turn < 75) return;
+        game_parse_say(1, resource_name(bonus_at(x, y, 0) - 1), -1, -1);
+        bit_set(x, y, MAP_RESOURCE, 0);
+        synch_bit(x, y, f);
+        game_draw_tile(x, y, 2);
+        if (bonus_at(x, y, 0) || f != cur_faction()) return;
+        blink_resource(f, x, y, 0);
+        pause_unless_shift(100);
+        game_pop2(text(0x68b23c), text(0x68b228), -1);
+        return;
+    }
+    bit_set(x, y, MAP_RESOURCE, 1);
+    synch_bit(x, y, f);
+    game_draw_tile(x, y, 2);
+    int kind = bonus_at(x, y, 0) - 1;
+    if (kind < 0 || f != cur_faction()) return;
+    blink_resource(f, x, y, 1);
+    game_parse_say(1, resource_name(kind), -1, -1);
+    int sea = sea_at(tile(x, y));
+    uint32_t picture = !kind ? (sea ? 0x68b248 : 0x68b258) : (sea ? 0x68b268 : 0x68b278);
+    game_pop2(text(0x68b2a8), text(picture), -1);
+}
+
+// 9: one time in six, a solar flare (energy tripled for a turn; see
+// game_solar_flares), which burns out every energy satellite and orbital
+// defense pod.
+static void solar_flare(void) {
+    if (*game_solar_flares || game_random(0, 5)) return;
+    int burnt = 0;
+    for (int i = 1; i < 8; i++) {
+        int32_t *s = game_factions[i].satellites;
+        if (s[2] || s[3]) s[2] = s[3] = 0, burnt = 1;
+    }
+    *game_solar_flares = 1;
+    if (burnt) game_pop2(text(0x68b2c0), text(0x68b2b4), -1);
+    else game_pop2(text(0x68b2d8), text(0x68b2cc), -1);
+}
+
+// 10: one time in six, an asteroid shower wrecks the mineral satellites.
+static void asteroids(void) {
+    if (game_random(0, 5)) return;
+    int hit = 0;
+    for (int i = 1; i < 8; i++)
+        if (game_factions[i].satellites[1]) game_factions[i].satellites[1] = 0, hit = 1;
+    if (hit) game_pop2(text(0x68b2f0), text(0x68b2e4), -1);
+}
+
+// 11: sunspots for 10 to 20 turns, from turn 50, at least 40 turns after
+// the last ones end (80, or one time in three from turn 80).
+static void sunspots(void) {
+    int32_t since = *game_sunspot_duration;
+    if (*game_turn < 50 || since > -40) return;
+    if (since > -80 && *game_turn >= 80 && game_random(0, 3)) return;
+    *game_sunspot_duration = game_random(0, 11) + 10;
+    game_parse_num(0, 20);
+    game_pop2(text(0x68b30c), text(0x68b2fc), -1);
+}
+
+// 12: the energy market crashes for a faction with over 1000 credits (a
+// human's, or the AI's over 2000), leaving a quarter (Thinker a half); or
+// booms for a faction ranked fifth or higher with 500 or less, doubling
+// them.
+static void energy_market(const struct event *e) {
+    struct faction_data *F = e->F;
+    int32_t credits = F->energy_credits;
+    if (credits <= 1000) {
+        if (F->ranking > 4 || credits > 500) return;
+        F->energy_credits = credits * 2;
+        if (e->faction != cur_faction()) return;
+        game_parse_num(0, F->energy_credits);
+        game_console_update_data(game_console, 0);
+        game_pop2(text(0x68b328), text(0x68b318), -1);
+        return;
+    }
+    if (!game_is_human(e->faction) && credits <= 2000) return;
+    F->energy_credits = credits / 4;
+    if (e->faction == cur_faction()) {
+        game_parse_num(0, F->energy_credits);
+        game_console_update_data(game_console, 0);
+        game_pop2(text(0x68b344), text(0x68b334), -1);
+    } else if (*game_pbem) {
+        game_parse_num(0, F->energy_credits);
+        game_pop2(text(0x68b360), text(0x68b350), -1 - e->faction);
+    }
+}
+
+// 13, 20 and 21: storms wreck improvements of one kind on the 21 squares of
+// the base's radius (known to the faction, in its territory), shown when
+// the player sees the base. 13 takes solar collectors on land (from turn
+// 75, for a low-ranked faction). 20 and 21 would take kelp farms and mining
+// platforms at sea, but the original then also asks for land, so they never
+// happen (Thinker fixes that).
+static void storm(const struct event *e, uint32_t bit, int at_sea, uint32_t label, uint32_t picture) {
+    if (at_sea && *game_pbem) return;
+    if (*game_turn < 75 || !ranked_low(e)) return;
+    int f = e->faction, shown = 0;
+    for (int i = 0; i < 21; i++) {
+        int x, y;
+        if (!event_square(e->x, e->y, i, &x, &y)) continue;
+        struct map_tile *t = tile(x, y);
+        if (at_sea && !sea_at(t)) continue;
+        if (!(t->bits & bit) || !knows(f, x, y) || !territory_ok(f, x, y) || sea_at(t)) continue;
+        int cur = cur_faction();
+        if (!at_sea && *game_pbem) shown = 1;
+        else if (f == cur || e->B->faction == cur || (e->B->visibility & (1u << cur))) {
+            if (!shown) {
+                game_console_focus(game_console, e->x, e->y, cur);
+                pause_unless_shift(200);
+            }
+            shown = at_sea ? 1 : shown | (f == cur ? 2 : 1);
+        }
+        bit_set(x, y, bit, 0);
+        synch_bit(x, y, f);
+        forget_bits(t, bit);
+        if (shown) {
+            game_draw_tile(x, y, 2);
+            if (!shift_held() && !*game_net_multiplayer && !*game_pbem) game_clock_wait(50);
+        }
+    }
+    if (!shown) return;
+    if (!at_sea) {
+        game_pop2(text(label), text(picture), e->base);
+        return;
+    }
+    game_parse_says(0, e->B->name, -1, -1);
+    game_pop2(text(label), NULL, e->faction == cur_faction() ? e->base : -1);
+}
+
+// A unit's hit points: 1 for an artifact, else 10 a reactor level.
+static int hit_points(const struct veh *V) {
+    const struct unit_proto *P = proto_of(V);
+    if (P->plan == PLAN_ARTIFACT) return 1;
+    int reactor = P->reactor < 1 ? 1 : P->reactor > 100 ? 100 : P->reactor;
+    return reactor * 10;
+}
+// The player's base among those struck, named in the message (once; the
+// original compares the faction of the last base it named).
+static void name_struck(int base, int *named, int *shown) {
+    int cur = cur_faction();
+    if (game_bases[base].faction != cur || game_bases[*named].faction == cur) return;
+    game_parse_says(0, game_bases[base].name, -1, -1);
+    *named = base, *shown = 1;
+}
+
+// 14: Mount Planet erupts, for a faction with eight bases or more ranked
+// third or lower, whose base is within 5 of it and who knows it (from turn
+// 75, not in a scenario). The 81 squares around lose what was built on
+// them and turn rocky; units on the volcano die and others lose half their
+// hit points left; bases on the nine squares nearest die (but scenario
+// objectives), the others lose people, the nearer the more. A dust cloud
+// follows for ten turns.
+static void volcano(struct event *e) {
+    if (*game_pbem || *game_turn < 75 || e->F->base_count < 8 || (*game_state & STATE_SCENARIO)) return;
+    int mx = *game_mount_planet_x, my = *game_mount_planet_y;
+    if (my < 0 || my >= *game_map_height || mx < 0 || mx >= *game_map_width) return;
+    if ((tile(mx, my)->bits2 & MAP2_VOLCANO_LIVE) != MAP2_VOLCANO) return;
+    if (((x_dist(e->x, mx) + abs(e->y - my)) & ~1) > 10) return;
+    if (!knows(e->faction, mx, my) || e->F->ranking < 6) return;
+    int cur = cur_faction(), shown = knows(cur, mx, my), named = e->base;
+    for (int i = 0; i < 81; i++) {
+        int x, y;
+        if (!event_square(mx, my, i, &x, &y)) continue;
+        bit_set(x, y, MAP_LOST_TO_DISASTER, 0);
+        synch_bit(x, y, cur_faction());
+        rocky_set(x, y, 2);
+        if ((tile(x, y)->bits2 & MAP2_VOLCANO_LIVE) == MAP2_VOLCANO) {
+            for (int v = *game_veh_count - 1; v >= 0; v--)
+                if (game_vehs[v].x == x && game_vehs[v].y == y) veh_kill(v);
+        } else
+            for (int v = *game_veh_count - 1; v >= 0; v--) {
+                struct veh *V = &game_vehs[v];
+                if (V->x != x || V->y != y) continue;
+                int left = hit_points(V) - V->damage;
+                left = left < 0 ? 0 : left > 9999 ? 9999 : left;
+                V->damage = (uint8_t)(V->damage + left / 2);
+            }
+        int b = base_at(x, y);
+        if (b < 0) continue;
+        name_struck(b, &named, &shown);
+        struct base *B = &game_bases[b];
+        if (i < 9 && !is_objective(b)) base_kill(b);
+        else if (i < 25) B->pop_size = (int8_t)((B->pop_size + 3) / 4);
+        else if (i < 49) B->pop_size = (int8_t)((B->pop_size + 1) / 2);
+        else B->pop_size = (int8_t)((B->pop_size + 1) * 3 / 4);
+    }
+    if (!shown || !game_console_focus(game_console, mx, my, cur_faction())) game_draw_map(1);
+    *game_dust_cloud = 10;
+    game_popp(*game_script_file, text(0x68b38c), 0, text(0x68b380), 0);
+}
+
+// 15: a meteor strikes the base of a faction with eight bases or more
+// ranked second or lower (from turn 75, not in a scenario, away from
+// landmarks), if the 25 squares around are land and at most five more of
+// the 49 sea (Thinker four). Everything on the 49 squares is lost, bases
+// and units too, and a crater is left; a dust cloud follows.
+static void meteor(struct event *e) {
+    if (*game_pbem || *game_turn < 75 || e->F->base_count < 8 || (*game_state & STATE_SCENARIO)) return;
+    if (near_landmark(e->x, e->y)) return;
+    int cur = cur_faction(), shown = knows(cur, e->x, e->y), sea = 0, x, y;
+    for (int i = 0; i < 49; i++) {
+        if (!event_square(e->x, e->y, i, &x, &y) || !sea_at(tile(x, y))) continue;
+        if (i < 25 || ++sea > 5) return;
+    }
+    if (e->F->ranking < 7) return;
+    int named = e->base;
+    for (int i = 0; i < 49; i++) {
+        if (!event_square(e->x, e->y, i, &x, &y)) continue;
+        bit_set(x, y, MAP_LOST_TO_DISASTER, 0);
+        synch_bit(x, y, cur_faction());
+        int b = base_at(x, y);
+        if (b >= 0) {
+            name_struck(b, &named, &shown);
+            base_kill(b);
+        }
+        for (int v = *game_veh_count - 1; v >= 0; v--) {
+            const struct veh *V = &game_vehs[v];
+            if (V->x != x || V->y != y) continue;
+            if (V->faction == cur_faction()) shown = 1;
+            veh_kill(v);
+        }
+    }
+    world_crater(e->x, e->y);
+    world_climate();
+    if (!shown || !game_console_focus(game_console, e->x, e->y, cur_faction())) game_draw_map(1);
+    *game_dust_cloud = 10;
+    game_popp(*game_script_file, text(0x68b3a8), 0, text(0x68b39c), 0);
+}
+
+// 16 and 17: a blight takes the forests, soil enrichers and farms around
+// the base (16), or the mines collapse (17), on the land of its radius it
+// knows and holds; once the faction has the tech for a biology lab or an
+// energy bank, for a low-ranked faction. A base with the lab (or with the
+// bank or the Planetary Energy Grid) is spared: it gains a bumper crop
+// instead (16) or 50 credits (17). The blight's squares are forgotten only
+// by the player's faction (seven times over), the mines' by every faction.
+static void blight(struct event *e, int mines) {
+    int fac = mines ? EV_FAC_ENERGY_BANK : EV_FAC_BIOLOGY_LAB;
+    if (!has_tech(game_facilities[fac].preq_tech, e->faction)) return;
+    int spared = built(e->base, fac) || (mines && has_project(SP_ENERGY_GRID, e->faction)), shown = 0;
+    if (!spared && !ranked_low(e)) return;
+    uint32_t bit = mines ? MAP_MINE : MAP_FOREST | MAP_FARM, lost = mines ? MAP_MINE : MAP_FOREST | MAP_FARM | MAP_SOIL_ENRICHER;
+    for (int i = 0; i < 21; i++) {
+        int x, y;
+        if (!event_square(e->x, e->y, i, &x, &y)) continue;
+        struct map_tile *t = tile(x, y);
+        if (sea_at(t) || !(t->bits & bit) || !knows(e->faction, x, y) || !territory_ok(e->faction, x, y)) continue;
+        if (!spared) {
+            if (!shown) {
+                game_console_focus(game_console, e->x, e->y, cur_faction());
+                pause_unless_shift(200);
+            }
+            bit_set(x, y, lost, 0);
+            synch_bit(x, y, e->faction);
+            if (mines) forget_bits(t, lost);
+            else
+                for (int k = 0; k < 7; k++) *seen_word(t, cur_faction()) &= ~lost;
+            game_draw_tile(x, y, 2);
+            pause_unless_shift(50);
+        }
+        shown = 1;
+    }
+    if (!shown) return;
+    if (spared) {
+        if (mines) e->F->energy_credits += 50;
+        else {
+            e->B->event |= BASE_EVENT_BUMPER;
+            e->B->random_event_turns = BASE_EVENT_TURNS;
+        }
+    }
+    if (e->faction == cur_faction() && !game_console_focus(game_console, e->x, e->y, e->faction))
+        game_draw_radius(e->x, e->y, 2, 2);
+    if (mines) base_message(e, spared ? 0x68b3e0 : 0x68b3e8, 0x68b3d0);
+    else base_message(e, spared ? 0x68b3c0 : 0x68b3c8, 0x68b3b0);
+}
+
+// 18: once the faction has the tech for a network node, and research a
+// quarter of the way to its next tech, a base with a node completes the
+// tech's research; else a low-ranked faction's network crashes, losing it.
+static void network(struct event *e) {
+    if (!has_tech(game_facilities[EV_FAC_NETWORK_NODE].preq_tech, e->faction)) return;
+    int32_t *research = faction_word(e->faction, F_TECH_ACCUMULATED);
+    if (*research < tech_rate(e->faction) / 4) return;
+    if (built(e->base, EV_FAC_NETWORK_NODE)) {
+        *research = tech_rate(e->faction);
+        focus_player(e);
+        base_message(e, 0x68b400, 0x68b3f0);
+        return;
+    }
+    if (!ranked_low(e)) return;
+    *research = 0;
+    e->F->net_random_event = 0;
+    focus_player(e);
+    base_message(e, 0x68b41c, 0x68b40c);
+}
+
+// 19: once the faction has the tech for a children's creche, a base with
+// one grows by up to two while it has food to spare (Thinker checks the
+// size limit); else a low-ranked faction's base gets restless, its people
+// assimilating for five turns.
+static void creche(struct event *e) {
+    if (!has_tech(game_facilities[EV_FAC_CRECHE].preq_tech, e->faction)) return;
+    if (built(e->base, EV_FAC_CRECHE)) {
+        if (e->B->surplus[RESOURCE_NUTRIENT] <= 0) return;
+        for (int grown = 1; grown < 3 && e->B->surplus[RESOURCE_NUTRIENT] > 0; grown++) {
+            e->B->pop_size++;
+            set_base(e->base);
+            base_compute(1);
+        }
+        if (e->faction == cur_faction() && !game_console_focus(game_console, e->x, e->y, e->faction))
+            game_draw_tile(e->x, e->y, 2);
+        if (alien(e->faction)) base_message(e, 0x68b438, 0x68b428);
+        else base_message(e, 0x68b44c, 0x68b440);
+        return;
+    }
+    if (!ranked_low(e) || e->B->assimilation_turns) return;
+    e->B->assimilation_turns = 5;
+    focus_player(e);
+    if (alien(e->faction)) base_message(e, 0x68b464, 0x68b454);
+    else base_message(e, 0x68b478, 0x68b46c);
+}
+
+// The countdowns and perihelion (flag 0); returns 1 if perihelion began or
+// ended, which ends the turn's events.
+static int events_upkeep(int flag) {
+    if (!flag) {
+        // A flare lasts the turn after it (bit 1), then ends.
+        if (*game_solar_flares & 2) *game_solar_flares = 0;
+        else if (*game_solar_flares & 1) *game_solar_flares = 2;
+        int32_t spots = *game_sunspot_duration;
+        if (spots < -1000) spots = -1000;
+        if (*game_dust_cloud < 0) *game_dust_cloud = 0;
+        *game_sunspot_duration = --spots;
+        if (!spots) game_pop2(text(0x68b094), text(0x68b084), -1);
+        for (int i = 1; i < 8; i++) {
+            if (!game_is_human(i)) continue;
+            for (int j = 1; j < 8; j++)
+                if (!game_is_human(j) && !(game_factions[j].diplo_status[i] & (TREATY_VENDETTA | TREATY_WANT_REVENGE)))
+                    set_treaty(j, i, TREATY_SHALL_BETRAY | TREATY_UNK_800, 0);
+        }
+        if (*game_dust_cloud > 0 && !--*game_dust_cloud) game_pop2(text(0x68b0b0), text(0x68b0a0), -1);
+        // A base's event ends as its turns run out: from 0 they go to -1,
+        // and the event stays (Thinker stops at 0).
+        for (int b = 0; b < *game_base_count; b++) {
+            struct base *B = &game_bases[b];
+            if (!(B->event & BASE_EVENTS)) continue;
+            if (B->random_event_turns >= 0) B->random_event_turns--;
+            if (!B->random_event_turns) B->event &= ~(uint32_t)BASE_EVENTS;
+        }
+        if ((*game_state & GAME_STATE_PERIHELION) && !((game_year(*game_turn) - 2210) % 80)) {
+            *game_state &= ~(uint32_t)GAME_STATE_PERIHELION;
+            game_pop2(text(0x68b0cc), text(0x68b0bc), -1);
+            return 1;
+        }
+    }
+    if (*game_turn > 50 && !flag && !((game_year(*game_turn) - 2190) % 80)) {
+        *game_state |= GAME_STATE_PERIHELION;
+        game_pop2(text(0x68b0e8), text(0x68b0dc), -1);
+        return 1;
+    }
+    return 0;
+}
+
+void random_events(int flag) {
+    if (events_upkeep(flag)) return;
+    if ((*game_rules & RULES_BELL_CURVE) || *game_turn < 75 - *game_difficulty * 10) return;
+    if (!flag) game_random_reseed(*game_map_seed + *game_turn * 13);
+    int base = game_random(0, *game_base_count > 100 ? *game_base_count : 100);
+    if (base >= *game_base_count) return;
+    struct base *B = &game_bases[base];
+    if (B->pop_size <= 3 || game_factions[B->faction].base_count <= 1 || (B->event & BASE_EVENTS)) return;
+    int kind = game_random(0, 22);
+    struct event e = {base, B->faction, B->x, B->y, B, &game_factions[B->faction]};
+    game_parse_num(0, BASE_EVENT_TURNS);
+    game_parse_says(0, B->name, -1, -1);
+    game_battle_text[0] = 0;
+    switch (kind) {
+    case 0: base_event(&e, 1, BASE_EVENT_BUMPER, 0x68b0f4, 0x68b0fc); break;
+    case 1: base_event(&e, 0, BASE_EVENT_FAMINE, 0x68b108, alien(e.faction) ? 0x68b110 : 0x68b120); break;
+    case 2: base_event(&e, 1, BASE_EVENT_INDUSTRY, 0x68b130, 0x68b13c); break;
+    case 3: base_event(&e, 0, BASE_EVENT_BUST, 0x68b14c, 0x68b154); break;
+    case 4: base_event(&e, 1, BASE_EVENT_HEAT_WAVE, 0x68b168, 0x68b174); break;
+    case 5: base_event(&e, 0, BASE_EVENT_CLOUD_COVER, 0x68b180, 0x68b18c); break;
+    case 6: plague(&e); break;
+    case 7: case 8: resources(&e); break;
+    case 9: solar_flare(); break;
+    case 10: asteroids(); break;
+    case 11: sunspots(); break;
+    case 12: energy_market(&e); break;
+    case 13: storm(&e, MAP_SOLAR, 0, 0x68b378, 0x68b36c); break;
+    case 14: volcano(&e); break;
+    case 15: meteor(&e); break;
+    case 16: blight(&e, 0); break;
+    case 17: blight(&e, 1); break;
+    case 18: network(&e); break;
+    case 19: creche(&e); break;
+    case 20: storm(&e, MAP_FARM, 1, 0x68b480, 0); break;
+    case 21: storm(&e, MAP_MINE, 1, 0x68b48c, 0); break;
+    }
+}
+
+// ---- A faction's end, and its social engineering --------------------------------------
+
+enum { BONUS_SOCIAL = 3 };
+
+// The player who put the faction out sees where its colony pod escaped to
+// (one time in four, or two with an infiltrator among them): the squares
+// around its units, the colony pod in the stack alone. The map is moved to
+// the last square looked at, the ninth of the radius table, as the
+// original has it.
+static void tracked(int faction, int killer) {
+    int n = (game_factions[cur_faction()].diplo_status[faction] & TREATY_INFILTRATOR) ? 2 : 4;
+    if (game_rnd(n)) return;
+    int v = veh_find(0, 0, faction, -1);
+    if (v < 0) return;
+    int x = 0, y = 0;
+    for (int i = 0; i < 9; i++) {
+        x = xrange(game_vehs[v].x + game_radius_x[i]), y = game_vehs[v].y + game_radius_y[i];
+        if (on_map(x, y)) spot_loc(x, y, killer);
+    }
+    int top = v, found = 0;
+    while (game_vehs[top].prev_in_stack >= 0) top = game_vehs[top].prev_in_stack;
+    for (int u = top; u >= 0; u = game_vehs[u].next_in_stack) {
+        struct veh *U = &game_vehs[u];
+        U->visibility = 0;
+        if (proto_of(U)->plan == PLAN_COLONY && !found) {
+            found = 1;
+            U->visibility = (uint8_t)(1u << killer);
+        }
+    }
+    game_draw_tiles(x, y, 2);
+    game_map_win_set_center(game_map_wins[0], x, y, 1);
+    game_parse_says(6, game_faction_defs[faction].adjective, -1, -1);
+    if (alien(faction)) game_popp(*game_script_file, text(0x6915c4), 0, text(0x6915b4), 0);
+    else game_popp(*game_script_file, text(0x6915dc), 0, text(0x6915cc), 0);
+}
+
+// A faction with no base left is out of the game (returns 1; 0 while it
+// has a base): its units are disbanded, and setup_player() lets it escape
+// in a colony pod early in the game, or ends it, or the game for the
+// player. The killer (if any; 0 for none) counts another faction
+// eliminated, and an escaped faction wants revenge on it. Everyone is told,
+// with the faction's picture, but the player's own end is left to the
+// caller; the player who put it out may see the movie, or where it
+// escaped to.
+int eliminate_player(int faction, int killer) {
+    if (!faction) return 0;
+    for (int b = 0; b < *game_base_count; b++)
+        if (game_bases[b].faction == faction) return 0;
+    for (int v = *game_veh_count - 1; v >= 0; v--)
+        if (v < *game_veh_count && game_vehs[v].faction == faction) veh_kill(v);
+    game_factions[faction].base_count = 0;
+    int escaped = game_setup_player(faction, killer, 0);
+    if (!escaped) {
+        if (killer > 0 && !(*game_state & (GAME_STATE_DONE | GAME_STATE_FINAL_SCORE_DONE)))
+            ++*faction_word(killer, F_ELIMINATED);
+        if (faction == cur_faction()) return 1;
+    }
+    if (killer < 0) killer = 0;
+    else if (killer > 0) set_treaty(faction, killer, TREATY_WANT_TO_TALK | TREATY_WANT_REVENGE | TREATY_VENDETTA, 1);
+    game_draw_map(1);
+    struct faction_def *d = &game_faction_defs[faction], *k = &game_faction_defs[killer];
+    *game_parse_gender = d->noun_gender, *game_parse_plural = d->noun_plural;
+    game_parse_says(0, d->noun, -1, -1);
+    *game_parse_gender = k->noun_gender, *game_parse_plural = k->noun_plural;
+    game_parse_says(1, k->noun, -1, -1);
+    *game_parse_gender = d->leader_female, *game_parse_plural = 0;
+    game_parse_says(2, d->leader_title, -1, -1);
+    *game_parse_gender = d->leader_female, *game_parse_plural = 0;
+    game_parse_says(3, d->leader_name, -1, -1);
+    game_parse_says(4, game_get_his_her(faction, 0), -1, -1);
+    // The message's label: WIPEOUT, YOU if the player did it, and 2 with
+    // no killer, else 1 if the faction escaped or 0.
+    char number[16], picture[92];
+    game_battle_text[0] = 0;
+    strcat(game_battle_text, text(0x691580));
+    if (killer && killer == cur_faction()) strcat(game_battle_text, text(0x691588));
+    snprintf(number, sizeof number, "%d", killer ? escaped != 0 : 2);
+    strcat(game_battle_text, number);
+    picture[0] = 0;
+    strcat(picture, d->filename);
+    strcat(picture, text(0x69158c));
+    uint32_t pod = alien(faction) ? 0x691594 : 0x6915a4;
+    game_popp(*game_script_file, game_battle_text, 0, escaped ? text(pod) : picture, 0);
+    if (!escaped) game_mon_killed_faction(killer, faction);
+    if (!*game_net_multiplayer && killer == cur_faction()) {
+        if (escaped) tracked(faction, killer);
+        else if (*game_preferences & PREF_PROJECT_MOVIES) game_amovie_project_2(d->filename);
+    }
+    if (alien(faction) && alien(cur_faction()) && faction != cur_faction()) game_interlude(0x2a, NULL, 1, 0);
+    return 1;
+}
+
+// A faction file's rules put back to their defaults before it is read:
+// no free techs or bonuses, costs at 100 percent.
+void clear_faction(struct faction_def *d) {
+    d->rule_tech_selected = d->rule_morale = d->rule_research = d->rule_drone = 0;
+    d->rule_talent = d->rule_energy = d->rule_interest = d->rule_population = 0;
+    d->rule_hurry = d->rule_techcost = 100;
+    d->rule_flags = d->bonus_count = 0;
+    d->rule_psi = d->rule_sharetech = d->rule_commerce = 0;
+}
+
+// The social effects the faction's file gives it, as the base the social
+// models add to.
+void compute_faction_modifiers(int faction) {
+    struct faction_data *F = &game_factions[faction];
+    const struct faction_def *d = &game_faction_defs[faction];
+    memset(F->se_base, 0, sizeof F->se_base);
+    for (int i = 0; i < d->bonus_count; i++)
+        if (d->bonus_id[i] == BONUS_SOCIAL) F->se_base[d->bonus_val1[i]] += d->bonus_val2[i];
+}
+
+// The faction's chosen social models take effect: its pending effects are
+// worked out again, and as its costs of growth and production change, each
+// base's stores are scaled to keep its progress (rounded to nearest). A
+// human's bases are worked out again.
+void social_set(int faction) {
+    struct faction_data *F = &game_factions[faction];
+    int nutrient = cost_factor(faction, 0, -1), mineral = cost_factor(faction, 1, -1);
+    social_calc(F->se_models_pending, F->se_pending, faction, 0, 0);
+    int nutrient_now = cost_factor(faction, 0, -1), mineral_now = cost_factor(faction, 1, -1);
+    for (int b = 0; b < *game_base_count; b++) {
+        struct base *B = &game_bases[b];
+        if (B->faction != faction) continue;
+        if (nutrient_now != nutrient) B->nutrients = (nutrient / 2 + nutrient_now * B->nutrients) / nutrient;
+        if (mineral_now != mineral) B->minerals = B->minerals_2 = (mineral / 2 + B->minerals * mineral_now) / mineral;
+        if (!*game_net_multiplayer && game_is_human(faction)) {
+            set_base(b);
+            base_compute(1);
+        }
+    }
+    if (faction == cur_faction()) game_graphic_win_redraw(game_base_win);
+}
+
+// The social engineering screen, for the faction (in the scenario editor,
+// one the editor picks); then its choices take effect. Nothing in a game
+// whose rules leave social engineering out.
+void social_select(int faction) {
+    uint8_t state = (uint8_t)*game_state;
+    if (!(state & 0xc0) && (*game_more_rules & MORE_RULES_NO_SOCIAL)) return;
+    if (state & GAME_STATE_OMNISCIENT) {
+        faction = game_console_editor_who(game_console, faction, 1);
+        if (faction < 0) return;
+    }
+    game_social_win_init(game_social_win, faction);
+    game_social_win_close(game_social_win);
+    game_synch_soc(faction);
+    if (!*game_net_multiplayer) social_set(faction);
+}
+
 // ---- Hooks and shadow checks ------------------------------------------------------
 
 extern struct hook_module events_module;
@@ -983,6 +1734,59 @@ SHADOW_ASKING(int, goody_box, pod_asks)
 SHADOW_ASKING(void, monolith, monolith_asks)
 // The player's study of an artifact only shows a message.
 SHADOW_WRITER(EVENTS, int, study_artifact, (int a), (a), hooks_writes_game(&w_), "%d", a)
+// The turn's events show messages, move the map and pause, all held; none
+// asks a question, so every call is checked.
+SHADOW_WRITER(EVENTS, void, random_events, (int a), (a), hooks_writes_game(&w_), "%d", a)
+// A faction's end runs the original unchecked for a human faction, whose
+// end may be the game's. An escaped faction may found a base at once,
+// naming it from its file, which a check can't open: the name is found
+// first, before any state is protected (on land, or at sea for an aquatic
+// faction), and both runs take it, as base_init's check does.
+SHADOW_WRITER_CHECK(int, eliminate_player, (int a, int b), (a, b), orig_eliminate_player(a, b), hooks_writes_game(&w_),
+                    "%d, %d", a, b)
+static void hold_base_name(int faction) {
+    if (*game_base_count >= BASE_COUNT) return;
+    char name[sizeof game_bases[0].name];
+    memcpy(name, game_bases[*game_base_count].name, sizeof name);
+    name[0] = 0;
+    name_base_hold(faction, name, (game_faction_defs[faction].rule_flags & RULE_FLAG_AQUATIC) != 0);
+}
+static int shadow_eliminate_player(int faction, int killer) {
+    if (hooks_nested) return orig_eliminate_player(faction, killer);
+    if (shadow_bypass()) return eliminate_player(faction, killer);
+    stats_eliminate_player.calls++;
+    shadow_tick(EVENTS);
+    if (game_is_human(faction)) return orig_eliminate_player(faction, killer);
+    hold_base_name(faction);
+    int r = check_eliminate_player(faction, killer);
+    name_base_release();
+    return r;
+}
+SHADOW_WRITER(EVENTS, void, clear_faction, (struct faction_def * a), (a), WRITES(a, sizeof *a), "%d",
+              (int)(a - game_faction_defs))
+SHADOW_WRITER(EVENTS, void, compute_faction_modifiers, (int a), (a),
+              WRITES(game_factions[a].se_base, sizeof game_factions[a].se_base), "%d", a)
+// A human's bases are worked out again, writing widely.
+SHADOW_WRITER(EVENTS, void, social_set, (int a), (a), hooks_writes_game(&w_), "%d", a)
+// The social engineering screen can't be checked (the player's choices,
+// and a window that allocates): only a game without social engineering,
+// where nothing happens, is.
+SHADOW_WRITER_CHECK(void, social_select, (int a), (a), orig_social_select(a), hooks_writes_game(&w_), "%d", a)
+static int social_screen(void) { return (*game_state & 0xc0) || !(*game_more_rules & MORE_RULES_NO_SOCIAL); }
+static void shadow_social_select(int faction) {
+    if (hooks_nested) {
+        orig_social_select(faction);
+        return;
+    }
+    if (shadow_bypass()) {
+        social_select(faction);
+        return;
+    }
+    stats_social_select.calls++;
+    shadow_tick(EVENTS);
+    if (social_screen()) orig_social_select(faction);
+    else check_social_select(faction);
+}
 
 // ---- Sweep -------------------------------------------------------------------------
 //
@@ -1194,18 +1998,266 @@ static void sweep_artifacts(int turn) {
     }
 }
 
-// Once a turn, on a protected copy of the game.
+// A case of its own on the sweep's copy: made up, checked, put back.
+static void case_begin(struct hook_writes *w) {
+    *w = (struct hook_writes){.protect_only = 1};
+    hooks_writes_game(w);
+    hooks_writes_begin(w);
+}
+
+// game_random()'s generator, to find a seed that picks the base and the
+// event: only the low 16 bits of the seed decide the next two picks.
+static uint32_t random_step(uint32_t s) { return s * 0x19660du + 0x3c6ef35fu; }
+static int random_pick(uint32_t s, int n) { return (int)((uint32_t)n * (s & 0xffff) >> 16); }
+static uint32_t seed_for(uint32_t high, int base, int kind) {
+    int n = *game_base_count > 100 ? *game_base_count : 100;
+    for (uint32_t low = 0; low < 0x10000; low++) {
+        uint32_t s = (high & 0xffff0000u) | ((low + high) & 0xffff), s1 = random_step(s);
+        if (random_pick(s1, n) == base && random_pick(random_step(s1), 22) == kind) return s;
+    }
+    return high;
+}
+
+// The squares of the base's radius made known to the faction, or not, and
+// its territory or another's or no one's, with things built on them (on
+// land, at sea, or either).
+static void vary_radius(const struct base *B, int faction, uint32_t h, uint32_t bits, int sea) {
+    for (int i = 0; i < BASE_RADIUS_SQUARES; i++) {
+        int x, y;
+        if (!event_square(B->x, B->y, i, &x, &y)) continue;
+        struct map_tile *t = tile(x, y);
+        uint32_t g = mix(h + (uint32_t)i * 0x9e3779b9u);
+        if (!coin(g, 0, 4)) t->visibility |= (uint8_t)(1u << faction);
+        if (coin(g, 2, 3)) t->territory = (int8_t)(coin(g, 4, 2) ? faction : (int)((g >> 5) % 8) - 1);
+        if (bits && (sea < 0 || sea_at(t) == sea) && !coin(g, 8, 3)) t->bits |= bits;
+        if (coin(g, 10, 4)) t->bits ^= MAP_RESOURCE;
+        if (coin(g, 12, 2))  // every faction has seen them
+            for (int j = 1; j < 8; j++) *seen_word(t, j) |= t->bits & bits;
+    }
+}
+static void toggle_fac(struct base *B, int fac) {
+    int offset;
+    uint32_t mask;
+    bitmask(fac, &offset, &mask);
+    B->facilities_built[offset] ^= (uint8_t)mask;
+}
+
+// Each event forced by the seed, at a base of each faction in turn, with
+// the conditions it looks at varied: the turn, the faction's rank, money,
+// bases, techs and facilities, the satellites, sunspots, the squares
+// around, Mount Planet nearby, who is the player. Then the turn's
+// countdowns, perihelion and the AI's watch on humans (flag 0), with the
+// seed coming from the map's.
+static void sweep_random_events(int turn) {
+    static const int32_t credits[] = {0, 250, 500, 501, 900, 1001, 1800, 2001, 5000};
+    static const int labs[] = {EV_FAC_CRECHE, EV_FAC_ENERGY_BANK, EV_FAC_NETWORK_NODE, EV_FAC_BIOLOGY_LAB,
+                               EV_FAC_RESEARCH_HOSPITAL, EV_FAC_NANOHOSPITAL};
+    static const int projects[] = {SP_GENOME, SP_LONGEVITY, SP_IMMORTALITY, SP_ENERGY_GRID};
+    static const uint32_t built_bits[] = {MAP_SOLAR, MAP_FOREST | MAP_FARM, MAP_MINE, MAP_FARM, MAP_MINE};
+    int bases = *game_base_count;
+    if (bases <= 0) return;
+    for (int k = 0; k < 30; k++) {
+        uint32_t h = mix((uint32_t)turn * 0x85ebca6bu + (uint32_t)k), g = mix(h ^ 0x27d4eb2fu), u = mix(g);
+        uint32_t v = mix(u + 1), m = mix(v);
+        // Each event, then the countdowns, then the volcano and the meteor
+        // again.
+        int kind = k < 22 ? (k + turn) % 22 : 14 + (k & 1), b = (int)(h % (uint32_t)bases), countdowns = k >= 22 && k < 28;
+        struct base *B = &game_bases[b];
+        int f = B->faction;
+        struct faction_data *F = &game_factions[f];
+        struct hook_writes w;
+        case_begin(&w);
+        if (!coin(h, 8, 8)) B->pop_size = (int8_t)(B->pop_size > 3 ? B->pop_size : 4 + (h >> 11) % 8);
+        if (!coin(h, 14, 8)) B->event &= ~(uint32_t)BASE_EVENTS;
+        if (F->base_count <= 1 && !coin(h, 17, 8)) F->base_count = 2 + (int32_t)((h >> 20) % 3);
+        if (!coin(g, 0, 4)) F->ranking = (int32_t)((g >> 2) % 8);
+        if (!coin(g, 5, 4)) *game_turn = 75 + (int32_t)((g >> 7) % 230);
+        else if (coin(g, 15, 2)) *game_turn = 40 + (int32_t)((g >> 16) % 60);
+        *game_current_faction = coin(g, 23, 2) ? f : (int32_t)((g >> 24) % 7) + 1;
+        if (coin(g, 27, 10)) *game_pbem = 1;
+        if (coin(u, 0, 3)) *game_human_factions ^= (uint8_t)(1u << f);
+        if (coin(u, 2, 3)) F->diff_level = (int32_t)((u >> 4) % 6);
+        if (coin(u, 7, 3)) game_faction_rankings[7] = f;
+        if (coin(u, 9, 2)) B->visibility ^= (uint8_t)(1u << *game_current_faction);
+        if (coin(u, 10, 3)) F->flags ^= FACTION_FLAG_MAP_REVEALED;
+        if (coin(u, 12, 30)) *game_rules ^= RULES_BELL_CURVE;
+        F->energy_credits = credits[(u >> 14) % 9];
+        for (int i = 1; i < 8; i++)
+            for (int j = 0; j < 4; j++) game_factions[i].satellites[j] = (int32_t)(mix(u + (uint32_t)(i * 4 + j)) % 3);
+        if (!coin(u, 18, 4)) *game_solar_flares = 0;
+        *game_sunspot_duration = 3 - (int32_t)((u >> 20) % 130);
+        // The facilities that spare a base or bring a bonus, and their techs.
+        for (int i = 0; i < 6; i++) {
+            if (coin(v, i * 2, 3)) toggle_fac(B, labs[i]);
+            int preq = game_facilities[labs[i]].preq_tech;
+            if (preq >= 0 && preq < TECH_COUNT && !coin(v, 12 + i, 4)) game_tech_achieved[preq] |= (uint8_t)(1u << f);
+        }
+        for (int i = 0; i < 4; i++)
+            if (coin(v, 18 + i, 5)) game_secret_projects[projects[i]] = coin(v, 22 + i, 2) ? b : -1;
+        if (coin(v, 26, 3)) B->assimilation_turns = 0;
+        B->surplus[RESOURCE_NUTRIENT] = (int32_t)((v >> 28) % 5) - 1;
+        int rate = tech_rate(f);  // research done, around the quarter a network needs
+        *faction_word(f, F_TECH_ACCUMULATED) =
+            coin(m, 23, 2) ? rate / 4 + (int)((m >> 24) % 4) - 1 : rate * (int)((m >> 24) % 7) / 4;
+        int which = kind == 13 ? 0 : kind == 16 ? 1 : kind == 17 ? 2 : kind == 20 ? 3 : kind == 21 ? 4 : (int)(m % 5);
+        vary_radius(B, f, m, coin(m, 3, 4) ? 0 : built_bits[which], which >= 3);
+        if (kind == 14 || kind == 15 || coin(m, 5, 8)) {
+            if (!coin(m, 8, 6)) F->base_count = 8 + (int32_t)((m >> 9) % 4);
+            if (!coin(m, 11, 4)) F->ranking = 6 + (int32_t)((m >> 13) % 2);
+            if (!coin(m, 14, 6)) *game_state &= ~(uint32_t)STATE_SCENARIO;
+            if (!coin(m, 15, 6)) *game_turn = 75 + (int32_t)((m >> 16) % 200);
+        }
+        if (kind == 14 && !coin(m, 20, 6)) {  // Mount Planet near the base, the base on any of its rings
+            static const int rings[] = {0, 8, 9, 24, 25, 48, 49, 80};  // where the damage changes
+            uint32_t q = mix(m + 3);
+            int r = coin(q, 0, 2) ? rings[(q >> 1) % 8] : (int)((q >> 4) % 81);
+            int mx = xrange(B->x - game_radius_x[r]), my = B->y - game_radius_y[r];
+            if (on_map(mx, my)) {
+                *game_mount_planet_x = mx, *game_mount_planet_y = my;
+                tile(mx, my)->bits2 = (tile(mx, my)->bits2 & ~MAP2_VOLCANO_LIVE) | MAP2_VOLCANO;
+                if (!coin(m, 26, 4)) tile(mx, my)->visibility |= (uint8_t)(1u << f);
+            }
+        }
+        if (kind == 15 && !coin(m, 28, 4)) {  // land around but 3 to 7 squares of sea, and no landmark near
+            int sea_left = 3 + (int)((m >> 29) % 5);
+            for (int i = 0; i < RADIUS_SQUARES; i++) {
+                int x, y;
+                if (!event_square(B->x, B->y, i, &x, &y)) continue;
+                struct map_tile *t = tile(x, y);
+                t->bits2 &= ~(uint32_t)MAP2_LANDMARK_CODE;
+                if (i >= 49 || !sea_at(t)) continue;
+                if (i >= 25 && sea_left > 0) sea_left--;
+                else t->climate = (uint8_t)((t->climate & 0x1f) | ALT_SHORE);
+            }
+        }
+        uint32_t seed = seed_for(mix(m + 2), b, kind);
+        if (countdowns) {
+            // The turn's countdowns: perihelion's years come round, events
+            // run out at bases, sunspots and the dust cloud end, and some
+            // of the AI's factions are made human.
+            static const int turns[] = {89, 109, 169, 189, 249, 90, 110};
+            uint32_t y = mix(seed);
+            if (!coin(y, 0, 3)) *game_turn = turns[(y >> 2) % 7];
+            if (coin(y, 5, 2)) *game_state ^= GAME_STATE_PERIHELION;
+            if (coin(y, 6, 3)) *game_solar_flares = (int32_t)((y >> 7) % 4);
+            if (coin(y, 9, 3)) *game_sunspot_duration = (int32_t)((y >> 10) % 3) - (coin(y, 12, 2) ? 0 : 1001);
+            if (coin(y, 13, 2)) *game_dust_cloud = (int32_t)((y >> 14) % 3) - 1;
+            for (int i = 0; i < bases && i < 64; i++) {
+                uint32_t z = mix(y + (uint32_t)i);
+                if (!coin(z, 0, 3)) continue;
+                game_bases[i].event |= (uint32_t)BASE_EVENT_BUMPER << (z >> 2) % 6;
+                game_bases[i].random_event_turns = (int32_t)((z >> 5) % 3) - 1;
+            }
+            *game_human_factions = (uint8_t)(mix(y + 99) & 0xfe);
+            *game_map_seed = (int32_t)(seed - (uint32_t)*game_turn * 13u);
+        } else
+            *game_random_seed = seed;
+        *game_rand_state() = mix(seed + 5);
+        check_random_events(!countdowns);
+        hooks_writes_abandon(&w);
+    }
+}
+
+// An AI faction for the sweep to put out of the game this turn, or 0.
+static int pick_doomed(int turn) {
+    for (int k = 0; k < 7; k++) {
+        int f = (turn + k) % 7 + 1;
+        if ((*game_factions_alive & (1u << f)) && !game_is_human(f)) return f;
+    }
+    return 0;
+}
+
+// The faction's bases handed to another, so it has none, then put out of
+// the game by another faction, the player or no one, early in the game
+// (when it may escape) or late, under each rule that decides that, with
+// the movie preference and an infiltrator varied.
+static void sweep_eliminate(int turn, int f) {
+    for (int k = 0; k < 3; k++) {
+        uint32_t h = mix((uint32_t)turn * 0xc2b2ae35u + (uint32_t)k), g = mix(h);
+        int other = 0;
+        for (int i = 0; i < 7 && !other; i++) {
+            int o = (int)((h + (uint32_t)i) % 7) + 1;
+            if (o != f && (*game_factions_alive & (1u << o))) other = o;
+        }
+        if (!other) return;
+        struct hook_writes w;
+        case_begin(&w);
+        for (int b = 0; b < *game_base_count; b++)
+            if (game_bases[b].faction == f) game_bases[b].faction = (uint8_t)other;
+        int killers[4] = {0, -1, other, *game_current_faction};
+        int killer = killers[(h >> 3) % 4];
+        if (killer == f) killer = other;
+        if (coin(h, 5, 2) && killer > 0) *game_current_faction = killer;
+        if (coin(h, 6, 3)) *game_turn = 20 + (int32_t)((h >> 8) % 81);
+        else if (coin(h, 7, 2)) *game_turn = 101 + (int32_t)((h >> 8) % 200);
+        if (coin(g, 0, 4)) *game_rules ^= RULES_DO_OR_DIE;
+        if (coin(g, 2, 2)) *game_preferences ^= PREF_PROJECT_MOVIES;
+        if (coin(g, 3, 2)) game_factions[*game_current_faction].diplo_status[f] ^= TREATY_INFILTRATOR;
+        *game_rand_state() = mix(g + 1);
+        *game_random_seed = mix(g + 2);
+        check_eliminate_player(f, killer);
+        hooks_writes_abandon(&w);
+    }
+}
+
+// Factions' social models changed and put into effect (as a human's or
+// the AI's), the screen skipped where the rules leave social engineering
+// out, each faction file's bonuses worked out (some made up), and last the
+// files' rules cleared.
+static void sweep_social(int turn) {
+    for (int k = 0; k < 4; k++) {
+        uint32_t h = mix((uint32_t)turn * 0x165667b1u + (uint32_t)k);
+        int f = (int)((h >> 4) % 7) + 1;
+        if (!(*game_factions_alive & (1u << f))) continue;
+        struct hook_writes w;
+        case_begin(&w);
+        struct faction_data *F = &game_factions[f];
+        for (int i = 0; i < 4; i++)
+            if (coin(h, 8 + i * 2, 2)) F->se_models_pending[i] = (int32_t)(mix(h + (uint32_t)i) % 4);
+        if (coin(h, 16, 2)) *game_human_factions ^= (uint8_t)(1u << f);
+        if (coin(h, 17, 2)) *game_current_faction = f;
+        check_social_set(f);
+        *game_state &= ~0xc0u;
+        *game_more_rules |= MORE_RULES_NO_SOCIAL;
+        check_social_select(f);
+        hooks_writes_abandon(&w);
+    }
+    for (int f = 0; f < FACTION_COUNT; f++) {
+        struct faction_def *d = &game_faction_defs[f];
+        uint32_t h = mix((uint32_t)turn * 0x27d4eb2du + (uint32_t)f);
+        if (coin(h, 0, 2)) {
+            d->bonus_count = (int32_t)((h >> 1) % 9);
+            for (int i = 0; i < d->bonus_count; i++) {
+                uint32_t g = mix(h + (uint32_t)i);
+                d->bonus_id[i] = coin(g, 0, 2) ? BONUS_SOCIAL : (int32_t)((g >> 1) % 15);
+                d->bonus_val1[i] = (int32_t)((g >> 5) % SE_COUNT);
+                d->bonus_val2[i] = (int32_t)((g >> 9) % 7) - 3;
+            }
+        }
+        check_compute_faction_modifiers(f);
+    }
+    for (int f = 0; f < FACTION_COUNT; f++) check_clear_faction(&game_faction_defs[f]);
+}
+
+// Once a turn, on a protected copy of the game. A base the faction put out
+// of the game may found is named first, as naming opens the faction's file
+// (see shadow_eliminate_player).
 static void events_sweep(void) {
     if (!*game_map || *game_veh_count <= 0) return;
-    int sweeping = hooks_sweeping, turn = *game_turn;
+    int sweeping = hooks_sweeping, turn = *game_turn, doomed = pick_doomed(turn);
+    hooks_sweeping = 1;
+    if (doomed) hold_base_name(doomed);
     struct hook_writes outer = {.protect_only = 1};
     hooks_writes_game(&outer);
     hooks_writes_begin(&outer);
-    hooks_sweeping = 1;
     sweep_pods(turn);
     sweep_monoliths(turn);
     sweep_artifacts(turn);
+    sweep_random_events(turn);
+    if (doomed) sweep_eliminate(turn, doomed);
+    sweep_social(turn);
     hooks_writes_abandon(&outer);
+    name_base_release();
     hooks_sweeping = sweeping;
 }
 
@@ -1214,5 +2266,11 @@ static const struct hook events_hooks[] = {
     HOOK(0x57a660, goody_box, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x34),       // sub esp, 0x34
     HOOK(0x57a050, monolith, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x5c),        // sub esp, 0x5c
     HOOK(0x57cfa0, study_artifact, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x60),  // sub esp, 0x60
+    HOOK(0x51f2e0, random_events, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x20),   // sub esp, 0x20
+    HOOK(0x5b3380, eliminate_player, PUSH_EBP_MOV_EBP_ESP, 0x81, 0xec, 0xac, 0x00, 0x00, 0x00),  // sub esp, 0xac
+    HOOK(0x585fe0, clear_faction, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),   // mov eax, [ebp+8]
+    HOOK(0x5b0d70, compute_faction_modifiers, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x55, 0x08),  // mov edx, [ebp+8]
+    HOOK(0x5b4600, social_set, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10),      // sub esp, 0x10
+    HOOK(0x5b5620, social_select, PUSH_EBP_MOV_EBP_ESP, 0xa0, 0xc0, 0x64, 0x9a, 0x00),  // mov al, [0x9a64c0]
 };
 struct hook_module events_module = {"events", events_hooks, HOOK_COUNT(events_hooks), events_sweep, NULL, -1};

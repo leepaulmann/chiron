@@ -20,7 +20,7 @@ static struct rules_weapon weapons[2];
 static struct faction_data factions[FACTION_COUNT];
 static struct faction_def faction_defs[FACTION_COUNT];
 static struct veh vehs[8];
-static struct base bases[3];
+static struct base bases[4];
 static struct continent continents[4];
 static int32_t veh_count, base_count, net, turn, projects[SP_COUNT], current_faction = 1, find_dist, difficulty = 3;
 static int32_t expansion, native_life, more_prefs, map_seed, ranked[2];
@@ -251,6 +251,243 @@ static void test_artifact(void) {
     projects[20] = -1;
 }
 
+// ---- The turn's random events, a faction's end ----
+
+// game_random() plays back a script of picks, then 0.
+static int picks[16], picks_len, picks_pos;
+static void pick(int n, const int *v) {
+    memcpy(picks, v, (size_t)n * sizeof *v);
+    picks_len = n, picks_pos = 0;
+}
+static int random_(int lo, int hi) {
+    (void)hi;
+    return lo + (picks_pos < picks_len ? picks[picks_pos++] : 0);
+}
+static void reseed_(int seed) { (void)seed; }
+static int pop2s, last_pop2_base;
+static int pop2_(char *label, char *picture, int base) {
+    (void)label, (void)picture;
+    pop2s++, last_pop2_base = base;
+    return 0;
+}
+static int __attribute__((thiscall)) focus_(void *console, int x, int y, int faction) {
+    (void)console, (void)x, (void)y, (void)faction;
+    return 1;
+}
+static int16_t __attribute__((stdcall)) key_(int key) {
+    (void)key;
+    return (int16_t)0x8000;  // shift held: no pauses
+}
+static void wait_(int ms) { (void)ms; }
+static void __attribute__((thiscall)) update_(void *console, int unk) { (void)console, (void)unk; }
+static void draw_radius_(int x, int y, int r, int unk) { (void)x, (void)y, (void)r, (void)unk; }
+static int32_t rankings[8], pbem, flares, sunspots, dust, start_year = 2100;
+static int setups;
+static int setup_(int faction, int killer, int probe) {
+    (void)faction, (void)killer, (void)probe;
+    setups++;
+    return 0;
+}
+static char his_[] = "his";
+static char *his_her_(int faction, int unk) {
+    (void)faction, (void)unk;
+    return his_;
+}
+static int monuments;
+static void mon_(int faction, int other) { (void)faction, (void)other, monuments++; }
+
+static void events_base(int faction, int pop) {
+    land();
+    put_base(0, 8, 4, faction);
+    put_base(1, 2, 2, faction);
+    bases[0].pop_size = (int8_t)pop;
+    turn = 120, net = 0, pbem = 0;
+}
+
+static void test_base_events(void) {
+    events_base(1, 5);
+    current_faction = 1;
+    // Base 0 of 100, event 1 (famine): the faction is ranked too high.
+    factions[1].ranking = 2;
+    pick(2, (int[]){0, 1});
+    random_events(1);
+    EXPECT(bases[0].event, 0);
+    // Ranked low, it falls on the base for ten turns, and the player is told.
+    factions[1].ranking = 6;
+    int n = pop2s;
+    pick(2, (int[]){0, 1});
+    random_events(1);
+    EXPECT(bases[0].event, 0x400);
+    EXPECT(bases[0].random_event_turns, 10);
+    EXPECT(pop2s, n + 1);
+    // No more events at the base while one is under way.
+    pick(2, (int[]){0, 3});
+    random_events(1);
+    EXPECT(bases[0].event, 0x400);
+    // A bumper crop passes the faction in first place by, but one time in
+    // four.
+    bases[0].event = 0, rankings[7] = 1;
+    pick(3, (int[]){0, 0, 2});
+    random_events(1);
+    EXPECT(bases[0].event, 0);
+    pick(3, (int[]){0, 0, 0});
+    random_events(1);
+    EXPECT(bases[0].event, 0x200);
+    // Bases of three or fewer are left alone.
+    events_base(1, 3);
+    factions[1].ranking = 7;
+    pick(2, (int[]){0, 1});
+    random_events(1);
+    EXPECT(bases[0].event, 0);
+    rankings[7] = 0;
+}
+
+static void test_market(void) {
+    events_base(1, 6);
+    // Event 12: the AI with 1500 keeps it; with 2400 a quarter is left.
+    factions[1].energy_credits = 1500;
+    pick(2, (int[]){0, 12});
+    random_events(1);
+    EXPECT(factions[1].energy_credits, 1500);
+    factions[1].energy_credits = 2400;
+    pick(2, (int[]){0, 12});
+    random_events(1);
+    EXPECT(factions[1].energy_credits, 600);
+    // A human's 1500 crash too; a boom doubles 400 for a high-ranked one.
+    humans = 2;
+    factions[1].energy_credits = 1500;
+    pick(2, (int[]){0, 12});
+    random_events(1);
+    EXPECT(factions[1].energy_credits, 375);
+    factions[1].energy_credits = 400, factions[1].ranking = 3;
+    pick(2, (int[]){0, 12});
+    random_events(1);
+    EXPECT(factions[1].energy_credits, 800);
+    humans = 0;
+}
+
+static void test_sky(void) {
+    events_base(1, 6);
+    // Event 9: a solar flare burns out energy satellites and defense pods.
+    factions[3].satellites[2] = 2, factions[4].satellites[3] = 1, factions[4].satellites[1] = 4;
+    flares = 0;
+    pick(3, (int[]){0, 9, 0});
+    random_events(1);
+    EXPECT(flares, 1);
+    EXPECT(factions[3].satellites[2] + factions[4].satellites[3], 0);
+    EXPECT(factions[4].satellites[1], 4);
+    // Event 10: asteroids wreck mineral satellites.
+    pick(3, (int[]){0, 10, 0});
+    random_events(1);
+    EXPECT(factions[4].satellites[1], 0);
+    // Event 11: sunspots, 40 turns after the last at least.
+    sunspots = -30;
+    pick(2, (int[]){0, 11});
+    random_events(1);
+    EXPECT(sunspots, -30);
+    sunspots = -90;
+    pick(3, (int[]){0, 11, 4});
+    random_events(1);
+    EXPECT(sunspots, 14);
+}
+
+static void test_countdowns(void) {
+    events_base(1, 6);
+    // Flag 0, early in the game: only the countdowns run.
+    turn = 10, flares = 1, sunspots = 1, dust = 2;
+    bases[0].event = 0x800, bases[0].random_event_turns = 1;
+    bases[1].event = 0x800, bases[1].random_event_turns = 0;
+    humans = 2;
+    int n = pop2s;
+    random_events(0);
+    EXPECT(flares, 2);
+    EXPECT(sunspots, 0);
+    EXPECT(dust, 1);
+    EXPECT(pop2s, n + 1);  // the sunspots are over
+    EXPECT(bases[0].event, 0);
+    // From 0 the turns go to -1, and the event stays.
+    EXPECT(bases[1].random_event_turns, -1);
+    EXPECT(bases[1].event, 0x800);
+    // The AI watches the human.
+    factions[3].diplo_status[1] = 0xc00;
+    flares = 3;  // a flare's second turn ends it
+    random_events(0);
+    EXPECT(factions[3].diplo_status[1], 0);
+    EXPECT(flares, 0);
+    // Perihelion begins in 2190 and every 80 years, and ends 20 years on.
+    turn = 90;
+    random_events(0);
+    EXPECT(state & GAME_STATE_PERIHELION, GAME_STATE_PERIHELION);
+    turn = 110;
+    random_events(0);
+    EXPECT(state & GAME_STATE_PERIHELION, 0);
+    humans = 0;
+}
+
+static void test_plague(void) {
+    events_base(1, 7);
+    put_base(2, 10, 4, 2);
+    bases[2].pop_size = 5;
+    put_base(3, 14, 8, 2);
+    bases[3].pop_size = 5;
+    factions[1].ranking = 6;
+    current_faction = 2;
+    // Event 6: the bases within 4 are halved, rounded up; the message goes
+    // to the player's last base struck.
+    int n = pop2s;
+    pick(2, (int[]){0, 6});
+    random_events(1);
+    EXPECT(bases[0].pop_size, 4);
+    EXPECT(bases[2].pop_size, 3);
+    EXPECT(bases[3].pop_size, 5);
+    EXPECT(pop2s, n + 1);
+    EXPECT(last_pop2_base, 2);
+    current_faction = 1;
+}
+
+static void test_eliminate(void) {
+    land();
+    put_base(0, 8, 4, 2);
+    put_unit(0, 2, 2, 3, 0);
+    put_unit(1, 4, 2, 2, 0);
+    // A faction with a base isn't out.
+    EXPECT(eliminate_player(2, 1), 0);
+    // Without: its units are disbanded, the killer counts it, and the
+    // monument is raised.
+    EXPECT(eliminate_player(3, 1), 1);
+    EXPECT(veh_count, 1);
+    EXPECT(vehs[0].faction, 2);
+    EXPECT(*(int32_t *)((char *)&factions[1] + 0x20a0), 1);
+    EXPECT(setups, 1);
+    EXPECT(monuments, 1);
+    // The player's own end is left to the caller.
+    current_faction = 3;
+    int n = popps;
+    EXPECT(eliminate_player(3, 0), 1);
+    EXPECT(popps, n);
+    current_faction = 1;
+}
+
+static void test_faction_file(void) {
+    struct faction_def *d = &faction_defs[2];
+    d->rule_techcost = 80, d->rule_flags = 0x80, d->bonus_count = 3, d->rule_commerce = 2;
+    d->bonus_id[0] = 3, d->bonus_val1[0] = 2, d->bonus_val2[0] = 2;
+    d->bonus_id[1] = 7, d->bonus_val1[1] = 2, d->bonus_val2[1] = 5;
+    d->bonus_id[2] = 3, d->bonus_val1[2] = 2, d->bonus_val2[2] = -1;
+    factions[2].se_base[4] = 9;
+    compute_faction_modifiers(2);
+    EXPECT(factions[2].se_base[2], 1);
+    EXPECT(factions[2].se_base[4], 0);
+    clear_faction(d);
+    EXPECT(d->rule_techcost, 100);
+    EXPECT(d->rule_hurry, 100);
+    EXPECT(d->bonus_count + (int)d->rule_flags + d->rule_commerce, 0);
+    // Social engineering left out: no screen.
+    more_rules_ = 8, state = 0;
+    social_select(2);
+    more_rules_ = 0;
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     static uint8_t image[0x300000];  // the game's strings, from 0x400000: all empty here
@@ -299,6 +536,27 @@ int main(void) {
     test_monolith();
     test_artifact();
     test_build();
+    game_random = random_, game_random_reseed = reseed_, game_pop2 = pop2_, game_console_focus = focus_;
+    game_get_async_key_state = key_, game_clock_wait = wait_, game_faction_rankings = rankings, game_pbem = &pbem;
+    game_solar_flares = &flares, game_sunspot_duration = &sunspots, game_dust_cloud = &dust;
+    game_start_year = &start_year, game_setup_player = setup_, game_get_his_her = his_her_;
+    game_mon_killed_faction = mon_;
+    game_console_update_data = update_, game_draw_radius = draw_radius_;
+    static int32_t prefs;
+    game_preferences = &prefs;
+    image[0x68b0f4 - 0x400000] = image[0x68b108 - 0x400000] = 'X';  // the labels of two base events
+    static int32_t gender, plural;
+    game_parse_gender = &gender, game_parse_plural = &plural;
+    static struct rules_facility facilities[FACILITY_COUNT];
+    for (int i = 0; i < FACILITY_COUNT; i++) facilities[i].name = text_, facilities[i].preq_tech = TECH_DISABLED;
+    game_facilities = facilities;
+    test_base_events();
+    test_market();
+    test_sky();
+    test_countdowns();
+    test_plague();
+    test_eliminate();
+    test_faction_file();
     if (failures) return 1;
     printf("engine_events: ok\n");
     return 0;

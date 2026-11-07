@@ -1157,6 +1157,22 @@ extern int32_t *game_social_preqs;
 // redesigning its units.
 extern int (*game_aah_ooga)(int faction, int pact_faction);
 extern void (*game_social_set)(int faction);
+// The social engineering screen (social_select): its window opened on a
+// faction and closed, the choice sent to the other players, and in the
+// scenario editor the faction it picks (or negative).
+extern void *game_social_win;
+extern void(__attribute__((thiscall)) * game_social_win_init)(void *win, int faction);
+extern void(__attribute__((thiscall)) * game_social_win_close)(void *win);
+extern void (*game_synch_soc)(int faction);
+extern int(__attribute__((thiscall)) * game_console_editor_who)(void *console, int faction, int unk);
+// A faction's end (eliminate_player): set up again, which may let it
+// escape in a colony pod (non-zero then); its pronoun; the monument to it.
+extern int (*game_setup_player)(int faction, int killer, int probe);
+extern char *(*game_get_his_her)(int faction, int unk);
+extern void (*game_mon_killed_faction)(int faction, int other);
+// The resources' names: [2 * kind], plural [2 * kind + 1] (nutrient,
+// mineral, energy).
+extern char **game_resource_names;
 extern void (*game_consider_designs)(int faction);
 // Designs a faction retired (retire_proto), the last 64 for each faction,
 // which propose_proto won't bring back for a human player.
