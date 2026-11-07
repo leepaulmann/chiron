@@ -215,7 +215,14 @@ module at a time. So far:
   a former's turn of work and what the finished work does), founding a
   base, nerve stapling, bombarding and pillaging, artillery fire,
   self-destruct, obliterating a base, tectonic and fungal missiles, and
-  psi gates;
+  psi gates; and a unit's step to the next square, with all it may meet
+  there (zones of control, transports, foreign bases, captures, pods,
+  monoliths, artifacts and the menus a player is shown);
+- the AI's units: the faction's turn around its units (each given its
+  moves, kind by kind), carrying out each unit's move, native life's moves
+  and the base it heads for, planet busters placed near their targets, and
+  air units' and missiles' moves (interceptors, attack aircraft, patrols,
+  tectonic and fungal strikes);
 - combat: the battle itself (who fights, artillery and air superiority,
   the odds a player is shown, nerve gas, the rounds, boarding, retreat,
   promotion, collateral damage, bases falling, and the battle report);
@@ -234,6 +241,12 @@ module at a time. So far:
   the land a faction holds around a square;
 - scores: the year, objectives, the factions' rankings (with the AI's
   rolls to turn on the leader), the score and its rating by difficulty;
+- events: the turn's random events (perihelion and the base and world
+  events), a faction put out of the game, and the faction modifiers and
+  social choices set when it starts;
+- a new game: setting up each faction (its landing site, first units and
+  free techs, a late arrival or an escape pod, or its end), the whole new
+  game's state with the rivals' agendas, and the landing message;
 - the Planetary Council: votes, who may stand for governor, whether a
   faction may call the Council, and the AI's stand and vote on each
   proposal.
