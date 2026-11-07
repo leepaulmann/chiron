@@ -203,7 +203,6 @@ void *game_deletion_list;
 void(__attribute__((thiscall)) * game_deletion_add)(void *list, int veh);
 void(__attribute__((thiscall)) * game_base_win_check_base)(void *win, int base);
 void(__attribute__((thiscall)) * game_base_win_check_loc)(void *win, int x, int y, int unk);
-void (*game_spot_all)(int veh, int unk);
 void (*game_reset_territory)(void);
 int (*game_world_site)(int x, int y, int unk);
 void (*game_add_site)(int faction, int type, int priority, int x, int y);
@@ -211,7 +210,6 @@ int (*game_at_site)(int faction, int type, int x, int y);
 void (*game_fixup_landmarks)(void);
 uint32_t(__attribute__((stdcall)) * game_time_get_time)(void);
 void (*game_replay_base)(int event, int x, int y, int faction);
-void (*game_spot_base)(int base, int faction);
 int (*game_propose_proto)(int faction, int chassis, int weapon, int armor, uint32_t abilities, int reactor, int plan,
                           char *name);
 void(__attribute__((thiscall)) * game_map_win_set_center)(void *win, int x, int y, int unk);
@@ -571,7 +569,6 @@ void game_bind(struct pe_image *exe) {
     game_deletion_add = (void *)code_at(exe, 0x52de70);
     game_base_win_check_base = (void *)code_at(exe, 0x41a7a0);
     game_base_win_check_loc = (void *)code_at(exe, 0x41a7e0);
-    game_spot_all = (void *)code_at(exe, 0x5b6260);
     game_veh_lift_y = (int32_t *)code_at(exe, 0x9b2284);
     game_veh_at_rebuilt = (int32_t *)code_at(exe, 0x9b228c);
     game_reset_territory = (void *)code_at(exe, 0x523dd0);
@@ -581,7 +578,6 @@ void game_bind(struct pe_image *exe) {
     game_fixup_landmarks = (void *)code_at(exe, 0x592940);
     game_time_get_time = *(void **)code_at(exe, 0x669368);  // filled in when imports were bound
     game_replay_base = (void *)code_at(exe, 0x5ade80);
-    game_spot_base = (void *)code_at(exe, 0x5b57d0);
     game_propose_proto = (void *)code_at(exe, 0x580860);
     game_map_win_set_center = (void *)code_at(exe, 0x46b1f0);
     game_base_win = code_at(exe, 0x6a7628);

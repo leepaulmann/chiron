@@ -15,6 +15,7 @@
 #include "game.h"
 #include "map.h"
 #include "shadow.h"
+#include "spot.h"
 #include "tech.h"
 
 enum {
@@ -1967,7 +1968,7 @@ int veh_init(int proto, int faction, int x, int y) {
         if (*game_computed_base_id == base) *game_computed_base_id = -1;
     }
     veh_drop(veh, x, y);
-    game_spot_all(veh, 1);
+    spot_all(veh, 1);
     if (F->target_x < 0) return veh;
     const struct map_tile *here = square(x, y);
     if (here->climate >> 5 < ALT_SHORE_LINE) return veh;

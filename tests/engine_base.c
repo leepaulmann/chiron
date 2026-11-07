@@ -179,11 +179,10 @@ static int __attribute__((thiscall)) path_sensors_stub(void *path, int faction, 
 }
 static int terrain_avail_stub(int terraform, int sea, int faction) { return 0; }
 static int abil_index_stub(uint32_t flag) { return 0; }
-static int rand_value, rand_calls, replays, spotted, proposed, centred, territory;
+static int rand_value, rand_calls, replays, proposed, centred, territory;
 static int rand_stub(void) { return rand_calls++, rand_value; }
 static uint32_t __attribute__((stdcall)) time_stub(void) { return 1234; }
 static void replay_stub(int event, int x, int y, int faction) { replays++; }
-static void spot_stub(int base, int faction) { spotted++; }
 static int propose_stub(int faction, int chassis, int weapon, int armor, uint32_t abilities, int reactor, int plan,
                         char *name) {
     return proposed++, -1;
@@ -1398,7 +1397,7 @@ int main(void) {
     // A later riot turn under POLICE -6, at a base of size 4 of a faction
     // with others: it loses the facility the dice pick, the skunkworks.
     static void *map_wins[8];
-    game_rand = rand_stub, game_time_get_time = time_stub, game_replay_base = replay_stub, game_spot_base = spot_stub;
+    game_rand = rand_stub, game_time_get_time = time_stub, game_replay_base = replay_stub;
     game_propose_proto = propose_stub, game_map_win_set_center = centre_stub, game_reset_territory = territory_stub;
     game_map_wins = map_wins;
     struct faction_data saved_f2 = factions[2], saved_f3 = factions[3];

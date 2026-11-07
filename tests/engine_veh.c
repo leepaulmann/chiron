@@ -49,9 +49,11 @@ static void __attribute__((thiscall)) check_base_stub(void *w, int b) { checked_
 static void __attribute__((thiscall)) check_loc_stub(void *w, int x, int y, int u) {}
 static void draw_radius_stub(int x, int y, int r, int u) { drawn_radius++; }
 static void draw_tile_stub(int x, int y, int u) { drawn_tile++; }
-static int spotted, rand_value;
+static int rand_value;
+static int32_t more_prefs;
+static uint32_t draw_state;
+static void __attribute__((thiscall)) redraw_stub(void *w) {}
 static int32_t computed_base = -1, find_dist = 0;
-static void spot_all_stub(int v, int u) { spotted = v; }
 static int rand_stub(void) { return rand_value; }
 static char *__attribute__((thiscall)) strings_get_stub(void *table, char *s) { return s; }
 static char battle_text[256];
@@ -472,7 +474,8 @@ int main(void) {
     protos[64].abilities = 0, veh_count = 0;
 
     // New units: the next slot, homed at the faction's nearest base.
-    game_spot_all = spot_all_stub, game_rand = rand_stub;
+    game_rand = rand_stub, game_more_preferences = &more_prefs, game_draw_state = &draw_state;
+    game_graphic_win_redraw = redraw_stub;
     game_computed_base_id = &computed_base, game_base_find_dist = &find_dist;
     veh_count = 0, factions[1].units_active[64] = 0, factions[1].total_combat_units = 0, factions[1].target_x = -1;
     computed_base = 1, defs[1].bonus_count = 0;  // no free drop pods
@@ -481,7 +484,7 @@ int main(void) {
     EXPECT(veh_count, 1);
     EXPECT(vehs[0].home_base, 1);
     EXPECT(computed_base, -1);
-    EXPECT(spotted, 0);
+    EXPECT(tiles[2 + 2 * (W / 2)].visibility, 1 << 1);  // spotted
     EXPECT(vehs[0].x, 4);
     EXPECT(factions[1].units_active[64], 1);
     EXPECT(factions[1].total_combat_units, 1);

@@ -12,6 +12,7 @@
 #include "mapgen.h"
 #include "shadow.h"
 #include "social.h"
+#include "spot.h"
 #include "tech.h"
 
 static inline struct map_tile *tile(int x, int y) { return &(*game_map)[(x >> 1) + y * *game_map_half_width]; }
@@ -325,7 +326,7 @@ static void defect(int faction, int target) {
             u->state &= 0xfcffbdffu;
         }
     }
-    game_spot_base(ID, faction);
+    spot_base(ID, faction);
     game_reset_territory();
     for (int v = *game_veh_count - 1; v >= 0; v--)
         if (v < *game_veh_count && game_vehs[v].faction == faction && game_vehs[v].home_base == ID) game_kill(v);
