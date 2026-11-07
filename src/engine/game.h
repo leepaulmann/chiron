@@ -1282,6 +1282,10 @@ extern int(__attribute__((thiscall)) * game_net_lock_veh)(void *daemon, int *veh
 extern int(__attribute__((thiscall)) * game_net_maybe_lock)(void *daemon, int *veh, int a, int b, int x, int y, int type);
 extern void (*game_message_veh)(int type, int veh, int dir, int unk);
 extern void (*game_x_pop)(char *label, int unk);  // a popup from script.txt
+// The AI's turn around its units (ai.c): the AI's choice of a unit's move,
+// and a network game's unit handed to the daemon.
+extern int (*game_enemy_move)(int veh);
+extern int(__attribute__((thiscall)) * game_net_daemon_action)(void *daemon, int veh, int unk);
 // base_at(): set while its "Base Bits Error" is being reported, and the two
 // flags that decide whether the popup shows and the Ctrl key is read.
 extern int32_t *game_base_bits_reporting, *game_base_bits_popup, *game_base_bits_quiet;

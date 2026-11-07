@@ -24,3 +24,7 @@ void action_fungal(int veh, int x, int y);
 // A unit's step in a direction (8 or a negative one: a stay); type 1 the
 // player sees it, 2 it happens. 1 if the unit moved or may go on.
 int order_veh(int veh, int dir, int type);
+// For other modules' sweeps: the step held, and whether action_destroy()
+// might start a fight.
+void move_hold_steps(int on);
+int move_destroy_fights(int veh, int x, int y);

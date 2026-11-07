@@ -545,6 +545,15 @@ __asm__(".text\n"
 // 1 call in 200 in a shadow soak; in a check ours gets what the original's
 // got (see shadow_path_find_in).
 static int32_t move_stale = 1;
+// A check of a caller that moves many units (ai.c) hands ours the words
+// the original's Path_find calls found, in order (path_stale_record).
+enum { STALE_LOG = 512 };
+static int32_t stale_log[STALE_LOG];
+static int stale_logging, stale_replaying, stale_n, stale_next;
+static int32_t stale_for_move(void) {
+    if (stale_replaying && stale_next < stale_n) return stale_log[stale_next++];
+    return move_stale;
+}
 
 static int moves_left(int veh) {
     int m = veh_speed(veh, 0) - game_vehs[veh].moves_spent;
@@ -578,7 +587,7 @@ int __attribute__((thiscall)) path_move(struct game_path *p, int veh, int factio
     }
     if (game_chassis[P->chassis].triad != TRIAD_AIR && ((x_dist(vx, wx) + iabs_(vy - wy)) & ~1)) {
         int unk = V->state & 0x10000 ? (int8_t)V->unk_29 : -1;
-        int dir = path_find_at(p, vx, vy, wx, wy, V->proto, faction, flags, unk, move_stale);
+        int dir = path_find_at(p, vx, vy, wx, wy, V->proto, faction, flags, unk, stale_for_move());
         if (dir >= 0) return dir;
         if ((V->state & 0x1000200) == 0x1000200) {
             V->order = 0;
@@ -834,6 +843,7 @@ int shadow_path_find_in(struct game_path *p, int x1, int y1, int x2, int y2, int
     int32_t a[8] = {x1, y1, x2, y2, proto, faction, flags, unk};
     if (hooks_nested) {
         nested_stale = stale, nested_stale_seen = 1;
+        if (stale_logging && stale_n < STALE_LOG) stale_log[stale_n++] = stale;
         return path_stale_call((void *)orig_path_find, p, a, stale);
     }
     if (shadow_bypass()) return find_at(p, a, stale);
@@ -898,6 +908,9 @@ int32_t path_stale_take(void) {
     return saved;
 }
 void path_stale_put(int32_t saved) { move_stale = saved; }
+void path_stale_record(void) { stale_logging = 1, stale_replaying = 0, stale_n = 0; }
+void path_stale_replay(void) { stale_logging = 0, stale_replaying = 1, stale_next = 0; }
+void path_stale_stop(void) { stale_logging = stale_replaying = 0; }
 
 // Path_sensors: each run gets its own copy of the square, and the
 // original's goes back to the caller.

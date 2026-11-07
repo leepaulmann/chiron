@@ -309,6 +309,8 @@ void(__attribute__((thiscall)) * game_fx_engine_pitch)(void *fx, int pitch);
 int32_t *game_moved_quickly, *game_console_23be4;
 int32_t *game_zoc_tutorial_count, *game_fungus_tutorial_count, *game_tutorial_moves_seen;
 void (*game_x_pop)(char *label, int unk);
+int (*game_enemy_move)(int veh);
+int(__attribute__((thiscall)) * game_net_daemon_action)(void *daemon, int veh, int unk);
 int32_t *game_base_bits_reporting, *game_base_bits_popup, *game_base_bits_quiet;
 void (*game_wipe_goals)(int faction);
 void (*game_danger)(const char *format, char *buffer, int a, int b, int c);
@@ -823,6 +825,8 @@ void game_bind(struct pe_image *exe) {
     game_net_maybe_lock = (void *)code_at(exe, 0x531700);
     game_message_veh = (void *)code_at(exe, 0x592e10);
     game_x_pop = (void *)code_at(exe, 0x5bf310);
+    game_enemy_move = (void *)code_at(exe, 0x56b5b0);
+    game_net_daemon_action = (void *)code_at(exe, 0x532570);
     game_base_bits_reporting = (int32_t *)code_at(exe, 0x90ea38);
     game_base_bits_popup = (int32_t *)code_at(exe, 0x93a94c);
     game_base_bits_quiet = (int32_t *)code_at(exe, 0x9bc070);

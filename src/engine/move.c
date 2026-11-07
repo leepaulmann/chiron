@@ -3671,6 +3671,15 @@ static int destroy_fights(int veh, int x, int y) {
     return 0;
 }
 
+// For other modules' sweeps (ai.c): the step held (answering 1, without
+// moving the unit) while state is protected, or not; and whether
+// action_destroy() might start a fight.
+void move_hold_steps(int on) {
+    holding = on;
+    hold_result = 1, hold_moves = 0;
+}
+int move_destroy_fights(int veh, int x, int y) { return destroy_fights(veh, x, y); }
+
 // Units' attacks on squares, orders carried out, and the rest, with the
 // step (order_veh) held.
 static void sweep_unit_actions(int turn) {

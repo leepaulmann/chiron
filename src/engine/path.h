@@ -27,3 +27,9 @@ void writes_paths(struct hook_writes *w, struct game_path *p);
 void path_stale_reset(void);
 int32_t path_stale_take(void);
 void path_stale_put(int32_t saved);
+// The same for a check whose original searches many paths: record the
+// words while the original runs, then replay them to ours' path_move
+// calls in order, and stop.
+void path_stale_record(void);
+void path_stale_replay(void);
+void path_stale_stop(void);
