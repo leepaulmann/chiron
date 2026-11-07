@@ -44,26 +44,11 @@ static void add_goal_stub(int f, int type, int pri, int x, int y, int base) {
             return;
         }
 }
-static int base_at_stub(int x, int y) {
-    for (int i = 0; i < base_count; i++)
-        if (bases[i].x == x && bases[i].y == y) return i;
-    return -1;
-}
 static int veh_at_stub(int x, int y) {
     for (int i = 0; i < veh_count; i++)
         if (vehs[i].x == x && vehs[i].y == y) return i;
     return -1;
 }
-static int find2_stub(int x, int y, int f) {
-    for (int i = 0; i < base_count; i++)
-        if (bases[i].faction == f) {
-            find_dist = vector_dist(x, y, bases[i].x, bases[i].y);
-            return i;
-        }
-    return -1;
-}
-static int find3_stub(int x, int y, int f, int r, int o, int s) { return find2_stub(x, y, f); }
-static int find_stub(int x, int y) { return base_at_stub(x, y); }
 static int identity(int v) { return v; }
 static int zero1(int a) { return 0; }
 static int one1(int a) { return 1; }
@@ -99,8 +84,8 @@ int main(void) {
     game_base_find_dist = &find_dist, game_radius_near_x = near_x, game_radius_near_y = near_y;
     game_radius_x = radius_x, game_radius_y = radius_y;
     for (int i = 1; i < RADIUS_SQUARES; i++) radius_x[i] = i < 9 ? near_x[i - 1] : 1000, radius_y[i] = i < 9 ? near_y[i - 1] : 0;
-    game_add_goal = add_goal_stub, game_base_at = base_at_stub, game_veh_at = veh_at_stub, game_stack_fix = identity;
-    game_stack_check = stack_stub, game_base_find = find_stub, game_base_find2 = find2_stub, game_base_find3 = find3_stub;
+    game_add_goal = add_goal_stub, game_veh_at = veh_at_stub, game_stack_fix = identity;
+    game_stack_check = stack_stub;
     game_is_objective = zero1, game_terraform_cost = terraform_stub, game_base_reset = base_reset_stub;
     game_enemy_capabilities = nothing1, game_weap_val = zero2, game_arm_val = zero2, game_planet_buster = zero1;
     game_console_upgrade = upgrade_stub, game_kill = kill_stub, game_veh_kill = kill_stub, game_veh_sleep = nothing1;

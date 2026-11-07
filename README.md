@@ -128,7 +128,11 @@ module at a time. So far:
   doctors in riots, disbanding the units it can't support, and the AI
   rushing production with its energy reserves; its ecological damage:
   fungus, native life, global warming and the volcano; the AI's
-  terraforming plans; new bases' names, and captured bases renamed; and
+  terraforming plans; new bases' names, and captured bases renamed;
+  finding bases (on a square, the nearest, by faction, region and
+  pacts), marking a new base's radius, its first production and a unique
+  name, facilities and secret projects held, and minerals lost to
+  retooling; and
   the base's turn that runs all of these, with its energy and trade
   going into the faction's reserves; and the faction's turn around them:
   loans, the AI's maintenance discount, interest, the first turn's free

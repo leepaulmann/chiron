@@ -169,7 +169,6 @@ static int can_terraform_stub(int faction, int x, int y, int unk, int base) { re
 static void base_connect_stub(int level) { connects++; }
 static int terrain_avail_stub(int terraform, int sea, int faction) { return 0; }
 static int abil_index_stub(uint32_t flag) { return 0; }
-static int base_find_stub(int x, int y) { return 1; }
 static int rand_value, rand_calls, replays, spotted, proposed, centred, territory;
 static int rand_stub(void) { return rand_calls++, rand_value; }
 static uint32_t __attribute__((stdcall)) time_stub(void) { return 1234; }
@@ -209,8 +208,7 @@ static void log_say5_stub(char *a, char *b, int n1, int n2, int n3) {}
 static int pumps, advances;
 static void pump_stub(void) { pumps++; }
 static void advance_stub(int faction) { advances++; }
-static int base_at_value = -1, breeds;
-static int base_at_test_stub(int x, int y) { return base_at_value; }
+static int breeds;
 static int cargo_stub(int veh) { return 0; }
 static int breed_stub(int base, int faction) { return breeds; }
 static void draws_stub(void) {}
@@ -1520,7 +1518,7 @@ int main(void) {
     game_continents = regions, game_abilities = abilities, game_radius_count = counts, game_cloud_cover = &cloud;
     game_map_area = &area, game_terraform = terraform;
     game_can_terraform = can_terraform_stub, game_base_connect = base_connect_stub;
-    game_terrain_avail = terrain_avail_stub, game_abil_index = abil_index_stub, game_base_find = base_find_stub;
+    game_terrain_avail = terrain_avail_stub, game_abil_index = abil_index_stub;
     for (int y = 0; y < H; y++)
         for (int x = y & 1; x < W; x += 2) put(x, y, 3, 1, 0, 0), at(x, y)->territory = 1;
     at(6, 4)->bits = MAP_BASE, at(6, 4)->owner_site = 1;
@@ -1661,7 +1659,7 @@ int main(void) {
     // Repairs: a unit away from bases and territory heals 1 a turn by its
     // reactor, down to twice its reactor; at a base with a Command Center,
     // all of it; it wakes from sentry when done, for a human.
-    game_base_at = base_at_test_stub, game_veh_cargo = cargo_stub, game_breed_mod = breed_stub;
+    game_veh_cargo = cargo_stub, game_breed_mod = breed_stub;
     game_do_all_draws = draws_stub;
     struct veh kept_v0 = vehs[0];
     int32_t kept_count = veh_count;
@@ -1676,7 +1674,7 @@ int main(void) {
     vehs[0].damage = 2;
     repair_phase(1);
     EXPECT(vehs[0].damage, 2);
-    base_at_value = 1, b1->state = 0, give(1, 27);
+    b1->x = 4, b1->y = 2, at(4, 2)->bits = MAP_BASE, b1->state = 0, give(1, 27);  // in base 1
     vehs[0].damage = 8, vehs[0].order = 1, humans = 1 << 1;
     repair_phase(1);
     EXPECT(vehs[0].damage, 0);
@@ -1686,7 +1684,7 @@ int main(void) {
     repair_phase(1);
     EXPECT(vehs[0].damage, 8);
     EXPECT(vehs[0].moves_spent, 0);
-    base_at_value = -1, humans = 0, *b1 = saved_b1;
+    at(4, 2)->bits = 0, humans = 0, *b1 = saved_b1;
     vehs[0] = kept_v0, veh_count = kept_count;
 
     // A faction's whole turn: on a full turn the AI's diplomacy, strategy
@@ -1758,6 +1756,51 @@ int main(void) {
     factions[1].base_count = kept_bases;
     *b1 = saved_b1, factions[1] = saved_f1, faction_defs[1] = saved_d1, rules = saved_rules;
     humans = 0, eliminated = 0;
+
+    // Finding bases: on a square marked as a base, the nearest (the last
+    // of equals), by faction, and a faction's or its pact partners'.
+    static int32_t dist, reporting, popup, quiet;
+    game_base_find_dist = &dist, game_base_bits_reporting = &reporting, game_base_bits_popup = &popup;
+    game_base_bits_quiet = &quiet;
+    struct base kept[3] = {bases[0], bases[1], bases[2]};
+    int32_t kept_bases_count = base_count;
+    base_count = 3;
+    bases[0].x = 2, bases[0].y = 2, bases[0].faction = 1;
+    bases[1].x = 6, bases[1].y = 2, bases[1].faction = 2;
+    bases[2].x = 4, bases[2].y = 4, bases[2].faction = 1;
+    for (int i = 0; i < 3; i++) at(bases[i].x, bases[i].y)->bits |= MAP_BASE;
+    EXPECT(base_at(6, 2), 1);
+    EXPECT(base_at(4, 2), -1);
+    EXPECT(base_find(4, 2), 2);  // all three 1 away: the last
+    EXPECT(dist, 1);
+    EXPECT(base_find_2(3, 1, 1), 0);
+    EXPECT(base_find_2(3, 1, -1), -1);
+    EXPECT(base_find_3(6, 4, 1, -1, -1, -1), 2);
+    EXPECT(base_find_3(6, 2, 1, -1, -1, -1), 2);
+    EXPECT(dist, 2);
+    factions[1].diplo_status[2] |= 1;  // a pact
+    EXPECT(base_find_3(6, 2, 1, -1, -2, -1), 1);
+    factions[1].diplo_status[2] &= ~1u;
+    EXPECT(base_find_3(6, 2, -1, -1, 1, -1), 1);  // not faction 1's
+    EXPECT(base_find_3(6, 2, 1, -1, -1, 3), -1);  // faction 3 has seen none
+    EXPECT(dist, 9999);
+    // Facilities by bit; a new base's name made unique.
+    int offset;
+    uint32_t mask;
+    bitmask(13, &offset, &mask);
+    EXPECT(offset * 100 + (int)mask, 132);
+    set_fac(13, 0, 1);
+    EXPECT(bases[0].facilities_built[1] & 0x20, 0x20);
+    current_id = 0;
+    EXPECT(has_fac_built(13), 1);
+    EXPECT(has_fac_built(65), 0);
+    set_fac(13, 0, 0);
+    EXPECT(has_fac_built(13), 0);
+    strcpy(bases[0].name, "Chiron"), strcpy(bases[2].name, "Chiron");
+    make_base_unique(2);
+    EXPECT(strcmp(bases[2].name, "Chiron-2"), 0);
+    for (int i = 0; i < 3; i++) at(bases[i].x, bases[i].y)->bits &= ~(uint32_t)MAP_BASE;
+    bases[0] = kept[0], bases[1] = kept[1], bases[2] = kept[2], base_count = kept_bases_count;
 
     if (failures) return 1;
     printf("engine_base: all tests passed\n");

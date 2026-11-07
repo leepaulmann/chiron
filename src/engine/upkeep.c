@@ -1858,7 +1858,7 @@ static void repair_veh(int faction, int v) {
         if (triad == TRIAD_AIR && (t->bits & MAP_AIRBASE)) value++;
         if (triad == TRIAD_LAND && (t->bits & MAP_BUNKER)) value++;
     }
-    int base = game_base_at(x, y);
+    int base = base_at(x, y);
     if (base >= 0 && !(game_bases[base].state & BASE_STATE_RIOTS)) {
         value++;
         if (is_native(p)) {

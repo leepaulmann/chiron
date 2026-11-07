@@ -49,14 +49,10 @@ static void __attribute__((thiscall)) check_base_stub(void *w, int b) { checked_
 static void __attribute__((thiscall)) check_loc_stub(void *w, int x, int y, int u) {}
 static void draw_radius_stub(int x, int y, int r, int u) { drawn_radius++; }
 static void draw_tile_stub(int x, int y, int u) { drawn_tile++; }
-static int found_base = -1, spotted, rand_value;
+static int spotted, rand_value;
 static int32_t computed_base = -1, find_dist = 0;
-static int base_find_stub(int x, int y) { return found_base; }
-static int base_find3_stub(int x, int y, int f, int r, int o, int s) { return -1; }
 static void spot_all_stub(int v, int u) { spotted = v; }
 static int rand_stub(void) { return rand_value; }
-static int base_here = -1;
-static int base_at_stub(int x, int y) { return base_here; }
 static char *__attribute__((thiscall)) strings_get_stub(void *table, char *s) { return s; }
 static char battle_text[256];
 static char *label_list[1200], **labels_ptr = label_list;
@@ -476,10 +472,11 @@ int main(void) {
     protos[64].abilities = 0, veh_count = 0;
 
     // New units: the next slot, homed at the faction's nearest base.
-    game_base_find = base_find_stub, game_base_find3 = base_find3_stub, game_spot_all = spot_all_stub, game_rand = rand_stub;
+    game_spot_all = spot_all_stub, game_rand = rand_stub;
     game_computed_base_id = &computed_base, game_base_find_dist = &find_dist;
     veh_count = 0, factions[1].units_active[64] = 0, factions[1].total_combat_units = 0, factions[1].target_x = -1;
-    found_base = 1, computed_base = 1, defs[1].bonus_count = 0;  // no free drop pods
+    computed_base = 1, defs[1].bonus_count = 0;  // no free drop pods
+    bases[0].x = 0, bases[0].y = 0;  // so that base 1 is the nearest
     EXPECT(veh_init(64, 1, 4, 2), 0);
     EXPECT(veh_count, 1);
     EXPECT(vehs[0].home_base, 1);
@@ -488,7 +485,7 @@ int main(void) {
     EXPECT(vehs[0].x, 4);
     EXPECT(factions[1].units_active[64], 1);
     EXPECT(factions[1].total_combat_units, 1);
-    found_base = 0, bases[0].faction = 2;  // another faction's
+    bases[0].x = 2, bases[0].y = 2, bases[0].faction = 2;  // the nearest now, another faction's
     EXPECT(veh_init(64, 1, 4, 2), 1);
     EXPECT(vehs[1].home_base, -1);
     EXPECT(vehs[1].next_in_stack, 0);  // on top of the first
@@ -586,7 +583,7 @@ int main(void) {
     // The battle report: up to 4 non-zero modifiers a side.
     game_battle_mod_count = mod_counts, game_battle_mod = mods, game_battle_mod_label = mod_labels;
     game_battle_state = &mod_counts[2], game_battle_terrain = &terrain, game_battle_morale = morales;
-    game_labels = &labels_ptr, game_base_at = base_at_stub;
+    game_labels = &labels_ptr;
     label_list[91] = "Rocky", label_list[338] = "Fungus", label_list[291] = "Forest";
     mod_counts[0] = 3, mod_counts[2] = 1;
     battle_init();
@@ -633,7 +630,8 @@ int main(void) {
     int m = morale_veh(0, 1, 0);
     EXPECT(get_basic_offense(0, 1, 0, 0, 0), offense_proto(64, 1, 0) * (m + 6) * 4);
     EXPECT(morales[0], m);
-    base_here = 1, bases[1].facilities_built[0] = 1 << 2, factions[1].se[SE_MORALE] = -3;
+    bases[1].x = 4, bases[1].y = 2, sq->bits |= MAP_BASE;  // base 1 on the attacker's square
+    bases[1].facilities_built[0] = 1 << 2, factions[1].se[SE_MORALE] = -3;
     m = morale_veh(0, 1, 0);
     EXPECT(get_basic_offense(0, 1, 0, 0, 0), offense_proto(64, 1, 0) * (m + 1 + 2 + 6) * 4);
     EXPECT(morales[0], m + 3);
@@ -641,7 +639,8 @@ int main(void) {
     int b1 = m + 4 > 6 ? 6 : m + 4;
     EXPECT(get_basic_offense(0, 1, 0, 0, 1), offense_proto(64, 1, 0) * (b1 + 6) * 4);
     EXPECT(morales[1], b1);
-    base_here = -1, bases[1].facilities_built[0] = 0, factions[1].se[SE_MORALE] = 0, factions[1].se_pending[SE_MORALE] = 0;
+    bases[1].x = 6, bases[1].y = 4, sq->bits &= ~(uint32_t)MAP_BASE;
+    bases[1].facilities_built[0] = 0, factions[1].se[SE_MORALE] = 0, factions[1].se_pending[SE_MORALE] = 0;
     m = morale_veh(1, 1, 0);
     m = m < 1 ? 1 : m;
     EXPECT(get_basic_defense(1, 0, 0, 0), armor_proto(64, 0, 0) * (m + 6));
@@ -691,11 +690,11 @@ int main(void) {
     EXPECT(mod_counts[0], 1);
     EXPECT(mods[0], 25);
     rules_basic.combat_atk_road = 0;
-    base_here = 1, bases[1].facilities_built[0] = 1 << 4;  // a perimeter defense
+    bases[1].x = 4, bases[1].y = 2, sq->bits |= MAP_BASE, bases[1].facilities_built[0] = 1 << 4;  // a perimeter defense
     battle_compute(0, 1, NULL, &def, 0);
     EXPECT(def, get_basic_defense(1, 0, 0, 0) * 8);
     EXPECT(mods[4], 100);
-    base_here = -1, bases[1].facilities_built[0] = 0;
+    bases[1].x = 6, bases[1].y = 4, sq->bits &= ~(uint32_t)MAP_BASE, bases[1].facilities_built[0] = 0;
     protos[64].plan = 11;
     battle_compute(0, 1, &att, &def, 0);
     EXPECT(def, get_basic_defense(1, 0, 0, 0) * 4);

@@ -12,12 +12,15 @@
 #include "base.h"
 
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "game.h"
 #include "map.h"
 #include "shadow.h"
+#include "build.h"
 #include "tech.h"
+#include "veh.h"
 
 static inline struct map_tile *tile(int x, int y) { return &(*game_map)[(x >> 1) + y * *game_map_half_width]; }
 
@@ -1460,6 +1463,231 @@ int base_queue(int base) {
 // ---- Hooks and shadow checks ------------------------------------------------
 
 extern struct hook_module base_module;
+// ---- Finding and marking bases ---------------------------------------------------
+
+enum { GAME_STATE_UNK_1000 = 0x1000, FAC_ANNOUNCED_LAST = 70, BASE_RADIUS_INNER = 21, BASE_RADIUS_OUTER = 49 };
+
+// A facility's byte and bit in a bit array. The byte is n / 8, rounded
+// towards zero as the original divides.
+void bitmask(int n, int *offset, uint32_t *mask) {
+    *offset = n / 8;
+    *mask = 1u << (n & 7);
+}
+
+// Makes a base the current one.
+void set_base(int base) {
+    *game_current_base_id = base;
+    *game_current_base = &game_bases[base];
+}
+
+// Adds a base's name to a string, or the label for none.
+void say_base(char *buf, int base) {
+    strcat(buf, base < 0 ? game_label(25) : game_bases[base].name);
+}
+
+// The base on a square, or -1. A square marked with a base that none of
+// the bases is on is logged ("Base Bits Error"), and the map's base bits
+// are rebuilt; with game state bit 0x1000 the player is also shown it (if
+// the popup flag is set) and the map moves to the square.
+int base_at(int x, int y) {
+    if (y < 0 || y >= *game_map_height || x < 0 || x >= *game_map_width) return -1;
+    if (!((*game_map)[(x >> 1) + y * *game_map_half_width].bits & MAP_BASE)) return -1;
+    for (int i = 0; i < *game_base_count; i++)
+        if (game_bases[i].x == x && game_bases[i].y == y) return i;
+    if (!*game_base_bits_reporting) game_log_say("Base Bits Error  (x, y)", x, y, 0);
+    if (!(*game_state & GAME_STATE_UNK_1000)) {
+        rebuild_base_bits();
+        return -1;
+    }
+    if (*game_base_bits_reporting) return -1;
+    *game_base_bits_reporting = 1;
+    if (*game_base_bits_popup) {
+        game_parse_num(0, x);
+        game_parse_num(1, y);
+        game_x_pop("BASEBIT", 0);
+    }
+    *game_base_bits_reporting = 0;
+    if (!*game_base_bits_quiet) game_get_async_key_state(0x11);
+    rebuild_base_bits();
+    game_console_focus(game_console, x, y, *game_current_faction);
+    return -1;
+}
+
+// The nearest base (of a faction, when not `any`), the last of equals; its distance is
+// left in game_base_find_dist when there is one.
+static int nearest_base(int x, int y, int any, int faction) {
+    int best = 9999, pick = -1;
+    for (int i = 0; i < *game_base_count; i++) {
+        const struct base *B = &game_bases[i];
+        if (!any && B->faction != faction) continue;
+        int d = vector_dist(x, y, B->x, B->y);
+        if (d <= best) best = d, pick = i;
+    }
+    if (pick >= 0) *game_base_find_dist = best;
+    return pick;
+}
+int base_find(int x, int y) { return nearest_base(x, y, 1, 0); }
+int base_find_2(int x, int y, int faction) { return nearest_base(x, y, 0, faction); }
+
+// The nearest base in a region (or any, -1) that belongs to `faction`, or
+// with `other` -2 to its pact partners too, or to `other`; with `faction`
+// negative, any base not `other`'s. With `seen_by` set, only bases that
+// faction owns or has seen. game_base_find_dist is 9999 when there is none.
+int base_find_3(int x, int y, int faction, int region, int other, int seen_by) {
+    int best = 9999, pick = -1;
+    *game_base_find_dist = 9999;
+    for (int i = 0; i < *game_base_count; i++) {
+        const struct base *B = &game_bases[i];
+        if (region >= 0 && (*game_map)[(B->x >> 1) + B->y * *game_map_half_width].region != region) continue;
+        if (faction >= 0) {
+            if (B->faction != faction) {
+                if (other == -2) {
+                    if (!(game_factions[faction].diplo_status[B->faction] & TREATY_PACT)) continue;
+                } else if (other < 0 || other != B->faction) {
+                    continue;
+                }
+            }
+        } else if (other >= 0 && B->faction == other) {
+            continue;
+        }
+        if (seen_by >= 0 && B->faction != seen_by && !(B->visibility & (uint8_t)(1u << seen_by))) continue;
+        int d = vector_dist(x, y, B->x, B->y);
+        if (d <= best) best = d, pick = i;
+    }
+    if (pick >= 0) *game_base_find_dist = best;
+    return pick;
+}
+
+// Marks a new base's radius on the map: the inner 21 squares as within a
+// base's radius and worked by its faction, the outer ring's sites cleared;
+// then every faction's site of type 8 is deleted at the last square looked
+// at (the outer corner), as the original does.
+void base_mark(int base) {
+    const struct base *B = &game_bases[base];
+    int x = 0, y = 0;
+    for (int i = 0; i < BASE_RADIUS_OUTER; i++) {
+        int w = *game_map_width;
+        x = game_radius_x[i] + B->x;
+        if (!(*game_map_flat & 1)) {
+            if (x < 0) x += w;
+            else if (x >= w) x -= w;
+        }
+        y = game_radius_y[i] + B->y;
+        if (y < 0 || y >= *game_map_height || x < 0 || x >= w) continue;
+        if (i < BASE_RADIUS_INNER) bit_set(x, y, MAP_BASE_RADIUS, 1);
+        else site_set(x, y, 0);
+        if (i < BASE_RADIUS_INNER) using_set(x, y, B->faction);
+    }
+    for (int f = 0; f < FACTION_COUNT; f++) game_del_site(f, 8, x, y, 3);
+}
+
+// The minerals a human's base loses by switching production to another
+// kind of item, beyond what the rules let it keep.
+int base_lose_minerals(int base) {
+    const struct rules_basic *R = game_rules_basic;
+    if (!R->retool_penalty) return 0;
+    const struct base *B = &game_bases[base];
+    if (!((uint8_t)(1u << B->faction) & *game_human_factions)) return 0;
+    if (base_making(B->production_last, base) == base_making(B->queue[0], base)) return 0;
+    int m = B->minerals_2, keep = R->retool_exemption;
+    if (m <= keep) return 0;
+    return m - (m - keep) * (100 - R->retool_penalty) / 100 - keep;
+}
+
+// Builds or removes a facility at a base.
+void set_fac(int fac, int base, int on) {
+    int offset;
+    uint32_t mask;
+    bitmask(fac, &offset, &mask);
+    uint8_t *b = &game_bases[base].facilities_built[offset];
+    *b = on ? (uint8_t)(*b | mask) : (uint8_t)(*b & ~mask);
+}
+
+// Whether the player has been told of a facility (any above 70 counts).
+int has_fac_announced(int faction, int fac) {
+    if (fac > FAC_ANNOUNCED_LAST) return 1;
+    int offset;
+    uint32_t mask;
+    bitmask(fac, &offset, &mask);
+    return (game_factions[faction].facility_announced[offset] & mask) != 0;
+}
+
+void set_fac_announced(int faction, int fac, int on) {
+    int offset;
+    uint32_t mask;
+    bitmask(fac, &offset, &mask);
+    uint8_t *b = &game_factions[faction].facility_announced[offset];
+    *b = on ? (uint8_t)(*b | mask) : (uint8_t)(*b & ~mask);
+}
+
+// A new base's first production: the unit it can build (a basic design,
+// or one of its faction's built ones) with the best armor for defending
+// (counting a defensive plan four times, a combat one three, recon two,
+// and a quarter off the ground) less its cost; the last of equals, or
+// design 2 (scout patrol) for none.
+void base_first(int base) {
+    struct base *B = &game_bases[base];
+    int best = -1, pick = 2;
+    B->queue[0] = 2;
+    for (int p = 0; p < PROTO_COUNT; p++) {
+        if (!veh_avail(p, B->faction, base)) continue;
+        const struct unit_proto *P = &game_protos[p];
+        if (p >= 64 && !(P->flags & PROTO_FLAG_BUILT)) continue;
+        int v = game_armor[P->armor].defense * 32;
+        if (P->plan == 2) v *= 4;
+        if (P->plan == 1) v *= 3;
+        if (P->plan == 3) v *= 2;
+        if (game_chassis[P->chassis].triad != TRIAD_LAND) v /= 4;
+        v -= P->cost;
+        if (v >= best) best = v, pick = p;
+    }
+    B->queue[0] = pick;
+}
+
+// Gives a base whose name another base has the name cut to 21 letters and
+// "-N", N one more than the bases sharing it.
+void make_base_unique(int base) {
+    int same = 0;
+    for (int i = 0; i < *game_base_count; i++)
+        if (i != base && !strcmp(game_bases[i].name, game_bases[base].name)) same++;
+    if (!same) return;
+    char *name = game_bases[base].name, digits[16];
+    name[21] = 0;
+    strcat(name, "-");
+    snprintf(digits, sizeof digits, "%d", same + 1);
+    strcat(name, digits);
+}
+
+// Whether a faction holds a secret project.
+int has_project(int sp, int faction) {
+    int b = game_secret_projects[sp];
+    return b >= 0 && game_bases[b].faction == faction;
+}
+
+// The base holding a secret project, or negative.
+int base_project(int sp) { return game_secret_projects[sp]; }
+
+// Whether one of the governor's kinds of work not skipped claims the item
+// at this score or below.
+int base_claimed(int item, int score, int a, int b, int c, int d) {
+    int skip[4] = {a, b, c, d};
+    for (int i = 0; i < 4; i++)
+        if (!skip[i] && item == game_gov_claims[i] && score >= game_gov_claim_scores[i]) return 1;
+    return 0;
+}
+
+// Whether the current base has a facility (not a secret project).
+int has_fac_built(int fac) {
+    if (fac >= 65) return 0;
+    int offset;
+    uint32_t mask;
+    bitmask(fac, &offset, &mask);
+    return (game_bases[*game_current_base_id].facilities_built[offset] & mask) != 0;
+}
+
+// The treaty bits one faction has with another, of those asked for.
+uint32_t has_treaty(int faction, int other, uint32_t bits) { return game_factions[faction].diplo_status[other] & bits; }
+
 #define BASE (&base_module)
 
 #define WRITES_YIELD WRITES(game_terraform_reduce, 4); WRITES(game_terraform_energy, 4)
@@ -1490,6 +1718,32 @@ SHADOW_WRITER(BASE, int, black_market, (int a), (a), WRITES_CURRENT, "%d", a)
 #define WRITES_PSYCH_CHECK WRITES(b, sizeof(*b)); WRITES(c, sizeof(*c))
 SHADOW_WRITER(BASE, void, psych_check, (int a, int *b, int *c), (a, b, c), WRITES_PSYCH_CHECK, "%d", a)
 SHADOW2(BASE, int, base_rank, int, int)
+SHADOW_WRITER(BASE, void, bitmask, (int a, int *b, uint32_t *c), (a, b, c), (WRITES(b, sizeof(*b)), WRITES(c, sizeof(*c))),
+              "%d", a)
+SHADOW_WRITER(BASE, void, set_base, (int a), (a), (WRITES(game_current_base_id, 4), WRITES(game_current_base, 4)), "%d", a)
+SHADOW_WRITER(BASE, void, say_base, (char *a, int b), (a, b), WRITES(a, strlen(a) + 128), "%d", b)
+SHADOW2(BASE, int, base_at, int, int)
+SHADOW_WRITER(BASE, int, base_find, (int a, int b), (a, b), WRITES(game_base_find_dist, 4), "%d, %d", a, b)
+SHADOW_WRITER(BASE, int, base_find_2, (int a, int b, int c), (a, b, c), WRITES(game_base_find_dist, 4), "%d, %d, %d", a, b, c)
+SHADOW_WRITER(BASE, int, base_find_3, (int a, int b, int c, int d, int e, int f), (a, b, c, d, e, f),
+              WRITES(game_base_find_dist, 4), "%d, %d, %d, %d, %d, %d", a, b, c, d, e, f)
+SHADOW_WRITER(BASE, void, base_mark, (int a), (a),
+              (hooks_writes_game(&w_), WRITES(*game_map, (size_t)*game_map_half_width * *game_map_height * sizeof(struct map_tile))),
+              "%d", a)
+SHADOW1(BASE, int, base_lose_minerals, int)
+SHADOW_WRITER(BASE, void, set_fac, (int a, int b, int c), (a, b, c), WRITES(game_bases[b].facilities_built, 12), "%d, %d, %d",
+              a, b, c)
+SHADOW2(BASE, int, has_fac_announced, int, int)
+SHADOW_WRITER(BASE, void, set_fac_announced, (int a, int b, int c), (a, b, c), WRITES(game_factions[a].facility_announced, 12),
+              "%d, %d, %d", a, b, c)
+SHADOW_WRITER(BASE, void, base_first, (int a), (a), WRITES(&game_bases[a].queue[0], 4), "%d", a)
+SHADOW_WRITER(BASE, void, make_base_unique, (int a), (a), WRITES(game_bases[a].name, sizeof game_bases[a].name), "%d", a)
+SHADOW2(BASE, int, has_project, int, int)
+SHADOW1(BASE, int, base_project, int)
+SHADOW_FN(BASE, int, base_claimed, (int a, int b, int c, int d, int e, int f), (a, b, c, d, e, f), "%d, %d, %d, %d, %d, %d", a, b,
+          c, d, e, f)
+SHADOW1(BASE, int, has_fac_built, int)
+SHADOW3(BASE, uint32_t, has_treaty, int, int, uint32_t)
 SHADOW1(BASE, int, pop_goal, int)
 SHADOW1(BASE, int, pop_goal_fac, int)
 SHADOW3(BASE, int, cost_factor, int, int, int)
@@ -1682,6 +1936,112 @@ static void sweep_bases(void) {
     }
 }
 
+// Finding bases: every base's square and the squares around it, the
+// nearest base by faction, region and pacts, and the bit helpers; each
+// base marked, given its first production and a unique name (once named
+// as another base), and its retooling losses for a human.
+static void sweep_lookups(void) {
+    int bases = *game_base_count, t = *game_turn;
+    for (int n = -9; n < 80; n += 1) {
+        int o;
+        uint32_t m;
+        check_bitmask(n, &o, &m);
+    }
+    for (int sp = 0; sp < SP_COUNT; sp++) {
+        check_base_project(sp);
+        for (int f = -1; f <= FACTION_COUNT; f++) check_has_project(sp, f);
+    }
+    for (int f = 0; f < FACTION_COUNT; f++)
+        for (int g = 0; g < FACTION_COUNT; g++) {
+            check_has_treaty(f, g, 0xffffffffu);
+            check_has_treaty(f, g, (uint32_t)(1u << ((f + g + t) % 32)));
+        }
+    for (int f = 0; f < FACTION_COUNT; f++)
+        for (int fac = 0; fac < 76; fac += 1 + (fac + t) % 3) {
+            check_has_fac_announced(f, fac);
+            if (fac % 7 == t % 7) check_set_fac_announced(f, fac, fac & 1);
+        }
+    for (int i = 0; i < 16; i++) {
+        int item = (i * 13 + t) % 120 - 60, score = (i * 7 + t) % 40;
+        check_base_claimed(item, score, i & 1, i & 2, i & 4, i & 8);
+        check_base_claimed(game_gov_claims[i % 4], game_gov_claim_scores[i % 4] + i % 3 - 1, i & 1, 0, 0, i & 2);
+    }
+    char text[256];
+    int id = *game_current_base_id;
+    struct base *current = *game_current_base;
+    for (int b = -1; b < bases; b++) {
+        strcpy(text, "Base: ");
+        check_say_base(text, b);
+        if (b < 0) continue;
+        const struct base *B = &game_bases[b];
+        check_set_base(b);
+        *game_current_base_id = b;
+        for (int fac = 0; fac < 70; fac += 3) check_has_fac_built(fac + (b + t) % 3);
+        check_has_fac_built(65 + b % 3);
+        for (int i = 0; i < 9; i++) {
+            int x = B->x + (i % 3 - 1) * (1 + b % 2), y = B->y + (i / 3 - 1) * (1 + b % 2);
+            check_base_at(x, y);
+            check_base_find(x, y);
+            check_base_find_2(x, y, (b + i) % FACTION_COUNT);
+            int region = (*game_map)[(B->x >> 1) + B->y * *game_map_half_width].region;
+            check_base_find_3(x, y, B->faction, i & 1 ? region : -1, i & 2 ? -2 : (i + t) % FACTION_COUNT - 1,
+                              i & 4 ? (b + t) % FACTION_COUNT : -1);
+            check_base_find_3(x, y, -1, i & 1 ? region : -1, (b + i) % FACTION_COUNT, -1);
+        }
+        check_base_first(b);
+        check_set_fac((b * 5 + t) % 70, b, b & 1);
+        check_make_base_unique(b);
+        if (bases > 1) {  // as if named as the next base
+            char name[sizeof B->name];
+            struct base *N = &game_bases[(b + 1) % bases];
+            memcpy(name, N->name, sizeof name);
+            memcpy(N->name, B->name, sizeof name);
+            check_make_base_unique(b);
+            check_make_base_unique((b + 1) % bases);
+            memcpy(N->name, name, sizeof name);
+        }
+        // Retooling as a human, with the penalty on.
+        uint8_t humans = *game_human_factions;
+        int32_t penalty = game_rules_basic->retool_penalty;
+        *game_human_factions = 0xff;
+        if (!penalty) game_rules_basic->retool_penalty = 50;
+        check_base_lose_minerals(b);
+        *game_human_factions = humans, game_rules_basic->retool_penalty = penalty;
+    }
+    *game_current_base_id = id, *game_current_base = current;
+    check_base_at(-1, 0), check_base_at(0, -1), check_base_at(*game_map_width, 0), check_base_at(0, *game_map_height);
+    check_base_find(0, 0);
+    if (bases) check_base_mark(t % bases);
+    if (!bases) return;
+    // First production with every tech, so that more designs compete.
+    uint8_t achieved[TECH_COUNT];
+    memcpy(achieved, game_tech_achieved, sizeof achieved);
+    memset(game_tech_achieved, 0xff, sizeof achieved);
+    for (int b = 0; b < bases; b++) check_base_first(b);
+    memcpy(game_tech_achieved, achieved, sizeof achieved);
+    // A base unseen even by its own faction, and one moved onto each edge
+    // of the map (its square marked for the moment).
+    struct base *B = &game_bases[t % bases];
+    uint8_t seen = B->visibility;
+    B->visibility = 0;
+    for (int f = 0; f < FACTION_COUNT; f++) check_base_find_3(B->x, B->y, B->faction, -1, -1, f);
+    B->visibility = seen;
+    int16_t bx = B->x, by = B->y;
+    int w = *game_map_width, h = *game_map_height;
+    const int edges[4][2] = {{0, 0}, {w - 2 + (h & 1), h - 1}, {w - 1 - ((h - 1) & 1), h - 1}, {w - 2, 0}};
+    for (int i = 0; i < 4; i++) {
+        int x = edges[i][0], y = edges[i][1];
+        if ((x + y) & 1) x ^= 1;
+        struct map_tile *T = &(*game_map)[(x >> 1) + y * *game_map_half_width];
+        uint32_t bits = T->bits;
+        B->x = (int16_t)x, B->y = (int16_t)y, T->bits |= MAP_BASE;
+        check_base_at(x, y);
+        check_base_find(x, y);
+        T->bits = bits;
+    }
+    B->x = bx, B->y = by;
+}
+
 static void base_sweep(void) {
     slice++;
     if (!*game_map || *game_map_width <= 0 || *game_map_height <= 0) return;
@@ -1689,11 +2049,31 @@ static void base_sweep(void) {
     hooks_sweeping = 1;
     sweep_yields();
     sweep_bases();
+    sweep_lookups();
     hooks_sweeping = sweeping;
 }
 
 #define PUSH_EBP_MOV_EBP_ESP 0x55, 0x8b, 0xec
 static const struct hook base_hooks[] = {
+    HOOK(0x50ba00, bitmask, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x4d, 0x08),                       // mov ecx, [ebp+8]
+    HOOK(0x4e39d0, set_base, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                      // mov eax, [ebp+8]
+    HOOK(0x4e3a00, say_base, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x0c),                      // mov eax, [ebp+12]
+    HOOK(0x4e3a50, base_at, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x57),                       // push ebx; push esi; push edi
+    HOOK(0x4e3b80, base_find, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),                     // sub esp, 12
+    HOOK(0x4e3c60, base_find_2, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),                   // sub esp, 12
+    HOOK(0x4e3d50, base_find_3, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),                   // sub esp, 12
+    HOOK(0x4e4350, base_mark, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                     // mov eax, [ebp+8]
+    HOOK(0x4e4810, base_lose_minerals, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0x2c, 0x98, 0x94, 0x00),  // mov eax, [retool_penalty]
+    HOOK(0x4e48b0, set_fac, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x55, 0x08),                 // push ecx; mov edx, [ebp+8]
+    HOOK(0x4e4900, has_fac_announced, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x45, 0x0c),       // push ecx; mov eax, [ebp+12]
+    HOOK(0x4e4960, set_fac_announced, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x55, 0x0c),       // push ecx; mov edx, [ebp+12]
+    HOOK(0x4e4aa0, base_first, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),                    // sub esp, 8
+    HOOK(0x4f7fe0, make_base_unique, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x54),              // sub esp, 84
+    HOOK(0x4f80d0, has_project, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                   // mov eax, [ebp+8]
+    HOOK(0x4f8110, base_claimed, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x10),                  // mov eax, [ebp+16]
+    HOOK(0x500290, has_fac_built, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x45, 0x08),           // push ecx; mov eax, [ebp+8]
+    HOOK(0x5002e0, base_project, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                  // mov eax, [ebp+8]
+    HOOK(0x5002f0, has_treaty, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                    // mov eax, [ebp+8]
     HOOK(0x4e6e50, crop_yield, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),                    // sub esp, 8
     HOOK(0x4e7310, mine_yield, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0xf0, 0xfa, 0x68, 0x00),        // mov eax, [0x68faf0]
     HOOK(0x4e7750, energy_yield, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x18),                  // sub esp, 24

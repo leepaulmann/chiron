@@ -1072,7 +1072,7 @@ int get_basic_offense(int veh_att, int veh_def, int psi, int bombard, int battle
     const struct veh *A = &game_vehs[veh_att];
     int f = A->faction;
     int m = f ? morale_veh(veh_att, 1, 0) : morale_alien(veh_att, veh_def >= 0 ? game_vehs[veh_def].faction : -1);
-    int b = game_base_at(A->x, A->y);
+    int b = base_at(A->x, A->y);
     if (b >= 0) {
         m = morale_at_home(m, b, f, A->proto, 4);
         if (battle) {
@@ -1107,7 +1107,7 @@ int get_basic_defense(int veh_def, int veh_att, int psi, int bombard) {
     const struct veh *D = &game_vehs[veh_def], *A = &game_vehs[veh_att];
     int f = D->faction;
     int m = f ? morale_veh(veh_def, 1, 0) : morale_alien(veh_def, veh_att >= 0 ? A->faction : -1);
-    int b = game_base_at(D->x, D->y);
+    int b = base_at(D->x, D->y);
     if (b >= 0) {
         m = morale_at_home(m, b, f, D->proto, 0);
         int p = game_factions[f].se_pending[SE_MORALE];
@@ -1556,7 +1556,7 @@ void battle_compute(int veh_att, int veh_def, int *off_out, int *def_out, int co
         goto out;
     }
     int dx = D->x, dy = D->y;
-    base = game_base_at(dx, dy);
+    base = base_at(dx, dy);
     if (psi) {
         if (base >= 0 && R->combat_base_def) {
             report(1, R->combat_base_def, game_label(332));
@@ -1677,7 +1677,7 @@ void battle_compute(int veh_att, int veh_def, int *off_out, int *def_out, int co
         for (int i = 0; i < 25; i++) {
             int x, y;
             if (!ring_square(dx, dy, i, &x, &y)) continue;
-            int b = game_base_at(x, y);
+            int b = base_at(x, y);
             if (b >= 0 && game_bases[b].faction == D->faction && built(b, FAC_FLECHETTE_DEFENSE)) {
                 def = def * 3 / 2;
                 report(1, 50, game_label(1113));
@@ -1691,7 +1691,7 @@ void battle_compute(int veh_att, int veh_def, int *off_out, int *def_out, int co
                 int x, y;
                 if (!ring_square(dx, dy, i, &x, &y) || !is_sensor(x, y)) continue;
                 if ((square(x, y)->climate & 0xe0) < ALT_SHORE_LINE << 5) {
-                    if (game_bases[game_base_find(x, y)].faction != D->faction) continue;
+                    if (game_bases[base_find(x, y)].faction != D->faction) continue;
                 } else {
                     int owner = whose_territory(D->faction, x, y, NULL, 0);
                     if (owner >= 0 && owner != D->faction) continue;
@@ -1790,7 +1790,7 @@ int best_defender(int veh_def, int veh_att, int artillery) {
     int offense = veh_att >= 0 ? get_basic_offense(veh_att, veh_def, 0, 0, 0) : 8;
     const struct map_tile *t = square(D->x, D->y);
     int ocean = (t->climate & 0xe0) < ALT_SHORE_LINE << 5;
-    int base = game_base_at(D->x, D->y);
+    int base = base_at(D->x, D->y);
     int best_score = -999, best = veh_def;
     if (veh_def < 0) return best;
     int i = veh_def;
@@ -1958,7 +1958,7 @@ int veh_init(int proto, int faction, int x, int y) {
     if (proto_of(proto)->plan <= PLAN_NAVAL_TRANSPORT) F->total_combat_units++;
     F->units_active[proto]++;
     veh_clear(veh, proto, faction);
-    int base = game_base_find(x, y);
+    int base = base_find(x, y);
     struct veh *V = &game_vehs[veh];
     if (proto_of(proto)->plan == PLAN_ARTIFACT) {
         if (*game_state & GAME_STATE_UNK_40000) V->flags |= VEH_FLAG_UNK_20;
@@ -1981,7 +1981,7 @@ int veh_init(int proto, int faction, int x, int y) {
         if (F->region_total_bases[region] > best) best = F->region_total_bases[region], enemy = i;
     }
     if (enemy >= 0) {
-        game_base_find3(x, y, enemy, region, -1, -1);
+        base_find_3(x, y, enemy, region, -1, -1);
         if (vector_dist(x, y, F->target_x, F->target_y) > *game_base_find_dist) return veh;
     }
     int limit = F->region_total_bases[region] * 2 / 3;

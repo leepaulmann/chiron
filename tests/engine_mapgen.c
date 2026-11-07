@@ -59,29 +59,22 @@ static void __attribute__((thiscall)) fake_path(void *path) {
     (void)path;
     path_calls++;
 }
-static int fake_base_find(int x, int y) { (void)x, (void)y; return -1; }
 static char *__attribute__((thiscall)) fake_strings_get(void *table, char *s) {
     (void)table;
     return s;
 }
 // For alt_set() during a game.
 static struct base bases[2];
-static int base_here = -1, landmarks_deleted, domes_given, bases_killed, towers;
+static int landmarks_deleted, bases_killed, towers;
 static int32_t skip_territory, battle_state, net_game, add_temperature, halted, native_life = 1;
 static int32_t erosive_forces, settings[7], rain_base, rain_faction, current_faction = 1, control_turn;
 static uint32_t fungus_clears = MAP_FOREST;
 static uint8_t human_factions;
-static int fake_base_at(int x, int y) { (void)x, (void)y; return base_here; }
 static int fake_veh_at(int x, int y) { (void)x, (void)y; return -1; }
 static int fake_stack_fix(int v) { return v; }
 static void fake_delete_landmark(int x, int y) { (void)x, (void)y; landmarks_deleted++; }
-static void fake_set_fac(int facility, int base, int on) {
-    if (facility == FAC_PRESSURE_DOME && on) bases[base].facilities_built[FAC_PRESSURE_DOME / 8] |= 1 << FAC_PRESSURE_DOME % 8;
-    domes_given++;
-}
 static int fake_is_objective(int base) { (void)base; return 0; }
 static void fake_base_kill(int base) { (void)base; bases_killed++; }
-static int fake_base_find2(int x, int y, int f) { (void)x, (void)y, (void)f; return -1; }
 static int fake_veh_init(int unit, int f, int x, int y) { (void)unit, (void)f, (void)x, (void)y; return towers++; }
 
 int main(void) {
@@ -97,13 +90,13 @@ int main(void) {
     game_radius_x = radius_x, game_radius_y = radius_y, game_radius_count = radius_count;
     game_turn = &turn, game_rand = fake_rand, game_getptd = fake_getptd;
     game_random = fake_random, game_random_reseed = fake_reseed, game_do_all_non_input = fake_pump;
-    game_path_continents = fake_path, game_base_find = fake_base_find;
+    game_path_continents = fake_path;
     game_ocean_coverage = &ocean_coverage, game_brush_total = &brush_total, game_brush_land_wanted = &brush_wanted;
     game_brush_stroke = &brush_stroke, game_cloud_cover = &cloud_cover, game_state = &state;
     game_landmarks = landmarks, game_natural = natural, game_strings_get = fake_strings_get, game_expansion = &expansion;
-    game_bases = bases, game_base_at = fake_base_at, game_veh_at = fake_veh_at, game_stack_fix = fake_stack_fix;
-    game_delete_landmark = fake_delete_landmark, game_set_fac = fake_set_fac, game_is_objective = fake_is_objective;
-    game_base_kill = fake_base_kill, game_base_find2 = fake_base_find2, game_veh_init = fake_veh_init;
+    game_bases = bases, game_veh_at = fake_veh_at, game_stack_fix = fake_stack_fix;
+    game_delete_landmark = fake_delete_landmark, game_is_objective = fake_is_objective;
+    game_base_kill = fake_base_kill, game_veh_init = fake_veh_init;
     game_world_skip_territory = &skip_territory, game_battle_state = &battle_state, game_net_multiplayer = &net_game;
     game_control_turn = &control_turn, game_world_add_temperature = &add_temperature, game_halted = &halted;
     game_native_life = &native_life, game_erosive_forces = &erosive_forces, game_map_settings = settings;
@@ -322,11 +315,11 @@ int main(void) {
     // given a pressure dome.
     skip_territory = 0, battle_state = 1;
     at(2, 2)->climate = 3 << 5;
-    base_here = 0, bases[0].faction = 1, bases[0].pop_size = 9;
+    base_count = 1, bases[0].x = 2, bases[0].y = 2, bases[0].faction = 1, bases[0].pop_size = 9;
     rand_next = 3;  // 3 % 3 + 2 = 2 lost, under half
     alt_set(2, 2, 2);
     EXPECT(bases[0].pop_size, 5);
-    EXPECT(domes_given, 1);
+    EXPECT(bases[0].facilities_built[FAC_PRESSURE_DOME / 8] >> FAC_PRESSURE_DOME % 8 & 1, 1);
     EXPECT(submerged[1], 1);
     EXPECT(factions[1].flags & FACTION_FLAG_BASE_SUBMERGED, FACTION_FLAG_BASE_SUBMERGED);
     // With a dome, nothing more happens.
@@ -343,7 +336,7 @@ int main(void) {
     at(2, 2)->climate = 3 << 5, bases[0].pop_size = 2, factions[1].base_count = 4;
     alt_set(2, 2, 2);
     EXPECT(bases_killed, 1);
-    base_here = -1, turn = 0;
+    base_count = 0, at(2, 2)->bits &= ~(uint32_t)MAP_BASE, turn = 0;
 
     // Shorelines: each square's altitude from its contour, then slopes made
     // smooth from the peaks down.

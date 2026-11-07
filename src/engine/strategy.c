@@ -6,6 +6,7 @@
 // original.
 #include <string.h>
 
+#include "base.h"
 #include "game.h"
 #include "map.h"
 #include "shadow.h"
@@ -92,7 +93,7 @@ static void rival_base_goals(int faction, int b) {
     game_add_goal(faction, GOAL_ATTACK, pri, x, y, -1);
     int tx = base->terraform_x, ty = base->terraform_y;
     if (!on_map(tx, ty)) return;
-    int t = game_base_find(tx, ty);
+    int t = base_find(tx, ty);
     if (t >= 0 && game_bases[t].faction == owner && game_terraform_cost(tx, ty, faction) <= me->energy_credits / 8)
         game_add_goal(faction, GOAL_RAISE_LAND, 2, tx, ty, -1);
 }
@@ -249,7 +250,7 @@ static void own_unit(int faction, int v, struct census *c) {
         return;
     }
     if (plan <= PLAN_COMBAT && !(u->state & VSTATE_TARGET)) {
-        int gb = game_base_at(u->x, u->y);
+        int gb = base_at(u->x, u->y);
         if (gb < 0 && u->status_icon == 'F') gb = u->home_base;
         if (gb >= 0) {
             int garrison = game_garrison_check(gb), needed = game_garrison_check(gb);
@@ -327,7 +328,7 @@ static int drop_target(int faction, int human, int *target_region) {
     struct faction_data *me = &game_factions[faction];
     int skip = human;
     if (me->target_x < 0) return skip;
-    int tb = game_base_at(me->target_x, me->target_y);
+    int tb = base_at(me->target_x, me->target_y);
     *target_region = region_at(me->target_x, me->target_y);
     if (tb < 0 || game_bases[tb].faction != faction) return 1;
     int tr = *target_region;
@@ -558,10 +559,10 @@ static void choose_target(int faction, int region, int waiting) {
         if (ab >= 0 && (me->diplo_status[game_bases[ab].faction] & (TREATY_UNK_800 | TREATY_VENDETTA)) &&
             region_at(game_bases[ab].x, game_bases[ab].y) == region) {
             dist = *game_base_find_dist = vector_dist(base->x, base->y, game_bases[ab].x, game_bases[ab].y);
-        } else if (game_base_find3(base->x, base->y, rival, region, -1, -1) >= 0) {
+        } else if (base_find_3(base->x, base->y, rival, region, -1, -1) >= 0) {
             dist = *game_base_find_dist;
         } else {
-            game_base_find2(base->x, base->y, rival);
+            base_find_2(base->x, base->y, rival);
             dist = *game_base_find_dist *= 2;
         }
         if (dist < best_dist) best_dist = dist, best_base = b;
@@ -577,7 +578,7 @@ static void choose_target(int faction, int region, int waiting) {
         if (p->plan > PLAN_DEFENSIVE || game_chassis[p->chassis].triad != TRIAD_LAND || game_has_abil(u->proto, ABL_DROP_POD))
             continue;
         if (region_at(u->x, u->y) != region || (u->order != 0 && u->order != ORDER_MOVE_TO)) continue;
-        game_base_find2(u->x, u->y, rival);
+        base_find_2(u->x, u->y, rival);
         if (*game_base_find_dist <= vector_dist(u->x, u->y, me->target_x, me->target_y)) continue;
         int wpn = game_weap_strat(p->weapon, faction), arm = game_arm_strat(p->armor, faction);
         if (wpn < arm && ((me->target_kinds & 1) || coast_only)) continue;
@@ -624,7 +625,7 @@ static int best_goal(int faction, int v, int plan, int reassign, int region, con
         } else if (plan == PLAN_RECON && game_has_abil(u->proto, ABL_EMPATH)) {
             continue;
         }
-        int gb = game_base_at(gx, gy);
+        int gb = base_at(gx, gy);
         int cost = vector_dist(x, y, gx, gy) << 8;
         int assigned =
             (reassign || (gb >= 0 && game_bases[gb].faction == faction && game_bases[gb].ai_plan)) ? 0 : assigned_count[g];
@@ -762,7 +763,7 @@ static void assign_unit(int faction, int v, int pass, int32_t *assigned_count) {
         int artifacts = game_stack_check(v, STACK_PLAN, PLAN_ARTIFACT, -1, -1);
         if (game_stack_check(v, STACK_ALL, -1, -1, -1) - artifacts <= 1) return;
         if (plan == PLAN_DEFENSIVE || plan == PLAN_RECON || plan == PLAN_COMBAT) {
-            int b = game_base_at(x, y);
+            int b = base_at(x, y);
             if (game_stack_check(v, STACK_GUARDS, -1, -1, -1) < game_garrison_check(b)) return;
         }
     }
@@ -778,7 +779,7 @@ static void assign_unit(int faction, int v, int pass, int32_t *assigned_count) {
     if (plan_of(u->proto) == PLAN_COLONY) u->movement_turns = 0;
     if (goal->type == GOAL_SCOUT) u->state |= VSTATE_SCOUTING;
     if (goal->type == GOAL_DEFEND) {
-        int b = game_base_at(goal->x, goal->y);
+        int b = base_at(goal->x, goal->y);
         if (b >= 0 && game_bases[b].faction == faction) {
             game_bases[b].state |= BSTATE_DEFEND;
             if (!is_human(faction)) game_base_reset(b, 0);

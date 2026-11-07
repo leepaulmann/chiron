@@ -11,6 +11,7 @@
 
 #include <string.h>
 
+#include "base.h"
 #include "game.h"
 #include "shadow.h"
 
@@ -366,7 +367,7 @@ int whose_territory(int faction, int x, int y, int *base, int ignore_comm) {
     const uint32_t known = TREATY_COMMLINK | TREATY_UNK_8000000;
     if (!ignore_comm && !(*game_state & GAME_STATE_OMNISCIENT) && game_has_treaty(faction, owner, known) != known)
         return -1;
-    if (base) *base = game_base_find3(x, y, -1, t->region, -1, -1);
+    if (base) *base = base_find_3(x, y, -1, t->region, -1, -1);
     return owner;
 }
 
@@ -403,7 +404,7 @@ int get_there(int veh, int x, int y) {
     int vx = game_vehs[veh].x, vy = game_vehs[veh].y;
     int from = region_at(vx, vy), to = region_at(x, y);
     if (triad == TRIAD_LAND) return from == to;
-    int base_from = game_base_at(vx, vy), base_to = game_base_at(x, y);
+    int base_from = base_at(vx, vy), base_to = base_at(x, y);
     if (base_to >= 0) return base_from >= 0 ? port_to_port(base_from, base_to) : base_on_sea(base_to, from);
     if (is_ocean(x, y)) return base_from >= 0 ? base_on_sea(base_from, to) : from == to;
     return base_from >= 0 ? port_to_coast(base_from, to) : sea_coast(to, from);
@@ -431,7 +432,7 @@ int valid_landmark(int x, int y, int faction) {
     int owner = *game_net_multiplayer ? tile(x, y)->territory : whose_territory(faction, x, y, NULL, 0);
     if (owner == faction) return 1;
     if (owner > 0) return 0;
-    int base = game_base_find(x, y);
+    int base = base_find(x, y);
     return base < 0 || game_bases[base].faction == faction;
 }
 
@@ -440,7 +441,7 @@ int valid_landmark(int x, int y, int faction) {
 // axis, as the original checks), or 0.
 int is_sensor(int x, int y) {
     if (tile(x, y)->bits & MAP_SENSOR) return 1;
-    int base = game_base_find(x, y);
+    int base = base_find(x, y);
     if (base == -1) return 0;
     const struct base *b = &game_bases[base];
     int dx = x_dist(x, b->x), dy = iabs(y - b->y);
@@ -699,7 +700,7 @@ void reset_territory(void) {
                                                              : (flags & FACTION_FLAG_MAP_REVEALED) || (t->visibility & (1 << f));
                 if (seen) game_factions[f].region_visible_tiles[region]++;
             }
-            int base = game_base_find3(x, y, -1, region, -1, -1), owner = -1;
+            int base = base_find_3(x, y, -1, region, -1, -1), owner = -1;
             int ocean = t->climate >> 5 < ALT_SHORE_LINE;
             if (base >= 0) {
                 int limit = game_rules_basic->territory_max_dist;
@@ -714,7 +715,7 @@ void reset_territory(void) {
                         else if (x2 >= *game_map_width) x2 -= *game_map_width;
                     }
                     if (y2 < 0 || y2 >= *game_map_height || x2 < 0 || x2 >= *game_map_width) continue;
-                    int b = game_base_at(x2, y2);
+                    int b = base_at(x2, y2);
                     if (b >= 0) {
                         owner = game_bases[b].faction;
                         break;
@@ -749,7 +750,7 @@ void reset_territory(void) {
             }
             for (int f = 1; f < FACTION_COUNT; f++) {
                 if (!game_factions[f].region_total_bases[region] || !site_known(f, t) || game_at_site(f, 3, x, y)) continue;
-                if (game_base_find3(x, y, f, region, -1, -1) < 0) continue;
+                if (base_find_3(x, y, f, region, -1, -1) < 0) continue;
                 int d = *game_base_find_dist, limit = game_rules_basic->territory_max_dist;
                 if (d >= limit && d <= 2 * limit) game_add_site(f, 3, 1, x, y);
             }

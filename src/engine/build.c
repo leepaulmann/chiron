@@ -45,11 +45,6 @@ static inline char *text(uint32_t addr) { return (char *)game_at(addr); }
 static inline int built(int base, int fac) {  // the inline test the original repeats
     return fac < 65 ? (game_bases[base].facilities_built[fac >> 3] >> (fac & 7)) & 1 : 0;
 }
-static inline int has_fac_built(int fac) { return fac < 65 && built(*game_current_base_id, fac); }
-static inline int has_project(int sp, int faction) {
-    int b = game_secret_projects[sp];
-    return b >= 0 && game_bases[b].faction == faction;
-}
 static inline int treaty(int faction, int other, uint32_t bits) { return game_factions[faction].diplo_status[other] & bits; }
 static inline int triad_of(int proto) { return game_chassis[game_protos[proto].chassis].triad; }
 
@@ -75,12 +70,6 @@ static int guard_check(int faction, int region) {
 
 // Whether base_reset() already picked this item, scoring at least as well,
 // for a governor priority the base doesn't have.
-static int base_claimed(int item, int score, int a, int b, int c, int d) {
-    int skip[4] = {a, b, c, d};
-    for (int i = 0; i < 4; i++)
-        if (!skip[i] && item == game_gov_claims[i] && score >= game_gov_claim_scores[i]) return 1;
-    return 0;
-}
 
 // The base's squares that may lie off the map edge, wrapped.
 static int wrap_x(int x) {
@@ -1895,11 +1884,6 @@ int base_making(int item, int base) {
 
 // bitmask(): a bit number as a byte index and a bit, as the game keeps
 // its project news.
-static void bitmask(int n, int *word, uint32_t *mask) {
-    *word = n / 8;
-    *mask = 1u << (n & 7);
-}
-
 static int iabs(int v) { return v < 0 ? -v : v; }
 
 // Sets what the base builds, keeping its faction's count of units being

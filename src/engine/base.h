@@ -2,6 +2,8 @@
 // from it.
 #pragma once
 
+#include <stdint.h>
+
 // What a square yields to `base` (or -1 for none) of `faction`; with `flag`
 // set, as if the square were improved for it (the game's terraforming
 // advice). Output above 2 a square is cut until the faction has the tech for
@@ -86,3 +88,24 @@ void allocate_energy(int faction);
 void repair_phase(int faction);
 // A faction's whole turn.
 void faction_upkeep(int faction);
+
+// Finding, marking and setting up bases (base.c).
+void bitmask(int n, int *offset, uint32_t *mask);
+void set_base(int base);
+void say_base(char *buf, int base);
+int base_at(int x, int y);
+int base_find(int x, int y);
+int base_find_2(int x, int y, int faction);
+int base_find_3(int x, int y, int faction, int region, int other, int seen_by);
+void base_mark(int base);
+int base_lose_minerals(int base);
+void set_fac(int fac, int base, int on);
+int has_fac_announced(int faction, int fac);
+void set_fac_announced(int faction, int fac, int on);
+void base_first(int base);
+void make_base_unique(int base);
+int has_project(int sp, int faction);
+int base_project(int sp);
+int base_claimed(int item, int score, int a, int b, int c, int d);
+int has_fac_built(int fac);
+uint32_t has_treaty(int faction, int other, uint32_t bits);

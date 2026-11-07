@@ -48,34 +48,12 @@ static int failures;
 static struct map_tile *at(int x, int y) { return &tiles[x / 2 + y * (W / 2)]; }
 
 // Stand-ins for the game functions the map code calls.
-static int fake_base_at(int x, int y) {
-    for (int i = 0; i < base_count; i++)
-        if (bases[i].x == x && bases[i].y == y) return i;
-    return -1;
-}
 static int fake_veh_at(int x, int y) {
     for (int i = 0; i < veh_count; i++)
         if (vehs[i].x == x && vehs[i].y == y) return i;
     return -1;
 }
 // The nearest base; ties go to the last, as in the game.
-static int fake_base_find3(int x, int y, int faction, int region, int owner, int seen_by) {
-    (void)faction, (void)owner, (void)seen_by;
-    int best = -1, dist = 9999;
-    for (int i = 0; i < base_count; i++) {
-        if (region >= 0 && region_at(bases[i].x, bases[i].y) != region) continue;
-        int d = vector_dist(x, y, bases[i].x, bases[i].y);
-        if (d <= dist) dist = d, best = i;
-    }
-    return best;
-}
-static int fake_base_find(int x, int y) { return fake_base_find3(x, y, -1, -1, -1, -1); }
-// reset_territory's: the same, leaving the distance behind.
-static int territory_find3(int x, int y, int faction, int region, int owner, int seen_by) {
-    int best = fake_base_find3(x, y, faction, region, owner, seen_by);
-    if (best >= 0) find_dist = vector_dist(x, y, bases[best].x, bases[best].y);
-    return best;
-}
 static int world_site_stub(int x, int y, int unk) { return 7; }
 static int sites_added, site_faction, site_x, site_y;
 static void add_site_stub(int faction, int type, int priority, int x, int y) {
@@ -103,8 +81,7 @@ int main(void) {
     game_vehs = vehs, game_veh_count = &veh_count, game_protos = protos, game_chassis = chassis;
     game_state = &state, game_draw_state = &draw_state, game_net_multiplayer = &net;
     game_base_find_dist = &find_dist, game_human_factions = &humans;
-    game_base_at = fake_base_at, game_veh_at = fake_veh_at;
-    game_base_find = fake_base_find, game_base_find3 = fake_base_find3;
+    game_veh_at = fake_veh_at;
     for (int i = 0; i < 3; i++) protos[i].chassis = (uint8_t)i, chassis[i].triad = (uint8_t)i;
     radius_x[0] = radius_y[0] = 0;
     for (int i = 1; i < RADIUS_SQUARES; i++) {
@@ -456,17 +433,20 @@ int main(void) {
     // distance at sea).
     static struct rules_basic rules_basic = {.territory_max_dist = 1};
     static int32_t difficulty = 4;
-    game_rules_basic = &rules_basic, game_difficulty = &difficulty, game_base_find3 = territory_find3;
+    game_rules_basic = &rules_basic, game_difficulty = &difficulty;
     game_world_site = world_site_stub, game_add_site = add_site_stub, game_at_site = at_site_stub;
     memset(tiles, 0, sizeof tiles), memset(factions, 0, sizeof factions), memset(continents, 0, sizeof continents);
     for (int y = 0; y < H; y++)
         for (int x = y & 1; x < W; x += 2) put(x, y, x < 6 ? 3 : 1, x < 6 ? 1 : 2), at(x, y)->territory = -1;
     flat = 0, seed = 0, rules = 0, humans = 1 << 1, draw_state = 0;
-    base_count = 2;
+    base_count = 3;
     bases[0].x = 0, bases[0].y = 2, bases[0].faction = 1;
     bases[1].x = 4, bases[1].y = 4, bases[1].faction = 2;
+    bases[2].x = 4, bases[2].y = 2, bases[2].faction = 2;  // 2 squares from the pod at (2, 0)
+    at(4, 2)->bits = MAP_BASE;
     at(0, 2)->territory = 1;
-    at(0, 2)->climate |= 1 << 3, at(0, 2)->bits = MAP_BASE_RADIUS;  // farmable, in a base's radius
+    at(0, 2)->climate |= 1 << 3, at(0, 2)->bits = MAP_BASE_RADIUS | MAP_BASE;  // farmable, in a base's radius
+    at(4, 4)->bits = MAP_BASE;
     at(2, 0)->owner_site = 0x9f;  // site 9 already
     at(7, 1)->bits = at(2, 0)->bits = MAP_SUPPLY_POD;
     at(7, 1)->visibility = 1 << 1;
@@ -491,9 +471,9 @@ int main(void) {
     EXPECT(draw_state, DRAW_TERRAIN);
     EXPECT(factions[1].region_territory_tiles[1], 1);
     EXPECT(factions[1].region_territory_tiles[2], 3);  // (6, 2) too
-    EXPECT(factions[2].region_territory_tiles[1], 1);
+    EXPECT(factions[2].region_territory_tiles[1], 2);  // and (4, 2)
     EXPECT(factions[2].region_territory_tiles[2], 1);
-    EXPECT(factions[0].region_territory_tiles[1], 16);
+    EXPECT(factions[0].region_territory_tiles[1], 15);
     EXPECT(factions[1].region_visible_tiles[1], 18);
     EXPECT(factions[1].region_visible_tiles[2], 6);
     EXPECT(factions[2].region_visible_tiles[1], 1);

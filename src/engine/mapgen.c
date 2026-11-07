@@ -9,6 +9,7 @@
 // the game's writable memory, the map and rand()'s state.
 #include "mapgen.h"
 
+#include "base.h"
 #include "game.h"
 #include "map.h"
 #include "shadow.h"
@@ -46,7 +47,7 @@ static int flood_base(int b) {
     if (half < lost || lost > 10) half = lost;
     else if (half > 10) half = 10;
     base->pop_size = (int8_t)(base->pop_size - half);
-    game_set_fac(FAC_PRESSURE_DOME, b, 1);
+    set_fac(FAC_PRESSURE_DOME, b, 1);
     int f = base->faction;
     game_factions[f].flags |= FACTION_FLAG_BASE_SUBMERGED;
     game_base_submerged_count[f]++;
@@ -74,13 +75,13 @@ void alt_set(int x, int y, int altitude) {
         if ((old < ALT_SHORE_LINE) != sea) {
             t->bits &= 0x7e1377a3;
             for (int f = 0; f < 7; f++) t->bits_seen[f] = t->bits;
-            int b = *game_world_skip_territory ? -2 : game_base_at(x, y);
+            int b = *game_world_skip_territory ? -2 : base_at(x, y);
             if (b >= 0 && (!sea || !flood_base(b))) b = -2;
             for (int v = b == -2 ? -1 : game_stack_fix(game_veh_at(x, y)); v >= 0;) {
                 const struct veh *u = &game_vehs[v];
                 int next = u->next_in_stack, triad = game_veh_triad(v);
                 if (triad != TRIAD_AIR && !(u->flags & VEH_FLAG_UNK_20) && (triad == TRIAD_SEA) != sea) {
-                    game_base_submerged_veh[u->faction] = game_base_find2(x, y, u->faction);
+                    game_base_submerged_veh[u->faction] = base_find_2(x, y, u->faction);
                     game_veh_kill(v);
                     if (next > v) next--;
                 }
@@ -981,10 +982,10 @@ void world_rainfall(void) {
                 if (old != rain && *game_rain_base < 0) {
                     if (old > rain &&
                         (*game_rain_faction < 0 || !(1u << *game_rain_faction & *game_human_factions))) {
-                        int b = game_base_find(x, y);
+                        int b = base_find(x, y);
                         if (b >= 0) *game_rain_faction = game_bases[b].faction;
                     }
-                    int b = game_base_find2(x, y, player);
+                    int b = base_find_2(x, y, player);
                     if (b >= 0 && *game_base_find_dist <= 2) *game_rain_base = b;
                 }
             }

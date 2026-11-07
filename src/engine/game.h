@@ -1124,6 +1124,10 @@ extern int (*game_contiguous)(int faction, int other, int region, int by_sea);
 extern void (*game_enemy_capabilities)(int faction);
 extern int(__attribute__((thiscall)) * game_console_upgrade)(void *console, int veh);  // 0 when it can't
 extern void (*game_del_site)(int faction, int type, int x, int y, int unk);
+extern void (*game_x_pop)(char *label, int unk);  // a popup from script.txt
+// base_at(): set while its "Base Bits Error" is being reported, and the two
+// flags that decide whether the popup shows and the Ctrl key is read.
+extern int32_t *game_base_bits_reporting, *game_base_bits_popup, *game_base_bits_quiet;
 extern void (*game_wipe_goals)(int faction);
 // The AI's choice of what a base builds.
 extern int (*game_speed_proto)(int proto);              // moves a turn, in thirds
