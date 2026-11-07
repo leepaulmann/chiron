@@ -626,14 +626,28 @@ struct rules_basic {
     int32_t tech_three_nutrients, tech_three_minerals, tech_three_energy;
     int32_t extra_cost_prototype[3];  // percent more for a new design's first unit, by TRIAD_*
     int32_t psi_combat_ratio_atk[3], psi_combat_ratio_def[3];  // psi combat odds, by TRIAD_*
-    GAME_PAD(0x7c, 0x90);
+    GAME_PAD(0x7c, 0x80);
+    // Combat percentages (battle_compute): a base's own defense, attacking
+    // along a road, from higher ground, and the defense against an attack
+    // from lower ground.
+    int32_t combat_base_def, combat_atk_road, combat_atk_higher, combat_pen_atk_lower;
     int32_t tech_orbital_insert;  // lets air drops reach anywhere without the Space Elevator
     GAME_PAD(0x94, 0x9c);
     int32_t territory_max_dist;  // how far a base's territory reaches over land; half that at sea
     int32_t turns_corner_market;  // from cornering the energy market to the win
     int32_t tech_mining_platform_bonus;
     int32_t tech_economic_victory;  // needed to corner the energy market
-    GAME_PAD(0xac, 0xf0);
+    // More combat percentages: the penalty after an air drop, fanatics'
+    // attack, land artillery against ships and ships' against land, artillery
+    // per level of altitude, a mobile unit in the open, rough ground against
+    // a mobile unit, trance against psi, empath song against psi, infantry
+    // against a base, air superiority against ground units and other air
+    // units, a non-combat unit's penalty, comm jammers, attacks on ships in
+    // port, AAA tracking, sensors, and PLANET in a psi attack.
+    int32_t combat_pen_airdrop, combat_fanatic, combat_art_vs_ship, combat_art_altitude;
+    int32_t combat_mobile_open, combat_def_vs_mobile, combat_trance, combat_empath;
+    int32_t combat_infantry_vs_base, combat_pen_air_vs_ground, combat_air_vs_air, combat_pen_noncombat;
+    int32_t combat_comm_jammer, combat_vs_ship_port, combat_aaa, combat_sensor, combat_psi_planet;
     int32_t retool_strictness;  // which changes of production lose minerals (base_making)
     int32_t retool_penalty;     // the percentage lost, for humans
     int32_t retool_exemption;  // the most minerals a human's base carries over after building
@@ -650,6 +664,9 @@ GAME_AT(struct rules_basic, territory_max_dist, 0x9c);
 GAME_AT(struct rules_basic, extra_cost_prototype, 0x58);
 GAME_AT(struct rules_basic, psi_combat_ratio_def, 0x70);
 GAME_AT(struct rules_basic, tech_orbital_insert, 0x90);
+GAME_AT(struct rules_basic, combat_base_def, 0x80);
+GAME_AT(struct rules_basic, combat_pen_airdrop, 0xac);
+GAME_AT(struct rules_basic, combat_psi_planet, 0xec);
 
 enum { RULE_FLAG_WORM_POLICE = 0x40, RULE_FLAG_ALIEN = 0x80, RULE_FLAG_AQUATIC = 0x100, RULE_FLAG_INTEREST = 0x4000 };  // faction_def.rule_flags
 enum { ECONOMICS_FREE_MARKET = 1, ECONOMICS_PLANNED = 2 };  // faction_data.se_models_pending[1]
@@ -814,6 +831,7 @@ extern int32_t *game_battle_mod;              // [2 * 4]
 extern char (*game_battle_mod_label)[80];     // [2 * 4]
 extern char **game_battle_terrain;
 extern int32_t *game_battle_morale;           // [2]
+extern char *game_battle_text;                // a label battle_compute puts together
 extern uint32_t *game_fungus_clears;          // map_tile.bits fungus removes
 // world_rainfall(): a base near a square whose rainfall changed, and the
 // faction of a base near one that got drier; -1 for none.

@@ -58,7 +58,9 @@ static void spot_all_stub(int v, int u) { spotted = v; }
 static int rand_stub(void) { return rand_value; }
 static int base_here = -1;
 static int base_at_stub(int x, int y) { return base_here; }
-static char *label_list[400], **labels_ptr = label_list;
+static char *__attribute__((thiscall)) strings_get_stub(void *table, char *s) { return s; }
+static char battle_text[256];
+static char *label_list[1200], **labels_ptr = label_list;
 static int32_t mod_counts[4], mods[8], morales[2];
 static char mod_labels[8][80], *terrain;
 
@@ -671,6 +673,44 @@ int main(void) {
     sq->bits = 0, to->bits = 0, to->climate = 2 << 5;
     EXPECT(hex_cost(65, 1, 4, 2, 5, 3, 0), 3);
     to->climate = 3 << 5;
+
+    // A battle: the defender's terrain and the base's defenses double up
+    // against the attacker's x4; a road attack counts; a probe team
+    // attacking quadruples the defense.
+    game_strings_get = strings_get_stub, game_battle_text = battle_text;
+    for (int i = 0; i < 1200; i++)
+        if (!label_list[i]) label_list[i] = "Label";
+    vehs[1].x = 4, vehs[1].y = 2;  // on the attacker's square, for the test
+    int att = 0, def = 0;
+    battle_compute(0, 1, &att, &def, 0);
+    EXPECT(att, get_basic_offense(0, 1, 0, 0, 0));
+    EXPECT(def, get_basic_defense(1, 0, 0, 0) * 4);
+    EXPECT(mod_counts[0] + mod_counts[1], 0);
+    rules_basic.combat_atk_road = 25;
+    battle_compute(0, 1, &att, &def, 0);
+    EXPECT(att, get_basic_offense(0, 1, 0, 0, 0) * 125 / 100);
+    EXPECT(mod_counts[0], 1);
+    EXPECT(mods[0], 25);
+    rules_basic.combat_atk_road = 0;
+    base_here = 1, bases[1].facilities_built[0] = 1 << 4;  // a perimeter defense
+    battle_compute(0, 1, NULL, &def, 0);
+    EXPECT(def, get_basic_defense(1, 0, 0, 0) * 8);
+    EXPECT(mods[4], 100);
+    base_here = -1, bases[1].facilities_built[0] = 0;
+    protos[64].plan = 11;
+    battle_compute(0, 1, &att, &def, 0);
+    EXPECT(def, get_basic_defense(1, 0, 0, 0) * 4);
+    protos[64].plan = 0;
+
+    // The best defender: the undamaged unit, unless the other is told to
+    // defend.
+    veh_count = 3;
+    vehs[2] = vehs[1];
+    vehs[1].next_in_stack = 2, vehs[2].prev_in_stack = 1, vehs[2].damage = 8;
+    EXPECT(best_defender(2, 0, 0), 1);
+    vehs[2].state = 0x80;
+    EXPECT(best_defender(2, 0, 0), 2);
+    EXPECT(best_defender(1, -1, 0), 2);
     veh_count = 0;
     if (failures) return 1;
     printf("engine_veh: all tests passed\n");

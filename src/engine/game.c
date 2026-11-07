@@ -58,7 +58,7 @@ int32_t *game_map_settings, *game_erosive_forces, *game_native_life, *game_world
 int32_t *game_current_faction, *game_control_turn, *game_battle_state, *game_rain_base, *game_rain_faction;
 int32_t *game_battle_mod_count, *game_battle_mod, *game_battle_morale;
 char (*game_battle_mod_label)[80];
-char **game_battle_terrain;
+char **game_battle_terrain, *game_battle_text;
 uint32_t *game_fungus_clears;
 void **game_map_wins;
 void *game_world_win, *game_console;
@@ -362,6 +362,7 @@ void game_bind(struct pe_image *exe) {
     game_battle_mod_label = (char(*)[80])code_at(exe, 0x90f554);
     game_battle_terrain = (char **)code_at(exe, 0x90f550);
     game_battle_morale = (int32_t *)code_at(exe, 0x912420);
+    game_battle_text = (char *)code_at(exe, 0x9b86a0);
     game_fungus_clears = (uint32_t *)code_at(exe, 0x6919ec);
     game_rain_base = (int32_t *)code_at(exe, 0x9b22e0);
     game_rain_faction = (int32_t *)code_at(exe, 0x9b22dc);

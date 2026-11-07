@@ -34,6 +34,11 @@ enum {
     BSC_LOCUSTS_OF_CHIRON = 10, BSC_SEALURK = 14, BSC_SPORE_LAUNCHER = 15, BSC_FUNGAL_TOWER = 19,
     BSC_UNITY_MINING_LASER = 20, BASIC_PROTOS = 64, BSC_MIND_WORMS = 8, BSC_ISLE_OF_THE_DEEP = 9,
     CHASSIS_HOVERTANK = 2, MAP_MAGTUBE = 0x8,
+    ABL_EMPATH = 0x800, ABL_BLINK_DISPLACER = 0x20000, ABL_TRANCE = 0x40000, ABL_COMM_JAMMER = 0x200, ABL_AAA = 0x100,
+    MAP_BUNKER = 0x800, RULE_FLAG_FANATIC = 0x400, BONUS_DEFENSE = 17, BONUS_OFFENSE = 18,
+    FAC_PERIMETER_DEFENSE = 4, FAC_TACHYON_FIELD = 5, FAC_FLECHETTE_DEFENSE = 39, SP_CITIZENS_DEFENSE_FORCE = 5,
+    WEAPON_RESONANCE_LASER = 12, WEAPON_RESONANCE_BOLT = 13, ARMOR_PULSE_3 = 10, ARMOR_RESONANCE_3 = 11,
+    ARMOR_PULSE_8 = 12, ARMOR_RESONANCE_8 = 13, VEH_STATE_AIRDROPPED = 0x20, VEH_STATE_DESIGNATED_DEFENDER = 0x80,
     WEAPON_PROBE = 11, WEAPON_TECTONIC = 21, WMODE_TRANSPORT = 7, WMODE_PROBE = 11,
     MAP_AIRBASE = 0x40000, VEH_STATE_UNK_4000000 = 0x4000000, VEH_STATE_MONOLITH_USED = 0x100,
     VEH_STATE_UNK_200 = 0x200, VEH_STATE_UNK_10000 = 0x10000, VEH_STATE_UNK_20000 = 0x20000, VEH_STATE_UNK_40000 = 0x40000,
@@ -1169,6 +1174,450 @@ int hex_cost(int proto, int faction, int xs, int ys, int xd, int yd, int fast) {
     return cost;
 }
 
+// One line of the battle report, when its side has room (the original's
+// inline add_bat, which doesn't skip a value of 0).
+static void report(int side, int value, const char *text) {
+    int n = game_battle_mod_count[side];
+    if (n >= 4) return;
+    game_battle_mod_count[side] = n + 1;
+    game_battle_mod[side * 4 + n] = value;
+    strcpy(game_battle_mod_label[side * 4 + n], text);
+}
+
+// A strength times a percentage, wrapping as the original's 32-bit product.
+static int percent(int v, int pct) { return (int)((uint32_t)v * (uint32_t)pct) / 100; }
+
+static int alt_under(const struct veh *V) { return square(V->x, V->y)->climate >> 5; }
+static int chassis_of(int proto) { return proto_of(proto)->chassis; }
+
+// The squares within two of (x, y) that are on the map, wrapping x unless
+// the map is flat; -1 once there are no more.
+static int ring_square(int x0, int y0, int i, int *x, int *y) {
+    int w = *game_map_width;
+    *x = game_radius_x[i] + x0, *y = game_radius_y[i] + y0;
+    if (!(*game_map_flat & 1)) {
+        if (*x < 0) *x += w;
+        else if (*x >= w) *x -= w;
+    }
+    return *y >= 0 && *y < *game_map_height && *x >= 0 && *x < w;
+}
+
+// The attacker's and defender's strengths in a battle (or the defender
+// against nothing, or no defender), with every modifier listed in the
+// battle report. combat_type: 1 artillery, 2 weapon against weapon (air
+// combat, an artillery duel), 8 and 0x10 air combat that ends with the
+// weapons. Psi combat counts only the faction's PSI and the projects (in
+// get_basic_offense and _defense) plus PLANET, a base's own defense,
+// trance and resonance. Otherwise the defender's terrain, bunkers, base
+// defenses (perimeter, naval yard, aerospace complex or their projects, the
+// tachyon field), artillery against the open, sensors, and the attacker's
+// altitude, mobility and road count. Where it differs from OpenSMACX: a
+// probe team attacking (not defending) quadruples the defense; a mobile
+// attacker in the open needs the defender to be no faster; the air drop
+// penalty is shown as negative; a missile meets a flechette defense from
+// each of the defender's bases within two squares; and with no attacker,
+// a base's facilities don't count. Units that aren't there are still read,
+// as the original reads them.
+void battle_compute(int veh_att, int veh_def, int *off_out, int *def_out, int combat) {
+    const struct rules_basic *R = game_rules_basic;
+    const struct veh *A = &game_vehs[veh_att], *D = &game_vehs[veh_def];
+    int off = 8, def = 8, psi = 0, base = -1;
+    battle_init();
+    int art = combat & 1;
+    int bombard = art || game_chassis[chassis_of(A->proto)].missile;
+    if (!bombard || A->proto == BSC_SPORE_LAUNCHER || D->proto == BSC_SPORE_LAUNCHER) {
+        if (veh_att >= 0 && game_weapons[proto_of(A->proto)->weapon].offense < 0) psi = 1;
+        if (veh_def >= 0 && game_armor[proto_of(D->proto)->armor].defense < 0) psi |= 2;
+        if (psi) {
+            int fa = A->faction, fd = D->faction;
+            if (game_faction_defs[fa].rule_psi) report(0, game_faction_defs[fa].rule_psi, game_label(342));
+            if (owns_project(SP_DREAM_TWISTER, fa)) report(0, 50, game_label(343));
+            if (game_faction_defs[fd].rule_psi) report(1, game_faction_defs[fd].rule_psi, game_label(342));
+            if (owns_project(SP_NEURAL_AMPLIFIER, fd)) report(1, 50, game_label(344));
+            if (veh_def >= 0 && D->proto == BSC_FUNGAL_TOWER) report(1, 50, game_protos[BSC_FUNGAL_TOWER].name);
+        }
+    }
+    if (veh_att >= 0) {
+        off = get_basic_offense(veh_att, veh_def, psi, bombard, 0);
+        int pa = A->proto;
+        if (proto_of(pa)->plan != PLAN_PROBE) {
+            if (veh_def >= 0 && !combat) {
+                const struct map_tile *t = square(D->x, D->y);
+                if ((t->bits & MAP_FUNGUS) && (t->climate & 0xe0) >= 0x40
+                    && (psi_basic(pa) || owns_project(SP_PHOLUS_MUTAGEN, A->faction))
+                    && game_weapons[proto_of(D->proto)->weapon].offense >= 0) {
+                    off += off / 2;
+                    report(0, 50, game_label(338));
+                }
+                int w = proto_of(pa)->weapon;
+                if ((psi & 2) && (w == WEAPON_RESONANCE_LASER || w == WEAPON_RESONANCE_BOLT)) {
+                    off = percent(off, 125);
+                    report(0, 25, game_label(1110));
+                }
+                if (!has_abil(D->proto, ABL_DISSOCIATIVE_WAVE) && (psi & 2) && has_abil(pa, ABL_EMPATH)
+                    && R->combat_empath) {
+                    off = percent(off, R->combat_empath + 100);
+                    report(0, R->combat_empath,
+                           game_strings_get(game_strings, game_abilities[abil_index(ABL_EMPATH)].name));
+                }
+            }
+            if ((A->state & VEH_STATE_AIRDROPPED) && has_abil(pa, ABL_DROP_POD) && R->combat_pen_airdrop) {
+                off = percent(off, 100 - R->combat_pen_airdrop);
+                int fa = A->faction, range = R->max_airdrop_range;
+                if (has_tech(R->tech_orbital_insert, fa) || owns_project(SP_SPACE_ELEVATOR, fa))
+                    range = *game_map_width > *game_map_height ? *game_map_width : *game_map_height;
+                char *text = game_label(range > R->max_airdrop_range ? 438 : 437);
+                if (R->combat_pen_airdrop) report(0, -R->combat_pen_airdrop, text);
+            }
+            const struct faction_def *F = &game_faction_defs[A->faction];
+            if ((F->rule_flags & RULE_FLAG_FANATIC) && R->combat_fanatic && !combat && !psi) {
+                off = percent(off, R->combat_fanatic + 100);
+                report(0, R->combat_fanatic, game_label(528));
+            }
+            for (int i = 0; i < F->bonus_count; i++) {
+                if (F->bonus_id[i] != BONUS_OFFENSE) continue;
+                off = percent(off, F->bonus_val1[i]);
+                if (F->bonus_val1[i] != 100) report(0, F->bonus_val1[i] - 100, game_label(1108));
+            }
+            if (psi && A->faction) {
+                int p = game_factions[A->faction].se[SE_PLANET];
+                if (p && R->combat_psi_planet) {
+                    int v = p * R->combat_psi_planet;
+                    if (v) report(0, v, game_label(625));
+                    off = percent(off, v + 100);
+                }
+            }
+        }
+    }
+    if (combat & 2) {  // weapon against weapon
+        if (veh_def < 0) goto out;
+        def = get_basic_offense(veh_def, veh_att, psi, bombard, 1);
+        if (combat & 0x18) goto out;
+        int td = triad(D->proto), ta = triad(A->proto);
+        if (td == TRIAD_SEA && ta == TRIAD_LAND) {
+            if (!R->combat_art_vs_ship) goto out;
+            off = percent(off, R->combat_art_vs_ship + 100);
+            report(0, R->combat_art_vs_ship, game_label(435));
+            goto out;
+        }
+        if (ta == TRIAD_SEA && td == TRIAD_LAND) {
+            if (!R->combat_art_vs_ship) goto out;
+            def = percent(def, R->combat_art_vs_ship + 100);
+            report(1, R->combat_art_vs_ship, game_label(435));
+            goto out;
+        }
+        int r = R->combat_art_altitude;
+        if (!r) goto out;
+        int aa = alt_under(A), ad = alt_under(D);
+        if (ad < aa) {
+            int v = (aa - ad) * r;
+            off = percent(off, v + 100);
+            if (v != 0) report(0, v, game_label(576));
+        } else if (ad > aa) {
+            int v = (ad - aa) * r;
+            def = percent(def, v + 100);
+            if (v != 0) report(1, v, game_label(576));
+        }
+        goto out;
+    }
+    if (veh_def < 0) goto out;
+    def = get_basic_defense(veh_def, veh_att, psi, bombard);
+    for (int i = 0; i < game_faction_defs[D->faction].bonus_count; i++) {
+        const struct faction_def *F = &game_faction_defs[D->faction];
+        if (F->bonus_id[i] != BONUS_DEFENSE) continue;
+        def = percent(def, F->bonus_val1[i]);
+        if (F->bonus_val1[i] != 100) report(1, F->bonus_val1[i] - 100, game_label(1109));
+    }
+    if (veh_att >= 0 && proto_of(A->proto)->plan == PLAN_PROBE) {
+        def *= 4;
+        goto out;
+    }
+    int dx = D->x, dy = D->y;
+    base = game_base_at(dx, dy);
+    if (psi) {
+        if (base >= 0 && R->combat_base_def) {
+            report(1, R->combat_base_def, game_label(332));
+            def = percent(def, R->combat_base_def + 100);
+        }
+        def *= 4;
+    } else {
+        int terrain = triad(D->proto) == TRIAD_AIR ? 2 : defense_value(D->faction, dx, dy, veh_def, veh_att);
+        if (veh_att >= 0 && triad(A->proto) == TRIAD_LAND) {
+            int r = R->combat_art_altitude;
+            if (combat && r && triad(D->proto) == TRIAD_LAND) {
+                int aa = alt_under(A), ad = alt_under(D);
+                if (aa > ad) {
+                    int v = (aa - ad) * r;
+                    off = percent(off, v + 100);
+                    if (v != 0) report(0, v, game_label(576));
+                }
+            }
+            if (R->combat_mobile_open && !combat && base < 0 && terrain == 2
+                && (square(dx, dy)->rocky_lock & 0xc0) < 0x80 && speed_proto(A->proto) > R->move_rate_roads
+                && speed_proto(D->proto) <= speed_proto(A->proto)) {
+                off = percent(off, R->combat_mobile_open + 100);
+                report(0, R->combat_mobile_open, game_label(611));
+            }
+            if (R->combat_def_vs_mobile && !combat && (terrain > 2 || base >= 0)
+                && speed_proto(A->proto) > R->move_rate_roads) {
+                def = percent(def, R->combat_def_vs_mobile + 100);
+                report(1, R->combat_def_vs_mobile, game_label(base >= 0 ? 612 : 548));
+            }
+            if (R->combat_atk_road && !combat) {  // along a road or not
+                off = percent(off, R->combat_atk_road + 100);
+                report(0, R->combat_atk_road, game_label(606));
+            }
+            if (R->combat_pen_atk_lower && !combat && alt_under(D) > alt_under(A)
+                && !has_abil(A->proto, ABL_ANTIGRAV_STRUTS)) {
+                report(1, R->combat_pen_atk_lower, game_label(441));
+                def = percent(def, R->combat_pen_atk_lower + 100);
+            }
+            if (R->combat_atk_higher && !combat && alt_under(A) > alt_under(D)
+                && !has_abil(D->proto, ABL_ANTIGRAV_STRUTS)) {
+                report(0, R->combat_atk_higher, game_label(330));
+                off = percent(off, R->combat_atk_higher + 100);
+            }
+        }
+        def *= terrain;
+        if (terrain > 2) {
+            char *text = game_battle_text;
+            text[0] = 0;
+            strcat(text, game_label(331));
+            strcat(text, " ");
+            strcat(text, "(");
+            strcat(text, game_strings_get(game_strings, *game_battle_terrain));
+            strcat(text, ")");
+            int v = (terrain * 5 - 10) * 10;
+            if (v != 0) report(1, v, text);
+        }
+        const struct map_tile *t = square(dx, dy);
+        int mult = 2;
+        char *text = NULL;
+        if ((t->bits & MAP_BUNKER) && (veh_att < 0 || triad(A->proto) != TRIAD_AIR)) {
+            text = (*game_labels)[358];
+            mult = 3;
+        }
+        if (base >= 0) {
+            text = (*game_labels)[332];
+            mult = 2;
+            int m = 2;
+            if (veh_att < 0) {
+                m = veh_att;  // the original's register still holds the attacker
+            } else {
+                switch (triad(A->proto)) {
+                case TRIAD_LAND:
+                    if (built(base, FAC_PERIMETER_DEFENSE) || owns_project(SP_CITIZENS_DEFENSE_FORCE, D->faction))
+                        m = 4, text = (*game_labels)[354];
+                    break;
+                case TRIAD_SEA:
+                    if (built(base, FAC_NAVAL_YARD) || owns_project(SP_MARITIME_CONTROL_CENTER, game_bases[base].faction))
+                        m = 4, text = game_facilities[FAC_NAVAL_YARD].name;
+                    break;
+                case TRIAD_AIR:
+                    if (built(base, FAC_AEROSPACE_COMPLEX) || owns_project(SP_CLOUDBASE_ACADEMY, game_bases[base].faction))
+                        m = 4, text = game_facilities[FAC_AEROSPACE_COMPLEX].name;
+                    break;
+                }
+            }
+            if (built(base, FAC_TACHYON_FIELD)) m += 2, text = (*game_labels)[357];
+            if (m >= 2) mult = m;
+            if (m <= 2 && !(veh_att >= 0 && has_abil(A->proto, ABL_BLINK_DISPLACER)) && R->combat_base_def) {
+                report(1, R->combat_base_def, game_label(332));
+                def = percent(def, R->combat_base_def + 100);
+            }
+        }
+        if (veh_att >= 0 && has_abil(A->proto, ABL_BLINK_DISPLACER)) {
+            if (mult > 2) mult = 2;
+            text = (*game_labels)[428];
+        }
+        if (R->combat_infantry_vs_base && !combat && base >= 0 && A->faction && !native(A->proto)
+            && triad(A->proto) == TRIAD_LAND && game_chassis[chassis_of(A->proto)].speed == 1) {
+            off = percent(off, R->combat_infantry_vs_base + 100);
+            report(0, R->combat_infantry_vs_base, game_label(547));
+        }
+        if (art && mult <= 2 && base < 0) {
+            t = square(dx, dy);
+            if ((t->rocky_lock & 0xc0) < 0x80 && !(t->bits & MAP_FOREST)
+                && !((t->bits & MAP_FUNGUS) && (t->climate & 0xe0) >= 0x40))
+                mult = 3, text = (*game_labels)[525];
+        }
+        def *= mult;
+        if (mult > 2) {
+            char *shown = game_strings_get(game_strings, text);
+            int v = (mult * 5 - 10) * 10;
+            if (v != 0) report(1, v, shown);
+        }
+    }
+    // A missile against the flechette defenses of the defender's bases
+    // nearby, each counting; sensors on land.
+    if (D->faction && veh_att >= 0 && game_chassis[chassis_of(A->proto)].missile) {
+        for (int i = 0; i < 25; i++) {
+            int x, y;
+            if (!ring_square(dx, dy, i, &x, &y)) continue;
+            int b = game_base_at(x, y);
+            if (b >= 0 && game_bases[b].faction == D->faction && built(b, FAC_FLECHETTE_DEFENSE)) {
+                def = def * 3 / 2;
+                report(1, 50, game_label(1113));
+            }
+        }
+    }
+    if ((square(dx, dy)->climate & 0xe0) >= ALT_SHORE_LINE << 5) {
+        int sensed = 0;
+        if (D->faction) {
+            for (int i = 0; i < 25; i++) {
+                int x, y;
+                if (!ring_square(dx, dy, i, &x, &y) || !is_sensor(x, y)) continue;
+                if ((square(x, y)->climate & 0xe0) < ALT_SHORE_LINE << 5) {
+                    if (game_bases[game_base_find(x, y)].faction != D->faction) continue;
+                } else {
+                    int owner = whose_territory(D->faction, x, y, NULL, 0);
+                    if (owner >= 0 && owner != D->faction) continue;
+                }
+                sensed |= 1;
+                if (is_sensor(x, y) > 1) sensed |= 2;
+            }
+        }
+        if (sensed & 1) {
+            def = percent(def, R->combat_sensor + 100);
+            if (R->combat_sensor) report(1, R->combat_sensor, game_label(613));
+        }
+        if (sensed & 2) {
+            def = percent(def, R->combat_sensor + 100);
+            if (R->combat_sensor) report(1, R->combat_sensor, game_label(1123));
+        }
+    }
+    if (!has_abil(A->proto, ABL_DISSOCIATIVE_WAVE) && R->combat_trance && veh_att >= 0 && (psi & 1)
+        && has_abil(D->proto, ABL_TRANCE)) {
+        def = percent(def, R->combat_trance + 100);
+        report(1, R->combat_trance, game_label(329));
+    }
+    if (psi & 1) {
+        if (veh_att < 0) goto out;
+        int ar = proto_of(D->proto)->armor;
+        if (ar == ARMOR_RESONANCE_3 || ar == ARMOR_RESONANCE_8) {
+            def = percent(def, 125);
+            report(1, 25, game_label(1111));
+        }
+    }
+    if (veh_att < 0) goto out;
+    {
+        int ta = triad(A->proto), td = triad(D->proto);
+        if (ta == TRIAD_AIR && has_abil(A->proto, ABL_AIR_SUPERIORITY) && !psi) {
+            if (td != TRIAD_AIR) {
+                if (R->combat_pen_air_vs_ground) {
+                    off = percent(off, 100 - R->combat_pen_air_vs_ground);
+                    report(0, -R->combat_pen_air_vs_ground, game_label(448));
+                }
+            } else if (R->combat_air_vs_air && !has_abil(D->proto, ABL_AIR_SUPERIORITY)) {
+                off = percent(off, R->combat_air_vs_air + 100);
+                report(0, R->combat_air_vs_air, game_label(449));
+            }
+        }
+        if (ta == TRIAD_AIR && td == TRIAD_AIR && has_abil(D->proto, ABL_AIR_SUPERIORITY)
+            && !has_abil(A->proto, ABL_AIR_SUPERIORITY) && !psi && !game_chassis[chassis_of(A->proto)].missile
+            && !game_chassis[chassis_of(D->proto)].missile && R->combat_air_vs_air) {
+            def = percent(def, R->combat_air_vs_air + 100);
+            report(1, R->combat_air_vs_air, game_label(449));
+        }
+        const struct unit_proto *P = proto_of(D->proto);
+        if (game_weapons[P->weapon].offense == 0 && game_armor[P->armor].defense == 1 && (A->faction || base < 0)
+            && R->combat_pen_noncombat) {
+            def = percent(def, 100 - R->combat_pen_noncombat);
+            report(1, -R->combat_pen_noncombat, game_label(439));
+        }
+        if (ta != TRIAD_SEA && td == TRIAD_SEA && base >= 0 && R->combat_vs_ship_port) {
+            off = percent(off, R->combat_vs_ship_port + 100);
+            report(0, R->combat_vs_ship_port, game_label(335));
+        }
+        int fast = ta == TRIAD_LAND && game_chassis[chassis_of(A->proto)].speed > 1;
+        if ((P->armor == ARMOR_PULSE_3 || P->armor == ARMOR_PULSE_8) && fast) {
+            def = percent(def, 125);
+            report(1, 25, game_label(1112));
+        }
+        if (!has_abil(A->proto, ABL_DISSOCIATIVE_WAVE) && has_abil(D->proto, ABL_COMM_JAMMER) && fast
+            && R->combat_comm_jammer) {
+            def = percent(def, R->combat_comm_jammer + 100);
+            report(1, R->combat_comm_jammer, game_label(336));
+        }
+        if (!has_abil(A->proto, ABL_DISSOCIATIVE_WAVE) && has_abil(D->proto, ABL_AAA) && ta == TRIAD_AIR && R->combat_aaa) {
+            def = percent(def, R->combat_aaa + 100);
+            report(1, R->combat_aaa, game_label(337));
+        }
+    }
+out:
+    if (off_out) *off_out = off;
+    if (def_out) *def_out = def;
+}
+
+// The unit of a stack that defends it: the one with the best score, its
+// strength against the attacker (8 without one) after damage, less its own
+// weapon, sixteen times over for combat units and formers (the plans below
+// 8, and 9), and well ahead for an air superiority unit against an air
+// attacker (or an air unit away from a base, airbase or carrier against
+// one with air superiority), artillery when asked for, or otherwise a unit
+// told to defend when the stack has no air units or is at a base, an
+// airbase or a carrier. Ties go to the earlier unit; land units don't
+// defend at sea outside a base, and against a probe team only probe teams
+// do. The search stops at the first unit the attacker can't harm. Unlike
+// OpenSMACX, an artillery duel needs both units to be artillery, and air
+// superiority counts against an air attacker; the attacker is read even
+// when there is none.
+int best_defender(int veh_def, int veh_att, int artillery) {
+    const struct veh *A = &game_vehs[veh_att], *D = &game_vehs[veh_def];
+    int offense = veh_att >= 0 ? get_basic_offense(veh_att, veh_def, 0, 0, 0) : 8;
+    const struct map_tile *t = square(D->x, D->y);
+    int ocean = (t->climate & 0xe0) < ALT_SHORE_LINE << 5;
+    int base = game_base_at(D->x, D->y);
+    int best_score = -999, best = veh_def;
+    if (veh_def < 0) return best;
+    int i = veh_def;
+    while (game_vehs[i].prev_in_stack >= 0) i = game_vehs[i].prev_in_stack;
+    for (; i >= 0; i = game_vehs[i].next_in_stack) {
+        const struct veh *V = &game_vehs[i];
+        int cp = V->proto;
+        const struct unit_proto *P = proto_of(cp);
+        if (triad(cp) == TRIAD_LAND && ocean && base < 0) continue;
+        if (proto_of(A->proto)->plan == PLAN_PROBE && P->plan != PLAN_PROBE) continue;
+        int ct = can_arty(cp, 1) && can_arty(A->proto, 1) ? 2 : 0;
+        if (veh_att >= 0 && triad(A->proto) == TRIAD_AIR && has_abil(cp, ABL_AIR_SUPERIORITY)
+            && !game_chassis[P->chassis].missile && !game_chassis[chassis_of(A->proto)].missile
+            && game_weapons[proto_of(A->proto)->weapon].offense > 0 && game_armor[proto_of(A->proto)->armor].defense > 0
+            && game_weapons[P->weapon].offense > 0) {
+            ct |= 0xa;
+            if (triad(cp) == TRIAD_AIR) ct |= 0x10;
+        }
+        int o, d;
+        battle_compute(veh_att, i, &o, &d, ct);
+        if (!o) break;
+        int power = P->plan == PLAN_ARTIFACT ? 1 : (P->reactor < 1 ? 1 : P->reactor > 100 ? 100 : P->reactor) * 10;
+        int hp = power - V->damage;
+        hp = hp < 0 ? 0 : hp > 9999 ? 9999 : hp;
+        int v = (int)((uint32_t)hp * (uint32_t)d) / power;
+        v = (int)((uint32_t)v * (uint32_t)offense) / o;
+        int score = v / 8 - game_weapons[P->weapon].offense;
+        if (P->plan < 8 || P->plan == PLAN_TERRAFORM) score = (int)((uint32_t)score << 4);
+        int ahead = 0;
+        if (veh_att >= 0 && triad(A->proto) == TRIAD_AIR && has_abil(cp, ABL_AIR_SUPERIORITY) && triad(cp) == TRIAD_AIR
+            && !game_chassis[P->chassis].missile && !game_chassis[chassis_of(A->proto)].missile) {
+            ahead = 1;
+        } else if (veh_att >= 0 && triad(A->proto) == TRIAD_AIR && has_abil(A->proto, ABL_AIR_SUPERIORITY)
+                   && triad(cp) == TRIAD_AIR && base < 0 && !(t->bits & MAP_AIRBASE)
+                   && !stack_check(i, 6, ABL_CARRIER, -1, -1) && !game_chassis[P->chassis].missile
+                   && !game_chassis[chassis_of(A->proto)].missile) {
+            ahead = 1;
+        } else if (artillery) {
+            ahead = can_arty(cp, 1);
+        } else if (!stack_check(i, 3, TRIAD_AIR, -1, -1) || base >= 0 || (t->bits & MAP_AIRBASE)
+                   || stack_check(i, 6, ABL_CARRIER, -1, -1)) {
+            ahead = (V->state & VEH_STATE_DESIGNATED_DEFENDER) != 0;
+        }
+        if (ahead) score += 0x80000;
+        score = (int)((uint32_t)score << 11) + i;
+        if (score > best_score) best_score = score, best = i;
+    }
+    return best;
+}
+
 // A transport's cargo: the units of its faction on its square that it can
 // carry (land units that aren't transports themselves, and for a carrier
 // air units that aren't carriers), up to its capacity (any number for the
@@ -1535,6 +1984,41 @@ SHADOW_WRITER(VEH, int, get_basic_defense, (int a, int b, int c, int d), (a, b, 
               "%d, %d, %d, %d", a, b, c, d)
 SHADOW_FN(VEH, int, hex_cost, (int a, int b, int c, int d, int e, int f, int g), (a, b, c, d, e, f, g),
           "%d, %d, %d, %d, %d, %d, %d", a, b, c, d, e, f, g)
+
+// A battle writes its report, the morale and terrain it found, the text it
+// put together, base_find()'s distance and its two results; a check gives
+// both runs the same place for the results and hands the original's back.
+static int32_t battle_out[2];
+static void writes_battle(struct hook_writes *w) {
+    hooks_writes_add(w, game_battle_mod_count, 16);
+    hooks_writes_add(w, game_battle_mod, 8 * 4);
+    hooks_writes_add(w, game_battle_mod_label, 8 * 80);
+    hooks_writes_add(w, game_battle_terrain, 4);
+    hooks_writes_add(w, game_battle_morale, 8);
+    hooks_writes_add(w, game_battle_text, 256);
+    hooks_writes_add(w, game_base_find_dist, 4);
+    hooks_writes_add(w, battle_out, sizeof battle_out);
+}
+SHADOW_DECLARE(void, battle_compute, (int a, int b, int *c, int *d, int e))
+static void check_battle_compute(int a, int b, int *c, int *d, int e) {
+    struct hook_writes w_ = {0};
+    writes_battle(&w_);
+    int *oc = c ? &battle_out[0] : NULL, *od = d ? &battle_out[1] : NULL;
+    hooks_writes_begin(&w_);
+    hooks_nested++;
+    orig_battle_compute(a, b, oc, od, e);
+    hooks_nested--;
+    int want[2] = {battle_out[0], battle_out[1]};
+    hooks_writes_middle(&w_);
+    battle_compute(a, b, oc, od, e);
+    const char *diff = hooks_writes_end(&w_, 0, 0);
+    if (diff) hooks_mismatch(&stats_battle_compute, "(%d, %d, %d, %d, %d) %s", a, b, c != NULL, d != NULL, e, diff);
+    hooks_ui_release();
+    if (c) *c = want[0];
+    if (d) *d = want[1];
+}
+SHADOW_WRITER_ENTRY(VEH, void, battle_compute, (int a, int b, int *c, int *d, int e), (a, b, c, d, e))
+SHADOW_WRITER(VEH, int, best_defender, (int a, int b, int c), (a, b, c), writes_battle(&w_), "%d, %d, %d", a, b, c)
 // Killing a unit renumbers units all over the game's memory.
 SHADOW_WRITER(VEH, int, veh_init, (int a, int b, int c, int d), (a, b, c, d), hooks_writes_game(&w_), "%d, %d, %d, %d", a,
               b, c, d)
@@ -1809,6 +2293,14 @@ static void sweep_varied(void) {
         struct veh *V = &game_vehs[v];
         int o = (v * 7 + t) % *game_veh_count;
         sweep_battle(v, o, v + t);
+        // Air dropped, and told to defend.
+        uint32_t state = V->state;
+        V->state ^= VEH_STATE_AIRDROPPED | VEH_STATE_DESIGNATED_DEFENDER;
+        int att, def;
+        check_battle_compute(v, o, &att, &def, 0);
+        check_best_defender(o, v, 0);
+        check_best_defender(v, o, 0);
+        V->state = state;
         int16_t proto = V->proto;
         V->proto = (v & 4) ? BSC_SPORE_LAUNCHER : BSC_MIND_WORMS;
         check_get_basic_offense(v, o, 1, 0, v & 8);
@@ -1826,7 +2318,9 @@ static void sweep_varied(void) {
     }
 }
 
-// A unit's strengths against another unit and none, its terrain's defense
+// (No battle is checked without an attacker: the original then reads the
+// design of the unit before the first, whatever memory that is, and can
+// fault.) A unit's strengths against another unit and none, its terrain's defense
 // there and around it, and its moves out of its square (also as native
 // life and with no design).
 static void sweep_battle(int v, int o, int k) {
@@ -1838,6 +2332,11 @@ static void sweep_battle(int v, int o, int k) {
     check_get_basic_defense(v, -1, (k >> 2) & 1, 0);
     check_defense_value(V->faction, V->x, V->y, v, o);
     check_defense_value(V->faction, V->x, V->y, v, -1);
+    static const int types[] = {0, 1, 2, 3, 0xa, 0x1a};
+    int att, def;
+    check_battle_compute(o, v, &att, &def, types[k % 6]);
+    check_battle_compute(o, v, NULL, &def, 0);
+    check_best_defender(v, o, k & 1);
     for (int i = 1; i <= 8; i++) {
         int x = xrange(V->x + game_radius_x[i]), y = V->y + game_radius_y[i];
         if (!on_map_(x, y)) continue;
@@ -2059,6 +2558,8 @@ static const struct hook veh_hooks[] = {
     HOOK(0x5010c0, defense_value, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0xf0, 0xfa, 0x68, 0x00),  // mov eax, [map_half_width]
     HOOK(0x5015b0, get_basic_offense, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),        // sub esp, 12
     HOOK(0x501940, get_basic_defense, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),        // sub esp, 8
+    HOOK(0x501da0, battle_compute, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x2c),          // sub esp, 44
+    HOOK(0x5044d0, best_defender, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x2c),           // sub esp, 44
     HOOK(0x593510, hex_cost, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x0d, 0xf0, 0xfa, 0x68, 0x00),  // push ecx; mov ecx, [...]
     HOOK(0x5c03d0, veh_init, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),                 // sub esp, 8
     HOOK(0x5b8ee0, stack_veh, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x28),                // sub esp, 40

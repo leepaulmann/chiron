@@ -72,6 +72,8 @@ int defense_value(int faction, int x, int y, int veh_def, int veh_att);
 int get_basic_offense(int veh_att, int veh_def, int psi, int bombard, int battle);
 int get_basic_defense(int veh_def, int veh_att, int psi, int bombard);
 int hex_cost(int proto, int faction, int xs, int ys, int xd, int yd, int fast);
+void battle_compute(int veh_att, int veh_def, int *off_out, int *def_out, int combat);
+int best_defender(int veh_def, int veh_att, int artillery);
 void veh_kill(int veh);
 void stack_kill(int veh);
 void kill(int veh);
