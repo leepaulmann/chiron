@@ -69,6 +69,7 @@ add_executable(chiron
   src/engine/veh.c
   src/engine/tech.c
   src/engine/spot.c
+  src/engine/council.c
   src/loader/pe.c
   src/loader/teb.c
   src/loader/thunks.c

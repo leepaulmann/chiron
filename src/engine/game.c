@@ -280,8 +280,9 @@ const char *game_name_believers, *game_name_peacekeepers, *game_name_caretakers;
 int32_t *game_pbem, *game_diplo_state, *game_diplo_attack_chance, *game_diplo_hostility, *game_diplo_friction;
 int32_t (*game_diplo_state_with)[FACTION_COUNT];
 int (*game_social_ai)(int faction, int a, int b, int c, int d, int e);
-int (*game_can_call_council)(int faction, int unk);
 void (*game_call_council)(int faction);
+uint32_t *game_more_rules;
+int32_t *game_council_candidate, *game_council_pending;
 void (*game_auto_save)(void);
 int16_t(__attribute__((stdcall)) * game_get_async_key_state)(int key);
 struct rules_terraform *game_terraform;
@@ -669,8 +670,10 @@ void game_bind(struct pe_image *exe) {
     game_diplo_hostility = (int32_t *)code_at(exe, 0x93fa60);
     game_diplo_friction = (int32_t *)code_at(exe, 0x93fa74);
     game_social_ai = (void *)code_at(exe, 0x5b4790);
-    game_can_call_council = (void *)code_at(exe, 0x52c670);
     game_call_council = (void *)code_at(exe, 0x52c880);
+    game_more_rules = (uint32_t *)code_at(exe, 0x9a681c);
+    game_council_candidate = (int32_t *)code_at(exe, 0x6ff6d4);
+    game_council_pending = (int32_t *)code_at(exe, 0x703de8);
     game_auto_save = (void *)code_at(exe, 0x5abd20);
     game_get_async_key_state = *(void **)code_at(exe, 0x669330);  // filled in when imports were bound
     game_terraform = (struct rules_terraform *)code_at(exe, 0x691878);

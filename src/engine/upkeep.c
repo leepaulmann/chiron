@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "base.h"
+#include "council.h"
 #include "faction.h"
 #include "game.h"
 #include "map.h"
@@ -2114,7 +2115,7 @@ void faction_upkeep(int faction) {
     uint32_t state = *game_state;
     if (full_turn(state)) {
         if (faction == *game_current_faction && !(state & (GAME_STATE_COUNCIL_SHOWN | GAME_STATE_COUNCIL_CONVENED)) &&
-            game_can_call_council(faction, 0) && !(*game_state & GAME_STATE_DONE)) {
+            can_call_council(faction, 0) && !(*game_state & GAME_STATE_DONE)) {
             *game_state |= GAME_STATE_COUNCIL_SHOWN;
             game_popp(*game_script_file, text(0x68ba58), 0, text(0x68ba48), 0);
         }

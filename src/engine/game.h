@@ -146,7 +146,10 @@ struct faction_data {
     int32_t ai_fight, ai_growth, ai_tech, ai_wealth, ai_power;  // the AI's priorities
     int32_t target_x, target_y;  // the AI's, or -1
     int32_t best_mineral_output;  // the most a base of the faction has made, its surplus counted twice
-    GAME_PAD(0x3fc, 0x458);
+    int32_t council_call_turn;
+    // Votes promised in the Planetary Council (buy_council_vote): the
+    // answer on each proposal, or 0, and for the governor the candidate.
+    int32_t council_pledge[11], council_pledge_to[11];
     uint8_t facility_announced[12];  // bit per facility the player has been shown
     int32_t clean_minerals;  // minerals a base makes before ecological damage
     int32_t attack_target_base;  // the AI's, or -1
@@ -287,6 +290,10 @@ GAME_AT(struct faction_data, pop_total, 0x1068);
 GAME_AT(struct faction_data, planet_busters, 0x1070);
 GAME_AT(struct faction_data, region_total_combat_units, 0x107c);
 GAME_AT(struct faction_data, region_flags, 0x137c);
+GAME_AT(struct faction_data, council_pledge, 0x400);
+GAME_AT(struct faction_data, council_pledge_to, 0x42c);
+GAME_AT(struct faction_data, facility_announced, 0x458);
+GAME_AT(struct faction_data, atrocities, 0x1d4);
 
 enum {  // faction_def bonus ids
     BONUS_FUNGUS_NUTRIENT = 7, BONUS_FUNGUS_MINERALS = 8, BONUS_FUNGUS_ENERGY = 9,
@@ -340,6 +347,8 @@ GAME_AT(struct faction_def, bonus_val1, 0x530);
 GAME_AT(struct faction_def, rule_population, 0x4f0);
 GAME_AT(struct faction_def, ideology_category, 0x584);
 GAME_AT(struct faction_def, ideology_effect, 0x594);
+GAME_AT(struct faction_def, rule_psi, 0x4fc);
+GAME_AT(struct faction_def, anti_ideology_model, 0x590);
 
 // ---- Units and the rules tables ---------------------------------------------
 
@@ -1184,8 +1193,12 @@ extern int32_t *game_diplo_attack_chance;  // diplomacy_check's: the rival's ope
 extern int32_t *game_diplo_hostility;      // and its hostility, 0 to 4
 extern int32_t *game_diplo_friction;
 extern int (*game_social_ai)(int faction, int a, int b, int c, int d, int e);
-extern int (*game_can_call_council)(int faction, int unk);
 extern void (*game_call_council)(int faction);
+// The Planetary Council.
+enum { MORE_RULES_NO_COUNCIL = 0x4 };  // game_more_rules bits
+extern uint32_t *game_more_rules;
+extern int32_t *game_council_candidate;  // [FACTION_COUNT] the governor each faction voted for in the council being held, or 0
+extern int32_t *game_council_pending;    // non-zero while a hotseat or e-mail game's council waits on its players
 extern void (*game_auto_save)(void);
 
 // Ecological damage: fungus, native life, warming and volcanoes.

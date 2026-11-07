@@ -205,11 +205,10 @@ static int __attribute__((thiscall)) focus_stub(void *console, int x, int y, int
 static void __attribute__((thiscall)) redraw_stub(void *win) { redrawn++; }
 static void __attribute__((thiscall)) zoom_stub(void *win, int base, int unk) { zoomed = base + 1; }
 static void log_say_stub(char *text, int a, int b, int c) {}
-static int fu_calls[8], council_open = 1;
+static int fu_calls[8];
 static void diplomacy_stub(int faction) { fu_calls[0]++; }
 static void strategy_stub(int faction) { fu_calls[1]++; }
 static int social_ai_stub(int faction, int a, int b, int c, int d, int e) { return fu_calls[2]++, 0; }
-static int can_council_stub(int faction, int unk) { return council_open; }
 static void call_council_stub(int faction) { fu_calls[4]++; }
 static void auto_save_stub(void) { fu_calls[5]++; }
 static int year_stub(int turn) { return 2100 + turn; }
@@ -1715,7 +1714,12 @@ int main(void) {
     static int32_t path_table[16];
     game_social_effects = social_table, game_path = path_table;
     game_enemy_diplomacy = diplomacy_stub, game_enemy_strategy = strategy_stub, game_social_ai = social_ai_stub;
-    game_can_call_council = can_council_stub, game_call_council = call_council_stub;
+    game_call_council = call_council_stub;
+    // The Council can be called: faction 1 holds the Empath Guild.
+    static uint32_t more_rules;
+    static int32_t council_pbem, council_pending;
+    game_more_rules = &more_rules, game_pbem = &council_pbem, game_council_pending = &council_pending;
+    projects[SP_EMPATH_GUILD] = 1;
     game_auto_save = auto_save_stub, game_game_year = year_stub;
     saved_b1 = *b1, saved_f1 = factions[1];
     saved_d1 = faction_defs[1];
@@ -1775,6 +1779,7 @@ int main(void) {
     factions[1].base_count = kept_bases;
     *b1 = saved_b1, factions[1] = saved_f1, faction_defs[1] = saved_d1, rules = saved_rules;
     humans = 0, eliminated = 0;
+    projects[SP_EMPATH_GUILD] = -1;
 
     // Finding bases: on a square marked as a base, the nearest (the last
     // of equals), by faction, and a faction's or its pact partners'.
