@@ -170,7 +170,9 @@ module at a time. So far:
   and which units the AI sends to a monolith; killing units, with the
   units they carry at sea, and renumbering the units after them; loading
   transports and carriers, for the player and the AI; creating units, and
-  the AI's choice of new units to send against its target.
+  the AI's choice of new units to send against its target; whether a unit
+  stops on spotting another, waking units on board, and whether a faction
+  wants a new design.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once

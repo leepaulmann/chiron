@@ -36,7 +36,10 @@ enum {
     WEAPON_PROBE = 11, WEAPON_TECTONIC = 21, WMODE_TRANSPORT = 7, WMODE_PROBE = 11,
     MAP_AIRBASE = 0x40000, VEH_STATE_UNK_4000000 = 0x4000000, VEH_STATE_MONOLITH_USED = 0x100,
     VEH_STATE_UNK_200 = 0x200, VEH_STATE_UNK_10000 = 0x10000, VEH_STATE_UNK_20000 = 0x20000, VEH_STATE_UNK_40000 = 0x40000,
-    PLAN_TERRAFORM = 9, ORDER_HOLD = 2,
+    PLAN_TERRAFORM = 9, ORDER_HOLD = 2, ORDER_NONE = 0, ORDER_MOVE_TO = 0x18,
+    VEH_STATE_EXPLORE = 0x4000, VEH_STATE_UNK_1000000 = 0x1000000, TREATY_TRUCE = 0x4,
+    PREF_WAKE_PACT = 0x100000, PREF_WAKE_TREATY = 0x200000, PREF_WAKE_TRUCE = 0x400000, PREF_WAKE_WAR = 0x800000,
+    PREF_WAKE_SAME_TRIAD = 0x40000000,
     ABL_DROP_POD = 0x10, GAME_STATE_UNK_40000 = 0x40000,
     PLAN_PROBE = 11, PLAN_ARTIFACT = 12, BONUS_FREE_ABILITY = 15, TECH_FLAG_PROBE = 0x2,
     RULE_FLAG_FREE_PROTO = 0x200, RULE_FLAG_MORALE = 0x8000,
@@ -892,6 +895,91 @@ static int faction_base(const struct map_tile *t, int first) {
     return (t->bits & MAP_BASE) && owner < 8 && owner >= first;
 }
 
+// Whether the faction's unit spotting another (or -1) should stop its
+// move. An air unit on its way to a base of its own or of a pact partner
+// (the first waypoint), when aloft, never stops. Otherwise it stops by the
+// player's preferences for the spotter's treaty with the faction, whose
+// flag is returned as it is, not as 1 (in a network game always, except
+// with a pact); with "only the same triad" set, or in a network game,
+// it doesn't stop for a unit of another triad, unless it is flagged
+// (state bits 0x200 and 0x1000000) and the other isn't a land unit.
+int want_to_wake(int faction, int veh, int spotted) {
+    const struct veh *V = &game_vehs[veh];
+    int tr = triad(V->proto);
+    if (tr == TRIAD_AIR && V->movement_turns && V->order == ORDER_MOVE_TO) {
+        const struct map_tile *t = square(V->waypoint_x[0], V->waypoint_y[0]);
+        if (faction_base(t, 0)) {
+            int owner = t->owner_site & 0xf;
+            if (owner == V->faction || game_has_treaty(V->faction, owner, TREATY_PACT)) return 0;
+        }
+    }
+    uint32_t d = game_factions[V->faction].diplo_status[faction];
+    uint32_t pref = (uint32_t)*game_preferences;
+    int net = *game_net_multiplayer, want;
+    if (d & TREATY_PACT) want = net ? 0 : (int)(pref & PREF_WAKE_PACT);
+    else if (d & TREATY_TREATY) want = net ? 1 : (int)(pref & PREF_WAKE_TREATY);
+    else if (d & TREATY_TRUCE) want = net ? 1 : (int)(pref & PREF_WAKE_TRUCE);
+    else want = net ? 1 : (int)(pref & PREF_WAKE_WAR);
+    if (!net && !(pref & PREF_WAKE_SAME_TRIAD)) return want;
+    if (veh < 0 || spotted < 0) return want;
+    int other = game_veh_triad(spotted);
+    if (other == tr) return want;
+    const uint32_t flagged = VEH_STATE_UNK_200 | VEH_STATE_UNK_1000000;
+    if ((V->state & flagged) == flagged && other != TRIAD_LAND) return want;
+    return 0;
+}
+
+// Wakes the units of the stack sentried on board: all but land units, and
+// those only on land, and from an air transport only at a base or an
+// airbase (or with no transport).
+void wake_stack(int veh) {
+    for (int v = veh_top(veh); v >= 0; v = game_vehs[v].next_in_stack) {
+        struct veh *U = &game_vehs[v];
+        if (U->order != ORDER_SENTRY_BOARD) continue;
+        if (game_veh_triad(v) == TRIAD_LAND) {
+            const struct map_tile *t = square(U->x, U->y);
+            if (t->climate >> 5 < ALT_SHORE_LINE) continue;
+            int tr = U->waypoint_x[0];
+            if (tr >= 0 && game_veh_triad(tr) == TRIAD_AIR && !faction_base(t, 0) && !(t->bits & MAP_AIRBASE)) continue;
+        }
+        U->order = ORDER_NONE;
+        U->state &= ~(uint32_t)VEH_STATE_EXPLORE;
+    }
+}
+
+// Whether the faction wants the finished design, i.e. none of its own
+// finished designs with the same plan and triad is as good: a weapon of
+// the same mode (for modes past missiles), or the same psi rating, or at
+// least the offense; the same armor if it has no rating, or at least the
+// armor value; and at least the speed. OpenSMACX compares the design's
+// offense by get_proto_offense_rating(); the original takes the weapon's.
+int wants_prototype(int proto, int faction) {
+    const struct unit_proto *P = proto_of(proto);
+    if (!(P->flags & PROTO_FLAG_ACTIVE) || !(P->flags & PROTO_FLAG_BUILT)) return 0;
+    const struct rules_weapon *wp = &game_weapons[P->weapon];
+    for (int i = 0; i < BASIC_PROTOS; i++) {
+        int c = faction * BASIC_PROTOS + i;
+        const struct unit_proto *C = proto_of(c);
+        if (!(C->flags & PROTO_FLAG_ACTIVE) || !(C->flags & PROTO_FLAG_BUILT) || C->plan != P->plan) continue;
+        if (game_chassis[C->chassis].triad != game_chassis[P->chassis].triad) continue;
+        const struct rules_weapon *wc = &game_weapons[C->weapon];
+        if (wc->mode > 2) {
+            if (wc->mode != wp->mode) continue;
+        } else if (wc->offense < 0) {
+            if (wc->offense != wp->offense) continue;
+        } else if (wc->offense < wp->offense) {
+            continue;
+        }
+        if (game_armor[C->armor].defense <= 0) {
+            if (C->armor != P->armor) continue;
+        } else if (armor_val(c, faction) < armor_val(proto, faction)) {
+            continue;
+        }
+        if (game_chassis[C->chassis].speed >= game_chassis[P->chassis].speed) return 0;
+    }
+    return 1;
+}
+
 // A transport's cargo: the units of its faction on its square that it can
 // carry (land units that aren't transports themselves, and for a carrier
 // air units that aren't carriers), up to its capacity (any number for the
@@ -1243,6 +1331,9 @@ SHADOW_WRITER(VEH, int, veh_put, (int a, int b, int c), (a, b, c), WRITES_STACKS
 SHADOW1(VEH, int, veh_health, int)
 SHADOW2(VEH, int, get_plan, int, int)
 SHADOW1(VEH, int, want_monolith, int)
+SHADOW3(VEH, int, want_to_wake, int, int, int)
+SHADOW_WRITER(VEH, void, wake_stack, (int a), (a), WRITES_STACKS, "%d", a)
+SHADOW2(VEH, int, wants_prototype, int, int)
 // Killing a unit renumbers units all over the game's memory.
 SHADOW_WRITER(VEH, int, veh_init, (int a, int b, int c, int d), (a, b, c, d), hooks_writes_game(&w_), "%d, %d, %d, %d", a,
               b, c, d)
@@ -1348,6 +1439,7 @@ static void sweep_stacks(void) {
             for (int k = 0; k < 2; k++) {
                 game_vehs[n].waypoint_x[0] = (int16_t)(k ? (v + 1) % vehs : v);
                 for (int type = 0; type < 3; type++) check_stack_veh(v, type);
+                check_wake_stack(v);
                 *game_human_factions = humans;
                 for (int type = 0; type < 3; type++) check_stack_veh(v, type);
                 *game_human_factions ^= (uint8_t)(1u << game_vehs[v].faction);
@@ -1519,6 +1611,52 @@ static void sweep_varied(void) {
     }
 }
 
+// Waking: some units spotting others for each faction, under each of the
+// player's preferences and in a network game, with each treaty, and air units as if on their
+// way to a base. Stacks with units sentried on board are woken in the
+// loading checks.
+static void sweep_wake(void) {
+    int vehs = *game_veh_count, t = *game_turn, bases = *game_base_count;
+    static const uint32_t prefs[] = {0, PREF_WAKE_PACT | PREF_WAKE_TRUCE, PREF_WAKE_TREATY | PREF_WAKE_WAR,
+                                     0xffffffffu, PREF_WAKE_SAME_TRIAD | PREF_WAKE_WAR | PREF_WAKE_PACT};
+    int32_t pref = *game_preferences, net = *game_net_multiplayer;
+    for (int k = 0; k < 24 && vehs; k++) {
+        int v = (k * 41 + t) % vehs;
+        struct veh *V = &game_vehs[v];
+        struct veh saved = *V;
+        for (int round = 0; round < 2; round++) {
+            if (round) {
+                if (!bases) break;
+                const struct base *B = &game_bases[(k + t) % bases];
+                V->order = ORDER_MOVE_TO, V->movement_turns = (uint8_t)(k % 3);
+                V->waypoint_x[0] = B->x, V->waypoint_y[0] = B->y;
+                if (k & 1) V->state |= VEH_STATE_UNK_200 | VEH_STATE_UNK_1000000;
+            }
+            for (unsigned i = 0; i <= sizeof prefs / sizeof prefs[0]; i++) {
+                *game_net_multiplayer = i == sizeof prefs / sizeof prefs[0];
+                *game_preferences = (int32_t)(*game_net_multiplayer ? (uint32_t)pref : prefs[i]);
+                for (int f = 0; f < FACTION_COUNT; f++) {
+                    uint32_t *d = &game_factions[V->faction].diplo_status[f], kept = *d;
+                    static const uint32_t treaties[] = {TREATY_PACT, TREATY_TREATY, TREATY_TRUCE, 0};
+                    *d = (kept & ~(uint32_t)(TREATY_PACT | TREATY_TREATY | TREATY_TRUCE)) | treaties[(f + k + i) % 4];
+                    check_want_to_wake(f, v, (v + f * 11 + 1) % vehs);
+                    *d = kept;
+                    check_want_to_wake(f, v, (v + f * 11 + 1) % vehs);
+                }
+                check_want_to_wake(V->faction, v, -1);
+            }
+            *game_preferences = pref, *game_net_multiplayer = net;
+            check_want_to_wake((k + t) % FACTION_COUNT, v, v);
+        }
+        *V = saved;
+    }
+    for (int k = 0; k < 8 && vehs; k++) {
+        int v = (k * 23 + t) % vehs;
+        if (stack_sound(v)) check_wake_stack(v);
+    }
+    check_wake_stack(-1);
+}
+
 // Every design against every faction and a spread of bases, units and
 // values.
 static void veh_sweep(void) {
@@ -1538,6 +1676,8 @@ static void veh_sweep(void) {
         check_arm_val(p % ARMOR_COUNT, -1);
         check_armor_val(p, f);
         check_armor_val(p, -1);
+        check_wants_prototype(p, f);
+        check_wants_prototype(p, p / BASIC_PROTOS % FACTION_COUNT);
         check_speed_proto(p);
         check_base_cost(p);
         int charged;
@@ -1595,6 +1735,7 @@ static void veh_sweep(void) {
         check_abil_index(1u << i);
         check_abil_index((1u << i) | 0x80000000u | (uint32_t)turn << 16);
     }
+    sweep_wake();
     sweep_varied();
     sweep_stacks();
     hooks_sweeping = sweeping;
@@ -1658,6 +1799,9 @@ static const struct hook veh_hooks[] = {
     HOOK(0x5a59e0, veh_health, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),               // mov eax, [ebp+8]
     HOOK(0x5aed50, get_plan, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x57),                 // push ebx; push esi; push edi
     HOOK(0x579f80, want_monolith, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),            // mov eax, [ebp+8]
+    HOOK(0x5b5ea0, want_to_wake, PUSH_EBP_MOV_EBP_ESP, 0x56, 0x57),                   // push esi; push edi
+    HOOK(0x5b6060, wake_stack, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),               // mov eax, [ebp+8]
+    HOOK(0x5be100, wants_prototype, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),          // sub esp, 12
     HOOK(0x5c03d0, veh_init, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),                 // sub esp, 8
     HOOK(0x5b8ee0, stack_veh, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x28),                // sub esp, 40
     HOOK(0x5c08c0, veh_kill, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),                 // sub esp, 8

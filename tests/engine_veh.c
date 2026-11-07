@@ -504,6 +504,78 @@ int main(void) {
     veh_count = VEH_COUNT;
     EXPECT(veh_init(64, 1, 4, 2), -1);
     veh_count = 0, factions[1].target_x = -1;
+
+    // Waking on spotting a unit: by the preference for the treaty, the flag
+    // as it is; in a network game always, but not for a pact partner.
+    static int32_t prefs;
+    game_preferences = &prefs;
+    veh_count = 3;
+    for (int i = 0; i < 3; i++)
+        vehs[i] = (struct veh){.x = 4, .y = 2, .proto = 64, .faction = 1, .next_in_stack = (int16_t)(i < 2 ? i + 1 : -1),
+                               .prev_in_stack = (int16_t)(i - 1)};
+    vehs[1].proto = 65;  // an air unit
+    prefs = 0x800000;
+    EXPECT(want_to_wake(2, 0, -1), 0x800000);
+    factions[1].diplo_status[2] = TREATY_PACT;
+    EXPECT(want_to_wake(2, 0, -1), 0);
+    factions[1].diplo_status[2] = TREATY_TREATY, prefs = 0x200000;
+    EXPECT(want_to_wake(2, 0, -1), 0x200000);
+    factions[1].diplo_status[2] = 0;
+    // Only for the same triad: not for the air unit, unless flagged.
+    prefs = 0x40800000;
+    EXPECT(want_to_wake(2, 0, 2), 0x800000);
+    EXPECT(want_to_wake(2, 0, 1), 0);
+    vehs[0].state = 0x1000200;
+    EXPECT(want_to_wake(2, 0, 1), 0x800000);
+    EXPECT(want_to_wake(2, 1, 0), 0);  // an air unit spotting a land unit
+    vehs[0].state = 0;
+    net_mp = 1, prefs = 0;
+    EXPECT(want_to_wake(2, 0, -1), 1);
+    factions[1].diplo_status[2] = TREATY_PACT;
+    EXPECT(want_to_wake(2, 0, -1), 0);
+    net_mp = 0, factions[1].diplo_status[2] = 0;
+    // An air unit aloft on its way to its own base doesn't stop.
+    prefs = -1;
+    vehs[1].order = 0x18, vehs[1].movement_turns = 1, vehs[1].waypoint_x[0] = 6, vehs[1].waypoint_y[0] = 4;
+    tiles[3 + 4 * (W / 2)].bits |= MAP_BASE, tiles[3 + 4 * (W / 2)].owner_site = 1;
+    EXPECT(want_to_wake(2, 1, -1), 0);
+    vehs[1].movement_turns = 0;
+    EXPECT(want_to_wake(2, 1, -1) != 0, 1);
+    tiles[3 + 4 * (W / 2)].bits &= ~(uint32_t)MAP_BASE, tiles[3 + 4 * (W / 2)].owner_site = 0xf;
+    vehs[1].order = 0;
+
+    // Waking a stack: units on board wake, but not on an air transport
+    // away from a base or an airbase.
+    vehs[0].order = 1, vehs[0].waypoint_x[0] = 1, vehs[0].state = 0x4000;
+    vehs[2].order = 1, vehs[2].waypoint_x[0] = -1, vehs[2].state = 0x4001;
+    wake_stack(2);
+    EXPECT(vehs[0].order, 1);
+    EXPECT(vehs[2].order, 0);
+    EXPECT(vehs[2].state, 1);
+    tiles[2 + 2 * (W / 2)].bits |= 0x40000;  // an airbase
+    wake_stack(1);
+    EXPECT(vehs[0].order, 0);
+    EXPECT(vehs[0].state, 0);
+    tiles[2 + 2 * (W / 2)].bits &= ~0x40000u;
+    vehs[1].order = 1;  // an air unit wakes anywhere
+    wake_stack(0);
+    EXPECT(vehs[1].order, 0);
+    veh_count = 0;
+
+    // A new design is wanted unless one of the faction's finished designs
+    // of the same plan and triad is as good and as fast.
+    chassis[3].speed = 10, chassis[3].triad = TRIAD_AIR;
+    protos[3] = (struct unit_proto){.chassis = 3, .weapon = 1, .armor = 2, .flags = PROTO_FLAG_ACTIVE | PROTO_FLAG_BUILT};
+    EXPECT(wants_prototype(3, 1), 1);
+    protos[3].chassis = 2;
+    EXPECT(wants_prototype(3, 1), 0);
+    protos[3].armor = 1;  // armor 1's value beats armor 2's
+    EXPECT(wants_prototype(3, 1), 1);
+    protos[3].armor = 2, protos[3].weapon = 0;  // not a psi weapon
+    EXPECT(wants_prototype(3, 1), 1);
+    protos[3].weapon = 1, protos[3].flags = PROTO_FLAG_ACTIVE;
+    EXPECT(wants_prototype(3, 1), 0);
+    protos[3] = (struct unit_proto){0};
     if (failures) return 1;
     printf("engine_veh: all tests passed\n");
     return 0;
