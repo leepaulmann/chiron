@@ -196,7 +196,9 @@ module at a time. So far:
   garrisons the AI wants; its view of its enemies' best units, and its
   odds of an attack; naming designs, retiring them (their units refitted,
   turned scouts or disbanded), marking superseded ones obsolete, and
-  proposing new ones;
+  proposing new ones; and the AI's pass that thinks up new designs each
+  turn (upgrades to its own, defenders, attackers, artillery, scouts,
+  ships, aircraft, missiles and formers);
 - spotting: what a unit sees as it moves (squares, bases and units, the
   contacts it makes and the units it wakes), and the squares, bases and
   stacks a faction has seen;
