@@ -208,6 +208,11 @@ module at a time. So far:
 - units' orders: setting a course (a transport's landing square), a base
   waiting for a transport, going to a waypoint, building a road or tube to
   a square, finding the way home to a base or carrier, and patrols;
+- combat around the battle: units killed (artifacts captured, the
+  credits for native life), stacks and chaff cleared after a fight,
+  attacks that break treaties, interceptors scrambled, orbital defenses
+  shooting down a missile, planet busters, and probe teams' odds and
+  their thefts of techs and energy;
 - the path finder: the route search behind every unit's moves (with its
   costs for terrain, roads, fungus, zones of control and borders), a
   unit's next step towards its waypoint, zones of control, the AI's choice
