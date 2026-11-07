@@ -33,6 +33,7 @@ CHIRON_REIMPL=shadow ...       # check reimplementations against the original; s
 ```
 
 - `30 click 835 362` is Quick Start. `30 click 835 287; 40 every 2 key Return` goes through Start Game, which is the path where the game builds a new map with `world_build`.
+- `python3 tools/coverage.py` reports how much of the game's code is hooked, by 64 KB block, from your own `terranx.exe` (estimates; the game logic is 0x4e0000–0x5cffff).
 - `CHIRON_SNAPSHOT=file.bmp` saves the screen (`tools/bmp2png.py` converts it). `CHIRON_SHADOW_DIFFS=1` lists every differing byte range of a shadow mismatch.
 - `CHIRON_SOAK=ai` hands the player's faction to the AI by clearing its human bit. The game still gives the player's console a pass over its units after each round, and would wait at "TURN COMPLETE" for orders for any unit the AI left with moves. `soak.c` skips such units when a turn hasn't moved for 30 seconds. Pace varies a lot between random maps (roughly turns 100–145 in 7 minutes); a whole game ends around turn 275.
 
