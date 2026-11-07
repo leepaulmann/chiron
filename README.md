@@ -102,7 +102,10 @@ module at a time. So far:
 
 - technology: whether a faction has or can research a tech, tech levels,
   categories and prerequisites, tech names, research cost, the AI's
-  valuation of techs, and the bonuses techs give;
+  valuation of techs, and the bonuses techs give; which facilities,
+  projects and terraforming a faction may build, the projects that make a
+  facility redundant, the free tech's message, and the AI's choice of
+  research;
 - the map: coordinates and distances, what a square holds (altitude,
   region, units and bases, resources, pods, elevation), territory, zones of
   control, sensors, landmarks, where units can reach and how bases, coasts
@@ -185,7 +188,14 @@ module at a time. So far:
   air superiority and the rest), and which unit of a stack defends it;
   the AI's choice of chassis, weapon and armor, what a design costs and
   filling one in, sending a unit somewhere, and the AI's transports
-  turning on a nearby enemy base.
+  turning on a nearby enemy base; upgrading designs (the cost, the AI's
+  decision, the units and queues switched) and promoting units; which
+  abilities a design may have; ports, convoys and sensor sites; the
+  garrisons the AI wants; its view of its enemies' best units, and its
+  odds of an attack;
+- spotting: what a unit sees as it moves (squares, bases and units, the
+  contacts it makes and the units it wakes), and the squares, bases and
+  stacks a faction has seen.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once
