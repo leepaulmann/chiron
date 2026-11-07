@@ -1458,6 +1458,19 @@ extern int (*game_pop3)(char *label, char *picture, int faction, int x, int y);
 extern void (*game_draw_tile_fixup)(int x, int y, int a, int b);
 extern void (*game_draw_tile_fixup_2)(int x1, int y1, int x2, int y2, int a, int b);
 
+// Pods and monoliths (events.c).
+// A unity pod around the landing site that is a special one (a mining
+// laser, a chopper, the engine's energy, the radar): non-zero if so.
+extern int (*game_do_unity_crash)(int x, int y, int faction);
+extern void (*game_my_srand)(int seed);  // srand(), logged, for network games
+extern void (*game_say_morale_2)(int veh, int unk);  // a unit's morale, into game_battle_text
+// Sound effects faded out or stopped (by id).
+extern void(__attribute__((thiscall)) * game_fx_fade)(void *fx, int id);
+extern void(__attribute__((thiscall)) * game_fx_stop)(void *fx, int id);
+extern int (*game_tut_check)(int bit);  // a tutorial note not yet shown (and now marked shown)
+extern uint32_t(__attribute__((stdcall)) * *game_char_lower)(char *s);  // CharLowerA, as imported
+extern char *game_parse_text;  // the text variables parse_says() fills, 256 bytes each
+
 // Point the variables above at a loaded terranx.exe.
 void game_bind(struct pe_image *exe);
 

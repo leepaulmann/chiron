@@ -269,6 +269,10 @@ static void shadow_veh_scoot(int veh, int x, int y, int dir, int unk) {
     hooks_ui_hold(&c);
 }
 HELD_THIS(fx_play, (void *self, int id), (self, id), c_.arg[0] = id, orig_fx_play(SELF, a_[0]))
+// Pods and monoliths: a sound faded out or stopped, and a square drawn with
+// its radar range.
+HELD_THIS(fx_fade, (void *self, int id), (self, id), c_.arg[0] = id, orig_fx_fade(SELF, a_[0]))
+HELD_THIS(fx_stop, (void *self, int id), (self, id), c_.arg[0] = id, orig_fx_stop(SELF, a_[0]))
 // Movies and help for secret projects.
 HELD(void, amovie_project, (void)0, (int project), (project), (c_.arg[0] = project), orig_amovie_project(a_[0]))
 HELD(void, amovie_project_2, (void)0, (char *name), (name), (hooks_ui_text(&c_, 0, name)), orig_amovie_project_2(TEXT(0)))
@@ -451,5 +455,7 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x421b20, battle_win_pulse_timer, 0x6a, 0x05, 0x68, 0x88, 0x13, 0x00, 0x00),    // push 5; push 5000
     QUIET_HOOK(0x59e5d0, prefs_save, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x54),                  // sub esp, 0x54
     QUIET_HOOK(0x477210, mon_enemy_destroyed, MON_PROLOGUE),
+    QUIET_HOOK(0x446ad0, fx_fade, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                  // mov eax, [ebp+8]
+    QUIET_HOOK(0x446a90, fx_stop, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),
 };
 struct hook_module quiet_module = {"quiet", quiet_hooks, HOOK_COUNT(quiet_hooks), NULL, NULL, -1};

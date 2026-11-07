@@ -73,6 +73,7 @@ add_executable(chiron
   src/engine/council.c
   src/engine/path.c
   src/engine/move.c
+  src/engine/events.c
   src/engine/combat.c
   src/loader/pe.c
   src/loader/teb.c

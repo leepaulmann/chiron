@@ -399,6 +399,15 @@ int (*game_pop3)(char *label, char *picture, int faction, int x, int y);
 void (*game_draw_tile_fixup)(int x, int y, int a, int b);
 void (*game_draw_tile_fixup_2)(int x1, int y1, int x2, int y2, int a, int b);
 
+int (*game_do_unity_crash)(int x, int y, int faction);
+void (*game_my_srand)(int seed);
+void (*game_say_morale_2)(int veh, int unk);
+void(__attribute__((thiscall)) * game_fx_fade)(void *fx, int id);
+void(__attribute__((thiscall)) * game_fx_stop)(void *fx, int id);
+int (*game_tut_check)(int bit);
+uint32_t(__attribute__((stdcall)) * *game_char_lower)(char *s);
+char *game_parse_text;
+
 void game_bind(struct pe_image *exe) {
     game_tech = (struct rules_tech *)code_at(exe, 0x94f358);
     game_tech_achieved = code_at(exe, 0x9a6670);
@@ -934,4 +943,12 @@ void game_bind(struct pe_image *exe) {
     game_pop3 = (void *)code_at(exe, 0x4055a0);
     game_draw_tile_fixup = (void *)code_at(exe, 0x46af90);
     game_draw_tile_fixup_2 = (void *)code_at(exe, 0x46b040);
+    game_do_unity_crash = (void *)code_at(exe, 0x5bed20);
+    game_my_srand = (void *)code_at(exe, 0x538fb0);
+    game_say_morale_2 = (void *)code_at(exe, 0x4b43c0);
+    game_fx_fade = (void *)code_at(exe, 0x446ad0);
+    game_fx_stop = (void *)code_at(exe, 0x446a90);
+    game_tut_check = (void *)code_at(exe, 0x4ba5f0);
+    game_char_lower = (void *)code_at(exe, 0x669344);
+    game_parse_text = (char *)code_at(exe, 0x9bb5e8);
 }
