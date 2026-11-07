@@ -1218,13 +1218,11 @@ extern int(__attribute__((thiscall)) * game_console_upgrade)(void *console, int 
 // For upgrades and promotions: a design's stats as text, each morale
 // level's name (and native life's), the message bar's notices, the
 // console's refresh, and a network game's message to the other players.
-extern void (*game_say_stats_2)(char *buf, int proto);
 extern char *(*game_morale_names)[2];
 extern void *game_netmsg;
 extern void(__attribute__((thiscall)) * game_netmsg_pop)(void *netmsg, char *label, int delay, int unk, char *sound);
 extern void(__attribute__((thiscall)) * game_console_update_data)(void *console, int unk);
 extern void (*game_message_data)(int type, int unk, int a, int b, int c, int d);
-extern void *game_net_daemon;
 extern int(__attribute__((thiscall)) * game_net_daemon_receive)(void *daemon);
 // Units moving and their orders (move.c): a step in a direction (order_veh,
 // the whole move with its fights and finds), a former's work started, a
@@ -1252,9 +1250,6 @@ extern void (*game_double_cross)(int faction, int other, int unk);
 extern void (*game_mon_colony_founded)(int faction, char *name);
 extern void *game_fx;
 extern int(__attribute__((thiscall)) * game_fx_play_loc)(void *fx, int sound, int x, int y);
-extern void *game_tut_win;
-extern int(__attribute__((thiscall)) * game_tut_map)(void *win, char *label, int x, int y, int veh, void *sprite, int a,
-                                                       int b, int c);
 extern int32_t *game_tut_map_seen;  // [2] bit per terraform shown, on land and at sea
 extern void *game_sprite_farm, *game_sprite_soil, *game_sprite_mine, *game_sprite_solar;
 extern void(__attribute__((thiscall)) * game_base_win_check_veh)(void *win, int veh);
@@ -1330,7 +1325,6 @@ extern int (*game_x_pops)(char *label, void *sprite, void *fn);
 extern int (*game_x_pops_11)(char *label, int flags, void *sprite, void *fn);
 extern int (*game_wants_prototype)(int proto, int faction);
 extern void (*game_tech_achieve)(int faction, int tech, int from, int steal);  // tech_achieved()
-extern void (*game_log_say)(char *format, int a, int b, int c);
 extern void(__attribute__((thiscall)) * game_net_daemon_await_diplo)(void *daemon, int unk);
 extern int (*game_spying)(int faction);
 extern void (*game_set_agenda)(int faction, int other, uint32_t agenda, int on);
@@ -1427,7 +1421,6 @@ extern int32_t *game_pb_reactor;  // a planet buster's reactor, for its explosio
 // The sound effects: each a 0x6c-byte object, whose method at 0x5c says
 // whether it is playing.
 enum { FX_SIZE = 0x6c, FX_PB_BLAST = 59, FX_PB_AFTER = 60 };
-extern void *game_fx;
 extern void(__attribute__((thiscall)) * game_fx_play)(void *fx, int id);
 extern int (*game_do_task)(void);  // the message pump, once
 // A unit shown moving a square in a direction (an animation only).
@@ -1435,9 +1428,7 @@ extern void (*game_veh_scoot)(int veh, int x, int y, int dir, int unk);
 // The tech a faction would take from another, or negative; `label` names
 // the window that lets a human choose.
 extern int (*game_tech_pick)(int faction, int unk, int other, char *label);
-extern void (*game_double_cross)(int faction, int other, int unk);  // a treaty broken by an attack
 extern void (*game_major_atrocity)(int faction, int victim);
-extern void (*game_tech_achieve)(int faction, int tech, int from, int steal);  // tech_achieved()
 
 // Point the variables above at a loaded terranx.exe.
 void game_bind(struct pe_image *exe);

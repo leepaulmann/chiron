@@ -264,13 +264,11 @@ void (*game_bases_reset)(int region, int faction, int same_plan);
 int (*game_terraform_cost)(int x, int y, int faction);
 int (*game_contiguous)(int faction, int other, int region, int by_sea);
 int(__attribute__((thiscall)) * game_console_upgrade)(void *console, int veh);
-void (*game_say_stats_2)(char *buf, int proto);
 char *(*game_morale_names)[2];
 void *game_netmsg;
 void(__attribute__((thiscall)) * game_netmsg_pop)(void *netmsg, char *label, int delay, int unk, char *sound);
 void(__attribute__((thiscall)) * game_console_update_data)(void *console, int unk);
 void (*game_message_data)(int type, int unk, int a, int b, int c, int d);
-void *game_net_daemon;
 int(__attribute__((thiscall)) * game_net_daemon_receive)(void *daemon);
 int (*game_order_veh)(int veh, int dir, int type);
 int (*game_action_terraform)(int veh, int terraform, int unk);
@@ -287,9 +285,6 @@ void (*game_double_cross)(int faction, int other, int unk);
 void (*game_mon_colony_founded)(int faction, char *name);
 void *game_fx;
 int(__attribute__((thiscall)) * game_fx_play_loc)(void *fx, int sound, int x, int y);
-void *game_tut_win;
-int(__attribute__((thiscall)) * game_tut_map)(void *win, char *label, int x, int y, int veh, void *sprite, int a, int b,
-                                                int c);
 int32_t *game_tut_map_seen;
 void *game_sprite_farm, *game_sprite_soil, *game_sprite_mine, *game_sprite_solar;
 void(__attribute__((thiscall)) * game_base_win_check_veh)(void *win, int veh);
@@ -342,7 +337,6 @@ int (*game_x_pops)(char *label, void *sprite, void *fn);
 int (*game_x_pops_11)(char *label, int flags, void *sprite, void *fn);
 int (*game_wants_prototype)(int proto, int faction);
 void (*game_tech_achieve)(int faction, int tech, int from, int steal);
-void (*game_log_say)(char *format, int a, int b, int c);
 void(__attribute__((thiscall)) * game_net_daemon_await_diplo)(void *daemon, int unk);
 int (*game_spying)(int faction);
 void (*game_set_agenda)(int faction, int other, uint32_t agenda, int on);
@@ -380,14 +374,11 @@ int (*game_terrain_avail)(int terraform, int sea, int faction);
 
 int32_t *game_probe_algo, *game_probe_target, *game_probe_target_hsa;
 int32_t *game_pb_reactor;
-void *game_fx;
 void(__attribute__((thiscall)) * game_fx_play)(void *fx, int id);
 int (*game_do_task)(void);
 void (*game_veh_scoot)(int veh, int x, int y, int dir, int unk);
 int (*game_tech_pick)(int faction, int unk, int other, char *label);
-void (*game_double_cross)(int faction, int other, int unk);
 void (*game_major_atrocity)(int faction, int victim);
-void (*game_tech_achieve)(int faction, int tech, int from, int steal);
 
 void game_bind(struct pe_image *exe) {
     game_tech = (struct rules_tech *)code_at(exe, 0x94f358);
@@ -738,13 +729,11 @@ void game_bind(struct pe_image *exe) {
     game_terraform_cost = (void *)code_at(exe, 0x4c9420);
     game_contiguous = (void *)code_at(exe, 0x53a780);
     game_console_upgrade = (void *)code_at(exe, 0x4d06c0);
-    game_say_stats_2 = (void *)code_at(exe, 0x57d8e0);
     game_morale_names = (void *)code_at(exe, 0x952328);
     game_netmsg = code_at(exe, 0x805338);
     game_netmsg_pop = (void *)code_at(exe, 0x47a890);
     game_console_update_data = (void *)code_at(exe, 0x514880);
     game_message_data = (void *)code_at(exe, 0x592ee0);
-    game_net_daemon = code_at(exe, 0x93cd90);
     game_net_daemon_receive = (void *)code_at(exe, 0x530320);
     game_order_veh = (void *)code_at(exe, 0x5947c0);
     game_action_terraform = (void *)code_at(exe, 0x4c9b00);
@@ -764,8 +753,6 @@ void game_bind(struct pe_image *exe) {
     game_mon_colony_founded = (void *)code_at(exe, 0x476b70);
     game_fx = code_at(exe, 0x749cf8);
     game_fx_play_loc = (void *)code_at(exe, 0x446960);
-    game_tut_win = code_at(exe, 0x8c6e68);
-    game_tut_map = (void *)code_at(exe, 0x4be650);
     game_tut_map_seen = (int32_t *)code_at(exe, 0x9a64b4);
     game_sprite_farm = code_at(exe, 0x79204c);
     game_sprite_soil = code_at(exe, 0x79a794);
@@ -860,7 +847,6 @@ void game_bind(struct pe_image *exe) {
     game_x_pops_11 = (void *)code_at(exe, 0x5bf7d0);
     game_wants_prototype = (void *)code_at(exe, 0x5be100);
     game_tech_achieve = (void *)code_at(exe, 0x5bb000);
-    game_log_say = (void *)code_at(exe, 0x6262f0);
     game_net_daemon_await_diplo = (void *)code_at(exe, 0x5315c0);
     game_spying = (void *)code_at(exe, 0x55bc00);
     game_set_agenda = (void *)code_at(exe, 0x55bba0);
@@ -899,12 +885,9 @@ void game_bind(struct pe_image *exe) {
     game_probe_target = (int32_t *)code_at(exe, 0x945b34);
     game_probe_target_hsa = (int32_t *)code_at(exe, 0x945b38);
     game_pb_reactor = (int32_t *)code_at(exe, 0x90f7d4);
-    game_fx = code_at(exe, 0x749cf8);
     game_fx_play = (void *)code_at(exe, 0x446a00);
     game_do_task = (void *)code_at(exe, 0x5fc7f0);
     game_veh_scoot = (void *)code_at(exe, 0x55a150);
     game_tech_pick = (void *)code_at(exe, 0x5beb70);
-    game_double_cross = (void *)code_at(exe, 0x50bcc0);
     game_major_atrocity = (void *)code_at(exe, 0x55f450);
-    game_tech_achieve = (void *)code_at(exe, 0x5bb000);
 }
