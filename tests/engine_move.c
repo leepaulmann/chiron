@@ -6,6 +6,7 @@
 
 #include "../src/engine/game.h"
 #include "../src/engine/move.h"
+#include "../src/engine/veh.h"
 
 enum { W = 10, H = 8, AREA = W / 2 * H };
 static struct map_tile tiles[AREA], *tiles_ptr = tiles;
@@ -439,6 +440,161 @@ static void test_staple(void) {
     EXPECT(atrocities, 2);
 }
 
+// Stand-ins for the step's (order_veh's) drawing, sounds, windows and the
+// calls it makes into parts of the game not reimplemented.
+static int scoots, booms, monoliths, goodies;
+static int32_t attack_flags, current_veh, moved_quickly, console_flag, zoc_count, fungus_count, moves_seen;
+static int32_t native_life, expansion, ref_map_1, lift_x, lift_y, lifted, rebuilt = 1, refs[3], battle_state;
+static uint32_t draw_state;
+static struct rules_ability abilities[32];
+static struct rules_armor armor[2];
+static char ability_name[] = "Ability";
+static void __attribute__((thiscall)) popup_(void *pop) { (void)pop; }
+static int16_t __attribute__((stdcall)) key_state_(int key) { return (void)key, 0; }
+static void __attribute__((thiscall)) fx_(void *fx, int id) { (void)fx, (void)id; }
+static int __attribute__((thiscall)) focus_(void *console, int x, int y, int faction) {
+    return (void)console, (void)x, (void)y, (void)faction, 0;
+}
+static void scoot_(int veh, int x, int y, int dir, int unk) { (void)veh, (void)x, (void)y, (void)dir, (void)unk, scoots++; }
+static void clock_wait_(int ms) { (void)ms; }
+static void radius_(int x, int y, int r, int unk) { (void)x, (void)y, (void)r, (void)unk; }
+static void boom_(int x, int y, int flags) { (void)x, (void)y, (void)flags, booms++; }
+static void log_say_(char *text, int a, int b, int c) { (void)text, (void)a, (void)b, (void)c; }
+static void synch_veh_(int veh) { (void)veh; }
+static void monolith_(int veh) { (void)veh, monoliths++; }
+static int goody_box_(int veh, int goody) { return (void)veh, (void)goody, goodies++, 0; }
+static int parse_say_(int slot, int text, int gender, int plural) { return (void)slot, (void)text, (void)gender, (void)plural, 0; }
+static int parse_num_(int slot, int value) { return (void)slot, (void)value, 0; }
+static int tut_check_(int bit) { return (void)bit, 0; }
+static int random_(int min, int max) { return (void)min, max - 1; }  // the worst roll
+static void __attribute__((thiscall)) win_base_(void *win, int base) { (void)win, (void)base; }
+static void x_pop_(char *label, int unk) { (void)label, (void)unk; }
+static void interlude_(int a, char *b, int c, int d) { (void)a, (void)b, (void)c, (void)d; }
+
+// A land unit (design 0, speed 1, three road moves) of faction 1 and
+// another faction's on a land map.
+static void step_setup(void) {
+    land();
+    for (int f = 0; f < FACTION_COUNT; f++)
+        for (int g = 0; g < FACTION_COUNT; g++) factions[f].diplo_status[g] = 0;
+    put_unit(0, 3, 3, 1, 0);
+    attack_flags = 0, current_faction = 7, humans = 0;
+}
+
+static void test_step(void) {
+    // A step east onto open land: moved, a move spent, facing east.
+    step_setup();
+    EXPECT(order_veh(0, 1, 3), 1);
+    EXPECT(vehs[0].x, 5);
+    EXPECT(vehs[0].y, 3);
+    EXPECT(vehs[0].moves_spent, 3);
+    EXPECT(vehs[0].unk_29, 1);
+    EXPECT(vehs[0].state & 0x10004, 0x10004);
+    EXPECT(attack_flags, 3);
+    // Off the map: nothing, and the order ends.
+    step_setup();
+    vehs[0].x = 9, vehs[0].order = 0x18;
+    EXPECT(order_veh(0, 1, 3), 0);
+    EXPECT(vehs[0].order, 0);
+    EXPECT(vehs[0].iter_count, 1);
+    // A stay (any direction past 7): its turn skipped.
+    step_setup();
+    EXPECT(order_veh(0, -1, 3), 1);
+    EXPECT(vehs[0].x, 3);
+    EXPECT(vehs[0].state & 0x10000, 0);
+    // Only seen, not happening: moved nowhere, but counted as done.
+    step_setup();
+    EXPECT(order_veh(0, 1, 1), 1);
+    EXPECT(vehs[0].x, 3);
+    // Out of moves: the step fails.
+    step_setup();
+    vehs[0].moves_spent = 3;
+    EXPECT(order_veh(0, 1, 3), 0);
+    EXPECT(vehs[0].x, 3);
+    // The AI on its way into the territory of a faction it knows, with no
+    // pact or vendetta: the order ends at once.
+    step_setup();
+    for (int i = 0; i < AREA; i++) tiles[i].territory = 2;
+    vehs[0].order = 0x18, vehs[0].waypoint_x[0] = 7, vehs[0].waypoint_y[0] = 3;
+    factions[1].diplo_status[2] = TREATY_COMMLINK | 0x8000000;
+    EXPECT(order_veh(0, 1, 3), 0);
+    EXPECT(vehs[0].x, 3);
+    EXPECT(vehs[0].order, 0);
+    factions[1].diplo_status[2] = TREATY_VENDETTA | TREATY_COMMLINK | 0x8000000;
+    vehs[0].order = 0x18;
+    EXPECT(order_veh(0, 1, 3), 1);
+    EXPECT(vehs[0].x, 5);
+    // Zones of control: from a square next to an enemy to another, empty.
+    step_setup();
+    put_unit(1, 4, 2, 2, 0);
+    factions[1].diplo_status[2] = TREATY_COMMLINK, factions[2].diplo_status[1] = TREATY_COMMLINK;
+    EXPECT(order_veh(0, 1, 3), 0);
+    EXPECT(vehs[0].x, 3);
+    // An attack where the defender stands: only its odds weighed for a
+    // move not happening (no unit moves).
+    // Onto the sea without a transport: no.
+    step_setup();
+    sea(5);
+    vehs[0].x = 5;
+    put_unit(0, 5, 3, 1, 0);
+    EXPECT(order_veh(0, 5, 3), 0);
+    EXPECT(vehs[0].x, 5);
+    // Aircraft at the end of their range, out of moves away from a base:
+    // lost.
+    step_setup();
+    put_unit(0, 3, 3, 1, 2);
+    vehs[0].moves_spent = (uint8_t)(veh_speed(0, 0) - 1), vehs[0].movement_turns = 1;
+    int count = veh_count;
+    EXPECT(order_veh(0, 1, 3), 0);
+    EXPECT(veh_count, count - 1);
+    // A turn aloft counted short of the range's end.
+    step_setup();
+    put_unit(0, 3, 3, 1, 2);
+    vehs[0].moves_spent = (uint8_t)(veh_speed(0, 0) - 1);
+    EXPECT(order_veh(0, 1, 3), 1);
+    EXPECT(vehs[0].movement_turns, 1);
+    // Short of the square's cost (two moves left of three): the roll (the
+    // worst here) fails, and the unit waits for its next turn, slowed;
+    // slowed, it goes.
+    step_setup();
+    vehs[0].moves_spent = 1;
+    EXPECT(order_veh(0, 1, 3), 1);
+    EXPECT(vehs[0].x, 3);
+    EXPECT(vehs[0].state & 0x8000, 0x8000);
+    vehs[0].moves_spent = 1;
+    EXPECT(order_veh(0, 1, 3), 1);
+    EXPECT(vehs[0].x, 5);
+    EXPECT(vehs[0].state & 0x8000, 0);
+    // Aboard its faction's transport out at sea: asleep there.
+    step_setup();
+    sea(5);
+    put_unit(0, 5, 3, 1, 0);
+    put_unit(1, 3, 3, 1, 1);
+    protos[1].carry = 2;
+    EXPECT(order_veh(0, 5, 3), 1);
+    EXPECT(vehs[0].x, 3);
+    EXPECT(vehs[0].order, 1);
+    EXPECT(vehs[0].waypoint_x[0], -1);
+    // A full one (a land unit already aboard each place): no.
+    put_unit(2, 5, 3, 1, 0);
+    put_unit(3, 3, 3, 1, 0);
+    vehs[3].next_in_stack = 0, vehs[0].prev_in_stack = 3, vehs[0].next_in_stack = 1, vehs[1].prev_in_stack = 0;
+    EXPECT(order_veh(2, 5, 3), 0);
+    EXPECT(vehs[2].x, 5);
+    protos[1].carry = 0;
+    // Monoliths and supply pods are visited.
+    step_setup();
+    at(5, 3)->bits |= MAP_MONOLITH;
+    at(5, 5)->bits |= MAP_SUPPLY_POD;
+    int m = monoliths, g = goodies;
+    EXPECT(order_veh(0, 1, 3), 1);
+    EXPECT(monoliths, m + 1);
+    vehs[0].moves_spent = 0;
+    EXPECT(order_veh(0, 3, 3), 1);
+    EXPECT(vehs[0].y, 5);
+    EXPECT(goodies, g + 1);
+}
+
 int main(void) {
     game_map = &tiles_ptr, game_map_width = &width, game_map_height = &height, game_map_half_width = &half_width;
     game_map_area = &area, game_map_flat = &flat, game_state = &state;
@@ -495,6 +651,19 @@ int main(void) {
     test_terraform_work();
     test_action();
     test_staple();
+    game_popup_ctor = game_popup_dtor = popup_, game_get_async_key_state = key_state_, game_fx_play = fx_;
+    game_console_focus = focus_, game_veh_scoot = scoot_, game_clock_wait = clock_wait_, game_draw_radius = radius_;
+    game_boom = boom_, game_log_say = log_say_, game_synch_veh = synch_veh_, game_monolith = monolith_;
+    game_goody_box = goody_box_, game_parse_say = parse_say_, game_parse_num = parse_num_, game_tut_check = tut_check_;
+    game_random = random_, game_base_win_check_base = win_base_, game_x_pop = x_pop_, game_interlude = interlude_;
+    game_veh_attack_flags = &attack_flags, game_current_veh = &current_veh, game_moved_quickly = &moved_quickly;
+    game_console_23be4 = &console_flag, game_zoc_tutorial_count = &zoc_count, game_fungus_tutorial_count = &fungus_count;
+    game_tutorial_moves_seen = &moves_seen, game_native_life = &native_life, game_expansion = &expansion;
+    game_draw_state = &draw_state, game_veh_ref_map_1 = &ref_map_1, game_abilities = abilities, game_armor = armor;
+    game_veh_ref_map_2 = &refs[0], game_veh_ref_3 = &refs[1], game_veh_ref_4 = &refs[2], game_battle_state = &battle_state;
+    game_veh_at = veh_at, game_veh_at_rebuilt = &rebuilt, game_veh_lift_x = &lift_x, game_veh_lift_y = &lift_y, game_veh_lifted = &lifted;
+    for (int i = 0; i < 32; i++) abilities[i].name = ability_name;
+    test_step();
     if (failures) return 1;
     printf("engine_move: ok\n");
     return 0;

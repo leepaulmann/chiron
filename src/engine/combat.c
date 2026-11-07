@@ -1739,7 +1739,7 @@ static void shadow_planet_busting(int a, int b, int c) {
 // and hotseat games, a base at the target with messages listed (its fall
 // renumbers them on the heap, see base_kill), and a planet buster while
 // its blast plays.
-static int battle_checkable(int veh, int tx, int ty) {
+int battle_checkable(int veh, int tx, int ty) {
     int fa = veh_(veh)->faction, fd = -1;
     if (*game_net_multiplayer || *game_pbem || game_is_human(fa)) return 0;
     for (int v = 0; v < *game_veh_count; v++)

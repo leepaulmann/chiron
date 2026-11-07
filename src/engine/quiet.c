@@ -273,6 +273,11 @@ HELD_THIS(fx_play, (void *self, int id), (self, id), c_.arg[0] = id, orig_fx_pla
 // its radar range.
 HELD_THIS(fx_fade, (void *self, int id), (self, id), c_.arg[0] = id, orig_fx_fade(SELF, a_[0]))
 HELD_THIS(fx_stop, (void *self, int id), (self, id), c_.arg[0] = id, orig_fx_stop(SELF, a_[0]))
+// A unit's step (order_veh): the map's cursor moved on with a unit shown
+// quickly, and the engine's pitch for a slow one.
+HELD_THIS(console_cursor_next, (void *self, int x, int y), (self, x, y), (c_.arg[0] = x, c_.arg[1] = y),
+          orig_console_cursor_next(SELF, a_[0], a_[1]))
+HELD_THIS(fx_engine_pitch, (void *self, int pitch), (self, pitch), c_.arg[0] = pitch, orig_fx_engine_pitch(SELF, a_[0]))
 // Movies and help for secret projects.
 HELD(void, amovie_project, (void)0, (int project), (project), (c_.arg[0] = project), orig_amovie_project(a_[0]))
 HELD(void, amovie_project_2, (void)0, (char *name), (name), (hooks_ui_text(&c_, 0, name)), orig_amovie_project_2(TEXT(0)))
@@ -298,6 +303,12 @@ HELD(void, mon_winning_trans, (void)0, (int faction, int other), (faction, other
      (c_.arg[0] = faction, c_.arg[1] = other), orig_mon_winning_trans(a_[0], a_[1]))
 HELD(void, mon_colony_founded, (void)0, (int faction, char *name), (faction, name),
      (c_.arg[0] = faction, c_.arg[1] = (int)(intptr_t)name), orig_mon_colony_founded(a_[0], PTR(1)))
+// A base conquered (its name on the caller's stack, so copied) and a
+// faction eliminated, from a unit's step.
+HELD(void, mon_conquer_base, (void)0, (int faction, char *name), (faction, name),
+     (c_.arg[0] = faction, hooks_ui_text(&c_, 0, name)), orig_mon_conquer_base(a_[0], TEXT(0)))
+HELD(void, mon_killed_faction, (void)0, (int faction, int other), (faction, other),
+     (c_.arg[0] = faction, c_.arg[1] = other), orig_mon_killed_faction(a_[0], a_[1]))
 
 // A tech given away (by a secret project), with its announcement and the
 // window that shows it, which allocates as the monuments do.
@@ -457,5 +468,9 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x477210, mon_enemy_destroyed, MON_PROLOGUE),
     QUIET_HOOK(0x446ad0, fx_fade, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                  // mov eax, [ebp+8]
     QUIET_HOOK(0x446a90, fx_stop, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),
+    QUIET_HOOK(0x5109b0, console_cursor_next, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x0c),  // mov eax, [ebp+12]
+    QUIET_HOOK(0x446b10, fx_engine_pitch, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x81, 0xec, 0x28, 0x00, 0x00),  // mov eax, [ecx+0x28ec]
+    QUIET_HOOK(0x477320, mon_conquer_base, MON_PROLOGUE),
+    QUIET_HOOK(0x477a60, mon_killed_faction, MON_PROLOGUE),
 };
 struct hook_module quiet_module = {"quiet", quiet_hooks, HOOK_COUNT(quiet_hooks), NULL, NULL, -1};

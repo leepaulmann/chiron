@@ -37,3 +37,7 @@ void planet_busting(int veh, int x, int y);
 // what it returns.
 int battle_fight_2(int veh_att, int offset, int tx, int ty, int table_offset, int option, int *def_id);
 int battle_fight(int veh, int offset, int table_offset, int option, int *def_id);
+// Shadow mode: whether a check can run a battle of the unit's on (tx, ty)
+// (no humans, nerve gas, falling base with messages listed or planet
+// buster's blast playing).
+int battle_checkable(int veh, int tx, int ty);

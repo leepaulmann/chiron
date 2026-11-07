@@ -1241,6 +1241,27 @@ extern int(__attribute__((thiscall)) * game_net_await_exec)(void *daemon, int un
 extern int(__attribute__((thiscall)) * game_net_await_synch)(void *daemon);
 extern void(__attribute__((thiscall)) * game_net_unlock_veh)(void *daemon);
 extern void (*game_del_site)(int faction, int type, int x, int y, int unk);
+// The step's own calls (order_veh): a probe team's mission, a supply
+// crawler's menu, a base captured, supply pods, monoliths and artifacts
+// studied, the tutorial's checks, a script.txt section opened for a menu,
+// a menu's items, the map cursor moved on and the engine's pitch; the
+// console's flags for a move shown quickly (1, 2 for the player's unit)
+// and for one the player sees, and the tutorial's counts of zones of
+// control and fungus met and its flag for fractional moves seen.
+extern int (*game_probe)(int veh, int base, int veh_target, int unk);
+extern int (*game_supply_options)(int veh, int base);
+extern void (*game_capture_base)(int base, int faction, int probe);
+extern int (*game_goody_box)(int veh, int goody);
+extern void (*game_monolith)(int veh);
+extern int (*game_study_artifact)(int veh);
+extern int (*game_tut_check)(int bit);
+extern int (*game_x_text_open)(char *file, char *label);
+extern void (*game_parse_string)(char *text, char *buffer);
+extern void(__attribute__((thiscall)) * game_dialogs_item)(void *dialogs, char *text, int id);
+extern void(__attribute__((thiscall)) * game_console_cursor_next)(void *console, int x, int y);
+extern void(__attribute__((thiscall)) * game_fx_engine_pitch)(void *fx, int pitch);
+extern int32_t *game_moved_quickly, *game_console_23be4;
+extern int32_t *game_zoc_tutorial_count, *game_fungus_tutorial_count, *game_tutorial_moves_seen;
 // Units' other actions (move.c): a fight started from the map, a missile's
 // target faction given its chance to shoot it down, an atrocity and a
 // broken treaty noted, a colony's monument, a sound at a square, the
@@ -1467,7 +1488,6 @@ extern void (*game_say_morale_2)(int veh, int unk);  // a unit's morale, into ga
 // Sound effects faded out or stopped (by id).
 extern void(__attribute__((thiscall)) * game_fx_fade)(void *fx, int id);
 extern void(__attribute__((thiscall)) * game_fx_stop)(void *fx, int id);
-extern int (*game_tut_check)(int bit);  // a tutorial note not yet shown (and now marked shown)
 extern uint32_t(__attribute__((stdcall)) * *game_char_lower)(char *s);  // CharLowerA, as imported
 extern char *game_parse_text;  // the text variables parse_says() fills, 256 bytes each
 

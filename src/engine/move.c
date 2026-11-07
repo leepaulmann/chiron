@@ -6,24 +6,27 @@
 // disassembly; names follow Thinker (MIT) and OpenSMACX (Brendan Casey,
 // GPL-3.0-or-later).
 //
-// The step itself is the game's order_veh(), which moves the unit with all
-// that may happen on the way (fights, supply pods, monoliths), and is not
-// here. Nor is veh_scoot(), which the game calls from it to show a unit
-// sliding into the next square: it is all animation (the sound, the
-// squares' pictures, a timed loop of drawing) and leaves nothing behind but
-// the unit's facing, so the game's own is kept.
+// The step itself is order_veh(), which moves the unit with all that may
+// happen on the way (fights, supply pods, monoliths). Not here is
+// veh_scoot(), which the game calls from it to show a unit sliding into the
+// next square: it is all animation (the sound, the squares' pictures, a
+// timed loop of drawing) and leaves nothing behind but the unit's facing,
+// so the game's own is kept.
 #include "move.h"
 
 #include <stdlib.h>
 #include <string.h>
 
 #include "base.h"
+#include "combat.h"
 #include "faction.h"
 #include "game.h"
 #include "map.h"
 #include "mapgen.h"
 #include "path.h"
+#include "score.h"
 #include "shadow.h"
+#include "spot.h"
 #include "strategy.h"
 #include "tech.h"
 #include "veh.h"
@@ -1408,6 +1411,1486 @@ void action_fungal(int veh, int x, int y) {
     if (seen) missile_done(veh, base, 0x688280, 0x68826c);
 }
 
+// ---- A unit's step (order_veh) --------------------------------------------------------
+//
+// A unit's move to one of the eight squares around it, or (a direction of
+// 8 or more, or a negative one) a stay where it is. On the way: the AI
+// kept out of others' territory, an artifact's menu at its own base,
+// probe teams' missions, boarding transports, zones of control, a supply
+// crawler's menu, native life rising from fungus, hidden units spotted,
+// the attack (battle_fight) or the capture of native life, and the
+// passengers a transport lets ashore; then, past the checks on a foreign
+// base, the cost of the square (a land unit short of it may fail the
+// move), and the move itself with what it brings: a base captured or the
+// worms' attack on it, bunkers, Gibraltar's guns, sleeping passengers
+// woken, fuel for aircraft, monoliths, supply pods, an artifact taken by
+// its neighbours, and a unit that boarded a transport put to sleep.
+// `type` (kept in veh_attack_flags) is 1 for a move the player sees and 2
+// for one that happens (3 for both; 1 alone only weighs a fight's odds).
+// Returns 1 if the unit moved or may go on, 0 if not or if a unit is gone.
+//
+// Thinker (MIT) has a version of it that this follows in outline. Where
+// they differ the original is kept: a land unit can't board an ally's
+// transport at sea (the move fails); a probe team sent home goes to the
+// base of its faction with the most citizens (with stack_put); the
+// facilities a worm attack may destroy are tried 101 times, among those
+// that aren't free to faction 0; the check for a carrier in an aircraft's
+// stack looks at the moving unit's own design each time; an artifact that
+// pays for production goes on through the rest of the move, its number by
+// then another unit's; the disembark menu comes up only for the player
+// and tells of failure when it found passengers but none with moves left;
+// one shore next to a transport is enough to wake its passengers; an
+// aircraft at its range's end with moves left has its fuel checked when
+// it can't move more than a road square's worth or has used up its turns.
+
+enum {
+    OV_PLAN_NAVAL_TRANSPORT = 7, OV_PLAN_COLONY = 8, OV_PLAN_TERRAFORM = 9, OV_PLAN_SUPPLY = 10,
+    OV_PLAN_PROBE = 11, OV_PLAN_ARTIFACT = 12,
+    OV_ABL_CLOAKED = 0x4, OV_ABL_AMPHIBIOUS = 0x8, OV_ABL_AIR_SUPERIORITY = 0x20, OV_ABL_CARRIER = 0x80,
+    OV_BSC_ARTIFACT = 7, OV_BSC_MIND_WORMS = 8, OV_BSC_ISLE = 9, OV_BSC_SEALURK = 14, OV_BSC_SPORE_LAUNCHER = 15,
+    OV_BSC_BATTLE_OGRE_1 = 16, OV_BSC_BATTLE_OGRE_3 = 18, OV_BSC_FUNGAL_TOWER = 19, OV_BASIC_PROTOS = 64,
+    OV_CHASSIS_COPTER = 6,
+    OV_STATE_MOVED = 0x4, OV_STATE_ZOC = 0x8, OV_STATE_UNK_40 = 0x40, OV_STATE_MONOLITH = 0x100,
+    OV_STATE_ALERT = 0x200, OV_STATE_EXPLORE = 0x4000, OV_STATE_AUTO = OV_STATE_ALERT | OV_STATE_EXPLORE,
+    OV_STATE_SLOWED = 0x8000, OV_STATE_FACING = 0x10000,
+    OV_STATE_SENTRY_ALERT = 0x1000200, OV_STATE_PATROL = 0x2000200,
+    OV_FLAG_PROBE_PACT = 0x4, OV_FLAG_OBJECTIVE = 0x20, OV_FLAG_INVISIBLE = 0x400, OV_FLAG_LURKER = 0x440,
+    OV_FLAG_NO_CAPTURE = 0x2000,
+    OV_TREATY_KEEP_OUT = 0xc11,  // pact, vendetta, shall betray, unk_800: the AI may go in
+    OV_TREATY_TRUCE_TREATY = 0x6, OV_TREATY_ANY = 0x7,
+    OV_MAP_BUNKER = 0x800, OV_MAP_SUPPLY_REMOVE = 0x100000,
+    OV_PREF_QUICK_ENEMY = 0x4, OV_PREF_TUTORIAL = 0x20, OV_PREF_QUICK_ALLY = 0x8000, OV_PREF_AIR_HOME = 0x10000,
+    OV_PREF_NO_CENTER = 0x80000,
+    OV_MPREF_QUICK_ORDERS = 0x40, OV_MPREF_QUICK_ALL = 0x80,
+    OV_RULES_NO_NATIVE = 0x200000,
+    OV_VK_SHIFT = 0x10, OV_VK_CONTROL = 0x11,
+    OV_SP_XENOEMPATHY_DOME = 8, OV_SP_UNIVERSAL_TRANSLATOR = 20, OV_FAC_NETWORK_NODE = 8, OV_FAC_PRESSURE_DOME = 26,
+    OV_BASE_ARTIFACT_LINKED = 0x800,
+    OV_FX_SPOTTED = 13, OV_FX_FUNGUS = 9, OV_FX_NONCOMBATANT = 0x33,
+    OV_GOAL_TRANSPORT = 6, OV_WMODE_PROBE = 11,
+    OV_BONUS_FACILITY = 2, OV_BONUS_FACILITY_TECH = 12,
+};
+#define OV_PREF_WAKE_ON_LAND 0x80000000u  // a transport's passengers woken at a shore
+
+// What the original keeps in its frame through the move.
+struct step {
+    uint8_t *pop;  // its popup, where the original's frame has it
+    int veh;       // another unit's number after a won fight, a capture or the disembark menu
+    int dir;
+    int faction;   // another after an artifact is taken
+    int fbit;      // the faction's bit as it was at first
+    int vx, vy, tx, ty, region;
+    int stack, base, tfac;  // the target square's units, base and faction (-1 for none)
+    int from_sea, to_sea, goody, count;
+    int result;        // what it returns
+    int boarded;       // a land unit boarded its faction's transport out at sea
+    int fought;        // it attacked
+    int refuel_check;  // it fought and won: an aircraft with a range of 1 checks its fuel
+    int probing;       // a probe team acted on a unit, or units were spotted
+    int slow;          // it moves on its own (exploring or on alert); later, shown at full pace
+    int seen;          // the player sees it (on some paths the original never sets it; see order_veh)
+    int owner;         // the bunker's or the last Gibraltar gun's faction
+    int cost;          // the square's cost
+    int triad;
+};
+
+enum next { GO_ON, GO_END, GO_RETURN_0, GO_RETURN_1, GO_SPOT, GO_NAVAL, GO_UPKEEP, GO_LOOP, GO_ARRIVE };
+
+// diplo_status of one faction towards another, read as the original does
+// even for no faction (-1).
+static inline uint32_t treaty_of(int faction, int other) {
+    return *(const uint32_t *)((const char *)game_factions[faction].diplo_status + 4 * other);
+}
+// A base by number, also for no base (-1), as the original reads it.
+static inline struct base *base_ref(int b) { return (struct base *)((char *)game_bases + b * (int)sizeof(struct base)); }
+static inline int sea_at(int x, int y) { return alt_of(tile(x, y)) < ALT_SHORE; }
+static inline int base_on(const struct map_tile *t) { return faction_on(t, MAP_BASE); }
+static inline int is_human_(int faction) { return (*game_human_factions >> faction) & 1; }
+static inline int attack_flags(void) { return *game_veh_attack_flags; }
+static inline const struct unit_proto *veh_design(int veh) { return &game_protos[game_vehs[veh].proto]; }
+static inline int veh_offense(int veh) { return game_weapons[veh_design(veh)->weapon].offense; }
+static inline int veh_plan(int veh) { return veh_design(veh)->plan; }
+static inline int veh_range(int veh) { return game_chassis[veh_design(veh)->chassis].range; }
+static inline int key_down(int key) { return (game_get_async_key_state(key) & 0xff00) != 0; }
+static inline int top_of(int veh) {
+    while (game_vehs[veh].prev_in_stack >= 0) veh = game_vehs[veh].prev_in_stack;
+    return veh;
+}
+static inline void say_name(int slot, int veh) { game_parse_says(slot, game_protos[game_vehs[veh].proto].name, -1, -1); }
+static inline void say_adjective(int slot, int faction) {
+    game_parse_says(slot, game_faction_defs[faction].adjective, -1, -1);
+}
+static inline void say_ability(uint32_t ability) {
+    game_parse_say(0, (int)(intptr_t)game_abilities[abil_index(ability)].name, -1, -1);
+}
+static inline void step_synch(int veh) {
+    game_synch_veh(veh);
+    game_net_await_synch(game_net_daemon);
+}
+static inline int ask_x(uint32_t label) { return ((int (*)(char *, int))game_x_pop)(text(label), 0); }
+static inline int ask(uint32_t label, uint32_t picture) { return game_popp(*game_script_file, text(label), 0, text(picture), 0); }
+static inline char *next_line(void) { return ((char *(*)(void))game_text_get)(); }
+// A line of a menu, put together in the battle text.
+static void menu_item(struct step *s, char *line, int id) {
+    game_parse_string(line, game_battle_text);
+    game_dialogs_item(s->pop + 0x21d0, game_battle_text, id);
+}
+// The player's units' messages, for a move the player sees.
+static inline int told(const struct step *s) { return s->faction == *game_current_faction && (attack_flags() & 1); }
+
+// The AI doesn't go into the territory of a faction it has none of
+// OV_TREATY_KEEP_OUT with: its order ends.
+static enum next step_territory(struct step *s) {
+    struct veh *V = &game_vehs[s->veh];
+    if ((*game_human_factions & s->fbit) || V->order != ORDER_MOVE_TO) return GO_ON;
+    s->owner = whose_territory(s->faction, V->waypoint_x[0], V->waypoint_y[0], NULL, 0);
+    if (s->owner >= 0 && s->owner != s->faction && !(treaty_of(s->faction, s->owner) & OV_TREATY_KEEP_OUT)) {
+        V->order = ORDER_NONE;
+        return GO_END;
+    }
+    return GO_ON;
+}
+
+// An artifact entering its faction's base (for a move the player sees):
+// what to do with it, kept in movement_turns (1 to link it to a Network
+// Node, or study it at the Universal Translator, 2 to put it into
+// production). The AI takes the last choice offered, the player is asked.
+static void step_artifact_menu(struct step *s) {
+    int veh = s->veh;
+    struct veh *V = &game_vehs[veh];
+    if (veh_plan(veh) != OV_PLAN_ARTIFACT || (V->flags & OV_FLAG_OBJECTIVE) || !(attack_flags() & 1)) return;
+    V->movement_turns = 0;
+    if (s->base < 0 || game_bases[s->base].faction != s->faction) return;
+    struct base *B = &game_bases[s->base];
+    int human = (*game_human_factions & s->fbit) != 0;
+    game_parse_says(0, B->name, -1, -1);
+    game_popup_start(s->pop, game_pop_file, text(0x68fc90), -1, 0, 0, 0);
+    int w, h;
+    if (!game_pcx_dimensions(text(0x68fc9c), &w, &h) && !game_sprite_init(s->pop + 0x2118, text(0x68fcac), w, h))
+        *(uint8_t **)(s->pop + 0x2144) = s->pop + 0x2118;
+    game_parse_num(0, B->minerals);
+    int item = B->queue[0], cost;
+    if (item < 0) {
+        cost = cost_factor(s->faction, 1, -1) * game_facilities[-item].cost;
+    } else {
+        cost = veh_cost(item, s->base, NULL);
+        cost *= cost_factor(s->faction, 1, -1);
+    }
+    game_parse_num(1, cost);
+    if (game_x_text_open(*game_script_file, text(0x68fcbc))) return;
+    *game_battle_text = 0;
+    menu_item(s, next_line(), 0);
+    int items = 1;
+    char *line = next_line();
+    int offset;
+    uint32_t mask;
+    bitmask(OV_FAC_NETWORK_NODE, &offset, &mask);
+    if ((B->facilities_built[offset] & mask) && game_secret_projects[OV_SP_UNIVERSAL_TRANSLATOR] != s->base &&
+        !(B->state & OV_BASE_ARTIFACT_LINKED)) {
+        *game_battle_text = 0;
+        menu_item(s, line, items++);
+        if (!human) V->movement_turns = 1;
+    }
+    line = next_line();
+    if (game_secret_projects[OV_SP_UNIVERSAL_TRANSLATOR] == s->base) {
+        *game_battle_text = 0;
+        menu_item(s, line, 1);
+        items++;
+        if (!human) V->movement_turns = 1;
+    }
+    line = next_line();
+    if (item <= -FAC_FIRST_PROJECT) {
+        *game_battle_text = 0;
+        game_parse_say(1, (int)(intptr_t)game_facilities[-item].name, -1, -1);
+        menu_item(s, line, 2);
+        items++;
+        if (!human) V->movement_turns = 2;
+    }
+    line = next_line();
+    if (item >= OV_BASIC_PROTOS && !(game_protos[item].flags & PROTO_FLAG_BUILT)) {
+        *game_battle_text = 0;
+        game_parse_says(2, game_protos[item].name, -1, -1);
+        menu_item(s, line, 2);
+        items++;
+    }
+    if (items > 1 && s->faction == *game_current_faction && human) {
+        V->movement_turns = (uint8_t)game_base_pop_exec_3(s->pop, 0, 0);
+        step_synch(veh);
+    }
+}
+
+// A stay (no direction). An aircraft of the player's, away from a base,
+// an airbase or a carrier (the original asks the moving unit's design
+// each time round its stack) or a supply crawler aloft, with moves left
+// and a range of 1 or turns spent aloft, heads home; on its way it
+// returns 0. Otherwise it stays put (1), skipping its turn.
+static enum next step_stay(struct step *s) {
+    int veh = s->veh;
+    struct veh *V = &game_vehs[veh];
+    const struct rules_chassis *C = chassis_of(V);
+    if (C->triad == TRIAD_AIR && C->range && (attack_flags() & 1) && s->faction == *game_current_faction) {
+        const struct map_tile *t = tile(s->tx, s->ty);
+        if (!base_on(t) && !(t->bits & MAP_AIRBASE)) {
+            for (int u = top_of(veh); u >= 0; u = game_vehs[u].next_in_stack) {
+                if (has_abil(V->proto, OV_ABL_CARRIER)) goto stay;
+                if (veh_plan(u) == OV_PLAN_SUPPLY && game_veh_triad(u) == TRIAD_AIR) goto stay;
+            }
+            if (moves_left(veh) && (chassis_of(V)->range == 1 || V->movement_turns)) {
+                action_home(veh, 0);
+                if (V->order == ORDER_MOVE_TO) {
+                    if (net_turn()) step_synch(veh);
+                    return GO_RETURN_0;
+                }
+            }
+        }
+    }
+stay:
+    s->result = 1;
+    if (!(attack_flags() & 2)) return GO_END;
+    veh_skip(veh);
+    V->state &= ~(uint32_t)OV_STATE_UNK_40;
+    return GO_UPKEEP;
+}
+
+// A probe team moving onto another faction's units or base. For the
+// player, a pact asks first. Units in the open (without a pact, and
+// without a probe team of their own) or a base (without a probe team, for
+// the AI only without a pact unless the base is its goal) get the team's
+// mission; in a network game a mission that happened ends the move (1).
+static enum next step_probe(struct step *s) {
+    int veh = s->veh;
+    struct veh *V = &game_vehs[veh];
+    if (veh_plan(veh) != OV_PLAN_PROBE || s->tfac < 0 || s->faction == s->tfac) return GO_ON;
+    if (attack_flags() & 1) {
+        V->flags &= ~OV_FLAG_PROBE_PACT;
+        if ((treaty_of(s->faction, s->tfac) & TREATY_PACT) && !s->slow && s->faction == *game_current_faction) {
+            if (s->base >= 0) {
+                game_parse_says(0, game_bases[s->base].name, -1, -1);
+                say_adjective(1, s->tfac);
+                if (!ask_x(0x68fccc)) return GO_ON;
+                V->flags |= OV_FLAG_PROBE_PACT;
+            } else if (stack_check(s->stack, 2, OV_PLAN_PROBE, s->tfac, -1)) {
+                say_adjective(0, s->tfac);
+                if (!ask_x(0x68fcd8)) return GO_ON;
+                V->flags |= OV_FLAG_PROBE_PACT;
+            }
+        }
+    }
+    if (s->base < 0) {
+        if (treaty_of(s->faction, s->tfac) & TREATY_PACT) return GO_ON;
+        if (s->stack >= 0 && stack_check(s->stack, 2, OV_PLAN_PROBE, -1, -1)) return GO_ON;
+        s->probing = 1;
+        int done = game_probe(veh, -1, s->stack, 1);
+        int flags = attack_flags();
+        if (done && net_turn() && (flags & 1) && !(flags & 2)) {
+            step_synch(veh);
+            return GO_RETURN_1;
+        }
+        if (*game_veh_count != s->count) return GO_RETURN_0;
+        if (s->stack >= 0) s->tfac = game_vehs[s->stack].faction;
+        return GO_ON;
+    }
+    if (s->stack >= 0 && stack_check(s->stack, 2, OV_PLAN_PROBE, -1, -1)) return GO_ON;
+    const struct base *B = &game_bases[s->base];
+    if (!(*game_human_factions & s->fbit) && (treaty_of(s->faction, s->tfac) & TREATY_PACT) &&
+        (V->waypoint_x[0] != B->x || V->waypoint_y[0] != B->y))
+        return GO_ON;
+    if (s->tfac == *game_current_faction) {
+        game_console_focus(game_console, s->vx, s->vy, s->faction);
+        if (!*game_net_multiplayer) game_clock_wait(400);
+        stack_veh(veh, 1);
+        game_veh_scoot(veh, s->vx, s->vy, s->dir, 0);
+        stack_put(veh, s->vx, s->vy);
+        game_draw_tile(s->tx, s->ty, 2);
+    }
+    if (!game_probe(veh, s->base, -1, 1)) return GO_END;
+    int flags = attack_flags();
+    if (!net_turn() || !(flags & 1) || (flags & 2)) return GO_END;
+    step_synch(veh);
+    return GO_RETURN_1;
+}
+
+// A land unit headed out to sea: onto its faction's transports with room
+// (in the open it boards), into its faction's base on the shore if
+// amphibious or with a transport there or in its own stack; into another
+// faction's sea base if amphibious; onto a stack in the open only an air
+// superiority unit against aircraft with no carrier, as an attack. A
+// pact is no way aboard.
+static enum next step_to_sea(struct step *s) {
+    if (s->triad != TRIAD_LAND || !s->to_sea) return GO_ON;
+    int veh = s->veh, proto = game_vehs[veh].proto;
+    if (s->faction == s->tfac) {
+        if (stack_check(s->stack, 8, s->faction, -1, -1) <= 0) {
+            if (s->base < 0) {
+                int n = stack_check(s->stack, 2, OV_PLAN_NAVAL_TRANSPORT, -1, -1);
+                if (n && told(s)) notice(stack_check(s->stack, 2, OV_PLAN_NAVAL_TRANSPORT, -1, -1) > 1 ? 0x68fd00 : 0x68fd10);
+                return GO_END;
+            }
+            if (!has_abil(proto, OV_ABL_AMPHIBIOUS) && !stack_check(s->stack, 2, OV_PLAN_NAVAL_TRANSPORT, -1, -1) &&
+                !stack_check(veh, 2, OV_PLAN_NAVAL_TRANSPORT, -1, -1)) {
+                if (told(s)) {
+                    say_ability(OV_ABL_AMPHIBIOUS);
+                    notice(0x68fcf4);
+                }
+                return GO_END;
+            }
+        }
+        if (s->base < 0) s->boarded = 1;
+        return GO_ON;
+    }
+    if (treaty_of(s->faction, s->tfac) & TREATY_PACT) return GO_END;
+    if (s->base >= 0) {
+        if (has_abil(proto, OV_ABL_AMPHIBIOUS)) return GO_ON;
+        if (told(s)) {
+            say_ability(OV_ABL_AMPHIBIOUS);
+            notice(0x68fce8);
+        }
+        return GO_END;
+    }
+    if (s->stack < 0 || !has_abil(proto, OV_ABL_AIR_SUPERIORITY) || !stack_check(s->stack, 18, -1, -1, -1) ||
+        stack_check(s->stack, 6, OV_ABL_CARRIER, -1, -1))
+        return GO_END;
+    return GO_SPOT;
+}
+
+// Zones of control: a land unit (not a probe team, not cloaked) going
+// between two squares next to enemies, onto an empty one, can't. The
+// player hears of it (with the tutorial's note at times) and enemies
+// around the square it wanted are spotted.
+static enum next step_zoc(struct step *s) {
+    if (s->from_sea || s->to_sea) return GO_ON;
+    int veh = s->veh;
+    const struct unit_proto *P = veh_design(veh);
+    if (game_chassis[P->chassis].triad != TRIAD_LAND || (P->abilities & OV_ABL_CLOAKED) || P->plan == OV_PLAN_PROBE ||
+        s->stack >= 0)
+        return GO_ON;
+    if (!zoc_move(s->vx, s->vy, s->faction) || !zoc_move(s->tx, s->ty, s->faction)) return GO_ON;
+    if (s->faction != *game_current_faction || s->slow || !(attack_flags() & 1)) return GO_END;
+    game_fx_play(game_fx, OV_FX_SPOTTED);
+    if (*game_net_multiplayer) return GO_END;
+    if ((*game_preferences & OV_PREF_TUTORIAL) ||
+        (game_factions[s->faction].diff_level <= 1 && (++*game_zoc_tutorial_count & 3) == 1)) {
+        say_ability(OV_ABL_CLOAKED);
+        int ax, ay, bx, by;
+        quick_zoc(s->vx, s->vy, s->faction, s->tx, s->ty, &ax, &ay);
+        quick_zoc(s->tx, s->ty, s->faction, s->vx, s->vy, &bx, &by);
+        game_tut_map(game_tut_win, text(0x68fd20), ax, ay, veh, NULL, 0, bx, by);
+        if (*game_net_multiplayer) return GO_END;
+    }
+    s->probing = 0;
+    for (int i = 0; i < 8; i++) {
+        int x = xrange(s->tx + game_radius_near_x[i]), y = s->ty + game_radius_near_y[i];
+        if (!on_map(x, y)) continue;
+        int u = stack_fix(veh_at(x, y));
+        if (u < 0 || game_vehs[u].faction == s->faction) continue;
+        if ((treaty_of(s->faction, game_vehs[u].faction) & TREATY_PACT) || (s->fbit & game_vehs[u].visibility)) continue;
+        spot_loc(x, y, s->faction);
+        s->probing = 1;
+    }
+    if (s->probing) game_draw_radius(s->tx, s->ty, 1, 2);
+    return GO_END;
+}
+
+// supply_options(): a supply crawler's menu at a base, for the player.
+// The AI is offered nothing (0), on a popup made and taken down at once
+// where the original's frame has it (the call's frame lies 0x542c below
+// order_veh's, and its popup 0x53a0 below that).
+static int supply_menu(struct step *s, int veh, int base) {
+    if (is_human_(game_vehs[veh].faction)) return game_supply_options(veh, base);
+    uint8_t *pop = s->pop + 0x5410 - 0xa7dc;
+    game_popup_ctor(pop);
+    *(uint32_t *)pop = game_va(0x6695c8);
+    *(uint32_t *)(pop + 0x444) = game_va(0x6695c0);
+    game_popup_close(pop);
+    *(uint32_t *)(pop + 0x3230) = game_va(0x669d58);
+    *(uint32_t *)(pop + 0x3674) = game_va(0x669d50);
+    game_scroll_close(pop + 0x3230);
+    game_flat_button_dtor(pop + 0x4828);
+    game_flat_button_dtor(pop + 0x3cdc);
+    game_graphic_win_dtor(pop + 0x3230);
+    game_base_pop_dtor(pop);
+    return 0;
+}
+static enum next step_supply(struct step *s) {
+    int veh = s->veh;
+    if (veh_plan(veh) != OV_PLAN_SUPPLY || s->base < 0 || *game_net_multiplayer) return GO_ON;
+    int chosen = supply_menu(s, veh, s->base);
+    if (attack_flags() & 2) return chosen ? GO_END : GO_ON;
+    if (!chosen) return GO_END;
+    if (net_turn()) {
+        step_synch(veh);
+        return GO_RETURN_1;
+    }
+    return GO_ON;
+}
+
+// Native life rising from fungus a faction's unit (not aircraft) moves
+// onto, on its own kind of square, empty, without a tube or a pod, more
+// than a square from any base, unless native life is off or the
+// Xenoempathy Dome is the faction's and the unit is unarmed or on its way
+// somewhere. The chance grows with the distance to the nearest base and
+// the native life setting, and is halved for a square native life rose
+// from before, the sea, roads and native units, and for every sensor and
+// base within two squares (quartered within one). Mind worms, or a spore
+// launcher (one in five with Alien Crossfire), or at sea an Isle of the
+// Deep; the unit stops.
+static enum next step_native(struct step *s) {
+    int veh = s->veh;
+    struct veh *V = &game_vehs[veh];
+    if (!(attack_flags() & 2) || game_veh_triad(veh) == TRIAD_AIR || s->stack >= 0 || !s->faction) return GO_SPOT;
+    const struct map_tile *t = tile(s->tx, s->ty);
+    if (!fungus_on(t) || (t->bits & MAP_MAGTUBE)) return GO_SPOT;
+    if (!veh_offense(veh) || V->order == ORDER_MOVE_TO) {
+        int dome = game_secret_projects[OV_SP_XENOEMPATHY_DOME];
+        if (dome >= 0 && game_bases[dome].faction == s->faction) return GO_SPOT;
+    }
+    if (s->from_sea != s->to_sea || goody_at(s->tx, s->ty) || (*game_rules & OV_RULES_NO_NATIVE)) return GO_SPOT;
+    base_find(s->tx, s->ty);
+    int dist = *game_base_find_dist;
+    if (dist <= 1) return GO_SPOT;
+    int chance = (dist < 0 ? 0 : dist > 32 ? 32 : dist) + 10 * *game_native_life;
+    uint32_t bits = t->bits;
+    if (bits & OV_MAP_SUPPLY_REMOVE) {
+        chance /= 2;
+        if (!*game_native_life) chance /= 2;
+    }
+    if (s->to_sea) {
+        chance /= 2;
+        if (!*game_native_life) chance /= 2;
+    }
+    if (bits & MAP_ROAD) chance /= 2;
+    int proto = V->proto;
+    if (proto < OV_BASIC_PROTOS && (game_weapons[game_protos[proto].weapon].offense < 0 || proto == OV_BSC_SPORE_LAUNCHER))
+        chance /= 2;
+    for (int i = 0; i < 25; i++) {
+        int x = xrange(s->tx + game_radius_x[i]), y = s->ty + game_radius_y[i];
+        if (!on_map(x, y)) continue;
+        if (is_sensor(x, y) || base_on(tile(x, y))) chance = i < 9 ? chance / 4 : chance / 2;
+    }
+    s->seen = chance;
+    if (game_rand() % 100 >= chance) return GO_SPOT;
+    if (s->to_sea) proto = OV_BSC_ISLE;
+    else if (!(game_rand() % 5) && *game_expansion) proto = OV_BSC_SPORE_LAUNCHER;
+    else proto = OV_BSC_MIND_WORMS;
+    s->stack = veh_init(proto, 0, s->tx, s->ty);
+    if (s->stack < 0) return GO_NAVAL;
+    game_vehs[veh].order = ORDER_NONE;
+    spot_stack(s->stack, s->faction);
+    game_draw_tile(s->tx, s->ty, 2);
+    bit_set(s->tx, s->ty, OV_MAP_SUPPLY_REMOVE, 1);
+    if (s->faction == *game_current_faction) {
+        game_fx_play(game_fx, OV_FX_SPOTTED);
+        say_adjective(0, s->tfac);
+        say_name(1, s->stack);
+        notice(s->to_sea ? 0x68fd34 : 0x68fd40);
+    }
+    return GO_END;
+}
+
+// A native unit captured instead of fought (for a faction with Planet,
+// not by aircraft, not an artifact or fungal tower). The worms are
+// agitated (the attack goes ahead) if the faction has them on its own
+// orders or the nearest of its bases has eco-damage; once refused, a unit
+// stays refused. Planet's chance, then a turn-weighted roll against the
+// prototypes the faction already has (or one in ten); or a faction whose
+// own Planet rating is positive and that has none of the kind. The stack
+// changes sides, homed at the nearest base if the faction's and of size 3.
+// Returns GO_ON for an attack.
+static enum next step_capture(struct step *s) {
+    int veh = s->veh, st = s->stack;
+    int proto = game_vehs[st].proto;
+    if (s->tfac || game_veh_triad(veh) == TRIAD_AIR || proto == OV_BSC_ARTIFACT || proto == OV_BSC_FUNGAL_TOWER)
+        return GO_ON;
+    struct faction_data *F = &game_factions[s->faction];
+    if (F->se[SE_PLANET] <= 0) return GO_ON;
+    if (moves_left(veh) < game_rules_basic->move_rate_roads && (F->se_base[SE_PLANET] <= 0 || F->units_active[proto]))
+        return GO_ON;
+    int near = base_find_2(s->tx, s->ty, s->faction);
+    if (!(attack_flags() & 2)) return GO_ON;
+    if (game_vehs[st].order_auto_type == s->faction || (near >= 0 && game_bases[near].eco_damage)) {
+        game_log_say(text(0x68ff58), 0, 0, 0);
+        if (s->faction == *game_current_faction) notice(0x68ff64);
+        return GO_ON;
+    }
+    game_log_say(text(0x68fe54), s->faction, st, 0);
+    game_log_say(text(0x68fe6c), F->se_base[SE_PLANET], F->units_active[proto], 0);
+    game_log_say(text(0x68fe84), proto, F->se[SE_PLANET], 0);
+    int capture = 0;
+    if (!(game_vehs[st].flags & OV_FLAG_NO_CAPTURE)) {
+        if (game_rand() % 4 < F->se[SE_PLANET] &&
+            (game_rnd(*game_turn / 5 + 100) >= 10 * F->units_active[proto] || !(game_rand() % 10)))
+            capture = 1;
+        else if (F->se_base[SE_PLANET] > 0 && !F->units_active[proto])
+            capture = 1;
+    }
+    if (!capture) {
+        game_vehs[st].flags |= OV_FLAG_NO_CAPTURE;
+        if (s->faction == *game_current_faction) notice(0x68ff3c);
+        game_log_say(text(0x68ff4c), 0, 0, 0);
+        return GO_ON;
+    }
+    for (int u = top_of(st); u >= 0; u = game_vehs[u].next_in_stack) {
+        struct veh *U = &game_vehs[u];
+        U->faction = (uint8_t)s->faction;
+        U->morale = (uint8_t)morale_alien(u, 0);
+        int b = base_find(s->tx, s->ty);
+        const struct base *B = base_ref(b);
+        U->home_base = (int16_t)(B->faction == s->faction && B->pop_size >= 3 ? b : -1);
+        veh_skip(u);
+    }
+    bit_set(s->tx, s->ty, OV_MAP_SUPPLY_REMOVE, 1);
+    owner_set(s->tx, s->ty, s->faction);
+    if (s->faction == *game_current_faction) game_draw_tile_fixup(s->tx, s->ty, 1, 2);
+    else game_draw_tile(s->tx, s->ty, 2);
+    if (s->faction == *game_current_faction) {
+        say_name(0, st);
+        proto = game_vehs[st].proto;
+        if (proto == OV_BSC_SPORE_LAUNCHER) {
+            if (!F->units_active[OV_BSC_SPORE_LAUNCHER]) ask(0x68febc, 0x68feac);
+            else notice(0x68fec8);
+        } else if (proto == OV_BSC_SEALURK) {
+            if (!F->units_active[OV_BSC_SEALURK]) ask(0x68fee4, 0x68fed4);
+            else notice(0x68fef0);
+        } else if (!F->units_active[proto]) {
+            ask(0x68ff18, sea_at(s->tx, s->ty) ? 0x68fefc : 0x68ff08);
+        } else {
+            notice(0x68ff24);
+        }
+    }
+    game_log_say(text(0x68ff30), 0, 0, 0);
+    return GO_NAVAL;
+}
+
+// A probe team met at truce or treaty, alone in the open: near the
+// faction's own base it is sent home (the AI always, the player chooses),
+// elsewhere the player may let it be. Sent home, it goes to the base of
+// its faction with the most citizens, or is lost if it has none (unless
+// human).
+static enum next step_enemy_probe(struct step *s) {
+    int veh = s->veh, st = s->stack;
+    int choice;
+    int near = base_find(s->tx, s->ty);
+    if (near >= 0 && game_bases[near].faction == s->faction) {
+        say_adjective(0, s->tfac);
+        say_name(1, st);
+        say_title(2, s->faction);
+        if (!(*game_human_factions & s->fbit)) {
+            choice = 1;
+        } else {
+            int alien = game_faction_defs[s->tfac].rule_flags & RULE_FLAG_ALIEN;
+            choice = alien ? ask(0x68fdc4, 0x68fdb4) : ask(0x68fde0, 0x68fdd0);
+            if (!choice) return GO_END;
+        }
+        if (choice != 1) return GO_ON;
+    } else {
+        if (s->faction != *game_current_faction) return GO_ON;
+        say_adjective(0, s->tfac);
+        say_name(1, st);
+        say_title(2, s->faction);
+        int alien = game_faction_defs[s->tfac].rule_flags & RULE_FLAG_ALIEN;
+        choice = alien ? ask(0x68fe18, 0x68fe08) : ask(0x68fe34, 0x68fe24);
+        return choice ? GO_ON : GO_END;
+    }
+    if (s->faction == *game_current_faction || s->tfac == *game_current_faction) {
+        game_console_focus(game_console, s->vx, s->vy, s->faction);
+        stack_veh(veh, 1);
+        game_veh_scoot(veh, s->vx, s->vy, s->dir, 0);
+        stack_put(veh, s->vx, s->vy);
+        game_draw_tile(s->vx, s->vy, 2);
+    }
+    int home = -1, most = -1;
+    for (int b = 0; b < *game_base_count; b++)
+        if (game_bases[b].faction == s->tfac && game_bases[b].pop_size > most) most = game_bases[b].pop_size, home = b;
+    if (home >= 0) {
+        stack_put(st, game_bases[home].x, game_bases[home].y);
+        game_vehs[st].visibility = 0;
+        game_parse_says(2, game_bases[home].name, -1, -1);
+    } else if (!is_human_(s->tfac)) {
+        veh_kill(st);
+    }
+    game_draw_tile(s->tx, s->ty, 2);
+    if (s->tfac == *game_current_faction) {
+        say_adjective(0, s->faction);
+        say_title(1, s->tfac);
+        notice(0x68fdec);
+    } else if (s->faction == *game_current_faction) {
+        say_adjective(0, s->tfac);
+        say_title(1, s->faction);
+        notice(0x68fdf8);
+    }
+    return GO_END;
+}
+
+// Spotted (a hidden unit found on the square): the unit stops.
+static enum next spotted(struct step *s, uint32_t label, uint32_t label0, int tell) {
+    game_vehs[s->veh].order = ORDER_NONE;
+    spot_stack(s->stack, s->faction);
+    game_draw_tile(s->tx, s->ty, 2);
+    if (tell) {
+        game_fx_play(game_fx, OV_FX_SPOTTED);
+        say_adjective(0, s->tfac);
+        say_name(1, s->stack);
+        notice(s->tfac ? label : label0);
+    }
+    return GO_END;
+}
+
+// Units on the target square. Its own faction's or an ally's (unless a
+// probe team on a mission) are joined. Otherwise, after a probe team's
+// mission nothing more; a hidden unit is spotted; units the player can't
+// see are found by the player's units in the open; aircraft in the open
+// can only be attacked by air superiority units unless a carrier is
+// with them; sea units don't attack land (but by artillery or unarmed),
+// nor land units from the sea without amphibious pods; the unarmed don't
+// attack; then probe teams at truce, haste, and the attack itself (only
+// its odds for a move that doesn't happen), or the capture of native life.
+static enum next step_occupied(struct step *s) {
+    if (s->stack < 0) return GO_NAVAL;
+    int veh = s->veh, st = s->stack;
+    struct veh *S = &game_vehs[st];
+    s->seen = st * (int)sizeof(struct veh);
+    uint16_t sflags = S->flags;
+    if (!(sflags & OV_FLAG_INVISIBLE)) {
+        if (s->faction == s->tfac) return GO_NAVAL;
+        if ((treaty_of(s->faction, s->tfac) & TREATY_PACT) &&
+            (veh_plan(veh) != OV_PLAN_PROBE || !(game_vehs[veh].flags & OV_FLAG_PROBE_PACT)))
+            return GO_NAVAL;
+    }
+    if (s->probing) return GO_END;
+    if (sflags & OV_FLAG_INVISIBLE) return spotted(s, 0x68fd50, 0x68fd58, s->faction == *game_current_faction);
+    if ((S->faction != s->faction || (sflags & OV_FLAG_LURKER) == OV_FLAG_LURKER) && !(s->fbit & S->visibility) &&
+        (*game_human_factions & s->fbit)) {
+        if (s->base >= 0) goto armed;
+        if (told(s)) return spotted(s, 0x68fd64, 0x68fd6c, 1);
+    }
+    if (s->base < 0 && !(tile(s->tx, s->ty)->bits & MAP_AIRBASE) && stack_check(st, 18, -1, -1, -1) &&
+        !has_abil(game_vehs[veh].proto, OV_ABL_AIR_SUPERIORITY) && !stack_check(st, 6, OV_ABL_CARRIER, -1, -1)) {
+        if (told(s)) {
+            say_ability(OV_ABL_AIR_SUPERIORITY);
+            notice(0x68fd78);
+        }
+        if (game_vehs[veh].state & OV_STATE_AUTO) veh_skip(veh);
+        return GO_END;
+    }
+armed:;
+    int proto = game_vehs[veh].proto;
+    if (proto == OV_BSC_SEALURK || s->from_sea) {
+        if (proto != OV_BSC_SEALURK && !s->to_sea && s->triad == TRIAD_SEA && !can_arty(proto, 1) && veh_offense(veh)) {
+            if (told(s)) notice(0x68fd84);
+            return GO_END;
+        }
+        if (s->from_sea && s->triad == TRIAD_LAND && !has_abil(game_vehs[veh].proto, OV_ABL_AMPHIBIOUS) &&
+            veh_plan(veh) != OV_PLAN_PROBE) {
+            abil_index(OV_ABL_AMPHIBIOUS);
+            if (told(s)) {
+                say_ability(OV_ABL_AMPHIBIOUS);
+                notice(base_on(tile(s->vx, s->vy)) ? 0x68fd8c : 0x68fd98);
+            }
+            return GO_END;
+        }
+    }
+    if (game_weapons[veh_design(veh)->weapon].mode != OV_WMODE_PROBE || !stack_check(st, 2, OV_PLAN_PROBE, -1, -1)) {
+        if (!veh_offense(veh)) {
+            if (told(s)) {
+                game_fx_play(game_fx, OV_FX_NONCOMBATANT);
+                notice(0x68fda4);
+            }
+            return GO_END;
+        }
+        if (veh_plan(st) == OV_PLAN_PROBE && stack_check(st, 1, -1, -1, -1) == 1 && !*game_net_multiplayer) {
+            uint32_t d = treaty_of(s->faction, s->tfac);
+            if ((d & OV_TREATY_TRUCE_TREATY) && !(d & TREATY_PACT)) {
+                enum next n = step_enemy_probe(s);
+                if (n != GO_ON) return n;
+            }
+        }
+    }
+    int rate = game_rules_basic->move_rate_roads;
+    proto = game_vehs[veh].proto;
+    if (moves_left(veh) < rate && proto != OV_BSC_SPORE_LAUNCHER && proto != OV_BSC_MIND_WORMS) {
+        if (s->faction == *game_current_faction && !s->slow && (attack_flags() & 1)) {
+            say_name(0, veh);
+            game_parse_num(0, moves_left(veh));
+            game_parse_num(1, game_rules_basic->move_rate_roads);
+            if (ask(0x68fe4c, 0x68fe40)) return GO_END;
+        } else if (!(*game_human_factions & s->fbit)) {
+            if (moves_left(veh) <= game_rules_basic->move_rate_roads / 2) return GO_END;
+        }
+    }
+    *game_current_veh = veh;
+    if (!(attack_flags() & 2)) {
+        s->result = battle_fight(veh, s->dir, 0, 1, NULL) == 0;
+        return GO_END;
+    }
+    enum next n = step_capture(s);
+    if (n != GO_ON) return n;
+    s->fought = 1;
+    int won = battle_fight(veh, s->dir, 0, 1, NULL);
+    if (!won) return GO_END;
+    if (won != 1) {
+        s->result = 0;
+        return GO_END;
+    }
+    s->veh = *game_current_veh;
+    s->tx = s->vx, s->ty = s->vy;
+    s->refuel_check = 1;
+    s->goody = 0;
+    return GO_UPKEEP;
+}
+
+// Shore and sea. A land unit leaving a base at sea for land (not
+// amphibious, onto an empty square) needs a transport in its stack. A
+// ship can't go onto land but into a base: for the player, it offers its
+// passengers with moves left the way ashore, and the move begins again
+// with the one chosen.
+static enum next step_naval(struct step *s) {
+    int veh = s->veh;
+    if (s->from_sea) {
+        if (s->to_sea) return GO_ARRIVE;
+        if (s->triad == TRIAD_LAND && s->stack < 0 && !has_abil(game_vehs[veh].proto, OV_ABL_AMPHIBIOUS) &&
+            base_on(tile(s->vx, s->vy)) && !stack_check(veh, 2, OV_PLAN_NAVAL_TRANSPORT, -1, -1)) {
+            if (told(s)) {
+                say_ability(OV_ABL_AMPHIBIOUS);
+                notice(0x68ff74);
+            }
+            return GO_END;
+        }
+    } else if (s->to_sea) {
+        return GO_ARRIVE;
+    }
+    if (s->base >= 0 || s->triad != TRIAD_SEA) return GO_ARRIVE;
+    if (*game_net_multiplayer || !told(s)) return GO_END;
+    game_vehs[veh].order = ORDER_NONE;
+    say_name(0, veh);
+    game_popup_start(s->pop, game_pop_file, text(0x68ff80), -1, 0, 0, 0);
+    if (game_x_text_open(*game_script_file, text(0x68ff8c))) return GO_END;
+    next_line();
+    stack_veh(veh, 0);
+    int last = -1, aboard = 0;
+    for (int u = top_of(veh); u >= 0; u = game_vehs[u].next_in_stack) {
+        const struct veh *U = &game_vehs[u];
+        if (U->order != ORDER_SENTRY_BOARD || U->waypoint_x[0] != veh) continue;
+        aboard++;
+        if (!moves_left(u)) continue;
+        last = u;
+        *game_battle_text = 0;
+        say_name(1, u);
+        menu_item(s, *game_text_line, u + 1);
+    }
+    if (last < 0) {
+        if (aboard) notice(0x68ff9c);
+        return GO_END;
+    }
+    int chosen = game_base_pop_exec_3(s->pop, 0, 0) - 1;
+    if (chosen < 0) return GO_END;
+    s->veh = chosen;
+    game_vehs[chosen].order = ORDER_NONE;
+    return GO_LOOP;
+}
+
+// Into another faction's base (not an ally's): aircraft with a range and
+// ships can't take it (a ship not even from the sea), nor land units at
+// sea without amphibious pods, nor the unarmed. At truce or better the AI
+// stops, and the player is asked to break the treaty. The player's units
+// on their way somewhere are asked before stopping at a supply pod.
+static enum next step_conquer(struct step *s) {
+    int veh = s->veh;
+    struct veh *V = &game_vehs[veh];
+    if (s->base >= 0 && s->tfac != s->faction && !(treaty_of(s->faction, s->tfac) & TREATY_PACT)) {
+        const struct unit_proto *P = veh_design(veh);
+        if (s->triad == TRIAD_AIR) {
+            if (game_chassis[P->chassis].range) {
+                if (told(s)) {
+                    game_parse_say(0, (int)(intptr_t)game_chassis[P->chassis].offsv1_name, -1, -1);
+                    notice(0x68ffac);
+                }
+                return GO_END;
+            }
+        } else if (s->triad == TRIAD_SEA) {
+            if (!s->to_sea) {
+                if (told(s)) notice(0x68ffb8);
+                return GO_END;
+            }
+        } else if (s->triad == TRIAD_LAND) {
+            if (s->to_sea && !has_abil(V->proto, OV_ABL_AMPHIBIOUS)) {
+                if (told(s)) notice(0x68ffc4);
+                return GO_END;
+            }
+        }
+        if (!veh_offense(veh)) {
+            if (told(s)) notice(0x68ffd0);
+            return GO_END;
+        }
+        if (treaty_of(s->faction, s->tfac) & OV_TREATY_ANY) {
+            if (!(*game_human_factions & s->fbit)) {
+                V->order = ORDER_NONE;
+                return GO_END;
+            }
+            if (s->faction != *game_current_faction) return GO_ON;
+            if ((attack_flags() & 1) && break_treaty(s->faction, s->tfac, OV_TREATY_ANY)) return GO_END;
+        }
+    }
+    if (s->faction == *game_current_faction && (*game_human_factions & s->fbit) && (attack_flags() & 1) &&
+        V->order == ORDER_MOVE_TO && (s->tx != V->waypoint_x[0] || s->ty != V->waypoint_y[0]) &&
+        chassis_of(V)->triad != TRIAD_AIR && !(V->state & OV_STATE_AUTO) && goody_at(s->tx, s->ty) &&
+        ask(0x68fff0, 0x68ffe0)) {
+        V->order = ORDER_NONE;
+        return GO_END;
+    }
+    return GO_ON;
+}
+
+// The square's cost. A land unit that hasn't got it all (short of a road
+// square's worth, or going into fungus as a non-native, not a former or
+// artifact, onto an empty square) makes it by chance, its moves (with a
+// road square's worth more if it was slowed before) against a roll of
+// the cost; failing, it waits for its next turn (1), slowed, the player
+// shown it trying (and the tutorial's notes on fungus and fractional
+// moves, which stop it). The player's units roll only for moves the
+// player sees.
+static enum next step_cost(struct step *s) {
+    int veh = s->veh;
+    struct veh *V = &game_vehs[veh];
+    if (!moves_left(veh)) return GO_END;
+    s->cost = hex_cost(V->proto, s->faction, s->vx, s->vy, s->tx, s->ty, 0);
+    if (s->cost <= moves_left(veh) || s->triad != TRIAD_LAND) return GO_ON;
+    int rate = game_rules_basic->move_rate_roads;
+    const struct map_tile *t = tile(s->tx, s->ty);
+    if (moves_left(veh) >= rate) {
+        if (!fungus_on(t)) return GO_ON;
+        if (V->proto < OV_BASIC_PROTOS && veh_offense(veh) < 0) return GO_ON;
+        if (veh_plan(veh) == OV_PLAN_TERRAFORM || veh_plan(veh) == OV_PLAN_ARTIFACT || s->stack >= 0) return GO_ON;
+    }
+    if (!(attack_flags() & 1) && (*game_human_factions & s->fbit)) return GO_ON;
+    int roll = *game_control_turn ? game_rnd(s->cost) : game_random(0, s->cost);
+    if (roll < moves_left(veh) + (V->state & OV_STATE_SLOWED ? game_rules_basic->move_rate_roads : 0)) return GO_ON;
+    if (s->faction == *game_current_faction) {
+        if (V->order == ORDER_NONE && !key_down(OV_VK_SHIFT) && (attack_flags() & 1) && !(V->state & OV_STATE_ALERT) &&
+            !(*game_more_preferences & OV_MPREF_QUICK_ALL)) {
+            game_console_focus(game_console, s->vx, s->vy, *game_current_faction);
+            stack_veh(veh, 1);
+            game_veh_scoot(veh, s->vx, s->vy, s->dir + 8, 0);
+            stack_put(veh, s->vx, s->vy);
+            for (int i = 0; i < 8; i++) {
+                int x = xrange(s->tx + game_radius_near_x[i]), y = s->ty + game_radius_near_y[i];
+                if (on_map(x, y)) spot_loc(x, y, s->faction);
+            }
+            game_draw_tiles(s->tx, s->ty, 2);
+        }
+        if (fungus_on(t) && V->order == ORDER_NONE && veh_plan(veh) != OV_PLAN_TERRAFORM &&
+            veh_plan(veh) != OV_PLAN_ARTIFACT && (attack_flags() & 1)) {
+            if (game_tut_check(0x1000)) {
+                ++*game_fungus_tutorial_count;
+                game_fx_play(game_fx, OV_FX_FUNGUS);
+                game_tut_map(game_tut_win, text(0x68fffc), s->tx, s->ty, -1, NULL, 0, -1, -1);
+                V->order = ORDER_NONE;
+                return GO_END;
+            }
+            if (!s->slow) ++*game_fungus_tutorial_count;
+        }
+        if (V->order == ORDER_NONE && !*game_tutorial_moves_seen && (attack_flags() & 1) && !fungus_on(t) &&
+            game_tut_check(0x4000)) {
+            game_tut_map(game_tut_win, text(0x690008), s->tx, s->ty, veh, NULL, 0, s->vx, s->vy);
+            V->order = ORDER_NONE;
+            return GO_END;
+        }
+    }
+    veh_skip(veh);
+    V->state |= OV_STATE_SLOWED;
+    if ((attack_flags() & 1) && net_turn()) step_synch(veh);
+    s->result = 1;
+    return GO_END;
+}
+
+// Whether the player sees the move, and how: a slow move (the player's own,
+// or one the preferences want shown, or into a foreign base) or a quick
+// one, or none at all off the player's map. The map follows the unit.
+static void step_show(struct step *s) {
+    int veh = s->veh, cur = *game_current_faction;
+    struct veh *V = &game_vehs[veh];
+    if (s->faction == cur) s->seen = 1;
+    else if (V->faction == cur && (V->flags & OV_FLAG_LURKER) != OV_FLAG_LURKER) s->seen = 1;
+    else if (V->visibility & (1 << cur)) s->seen = 1;
+    else s->seen = (*game_state & GAME_STATE_OMNISCIENT) ? 1 : 0;
+    if (!(*game_state & GAME_STATE_OMNISCIENT) && !(game_factions[cur].flags & FACTION_FLAG_MAP_REVEALED) &&
+        !(tile(s->tx, s->ty)->visibility & (1 << cur))) {
+        if (!s->seen) {
+            s->slow = 0;
+            return;
+        }
+    } else if (!s->seen) {
+        // Seen by the player's sensors in its territory, units next to it
+        // or bases within two, on the same land or sea (or across a shore).
+        const struct map_tile *T = tile(s->tx, s->ty);
+        for (int i = 0; i < 21 && !s->seen; i++) {
+            int x = xrange(s->tx + game_radius_x[i]), y = s->ty + game_radius_y[i];
+            if (!on_map(x, y)) continue;
+            const struct map_tile *P = tile(x, y);
+            if ((alt_of(P) < ALT_SHORE) == (alt_of(T) < ALT_SHORE) && P->region != T->region) continue;
+            if (is_sensor(x, y) && whose_territory(cur, x, y, NULL, 0) == cur) s->seen = 1;
+            int who = (i < 9 ? (P->bits & (MAP_BASE | MAP_UNIT)) : (P->bits & MAP_BASE)) && owner_of(P) < 8 ? owner_of(P) : -1;
+            if (who == cur) s->seen = 1;
+        }
+        if (!s->seen) {
+            s->slow = 0;
+            return;
+        }
+    }
+    int slow = 1;
+    if (s->faction != cur) {
+        uint32_t ours = treaty_of(cur, s->faction) & TREATY_PACT;
+        if ((*game_preferences & OV_PREF_QUICK_ENEMY) && !ours) slow = 1;
+        else if ((*game_preferences & OV_PREF_QUICK_ALLY) && ours) slow = 1;
+        else slow = s->base >= 0 && game_bases[s->base].faction != s->faction &&
+                    !(treaty_of(s->faction, game_bases[s->base].faction) & TREATY_PACT);
+    }
+    s->slow = slow;
+    int shift = key_down(OV_VK_SHIFT);
+    if (shift) s->slow = 0;
+    int quick;
+    if (!s->cost && (s->faction != cur || (V->state & OV_STATE_AUTO) || V->order == ORDER_MOVE_TO)) quick = 1;
+    else if (shift || (*game_more_preferences & OV_MPREF_QUICK_ALL)) quick = 1;
+    else if (!(*game_more_preferences & OV_MPREF_QUICK_ORDERS)) quick = 0;
+    else if (s->faction == cur) quick = (V->state & OV_STATE_AUTO) || V->order == ORDER_MOVE_TO;
+    else quick = s->triad == TRIAD_AIR;
+    if (quick) {
+        s->slow = 0;
+        *game_moved_quickly = 1;
+        if (s->faction == cur) {
+            *game_moved_quickly = 2;
+            game_console_cursor_next(game_console, s->tx, s->ty);
+        }
+    }
+    if (s->seen && !key_down(OV_VK_CONTROL) && (s->slow || !(*game_preferences & OV_PREF_NO_CENTER)))
+        game_console_focus(game_console, s->vx, s->vy, s->faction);
+}
+
+// A worm attack on a base: a facility destroyed (one of 101 tries at a
+// random one that is built, not free to faction 0 and not a pressure dome
+// on land), the worms gone and the native units around beyond the
+// faction's clean-mineral count with them, and a citizen killed from turn
+// 10 (an objective keeps one), the base lost with its last; without a
+// facility found, its minerals.
+static enum next step_worms(struct step *s) {
+    int base = s->base, tries, fac = 0, built = 0;
+    struct base *B = &game_bases[base];
+    const struct faction_def *D = &game_faction_defs[0];
+    for (tries = 0; tries <= 100; tries++) {
+        fac = game_rand() % 70;
+        int ok = 1;
+        for (int j = 0; j < D->bonus_count; j++) {
+            int id = D->bonus_id[j];
+            if ((id == OV_BONUS_FACILITY ||
+                 (id == OV_BONUS_FACILITY_TECH && has_tech(game_facilities[D->bonus_val1[j]].preq_tech, 0))) &&
+                fac == D->bonus_val1[j]) {
+                ok = 0;
+                break;
+            }
+        }
+        if (fac == OV_FAC_PRESSURE_DOME) {
+            if (sea_at(s->tx, s->ty)) ok = 0;
+        } else if (fac <= 1 || fac >= 65) {
+            continue;
+        }
+        int offset;
+        uint32_t mask;
+        bitmask(fac, &offset, &mask);
+        built = (B->facilities_built[offset] & mask) != 0;
+        s->boarded = built;
+        if (built && ok) break;
+    }
+    *game_battle_text = 0;
+    strcat(game_battle_text, text(0x69003c));
+    say_name(2, s->veh);
+    if (tries <= 100) {
+        strcat(game_battle_text, text(0x690048));
+        set_fac(fac, base, 0);
+        game_parse_say(1, (int)(intptr_t)game_facilities[fac].name, -1, -1);
+    }
+    if (s->seen && s->tfac == *game_current_faction) {
+        game_parse_says(0, B->name, -1, -1);
+        game_netmsg_pop(game_netmsg, game_battle_text, 5000, 0, NULL);
+    }
+    kill(s->veh);
+    int spared = 0;
+    for (int i = 0; i < 25; i++) {
+        int x = xrange(s->tx + game_radius_x[i]), y = s->ty + game_radius_y[i];
+        if (!on_map(x, y)) continue;
+        int u = s->veh = stack_fix(veh_at(x, y));
+        if (u < 0 || game_vehs[u].faction) continue;
+        // The next unit's number is taken before a kill renumbers them.
+        for (u = s->veh = top_of(u); u >= 0; u = s->veh) {
+            int next = game_vehs[u].next_in_stack;
+            if (spared < game_factions[s->tfac].clean_minerals) spared++;
+            else veh_kill(u);
+            s->veh = next;
+        }
+    }
+    if (*game_turn >= 10) {
+        B->pop_size--;
+        if (is_objective(base) && B->pop_size < 1) B->pop_size = 1;
+        if (!B->pop_size) {
+            base_kill(base);
+            game_draw_map(1);
+            game_eliminate_player(s->tfac, 0);
+            game_draw_map(1);
+            return GO_END;
+        }
+    }
+    if (tries > 100) B->minerals = 0;
+    game_draw_tile(B->x, B->y, 2);
+    game_base_win_check_base(game_base_win, base);
+    return GO_END;
+}
+
+// The move itself, with what it sets off: a surprise attack told to the
+// player, the slide shown, the unit's spotting begun again (native life
+// stays seen only by those that saw the square, near their bases or in
+// their territory), a bunker taken from an enemy, the worms' attack on a
+// base, and then the unit on its square: a base captured (an Alien
+// Crossfire unit other than a battle ogre fully repaired first), or at
+// sea the guns of enemies' artillery on land within two squares, each
+// costing a road square's worth of moves; passengers woken in a base, or
+// for the player on reaching a shore at the end of a transport's moves;
+// and a land unit from the sea counted on its new continent.
+static enum next step_enter(struct step *s) {
+    s->result = 1;
+    if (!(attack_flags() & 2)) return GO_END;
+    int veh = s->veh, cur = *game_current_faction;
+    struct veh *V = &game_vehs[veh];
+    V->moves_spent = (uint8_t)(V->moves_spent + s->cost);
+    V->state &= ~(uint32_t)(OV_STATE_SLOWED | OV_STATE_UNK_40);
+    if (s->base >= 0 && s->tfac != s->faction && !(treaty_of(s->faction, s->tfac) & TREATY_PACT)) {
+        if ((treaty_of(s->tfac, s->faction) & OV_TREATY_ANY) && s->tfac == cur) {
+            say_title(0, s->faction);
+            say_leader(1, s->faction);
+            say_noun(2, s->faction);
+            notice(0x690018);
+        }
+        cur = *game_current_faction;
+        if (s->faction != cur && s->tfac != cur) {
+            const struct base *B = &game_bases[s->base];
+            if ((B->faction == cur || (B->visibility & (1 << cur))) && s->faction) spot_stack(veh, cur);
+        }
+    }
+    step_show(s);
+    stack_veh(veh, 1);
+    if (s->slow) {
+        if (s->faction == *game_current_faction)
+            game_fx_engine_pitch(game_fx, alt_of(tile(s->tx, s->ty)) <= alt_of(tile(s->vx, s->vy)) ? 200 : 300);
+        game_veh_scoot(veh, s->vx, s->vy, s->dir, 0);
+        if (s->faction == *game_current_faction) game_fx_engine_pitch(game_fx, 0);
+    } else if (s->seen) {
+        game_veh_scoot(veh, s->vx, s->vy, s->dir, 0x4000);
+    } else {
+        V->unk_29 = (uint8_t)s->dir;
+    }
+    if (s->faction) {
+        unspot_stack(veh);
+    } else {
+        V->visibility &= tile(s->tx, s->ty)->visibility;
+        for (int f = 1; f < FACTION_COUNT; f++) {
+            if (!(V->visibility & (1 << f))) continue;
+            base_find_2(s->tx, s->ty, f);
+            if (*game_base_find_dist >= 8 && whose_territory(f, s->tx, s->ty, NULL, 0) != f)
+                V->visibility &= (uint8_t)~(1 << f);
+        }
+        s->owner = FACTION_COUNT;
+    }
+    if ((tile(s->tx, s->ty)->bits & OV_MAP_BUNKER) && s->stack < 0 && game_veh_triad(veh) == TRIAD_LAND &&
+        veh_plan(veh) != OV_PLAN_PROBE) {
+        s->owner = whose_territory(s->faction, s->tx, s->ty, NULL, 0);
+        if (s->owner >= 0 && s->owner != s->faction && !(treaty_of(s->faction, s->owner) & TREATY_PACT)) {
+            veh_skip(veh);
+            if (s->faction == *game_current_faction) notice(0x690024);
+        }
+    }
+    if (s->base >= 0 && s->faction != s->tfac && !s->faction) return step_worms(s);
+    stack_put(veh, s->tx, s->ty);
+    if (s->base >= 0) {
+        if (s->faction != s->tfac && !(treaty_of(s->faction, s->tfac) & TREATY_PACT)) {
+            if (*game_expansion && (V->proto < OV_BSC_BATTLE_OGRE_1 || V->proto > OV_BSC_BATTLE_OGRE_3)) V->damage = 0;
+            *game_current_veh = veh;
+            act_of_aggression(s->faction, s->tfac);
+            game_capture_base(s->base, s->faction, 0);
+            s->veh = veh = *game_current_veh;
+        }
+    } else if (s->to_sea && game_veh_triad(veh) == TRIAD_SEA) {
+        int guns = 0;
+        for (int i = 0; i < 25; i++) {
+            int x = xrange(s->tx + game_radius_x[i]), y = s->ty + game_radius_y[i];
+            if (!on_map(x, y)) continue;
+            for (int u = stack_fix(veh_at(x, y)); u >= 0; u = game_vehs[u].next_in_stack) {
+                const struct veh *U = &game_vehs[u];
+                if (!can_arty(U->proto, 1) || game_veh_triad(u) != TRIAD_LAND || U->faction == s->faction) continue;
+                if (!(treaty_of(s->faction, U->faction) & TREATY_VENDETTA)) continue;
+                if ((V->faction == U->faction && (V->flags & OV_FLAG_LURKER) != OV_FLAG_LURKER) ||
+                    (V->visibility & (1 << U->faction))) {
+                    guns++;
+                    s->owner = U->faction;
+                    spot_stack(u, s->faction);
+                }
+            }
+        }
+        if (guns) {
+            V->moves_spent = (uint8_t)(V->moves_spent + game_rules_basic->move_rate_roads * guns);
+            if (s->faction == *game_current_faction) {
+                say_adjective(0, s->owner);
+                notice(0x69004c);
+            }
+        }
+    }
+    V = &game_vehs[veh];
+    cur = *game_current_faction;
+    if (veh_cargo(veh) && s->base >= 0 &&
+        (s->faction == cur || (*game_net_multiplayer && (*game_human_factions & s->fbit))) &&
+        (V->order != ORDER_MOVE_TO || (V->waypoint_x[0] == s->tx && V->waypoint_y[0] == s->ty))) {
+        for (int u = top_of(veh); u >= 0; u = game_vehs[u].next_in_stack) {
+            struct veh *U = &game_vehs[u];
+            if (U->faction == s->faction && U->order == ORDER_SENTRY_BOARD &&
+                (U->waypoint_x[0] < 0 || U->waypoint_x[0] == veh))
+                U->order = ORDER_NONE;
+        }
+    }
+    if (s->faction == cur && (*game_preferences & OV_PREF_WAKE_ON_LAND) && game_veh_triad(veh) == TRIAD_SEA &&
+        veh_cargo(veh) && s->to_sea && !moves_left(veh) &&
+        (V->order != ORDER_MOVE_TO || (V->waypoint_x[0] == s->tx && V->waypoint_y[0] == s->ty))) {
+        int shore = 0;
+        for (int i = 0; i < 8 && !shore; i++) {
+            int x = xrange(s->tx + game_radius_near_x[i]), y = s->ty + game_radius_near_y[i];
+            if (on_map(x, y) && (alt_of(tile(x, y)) >= ALT_SHORE || base_on(tile(x, y)))) shore = 1;
+        }
+        if (shore)
+            for (int u = top_of(veh); u >= 0; u = game_vehs[u].next_in_stack) {
+                struct veh *U = &game_vehs[u];
+                if (game_veh_triad(u) == TRIAD_LAND && U->order == ORDER_SENTRY_BOARD && moves_left(u)) {
+                    U->order = ORDER_NONE;
+                    *game_veh_ref_map_1 = u;
+                }
+            }
+    }
+    if (s->triad == TRIAD_LAND && s->from_sea && !s->to_sea)
+        game_factions[s->faction].region_total_combat_units[s->region]++;
+    return GO_UPKEEP;
+}
+
+// Whether the player's aircraft, out of moves, heads home: by preference
+// or on its own orders, but not on alert at a sentry post or patrolling
+// with legs to go.
+static int aloft_home(const struct veh *V) {
+    if (!(*game_preferences & OV_PREF_AIR_HOME) && !(V->state & OV_STATE_AUTO)) return 0;
+    if ((V->state & OV_STATE_SENTRY_ALERT) == OV_STATE_SENTRY_ALERT) return 0;
+    return (V->state & OV_STATE_PATROL) != OV_STATE_PATROL || V->patrol_point >= V->waypoint_count;
+}
+
+// Aircraft: refuelled at a base, an airbase or a carrier (the AI anywhere
+// it can land; the player also on the square of a won fight with a range
+// of 1 and moves left, and anywhere with moves left unless enemies are
+// next to it or it can't go more than a road square or has used its last
+// turn but one). Otherwise the AI and (by preference) the player head
+// home; out of moves, a unit at its range's end is lost (a copter is
+// damaged), elsewhere it counts a turn aloft, turning for home at half.
+static enum next step_fuel(struct step *s) {
+    int veh = s->veh;
+    struct veh *V = &game_vehs[veh];
+    int human = (*game_human_factions & s->fbit) != 0;
+    const struct map_tile *t = tile(s->tx, s->ty);
+    int open = !base_on(t) && !(t->bits & MAP_AIRBASE);
+    for (int u = veh < 0 ? -1 : top_of(veh); open && u >= 0; u = game_vehs[u].next_in_stack)
+        if (has_abil(game_vehs[u].proto, OV_ABL_CARRIER)) open = 0;
+    int aloft;
+    if (!human || open) aloft = open;
+    else if (veh_range(veh) == 1 && moves_left(veh) && s->refuel_check) aloft = 1;
+    else if (!moves_left(veh)) aloft = 0;
+    else if (moves_left(veh) > game_rules_basic->move_rate_roads && V->movement_turns + 1 < veh_range(veh)) aloft = 1;
+    else aloft = zoc_veh(s->tx, s->ty, s->faction) != 0;
+    if (!aloft) {
+        V->movement_turns = 0;
+        veh_skip(veh);
+        veh_demote(veh);
+        game_draw_tile(V->x, V->y, 2);
+        return GO_ON;
+    }
+    int range = veh_range(veh);
+    if (!range) return GO_ON;
+    if (!human || (s->faction == *game_current_faction && aloft_home(V))) action_home(veh, 1);
+    if (moves_left(veh)) return GO_ON;
+    int turns = V->movement_turns + 1;
+    if (turns < range) {
+        if (turns >= range >> 1 &&
+            (!human || (s->faction == *game_current_faction && aloft_home(V) && V->order != ORDER_MOVE_TO)))
+            action_home(veh, 0);
+        V->movement_turns++;
+        return GO_ON;
+    }
+    V->state |= OV_STATE_MOVED;
+    if (s->seen) game_boom(V->x, V->y, 0x80);
+    const struct unit_proto *P = veh_design(veh);
+    if (range == 1 && P->chassis == OV_CHASSIS_COPTER) {
+        V->damage = (uint8_t)(V->damage + 3 * P->reactor);
+    } else {
+        int hp = P->plan == OV_PLAN_ARTIFACT ? 1 : 10 * (P->reactor < 1 ? 1 : P->reactor > 100 ? 100 : P->reactor);
+        int d = hp - V->damage;
+        V->damage = (uint8_t)(V->damage + (d < 0 ? 0 : d > 9999 ? 9999 : d));
+    }
+    P = veh_design(veh);
+    int hp = P->plan == OV_PLAN_ARTIFACT ? 1 : 10 * (P->reactor < 1 ? 1 : P->reactor > 100 ? 100 : P->reactor);
+    if (hp - V->damage <= 0) {
+        kill(veh);
+        if (s->seen && s->faction == *game_current_faction) notice(0x690058);
+        return GO_END;
+    }
+    V->movement_turns = 0;
+    game_draw_tile(V->x, V->y, 2);
+    if (s->seen && s->faction == *game_current_faction) notice(0x690064);
+    return GO_ON;
+}
+
+// After a move, a fight won or a stay: the unarmed lose morale, native
+// life heals in fungus, the unit looks around, the AI's moves the player
+// sees are paced, aircraft are fuelled; then monoliths (not after a
+// fight), supply pods, an artifact alone in the open taken by a stronger
+// neighbour, an artifact's choice at a base carried out (studied, or
+// half its cost given to production), a colony pod's landing noted, a
+// unit that boarded at sea put to sleep with the first unit of its stack
+// able to move (its transport's waypoint) picked, the AI's transports out
+// of moves at sea calling for passengers' pickup or stopping for
+// threats, the player's long-moving units asked whether to go on, and
+// the unit's facing.
+static enum next step_upkeep(struct step *s) {
+    int veh = s->veh;
+    struct veh *V = &game_vehs[veh];
+    if (!veh_offense(veh)) veh_demote(veh);
+    if (!s->faction && fungus_on(tile(s->tx, s->ty)) && V->damage) V->damage--;
+    spot_all(veh, 1);
+    if (s->faction != *game_current_faction && !(*game_human_factions & s->fbit) &&
+        !(*game_state & GAME_STATE_OMNISCIENT) && s->seen && !*game_moved_quickly && !key_down(OV_VK_SHIFT) &&
+        !*game_net_multiplayer)
+        game_clock_wait(s->slow && !*game_moved_quickly ? 100 : 5);
+    if (game_veh_triad(veh) == TRIAD_AIR && step_fuel(s) == GO_END) return GO_END;
+    const struct map_tile *t = tile(s->tx, s->ty);
+    if ((t->bits & MAP_MONOLITH) && s->triad != TRIAD_AIR &&
+        (s->dir >= 0 || (veh_offense(veh) && (V->damage || !(V->state & OV_STATE_MONOLITH)))) && !s->fought)
+        game_monolith(veh);
+    if (s->goody && s->triad != TRIAD_AIR && s->faction && game_goody_box(veh, s->goody)) return GO_END;
+    if (veh_plan(veh) == OV_PLAN_ARTIFACT && s->base < 0 && stack_check(veh, 1, -1, -1, -1) == 1 && s->dir < 8) {
+        for (int i = 0; i < 8; i++) {
+            int x = xrange(s->tx + game_radius_near_x[i]), y = s->ty + game_radius_near_y[i];
+            if (!on_map(x, y) || alt_of(tile(x, y)) < ALT_SHORE) continue;
+            int u = stack_fix(veh_at(x, y));
+            if (u < 0) continue;
+            int uf = game_vehs[u].faction;
+            if (uf == s->faction || !uf || (treaty_of(s->faction, uf) & TREATY_PACT)) continue;
+            int artifacts = stack_check(u, 2, OV_PLAN_ARTIFACT, -1, -1);
+            if (stack_check(u, 1, -1, -1, -1) <= artifacts) continue;
+            V->faction = game_vehs[u].faction;
+            V->order = ORDER_NONE;
+            game_draw_tile(s->tx, s->ty, 2);
+            owner_set(s->tx, s->ty, V->faction);
+            if (s->faction == *game_current_faction) {
+                *game_veh_ref_map_1 = -1;
+                say_noun(0, game_vehs[u].faction);
+                ask(0x690084, 0x690070);
+            } else if (game_vehs[u].faction == *game_current_faction) {
+                say_name(0, u);
+                say_noun(1, s->faction);
+                ask(0x6900a8, 0x690094);
+            }
+            s->faction = V->faction;
+            break;
+        }
+    }
+    if (veh_plan(veh) == OV_PLAN_ARTIFACT && s->base >= 0 && V->movement_turns) {
+        if (V->movement_turns == 1) {
+            if (game_study_artifact(veh)) return GO_END;
+        } else if (V->movement_turns == 2) {
+            struct base *B = &game_bases[s->base];
+            B->minerals += 10 * veh_design(veh)->cost / 2;
+            B->minerals_2 = B->minerals;
+            B->production_last = B->queue[0];
+            kill(veh);
+            game_base_win_check_base(game_base_win, s->base);
+        }
+    }
+    if (s->from_sea && !s->to_sea && veh_plan(veh) == OV_PLAN_COLONY)
+        game_factions[s->faction].region_flags[s->region] |= 2;
+    if (s->boarded) {
+        veh_sleep(veh);
+        veh_skip(veh);
+        for (int u = top_of(veh); u >= 0; u = game_vehs[u].next_in_stack) {
+            if (veh_cargo(u)) continue;
+            struct veh *U = &game_vehs[u];
+            if (U->moves_spent > veh_speed(u, 0)) {
+                U->order = ORDER_NONE;
+                continue;
+            }
+            stack_veh(u, 0);
+            if (V->waypoint_x[0] == u) {
+                *game_veh_ref_map_1 = u;
+                U->order = ORDER_NONE;
+                break;
+            }
+        }
+        game_draw_tile(s->tx, s->ty, 2);
+    }
+    if (!is_human_(s->faction) && veh_plan(veh) == OV_PLAN_NAVAL_TRANSPORT && sea_at(s->tx, s->ty) && s->base < 0 &&
+        !moves_left(veh)) {
+        if (zoc_any(V->x, V->y, s->faction) || (*game_human_factions & V->visibility) || V->status_icon == 'u')
+            for (int u = top_of(veh); u >= 0; u = game_vehs[u].next_in_stack)
+                if (game_vehs[u].order == ORDER_SENTRY_BOARD && game_vehs[u].waypoint_x[0] == veh) V->order = ORDER_NONE;
+        int x = s->tx, y = s->ty;
+        if (V->order == ORDER_MOVE_TO) {
+            int hx = (V->waypoint_x[0] + s->tx) / 2, hy = (V->waypoint_y[0] + s->ty) / 2;
+            if (hx & 1) hx--;
+            if (hy & 1) hx++;
+            if (sea_at(hx, hy)) x = hx, y = hy;
+        }
+        if (sea_at(x, y)) add_goal(s->faction, OV_GOAL_TRANSPORT, 2, x, y, -1);
+    }
+    if (s->faction == *game_current_faction && (V->order == ORDER_MOVE_TO || (V->state & OV_STATE_AUTO))) {
+        V->iter_count++;
+        if ((V->state & OV_STATE_FACING) && s->dir == ((int8_t)V->unk_29 ^ 4)) V->iter_count += 8;
+        if (V->iter_count >= 32) {
+            say_name(0, veh);
+            if (*game_net_multiplayer || ask_x(0x6900b8)) {
+                V->order = ORDER_NONE;
+                V->state &= ~0x3004200u;
+            }
+            V->iter_count = 0;
+        }
+    }
+    if (s->dir >= 0 && s->dir < 8) {
+        V->unk_29 = (uint8_t)s->dir;
+        V->state |= OV_STATE_FACING;
+    } else {
+        V->state &= ~(uint32_t)OV_STATE_FACING;
+    }
+    return GO_END;
+}
+
+// The end: with as many units as before, a failed move ends the unit's
+// orders (the AI's units and the player's on their own orders skip their
+// turn, the AI's after 24 failures); a move that happened leaves a zone
+// of control behind, and in a network game a unit arrived ends its order
+// or takes its patrol's next leg.
+static int step_end(struct step *s) {
+    if (*game_veh_count != s->count) return 0;
+    int veh = s->veh;
+    struct veh *V = &game_vehs[veh];
+    if (!s->result) {
+        int human = is_human_(s->faction);
+        V->order = ORDER_NONE;
+        if (!human || (V->state & OV_STATE_AUTO)) {
+            V->iter_count++;
+            if (V->iter_count >= 24 || human) {
+                V->iter_count = 0;
+                veh_skip(veh);
+            }
+        }
+        if (!(attack_flags() & 2) && net_turn()) step_synch(veh);
+        return 0;
+    }
+    if (!(attack_flags() & 2)) return 1;
+    if (s->dir >= 0 && s->dir < 8 && (V->state & OV_STATE_ZOC) && V->x == s->tx && V->y == s->ty &&
+        !zoc_veh(s->tx, s->ty, s->faction))
+        V->state &= ~(uint32_t)OV_STATE_ZOC;
+    if (net_turn() && V->order == ORDER_MOVE_TO && V->x == V->waypoint_x[0] && V->y == V->waypoint_y[0]) {
+        V->order = ORDER_NONE;
+        if ((V->state & OV_STATE_PATROL) == OV_STATE_PATROL && V->patrol_point < V->waypoint_count) {
+            V->patrol_point++;
+            V->order = ORDER_MOVE_TO;
+            int16_t *w = waypoint_x(V);  // the waypoints' x then y, read on past the end as the original does
+            w[0] = w[V->patrol_point];
+            w[4] = w[V->patrol_point + 4];
+            V->state &= ~0x2010200u;
+        }
+    }
+    return 1;
+}
+
+// One pass of the step, up to the move: run again with another unit after
+// the disembark menu.
+static enum next step_approach(struct step *s) {
+    struct veh *V = &game_vehs[s->veh];
+    s->slow = (V->state & OV_STATE_AUTO) != 0;
+    s->triad = chassis_of(V)->triad;
+    enum next n = step_territory(s);
+    if (n != GO_ON) return n;
+    step_artifact_menu(s);
+    if (s->dir >= 8) return step_stay(s);
+    game_vehs[s->veh].state |= OV_STATE_MOVED;
+    n = step_probe(s);
+    if (n == GO_ON) n = step_to_sea(s);
+    if (n == GO_ON) n = step_zoc(s);
+    if (n == GO_ON) n = step_supply(s);
+    if (n == GO_ON) n = step_native(s);
+    if (n == GO_SPOT) n = step_occupied(s);
+    if (n == GO_NAVAL) n = step_naval(s);
+    return n;
+}
+
+// The original keeps its popup at [ebp-0x5410], where the game records
+// its address, and on some paths (a stay) reads [ebp-0x24], for whether
+// the player sees the unit, without ever setting it. order_veh() below
+// gives ours the same frame: `pop` is that popup's place, and the word
+// 0x5410 - 0x24 above it is the one the original would read.
+int order_veh_in(uint8_t *pop, int veh, int dir, int type);
+int order_veh_in(uint8_t *pop, int veh, int dir, int type) {
+    struct step st = {0}, *s = &st;
+    s->pop = pop;
+    s->seen = *(int32_t *)(pop + 0x5410 - 0x24);
+    game_popup_ctor(pop);
+    *game_veh_attack_flags = type;
+    if (type & 1) *game_console_23be4 = 0;
+    else *game_moved_quickly = 0;
+    s->count = *game_veh_count;
+    struct veh *V = &game_vehs[veh];
+    s->veh = veh;
+    s->vx = V->x, s->vy = V->y;
+    s->faction = V->faction;
+    if (dir < 0) dir = 8;
+    s->dir = dir;
+    s->tx = xrange(s->vx + game_radius_near_x[dir]);
+    s->ty = s->vy + game_radius_near_y[dir];
+    enum next n = GO_END;
+    if (on_map(s->tx, s->ty)) {
+        s->region = tile(s->tx, s->ty)->region;
+        s->stack = stack_fix(veh_at(s->tx, s->ty));
+        s->base = base_at(s->tx, s->ty);
+        s->tfac = s->base >= 0 ? game_bases[s->base].faction : s->stack >= 0 ? game_vehs[s->stack].faction : -1;
+        s->from_sea = sea_at(s->vx, s->vy);
+        s->to_sea = sea_at(s->tx, s->ty);
+        s->goody = goody_at(s->tx, s->ty);
+        s->fbit = 1 << s->faction;
+        do n = step_approach(s);
+        while (n == GO_LOOP);
+        if (n == GO_ARRIVE) {
+            n = step_conquer(s);
+            if (n == GO_ON) n = step_cost(s);
+            if (n == GO_ON) n = step_enter(s);
+        }
+        if (n == GO_UPKEEP) n = step_upkeep(s);
+    }
+    int r = n == GO_RETURN_0 ? 0 : n == GO_RETURN_1 ? 1 : step_end(s);
+    game_popup_dtor(pop);
+    return r;
+}
+__asm__(".text\n"
+        ".globl order_veh\n"
+        "order_veh:\n"
+        "    pushl %ebp\n"
+        "    movl %esp, %ebp\n"
+        "    subl $0xb000, %esp\n"  // room for the popups, here and in supply_menu()
+        "    pushl 16(%ebp)\n"
+        "    pushl 12(%ebp)\n"
+        "    pushl 8(%ebp)\n"
+        "    leal -0x5410(%ebp), %eax\n"
+        "    pushl %eax\n"
+        "    call order_veh_in\n"
+        "    movl %ebp, %esp\n"
+        "    popl %ebp\n"
+        "    ret\n");
+
 // ---- Hooks and shadow checks ------------------------------------------------
 
 extern struct hook_module move_module;
@@ -1468,17 +2951,18 @@ SHADOW_WRITER_CHECK(void, action_road_to, (int a), (a), orig_action_road_to(a), 
 SHADOW_UNCHECKED(action_go_to)
 SHADOW_UNCHECKED(action_road_to)
 
-// Held in the sweep's checks: the step and the start of a former's work.
-// A held step returns `hold_result`; with `hold_moves` it also puts the
-// unit on the square it stepped to (its coordinates only), as the move
-// would, so that both runs see an arrival.
+// Held in the sweep's checks of the orders above: the step and the start
+// of a former's work. A held step returns `hold_result`; with `hold_moves`
+// it also puts the unit on the square it stepped to (its coordinates
+// only), as the move would, so that both runs see an arrival. The step's
+// own direction is only known once those orders have found it, too late
+// to tell whether the step could be checked (see order_checkable), so the
+// holds stay now that the step is checked on its own, and the game's
+// calls of action_go_to and action_road_to still run the original (the
+// step within them checked).
 static int holding, hold_result, hold_moves;
-static int (*orig_order_veh)(int veh, int dir, int type);
-static struct hook_stats stats_order_veh = {"(held order_veh)"};
 static void replay_none(const struct hook_ui_call *c) { (void)c; }
-static int shadow_order_veh(int veh, int dir, int type) {
-    if (!holding || !hooks_protecting()) return orig_order_veh(veh, dir, type);
-    stats_order_veh.calls++;
+static int hold_order_veh(int veh, int dir, int type) {
     struct hook_ui_call c = {.name = "order_veh", .replay = replay_none, .arg = {veh, dir, type}};
     hooks_ui_hold(&c);
     if (hold_moves && hold_result && dir >= 0 && dir < 8) {
@@ -1488,6 +2972,133 @@ static int shadow_order_veh(int veh, int dir, int type) {
     }
     return hold_result;
 }
+
+// ---- The step: shadow checks --------------------------------------------------------
+//
+// order_veh is checked on all of the game and the path finder's tables
+// (action_home searches), the slides not shown (quiet.c's veh_scoot hook
+// drops them, as in battles: shown afterwards they would find the unit
+// back in its stack). Its two runs get the same frame from stale_call3(),
+// so that their popups lie at the same address and the word the original
+// reads unset (see order_veh_in) is the same. A base that fell in a check
+// is told to the windows afterwards, as battle_fight's check does.
+
+// fn(a, b, c) called with *s below its entry stack pointer (as
+// hooks_stale_call() does for functions without arguments).
+int stale_call3(int (*fn)(int, int, int), const struct hook_stale *s, int a, int b, int c);
+__asm__(".text\n"
+        ".globl stale_call3\n"
+        "stale_call3:\n"
+        "    pushl %esi\n"
+        "    pushl %edi\n"
+        "    movl 12(%esp), %eax\n"      // fn
+        "    movl 16(%esp), %esi\n"      // s
+        "    leal -0x110(%esp), %edi\n"  // fn's entry stack pointer will be 16 below this one
+        "    movl $0x40, %ecx\n"
+        "    cld\n"
+        "    rep movsl\n"
+        "    pushl 28(%esp)\n"  // c
+        "    pushl 28(%esp)\n"  // b
+        "    pushl 28(%esp)\n"  // a
+        "    call *%eax\n"
+        "    addl $12, %esp\n"
+        "    popl %edi\n"
+        "    popl %esi\n"
+        "    ret\n");
+
+SHADOW_DECLARE(int, order_veh, (int veh, int dir, int type))
+extern int quiet_drop_scoot;
+
+// The target of a step, as order_veh finds it.
+static int step_target(int veh, int dir, int *x, int *y) {
+    const struct veh *V = &game_vehs[veh];
+    if (dir < 0) dir = 8;
+    *x = xrange(V->x + game_radius_near_x[dir]);
+    *y = V->y + game_radius_near_y[dir];
+    return on_map(*x, *y);
+}
+
+// What a check can't run: network and hotseat games; a human's unit (it
+// asks the player, of the attack, treaties, pods, haste, probe teams and
+// more) and a step onto human units or bases, or that could take or wipe
+// out a base with messages listed (see battle_checkable); a probe team's
+// mission (stolen techs are chosen in a window, which allocates from the
+// game's heap even for the AI); and the menus of an artifact at its
+// faction's base and of a transport's passengers (they open script.txt
+// and build their lists on the heap).
+static int order_checkable(int veh, int dir, int type) {
+    if (*game_net_multiplayer || *game_pbem) return 0;
+    const struct veh *V = &game_vehs[veh];
+    int f = V->faction;
+    if (game_is_human(f)) return 0;
+    int x, y;
+    if (!step_target(veh, dir, &x, &y)) return 1;
+    if (!battle_checkable(veh, x, y)) return 0;
+    int b = base_at(x, y), s = stack_fix(veh_at(x, y));
+    int tf = b >= 0 ? game_bases[b].faction : s >= 0 ? game_vehs[s].faction : -1;
+    if (veh_plan(veh) == OV_PLAN_PROBE && tf >= 0 && tf != f) return 0;
+    if (veh_plan(veh) == OV_PLAN_ARTIFACT && !(V->flags & OV_FLAG_OBJECTIVE) && (type & 1) && b >= 0 &&
+        game_bases[b].faction == f)
+        return 0;
+    return !(game_veh_triad(veh) == TRIAD_SEA && !sea_at(x, y) && b < 0 && f == *game_current_faction && (type & 1));
+}
+
+static int check_order_veh(const struct hook_stale *st, int veh, int dir, int type) {
+    struct hook_writes w_ = {0};
+    writes_paths(&w_, game_path);
+    hooks_writes_begin(&w_);
+    hooks_nested++;
+    path_stale_reset();
+    int want = stale_call3(orig_order_veh, st, veh, dir, type);
+    hooks_nested--;
+    hooks_writes_middle(&w_);
+    int32_t saved = path_stale_take();
+    int got = stale_call3(order_veh, st, veh, dir, type);
+    path_stale_put(saved);
+    const char *diff_ = hooks_writes_end(&w_, got, want);
+    if (diff_) hooks_mismatch(&stats_order_veh, "(%d, %d, %d) %s", veh, dir, type, diff_);
+    hooks_ui_release();
+    return want;
+}
+
+// A check, with the slides dropped and a fallen base told to the windows.
+static int checked_order_veh(const struct hook_stale *st, int veh, int dir, int type) {
+    int x, y, base = step_target(veh, dir, &x, &y) ? base_at(x, y) : -1, bases = *game_base_count;
+    quiet_drop_scoot++;
+    int r = check_order_veh(st, veh, dir, type);
+    quiet_drop_scoot--;
+    if (base >= 0 && *game_base_count < bases) {
+        game_base_win_base_killed(game_base_win, base);
+        game_listbox_update_changes(game_message_box);
+    }
+    return r;
+}
+
+int shadow_order_veh_in(const struct hook_stale *st, int veh, int dir, int type);
+int shadow_order_veh_in(const struct hook_stale *st, int veh, int dir, int type) {
+    if (holding && hooks_protecting()) return hold_order_veh(veh, dir, type);
+    if (hooks_nested) return stale_call3(orig_order_veh, st, veh, dir, type);
+    if (shadow_bypass()) return stale_call3(order_veh, st, veh, dir, type);
+    stats_order_veh.calls++;
+    shadow_tick(MOVE);
+    if (!order_checkable(veh, dir, type)) return stale_call3(orig_order_veh, st, veh, dir, type);
+    return checked_order_veh(st, veh, dir, type);
+}
+// The game's call: the bytes below its stack pointer kept for both runs.
+int shadow_order_veh(int veh, int dir, int type);
+__asm__(".text\n"
+        ".globl shadow_order_veh\n"
+        "shadow_order_veh:\n"
+        "    subl $0x100, %esp\n"  // HOOK_STALE_SIZE: the bytes stay put
+        "    movl %esp, %eax\n"
+        "    pushl 0x10c(%eax)\n"  // type
+        "    pushl 0x108(%eax)\n"  // dir
+        "    pushl 0x104(%eax)\n"  // veh
+        "    pushl %eax\n"
+        "    call shadow_order_veh_in\n"
+        "    addl $0x110, %esp\n"
+        "    ret\n");
+
 // ---- Actions: shadow checks ---------------------------------------------------------
 
 // The AI's choices of terraforming and their costs only read the game
@@ -2208,6 +3819,179 @@ static void sweep_found(int turn) {
     }
 }
 
+// ---- The step: sweep ------------------------------------------------------------------
+//
+// Steps on the sweep's copy of the game, among AI factions: units of every
+// faction (native life too), triad and kind (some given another design:
+// probe teams, supply crawlers, artifacts, transports, colony pods,
+// formers, native units, air superiority, artillery), in each of the
+// eight directions and staying, from squares by bases, transports,
+// enemies, pods, fungus, bunkers, shores and monoliths, with their moves,
+// damage, orders, states, turns aloft and treaties varied, the target
+// square's improvements, pods and fungus toggled, native life's setting
+// and the factions' Planet ratings changed, the player made the unit's
+// faction, the target's or another, the player's preferences varied, and
+// moves that happen, that are seen, and both. A case's unit and square are
+// put back after it (its design too), unless units were renumbered;
+// whatever else the steps leave stays on the copy. Cases the check
+// leaves to the original (see order_checkable) are skipped.
+
+// A unit standing next to another faction's units, from a hash, with the
+// direction to them; or -1.
+static int unit_by_enemy(uint32_t h, int *dir) {
+    int n = *game_veh_count;
+    for (int k = 0; k < n && k < 400; k++) {
+        int v = (int)((h + (uint32_t)k * 7u) % (uint32_t)n);
+        const struct veh *V = &game_vehs[v];
+        if (!on_map(V->x, V->y)) continue;
+        for (int d = 0; d < 8; d++) {
+            int x = xrange(V->x + game_radius_near_x[d]), y = V->y + game_radius_near_y[d];
+            if (!on_map(x, y)) continue;
+            int s = stack_fix(veh_at(x, y));
+            if (s >= 0 && game_vehs[s].faction != V->faction) {
+                *dir = d;
+                return v;
+            }
+        }
+    }
+    return -1;
+}
+
+// An existing design of the given plan, or -1.
+static int design_of_plan(uint32_t h, int plan) {
+    for (int k = 0; k < PROTO_COUNT; k++) {
+        int p = (int)((h + (uint32_t)k) % PROTO_COUNT);
+        if ((game_protos[p].flags & PROTO_FLAG_ACTIVE) && game_protos[p].plan == plan) return p;
+    }
+    return -1;
+}
+
+static void sweep_steps(int turn) {
+    uint8_t human = *game_human_factions;
+    int cur = *game_current_faction, native = *game_native_life;
+    uint32_t prefs = *game_preferences, more = *game_more_preferences;
+    static const uint8_t plans[] = {OV_PLAN_PROBE, OV_PLAN_SUPPLY, OV_PLAN_ARTIFACT, OV_PLAN_NAVAL_TRANSPORT,
+                                    OV_PLAN_COLONY, OV_PLAN_TERRAFORM};
+    static const int16_t natives[] = {OV_BSC_MIND_WORMS, OV_BSC_ISLE, OV_BSC_SEALURK, OV_BSC_SPORE_LAUNCHER};
+    static const uint32_t bits[] = {MAP_FUNGUS, MAP_MONOLITH, MAP_SUPPLY_POD, OV_MAP_BUNKER, MAP_AIRBASE, MAP_ROAD,
+                                    MAP_MAGTUBE, OV_MAP_SUPPLY_REMOVE, MAP_SENSOR};
+    static const uint32_t states[] = {OV_STATE_ALERT, OV_STATE_EXPLORE, OV_STATE_SLOWED, OV_STATE_FACING,
+                                      OV_STATE_ZOC, OV_STATE_PATROL, OV_STATE_SENTRY_ALERT, OV_STATE_MONOLITH};
+    static const uint32_t prefs_varied[] = {OV_PREF_QUICK_ENEMY, OV_PREF_QUICK_ALLY, OV_PREF_TUTORIAL, OV_PREF_AIR_HOME,
+                                            OV_PREF_NO_CENTER, (uint32_t)OV_PREF_WAKE_ON_LAND};
+    static const uint32_t treaties[] = {TREATY_PACT, TREATY_TREATY, OV_TREATY_TRUCE_TREATY & ~TREATY_TREATY,
+                                        TREATY_VENDETTA, TREATY_SHALL_BETRAY};
+    *game_human_factions = 0;
+    for (int k = 0; k < 72; k++) {
+        uint32_t h = mix((uint32_t)turn * 3266489917u + (uint32_t)k * 668265263u + 0x0e7e);
+        int dir = (int)(h % 10), v;
+        switch (k % 6) {
+        case 0: v = unit_by_base(h >> 4, &dir); break;
+        case 1: v = unit_by_enemy(h >> 4, &dir); break;
+        case 2: v = pick_unit(h >> 4, TRIAD_SEA); break;
+        case 3: v = pick_unit(h >> 4, TRIAD_AIR); break;
+        default: v = pick_unit(h >> 4, -1); break;
+        }
+        if (v < 0) continue;
+        if (dir == 9) dir = -1;
+        uint32_t u = mix(h + 1), w = mix(h + 2);
+        struct veh *V = &game_vehs[v], saved = *V;
+        int count = *game_veh_count;
+        // The unit.
+        if (u % 5 == 0) {
+            int p = design_of_plan(u >> 3, plans[(u >> 8) % 6]);
+            if (p >= 0) V->proto = (int16_t)p;
+        } else if (u % 7 == 0) {
+            V->proto = natives[(u >> 8) % 4];
+            if ((u >> 10) % 2 && V->prev_in_stack < 0 && V->next_in_stack < 0) V->faction = 0;  // alone: native life
+        }
+        struct unit_proto *P = &game_protos[V->proto], saved_proto = *P;
+        if ((u >> 11) % 6 == 0) P->abilities ^= (u >> 14) % 2 ? OV_ABL_AIR_SUPERIORITY : OV_ABL_AMPHIBIOUS;
+        if ((u >> 12) % 9 == 0) P->abilities ^= OV_ABL_CLOAKED;
+        V->moves_spent = (uint8_t)((u >> 15) % 3 ? (u >> 17) % 4 : veh_speed(v, 0) - (int)((u >> 17) % 3));
+        if ((u >> 19) % 3 == 0) V->damage = (uint8_t)((u >> 21) % 12);
+        if ((u >> 23) % 3 == 0) V->movement_turns = (uint8_t)((u >> 25) % 4);
+        if ((u >> 27) % 4 == 0) V->iter_count = (uint8_t)(20 + (u >> 29) % 6);
+        for (int i = 0; i < 8; i++)
+            if ((mix(u + (uint32_t)i) % 5) == 0) V->state ^= states[i];
+        if ((w % 4) == 0) {
+            int x, y;
+            pick_square(w >> 2, V->x, V->y, &x, &y);
+            V->order = ORDER_MOVE_TO;
+            V->waypoint_x[0] = (int16_t)x, V->waypoint_y[0] = (int16_t)y;
+        } else if ((w % 4) == 1) {
+            V->order = ORDER_NONE;
+        }
+        if ((w >> 6) % 5 == 0) V->flags ^= OV_FLAG_PROBE_PACT;
+        V->waypoint_count = (uint8_t)((w >> 8) % 4), V->patrol_point = (uint8_t)((w >> 10) % 4);
+        // The square it goes to.
+        int x, y, f = V->faction;
+        int on = step_target(v, dir, &x, &y);
+        struct map_tile *T = on ? tile(x, y) : NULL;
+        uint32_t toggled = 0;
+        if (T)
+            for (int i = 0; i < 9; i++)
+                if ((mix(w + 16 + (uint32_t)i) % 6) == 0) toggled |= bits[i];
+        if (T) T->bits ^= toggled;
+        int s = T ? stack_fix(veh_at(x, y)) : -1, b = T ? base_at(x, y) : -1;
+        int tf = b >= 0 ? game_bases[b].faction : s >= 0 ? game_vehs[s].faction : -1;
+        uint32_t d1 = 0, d2 = 0;
+        if (tf >= 0 && tf != f) {
+            d1 = treaties[(w >> 12) % 5], d2 = (w >> 15) % 2 ? treaties[(w >> 16) % 5] : 0;
+            game_factions[f].diplo_status[tf] ^= d1;
+            game_factions[tf].diplo_status[f] ^= d2;
+        }
+        // The territory its order heads into made known, at times with a pact.
+        int owner = -1;
+        uint32_t d3 = 0;
+        if (V->order == ORDER_MOVE_TO && on_map(V->waypoint_x[0], V->waypoint_y[0])) {
+            owner = tile(V->waypoint_x[0], V->waypoint_y[0])->territory;
+            if (owner > 0 && owner != f && owner != tf) {
+                const uint32_t known = TREATY_COMMLINK | 0x8000000;  // what whose_territory() asks for
+                d3 = (game_factions[f].diplo_status[owner] & known) ^ known;
+                if (mix(w + 40) % 2) d3 ^= TREATY_PACT;
+                game_factions[f].diplo_status[owner] ^= d3;
+            } else {
+                owner = -1;
+            }
+        }
+        int planet = game_factions[f].se[SE_PLANET], planet_base = game_factions[f].se_base[SE_PLANET];
+        if ((w >> 19) % 3 == 0) game_factions[f].se[SE_PLANET] = (int)((w >> 21) % 5) - 1;
+        if ((w >> 24) % 3 == 0) game_factions[f].se_base[SE_PLANET] = (int)((w >> 26) % 4) - 1;
+        *game_native_life = (int)((w >> 28) % 3);
+        // The player and the preferences.
+        uint32_t c = mix(h + 3);
+        *game_current_faction = c % 3 == 0 ? f : c % 3 == 1 && tf >= 0 ? tf : cur;
+        *game_preferences = prefs, *game_more_preferences = more;
+        for (int i = 0; i < 6; i++)
+            if ((mix(c + (uint32_t)i) % 4) == 0) *game_preferences ^= prefs_varied[i];
+        if ((c >> 4) % 4 == 0) *game_more_preferences ^= (c >> 6) % 2 ? OV_MPREF_QUICK_ALL : OV_MPREF_QUICK_ORDERS;
+        int type = (c >> 8) % 6 ? 3 : (c >> 11) % 2 ? 2 : 1;
+        struct hook_stale st;
+        for (int i = 0; i < HOOK_STALE_SIZE / 4; i++) st.w[i] = mix(c + 0x100 + (uint32_t)i) % 3 ? 0 : 1;
+        if (order_checkable(v, dir, type)) checked_order_veh(&st, v, dir, type);
+        // Put back, as far as the step left the unit where it was.
+        game_factions[f].se[SE_PLANET] = planet, game_factions[f].se_base[SE_PLANET] = planet_base;
+        if (owner >= 0) game_factions[f].diplo_status[owner] ^= d3;
+        if (tf >= 0 && tf != f) {
+            game_factions[f].diplo_status[tf] ^= d1;
+            game_factions[tf].diplo_status[f] ^= d2;
+        }
+        if (T) T->bits ^= toggled;
+        *P = saved_proto;
+        if (*game_veh_count == count && V->x == saved.x && V->y == saved.y) {
+            V->proto = saved.proto, V->faction = saved.faction, V->moves_spent = saved.moves_spent;
+            V->damage = saved.damage, V->state = saved.state, V->order = saved.order, V->flags = saved.flags;
+            V->movement_turns = saved.movement_turns, V->iter_count = saved.iter_count;
+            memcpy(V->waypoint_x, saved.waypoint_x, sizeof saved.waypoint_x);
+            memcpy(V->waypoint_y, saved.waypoint_y, sizeof saved.waypoint_y);
+            V->waypoint_count = saved.waypoint_count, V->patrol_point = saved.patrol_point;
+        }
+    }
+    *game_human_factions = human, *game_current_faction = cur, *game_native_life = native;
+    *game_preferences = prefs, *game_more_preferences = more;
+}
+
 static void sweep_actions(int turn) {
     sweep_terraform_choice(turn);
     sweep_terraform_work(turn);
@@ -2230,15 +4014,13 @@ static void move_sweep(void) {
     sweep_patrol(turn);
     sweep_orders(turn);
     sweep_actions(turn);
+    sweep_steps(turn);
     hooks_writes_abandon(&outer);
     sweep_found(turn);
     hooks_sweeping = sweeping;
 }
 
 #define PUSH_EBP_MOV_EBP_ESP 0x55, 0x8b, 0xec
-#define HELD_HOOK(addr, name, ...)                                                                      \
-    {addr, (const uint8_t[]){__VA_ARGS__}, sizeof((const uint8_t[]){__VA_ARGS__}), NULL, (void *)shadow_##name, \
-     (void **)&orig_##name, &stats_##name, 1}
 static const struct hook move_hooks[] = {
     HOOK(0x564890, set_course, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x1c),            // sub esp, 28
     HOOK(0x564b90, assemble_passengers, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10),   // sub esp, 16
@@ -2247,7 +4029,6 @@ static const struct hook move_hooks[] = {
     HOOK(0x4cbaa0, action_home, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x2c),           // sub esp, 44
     HOOK(0x4cd6a0, valid_patrol, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53),                // push ecx; push ebx
     HOOK(0x4cda30, action_patrol, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x8b, 0x5d, 0x0c),   // push ebx; mov ebx, [ebp+12]
-    HELD_HOOK(0x5947c0, order_veh, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),  // mov eax, fs:[0]
     HOOK(0x4c9b00, action_terraform, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x34),     // sub esp, 52
     HOOK(0x4c9420, terraform_cost, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),       // sub esp, 8
     HOOK(0x565320, can_terraform, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x44),        // sub esp, 68
@@ -2261,5 +4042,6 @@ static const struct hook move_hooks[] = {
     HOOK(0x4ce790, action_fungal, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x34),        // sub esp, 52
     HOOK(0x4cf380, action_gate, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x8b, 0x5d, 0x08),    // push ebx; mov ebx, [ebp+8]
     HOOK(0x4cf740, action, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x4d, 0x08),               // mov ecx, [ebp+8]
+    HOOK(0x5947c0, order_veh, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),  // mov eax, fs:[0]
 };
 struct hook_module move_module = {"move", move_hooks, HOOK_COUNT(move_hooks), move_sweep, NULL, -1};
