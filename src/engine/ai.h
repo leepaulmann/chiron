@@ -14,3 +14,7 @@ int alien_move(int veh);
 // A planet buster of the AI's put next to a target (the direction to it
 // returned) or in a base near one; -1 otherwise.
 int enemy_planet_buster(int veh);
+// The AI's move for an air unit (or missile) on (*x, *y), from enemy_move:
+// mostly a go-to order; a missile may be put down elsewhere (*x, *y then
+// its square). See ai.c for the results.
+int air_power(int veh, int home, int now, int *x, int *y);

@@ -15,12 +15,14 @@
 #include <string.h>
 
 #include "base.h"
+#include "combat.h"
 #include "faction.h"
 #include "game.h"
 #include "map.h"
 #include "move.h"
 #include "path.h"
 #include "shadow.h"
+#include "tech.h"
 #include "veh.h"
 
 enum {
@@ -391,6 +393,674 @@ int alien_move(int veh) {
     return 0;
 }
 
+// ---- Air units ----------------------------------------------------------------------
+//
+// air_power(), the AI's moves for its air units (and missiles), called
+// from the game's enemy_move() with the square the unit stands on. It
+// leaves a go-to order for most kinds, so that enemy_move() steers the
+// unit; missiles it puts down (veh_lift and veh_drop) next to their
+// target, in a base, or on the spot a payload goes off. Its own calls only
+// weigh odds (battle_fight_2 with option 0) and set orders.
+//
+// Returns -1 for an order the caller should carry out now (an attack from
+// where it stands), -2 when the unit has an order, -3 when it has none or
+// was put down, -4 when it stays at its post, -5 when a payload went off,
+// or the direction from the square it was put down on to its target.
+
+enum {
+    AIR_NEXT = 1,  // a phase's result: none, on to the next
+    VEH_STATE_ALERT = 0x200,  // on alert (with an order_auto_type below)
+    ALERT_BOMBARD = 10, ALERT_INTERCEPT = 11, ALERT_PATROL = 12,
+    ORDER_RAISE_LAND = 0x14, ORDER_LOWER_LAND = 0x15,
+    PLAN_NAVAL_SUPERIORITY = 6, PLAN_TERRAFORM_ = 9, PLAN_TECTONIC = 13, PLAN_FUNGAL = 14,
+    STACK_UNITS = 1, STACK_PLAN = 2, STACK_TRIAD = 3, STACK_ABIL = 6, STACK_MISSILES = 13, STACK_UNARMED = 19,
+    ABL_CARRIER = 0x80, MAP_AIRBASE = 0x40000,
+    FACTION_FLAG_SEES_ALL = 0x200,  // its explorers find nothing unseen (Thinker: map revealed)
+    FACTION_FLAG_UNK_80000 = 0x80000,
+    BASE_STATE_UNK_8 = 0x8, BASE_STATE_UNK_100000 = 0x100000,
+    REGION_PLAN_COLONIZE = 8,  // region_base_plan: where an explorer looks around
+    // What a fungal payload counts on a square: roads, magtubes, farms,
+    // mines, solar collectors, forests, condensers, echelon mirrors,
+    // boreholes and the like.
+    MAP_FUNGAL_WORTH = 0x1e8881c,
+};
+
+static inline int plan_of(int proto) { return proto_of(proto)->plan; }
+static inline const struct rules_chassis *chassis_of(int proto) { return &game_chassis[proto_of(proto)->chassis]; }
+// Half the distance in x (wrapped) plus y: the distance the AI's air units
+// count in.
+static int air_dist(int x1, int y1, int x2, int y2) { return (x_dist(x1, x2) + abs(y1 - y2)) >> 1; }
+// The distance the unit flies this turn, less a road move: what a missile
+// counts as in reach.
+static int air_turn(int veh) {
+    int rate = game_rules_basic->move_rate_roads;
+    return veh_speed(veh, 0) / rate - rate;
+}
+// The faction (0 to 7) with a unit or base (bits) on the square, or -1.
+static inline int owner_with(const struct map_tile *t, uint32_t bits) {
+    return (t->bits & bits) && owner_of(t) < 8 ? owner_of(t) : -1;
+}
+// A go-to order to (x, y), with its letter; a colony pod aloft also gets its
+// turns aloft back.
+static void air_go(struct veh *V, int x, int y, char icon) {
+    V->order = ORDER_MOVE_TO;
+    V->status_icon = (uint8_t)icon;
+    V->waypoint_x[0] = (int16_t)x, V->waypoint_y[0] = (int16_t)y;
+    if (plan_of(V->proto) == PLAN_COLONY) V->movement_turns = 0;
+}
+// The unit's odds against the stack at (x, y) with `target` in it, as the
+// AI weighs them.
+static int air_odds(int veh, int faction, int x, int y, int target) {
+    return compute_odds(battle_fight_2(veh, 0, x, y, 0, 0, NULL), faction, veh, target, -2);
+}
+// A sea square with a unit lowering the land within 4 of a base of the
+// faction (where the stack works on the faction's own coast).
+static int air_near_works(int faction, const struct veh *U) {
+    if (U->order != ORDER_LOWER_LAND || alt_of(tile(U->x, U->y)) >= ALT_SHORE) return 0;
+    int b = base_find_2(U->x, U->y, faction);
+    if (b < 0) return 0;
+    return ((x_dist(U->x, game_bases[b].x) + abs(U->y - game_bases[b].y)) & ~1) <= 4;
+}
+// Nearest to (tx, ty) of the faction's bases in this turn's reach: the
+// unit's go-to (letter 'M'). All 512 base slots are looked at, the unused
+// ones too.
+static void air_stage_missile(int veh, int faction, int x, int y, int tx, int ty) {
+    struct veh *V = &game_vehs[veh];
+    int best = 9999;
+    for (int b = 0; b < BASE_COUNT; b++) {
+        const struct base *B = &game_bases[b];
+        if (B->faction != faction || air_dist(x, y, B->x, B->y) > air_turn(veh)) continue;
+        int d = air_dist(tx, ty, B->x, B->y);
+        if (d >= best) continue;
+        best = d;
+        air_go(V, B->x, B->y, 'M');
+    }
+}
+
+// The unit's reach in squares: its turns aloft left (or six turns for
+// units without a range) at its speed. For a unit with a range of one turn
+// (a missile, a copter) `reach` counts the turn after this one unless it is
+// damaged, and `reach2` only this turn's moves left.
+static void air_reach(int veh, int *reach, int *reach2) {
+    const struct veh *V = &game_vehs[veh];
+    int range = chassis_of(V->proto)->range, rate = game_rules_basic->move_rate_roads, a, b;
+    if (!range) {
+        a = b = veh_speed(veh, 0) * 6;
+    } else {
+        int left = veh_speed(veh, 0) - V->moves_spent;
+        left = left < 0 ? 0 : left > 999 ? 999 : left;
+        if (range == 1) {
+            a = b = left;
+            if (!V->damage) a = veh_speed(veh, 0) + left;
+        } else {
+            a = b = veh_speed(veh, 0) * (range - V->movement_turns - 1) + left;
+        }
+    }
+    *reach = a / rate, *reach2 = b / rate;
+}
+
+// An explorer (or a unit over land where its region is to be settled):
+// the square half its reach off in the direction with most squares around
+// it its faction hasn't seen (letter 'a'); else one of its bases within
+// reach, picked at random weighed by distance (letter 'c'). An explorer
+// with neither stops (-3).
+static int air_explore(int veh, int reach2, int x0, int y0) {
+    struct veh *V = &game_vehs[veh];
+    int faction = V->faction, r = reach2 / 2, best = 0, bx = -1, by = -1;
+    for (int i = 0; i < 8; i++) {
+        int cx = xrange(x0 + game_radius_near_x[i] * r), cy = y0 + game_radius_near_y[i] * r;
+        if (!on_map(cx, cy)) continue;
+        int unseen = 0;
+        for (int j = 0; j < 9; j++) {
+            int nx = xrange(cx + game_radius_near_x[j]), ny = cy + game_radius_near_y[j];
+            if (!on_map(nx, ny) || (game_factions[faction].flags & FACTION_FLAG_SEES_ALL)) continue;
+            if (!(tile(nx, ny)->visibility & (1u << faction))) unseen++;
+        }
+        if (unseen > best) best = unseen, bx = cx, by = cy;
+    }
+    if (bx >= 0) {
+        air_go(V, bx, by, 'a');
+        return -2;
+    }
+    int pick = -1;
+    best = -1;
+    for (int b = 0; b < *game_base_count; b++) {
+        const struct base *B = &game_bases[b];
+        if (B->faction != faction) continue;
+        int d = air_dist(x0, y0, B->x, B->y);
+        if (d > reach2) continue;
+        int roll = d > 0 ? game_rand() % (d + 1) : 0;
+        if (roll > best) best = roll, pick = b;
+    }
+    if (pick >= 0) {
+        air_go(V, game_bases[pick].x, game_bases[pick].y, 'c');
+        return -2;
+    }
+    if (V->state & VEH_STATE_EXPLORE) return -3;
+    return AIR_NEXT;
+}
+
+// A missile without a target: one of several in its stack goes to a base
+// of its faction within reach with fewer missiles than its stack has,
+// put down there at once.
+static int air_missile_spread(int veh, int *px, int *py) {
+    struct veh *V = &game_vehs[veh];
+    int faction = V->faction, n = stack_check(veh, STACK_MISSILES, -1, -1, -1);
+    if (n <= 1) return -3;
+    for (int b = 0; b < *game_base_count; b++) {
+        const struct base *B = &game_bases[b];
+        if (B->faction != faction) continue;
+        if (stack_check(veh_at(B->x, B->y), STACK_MISSILES, -1, -1, -1) >= n) continue;
+        if (air_dist(*px, *py, B->x, B->y) > air_turn(veh)) continue;
+        veh_drop(veh_lift(veh), B->x, B->y);
+        V->visibility = 0;
+        *px = B->x, *py = B->y;
+        return -3;
+    }
+    return -3;
+}
+
+// The missile's strike on its go-to square: at a base of its own it is put
+// down there (-3); a payload is put down on the square and goes off (-5);
+// any other missile is put down on the first free square next to it (its
+// facing set), and the direction from there returned. With no order, or no
+// free square, it may move to another base instead.
+static int air_missile_strike(int veh, int *px, int *py, int tx, int ty) {
+    struct veh *V = &game_vehs[veh];
+    if (V->order != ORDER_MOVE_TO) return air_missile_spread(veh, px, py);
+    int wx = V->waypoint_x[0], wy = V->waypoint_y[0];
+    if (owner_with(tile(wx, wy), MAP_BASE) == V->faction) {
+        *px = wx, *py = wy;
+        V->order = ORDER_NONE;
+        V->visibility = 0;
+        veh_drop(veh_lift(veh), *px, *py);
+        return -3;
+    }
+    V->order = ORDER_NONE;
+    int plan = plan_of(V->proto);
+    if (plan == PLAN_TECTONIC || plan == PLAN_FUNGAL) {
+        veh_drop(veh_lift(veh), tx, ty);
+        if (plan == PLAN_TECTONIC) action_tectonic(veh, tx, ty);
+        else action_fungal(veh, tx, ty);
+        return -5;
+    }
+    for (int i = 0; i < 8; i++) {
+        int nx = xrange(wx + game_radius_near_x[i]), ny = wy + game_radius_near_y[i];
+        if (!on_map(nx, ny) || occupied(tile(nx, ny), MAP_BASE | MAP_UNIT)) continue;
+        *px = nx, *py = ny;
+        V->visibility = 0;
+        veh_drop(veh_lift(veh), nx, ny);
+        V->unk_29 = (uint8_t)i;
+        return i ^ 4;
+    }
+    V->order = ORDER_NONE;
+    return air_missile_spread(veh, px, py);
+}
+
+// A tectonic payload: the best of the faction's raise-land goals (eight
+// times their priority) and the squares four east of enemy bases on land
+// (eight for each five citizens, rounded up) away from the faction's own
+// bases, halved out of this turn's reach; free land squares only. In reach
+// it heads there (letter 'm'), else to its nearest base in reach (-3 either
+// way). With none, or an enemy base at the map's east edge, it may move to
+// another base.
+static int air_tectonic(int veh, int *px, int *py) {
+    struct veh *V = &game_vehs[veh];
+    int faction = V->faction, best = 0, bx = -1, by = -1;
+    const struct faction_data *F = &game_factions[faction];
+    for (int g = 0; g < GOAL_COUNT; g++) {
+        const struct goal *G = &F->goals[g];
+        if (G->type != GOAL_RAISE_LAND) continue;
+        int value = G->priority * 8;
+        if (air_dist(*px, *py, G->x, G->y) > air_turn(veh)) value /= 2;
+        const struct map_tile *t = tile(G->x, G->y);
+        if (occupied(t, MAP_BASE | MAP_UNIT) || alt_of(t) < ALT_SHORE) continue;
+        if (value > best) best = value, bx = G->x, by = G->y;
+    }
+    for (int b = 0; b < *game_base_count; b++) {
+        const struct base *B = &game_bases[b];
+        if (B->faction == faction || !(F->diplo_status[B->faction] & TREATY_VENDETTA)) continue;
+        const struct map_tile *t = tile(B->x, B->y);
+        if (alt_of(t) < ALT_SHORE) continue;
+        if (F->region_total_bases[t->region]) {
+            base_find_2(B->x, B->y, faction);
+            if (*game_base_find_dist < 10) continue;
+        }
+        int value = (B->pop_size + 4) / 5 * 8;
+        int x = xrange(B->x + 4), y = B->y;
+        if (!on_map(x, y)) return air_missile_spread(veh, px, py);
+        if (occupied(tile(x, y), MAP_BASE | MAP_UNIT)) continue;
+        if (air_dist(*px, *py, x, y) > air_turn(veh)) value /= 2;
+        if (value > best) best = value, bx = x, by = y;
+    }
+    if (bx < 0) return air_missile_spread(veh, px, py);
+    if (air_dist(*px, *py, bx, by) <= air_turn(veh)) {
+        air_go(V, bx, by, 'm');
+        return -3;
+    }
+    air_stage_missile(veh, faction, *px, *py, bx, by);
+    return -3;
+}
+
+// A fungal payload: the best square in the radius of an enemy base (of a
+// faction with no positive PLANET pending, away from the faction's own
+// bases): eight for each citizen, halved out of this turn's reach, and one
+// for each improvement there; free squares, not those in fungus already
+// (but for fungus in the deep sea). In reach it heads there (letter 'm'),
+// else to its nearest base in reach; then strikes.
+static int air_fungal(int veh, int *px, int *py) {
+    struct veh *V = &game_vehs[veh];
+    int faction = V->faction, best = 0, bx = -1, by = -1;
+    const struct faction_data *F = &game_factions[faction];
+    if (*game_base_count <= 0) return air_missile_spread(veh, px, py);
+    for (int b = 0; b < *game_base_count; b++) {
+        const struct base *B = &game_bases[b];
+        if (B->faction == faction || !(F->diplo_status[B->faction] & TREATY_VENDETTA)) continue;
+        if (game_factions[B->faction].se_pending[SE_PLANET] > 0) continue;
+        if (F->region_total_bases[tile(B->x, B->y)->region]) {
+            base_find_2(B->x, B->y, faction);
+            if (*game_base_find_dist < 5) continue;
+        }
+        int people = B->pop_size * 8;
+        for (int i = 0; i < BASE_RADIUS_SQUARES; i++) {
+            int x = xrange(B->x + game_radius_x[i]), y = B->y + game_radius_y[i];
+            if (!on_map(x, y)) continue;
+            const struct map_tile *t = tile(x, y);
+            if ((t->bits & MAP_FUNGUS) && alt_of(t) >= ALT_SHELF) continue;
+            if (occupied(t, MAP_BASE | MAP_UNIT)) continue;
+            int value = people;
+            if (air_dist(*px, *py, x, y) > air_turn(veh)) value = people / 2;
+            value += game_bit_count(t->bits & MAP_FUNGAL_WORTH);
+            if (value > best) best = value, bx = x, by = y;
+        }
+    }
+    if (bx < 0) return air_missile_spread(veh, px, py);
+    if (air_dist(*px, *py, bx, by) <= air_turn(veh)) air_go(V, bx, by, 'm');
+    else air_stage_missile(veh, faction, *px, *py, bx, by);
+    return air_missile_strike(veh, px, py, bx, by);
+}
+
+// Other missiles: the enemy unit (at war, seen, or working on the
+// faction's coast) worth most, half its odds times a weight against its
+// cost, the last of equals taking it. The weight is 16 at a base, where
+// drop troops can follow (the faction has some, or a unit of its own
+// within two squares) and 4 otherwise, out in the open 4 where transports,
+// formers at sea or the faction's own territory are involved and 2
+// elsewhere at a quarter of the odds; doubled with the odds where its
+// stack has as many air units as armed ones; with drop troops, doubled for
+// a human's units and for the top-ranked faction's; halved out of this
+// turn's reach. The count of drop troops (taken from designs 64 plus
+// multiples of the faction's number, as the original looks them up) only
+// grows from one target to the next. In reach it heads there (letter 'm'),
+// else to its nearest base in reach; then strikes.
+static int air_missile_targets(int veh, int *px, int *py) {
+    struct veh *V = &game_vehs[veh];
+    int faction = V->faction;
+    uint32_t me = 1u << faction;
+    const struct faction_data *F = &game_factions[faction];
+    int drops = 0;
+    for (int k = 0; k < 64; k++) {
+        int p = BASIC_PROTOS + k * faction;
+        if ((game_protos[p].flags & PROTO_FLAG_ACTIVE) && has_abil(p, ABL_DROP_POD)) drops += F->units_active[p];
+    }
+    int best = proto_of(V->proto)->cost * 16;
+    for (int i = 0; i < *game_veh_count; i++) {
+        const struct veh *U = &game_vehs[i];
+        int uf = U->faction;
+        if (uf == faction || !(F->diplo_status[uf] & TREATY_VENDETTA)) continue;
+        int base = base_at(U->x, U->y);
+        int works = air_near_works(faction, U);
+        if (!works && !(U->visibility & me)) {
+            if (base < 0) continue;
+            const struct base *B = &game_bases[base];
+            if (B->faction != faction && !(B->visibility & me)) continue;
+        }
+        if (triad_of(U->proto) == TRIAD_AIR && base < 0) continue;
+        int odds = air_odds(veh, faction, U->x, U->y, i), weight;
+        if (base >= 0) {
+            if (!drops) {
+                const struct base *B = &game_bases[base];
+                int near = 0;
+                for (int j = 0; j < 25 && !near; j++) {
+                    int x = xrange(B->x + game_radius_x[j]), y = B->y + game_radius_y[j];
+                    if (on_map(x, y) && owner_with(tile(x, y), MAP_UNIT) == faction) near = 1;
+                }
+                if (near) drops = 1, weight = 16;
+                else odds /= 2, weight = 4;
+            } else {
+                weight = 16;
+            }
+        } else {
+            odds /= 2, weight = 4;
+            if (stack_check(i, STACK_PLAN, PLAN_NAVAL_TRANSPORT, -1, -1) ||
+                (stack_check(i, STACK_PLAN, PLAN_TERRAFORM_, -1, -1) && alt_of(tile(U->x, U->y)) < ALT_SHORE) ||
+                whose_territory(faction, U->x, U->y, NULL, 0) == faction)
+                drops++;
+            else
+                weight = 2, odds /= 2;
+        }
+        int unarmed = stack_check(i, STACK_UNARMED, -1, -1, -1), units = stack_check(i, STACK_UNITS, -1, -1, -1);
+        if (stack_check(i, STACK_TRIAD, TRIAD_AIR, -1, -1) >= units - unarmed) odds *= 2, weight *= 2, drops++;
+        if (drops) {
+            if (*game_human_factions & (1u << uf)) weight *= 2;
+            if (game_factions[uf].ranking == 7) weight *= 2;
+        }
+        if (works) odds <<= 3;
+        int half = odds / 2;
+        if (air_dist(*px, *py, U->x, U->y) > air_turn(veh)) weight /= 2;
+        if (half < 8) continue;
+        int value = half * weight;
+        if (value < best) continue;
+        best = value;
+        if (air_dist(*px, *py, U->x, U->y) <= air_turn(veh)) air_go(V, U->x, U->y, 'm');
+        else air_stage_missile(veh, faction, *px, *py, U->x, U->y);
+    }
+    return air_missile_strike(veh, px, py, -1, -1);
+}
+
+// A missile (none for a human's in a network game): by its payload.
+static int air_missile(int veh, int *px, int *py) {
+    const struct veh *V = &game_vehs[veh];
+    if ((*game_human_factions & (1u << V->faction)) && *game_net_multiplayer) return -3;
+    switch (plan_of(V->proto)) {
+    case PLAN_TECTONIC: return air_tectonic(veh, px, py);
+    case PLAN_FUNGAL: return air_fungal(veh, px, py);
+    default: return air_missile_targets(veh, px, py);
+    }
+}
+
+// Interceptors (air superiority), attack aircraft and patrols: the unit
+// to go for, nearest (by its score) wins, the last of equals taking it.
+// An interceptor covers the faction's own grounded aircraft and transports
+// out in the open, without carriers or interceptors, by twice their
+// distance plus one (four times that when out of a turn's flight) over the
+// stack's size. Enemy units (seen, not at peace) count their distance,
+// twice that out of half the reach, half in a region the faction defends
+// and twice in one without its bases, nothing for those working on its
+// coast; ground units only with the odds (less at a base, more on the
+// coast), air units (out in the open) only for an interceptor; when the
+// faction is short of air power, only those in its territory or near its
+// bases; a patrol keeps to its territory and its coast. In half the reach
+// (a unit of its own: less 8, halved) the unit heads for it (letter 'a'),
+// -1 if already there; else for the base of its own or a pact partner's
+// nearest the target, closer than it and in reach, unless it intercepts
+// at its post.
+static int air_intercept(int veh, int reach, int reach2, int *px, int *py) {
+    struct veh *V = &game_vehs[veh];
+    int faction = V->faction, plan = plan_of(V->proto), best = -1, best_dist = 9999, best_score = 9999;
+    uint32_t me = 1u << faction;
+    const struct faction_data *F = &game_factions[faction];
+    for (int i = 0; i < *game_veh_count; i++) {
+        const struct veh *U = &game_vehs[i];
+        if (U->faction == faction) {
+            if (plan != PLAN_AIR_SUPERIORITY || chassis_of(V->proto)->range == 1) continue;
+            const struct map_tile *t = tile(U->x, U->y);
+            if (occupied(t, MAP_BASE) || (t->bits & MAP_AIRBASE)) continue;
+            if (stack_check(i, STACK_ABIL, ABL_CARRIER, -1, -1) || !no_moves(i)) continue;
+            if (stack_check(i, STACK_PLAN, PLAN_AIR_SUPERIORITY, -1, -1)) continue;
+            int up = plan_of(U->proto);
+            if (triad_of(U->proto) == TRIAD_AIR ? up == PLAN_AIR_SUPERIORITY : up != PLAN_NAVAL_TRANSPORT) continue;
+            int d = air_dist(*px, *py, U->x, U->y), score = 2 * d + 1;
+            if (veh_speed(veh, 0) / game_rules_basic->move_rate_roads < d) score *= 4;
+            score /= stack_check(i, STACK_UNITS, -1, -1, -1) + 1;
+            if (score > best_score) continue;
+            best_score = score, best_dist = d, best = i;
+            continue;
+        }
+        int works = air_near_works(faction, U);
+        if (!works && !(U->visibility & me)) continue;
+        if (F->diplo_status[U->faction] & (TREATY_PACT | TREATY_TREATY | TREATY_TRUCE)) continue;
+        const struct map_tile *t = tile(U->x, U->y);
+        if (triad_of(U->proto) == TRIAD_AIR) {
+            if (plan != PLAN_AIR_SUPERIORITY || occupied(t, MAP_BASE) || (t->bits & MAP_AIRBASE)) continue;
+        } else {
+            if (plan == PLAN_AIR_SUPERIORITY && (V->state & VEH_STATE_ALERT) && V->order_auto_type == ALERT_INTERCEPT)
+                continue;
+            int odds = air_odds(veh, faction, U->x, U->y, i);
+            if (occupied(t, MAP_BASE)) {
+                if (plan == PLAN_OFFENSIVE) continue;
+                int unarmed = stack_check(i, STACK_UNARMED, -1, -1, -1);
+                if (stack_check(i, STACK_UNITS, -1, -1, -1) - unarmed != 1) odds /= 2;
+            }
+            odds = odds * 2 / 3;
+            if (works) odds <<= 3;
+            if (!(plan != PLAN_AIR_SUPERIORITY && (V->state & VEH_STATE_ALERT) && V->order_auto_type == ALERT_PATROL))
+                odds /= 2;
+            if (odds < 8) continue;
+        }
+        if (F->unk_84c && F->air_offense < 2 * F->unk_84c &&
+            whose_territory(faction, U->x, U->y, NULL, 0) != faction) {
+            int b = base_find(U->x, U->y);
+            if (b >= 0 && game_bases[b].faction != faction) continue;
+        }
+        if ((V->state & VEH_STATE_ALERT) && V->order_auto_type == ALERT_PATROL) {
+            if (alt_of(t) < ALT_SHORE) {
+                base_find_2(U->x, U->y, faction);
+                if (*game_base_find_dist > 2) continue;
+            } else if (whose_territory(faction, U->x, U->y, NULL, 0) != faction) {
+                continue;
+            }
+        }
+        int d = air_dist(*px, *py, U->x, U->y), score;
+        if (reach / 2 < d) {
+            score = 2 * d;
+        } else {
+            int region = t->region;
+            if (F->region_base_plan[region] == PLAN_DEFENSIVE) score = d / 2;
+            else if (!F->region_total_bases[region]) score = 2 * d;
+            else score = d;
+            if (works) score = 0, d = 0;
+        }
+        if (score > best_score) continue;
+        best_score = score, best_dist = d, best = i;
+    }
+    if (best < 0) return AIR_NEXT;
+    const struct veh *T = &game_vehs[best];
+    if (T->faction == faction) best_dist = (best_dist - 8) / 2;
+    if (reach / 2 >= best_dist) {
+        air_go(V, T->x, T->y, 'a');
+        return *px == T->x && *py == T->y ? -1 : -2;
+    }
+    int alert = V->state & VEH_STATE_ALERT;
+    if (alert && V->order_auto_type == ALERT_INTERCEPT) return AIR_NEXT;
+    if (plan == PLAN_OFFENSIVE && !(alert && V->order_auto_type == ALERT_PATROL)) return AIR_NEXT;
+    int tx = T->x, ty = T->y;
+    for (int b = 0; b < *game_base_count; b++) {
+        const struct base *B = &game_bases[b];
+        if (B->faction != faction && !(F->diplo_status[B->faction] & TREATY_PACT)) continue;
+        int d = air_dist(tx, ty, B->x, B->y);
+        if (reach2 < d || d >= best_dist) continue;
+        air_go(V, B->x, B->y, 'a');
+        best_dist = d;
+    }
+    return V->order == ORDER_MOVE_TO ? -2 : AIR_NEXT;
+}
+
+// A unit on alert to intercept (an attack aircraft or a naval superiority
+// unit without an order) takes on the enemy (at war) ground or sea unit
+// around it, within one ring for a reach of one or less, else two, seen
+// and in its own element for a ship, with the best attack (three times
+// for land units, twice more for formers at sea and again with the
+// faction's flag 0x80000): letter 'L', -1 with `now`, else -2. Otherwise
+// it goes back to its post (waypoint 1, letter 'l', -2), or stays there
+// (-4).
+static int air_alert(int veh, int reach, int now, int *px, int *py) {
+    struct veh *V = &game_vehs[veh];
+    int faction = V->faction, plan = plan_of(V->proto);
+    uint32_t me = 1u << faction;
+    const struct faction_data *F = &game_factions[faction];
+    if ((plan == PLAN_OFFENSIVE || plan == PLAN_NAVAL_SUPERIORITY) && V->order != ORDER_MOVE_TO) {
+        int n = reach <= 1 ? 9 : 25, best = 0;
+        for (int k = 1; k < n; k++) {
+            int x = xrange(*px + game_radius_x[k]), y = *py + game_radius_y[k];
+            if (!on_map(x, y)) continue;
+            int s = stack_fix(veh_at(x, y));
+            if (s < 0) continue;
+            const struct veh *S = &game_vehs[s];
+            if (S->faction == faction || !(F->diplo_status[S->faction] & TREATY_VENDETTA)) continue;
+            if (triad_of(S->proto) == TRIAD_AIR) continue;
+            int triad = triad_of(V->proto);
+            const struct map_tile *t = tile(x, y);
+            if (triad != TRIAD_AIR) {
+                if (!(F->flags & FACTION_FLAG_SEES_ALL) && !(t->visibility & me)) continue;
+                if (!occupied(t, MAP_BASE) && !(S->visibility & me)) continue;
+                if ((alt_of(t) < ALT_SHORE) != (triad == TRIAD_SEA)) continue;
+            }
+            int attack = offense_proto(S->proto, -1, 0);
+            if (triad_of(S->proto) == TRIAD_LAND) attack *= 3;
+            if (alt_of(t) < ALT_SHORE && stack_check(s, STACK_PLAN, PLAN_TERRAFORM_, -1, -1)) {
+                attack *= 2;
+                if (F->flags & FACTION_FLAG_UNK_80000) attack *= 2;
+            }
+            if (attack > best) {
+                best = attack;
+                air_go(V, x, y, 'L');
+            }
+        }
+        if (V->order == ORDER_MOVE_TO) return now ? -1 : -2;
+    }
+    if (V->order == ORDER_MOVE_TO) return -4;
+    if (V->x == V->waypoint_x[1] && V->y == V->waypoint_y[1]) return -4;
+    air_go(V, V->waypoint_x[1], V->waypoint_y[1], 'l');
+    return -2;
+}
+
+// Attack aircraft, and units on alert to bombard (only the base at their
+// post, waypoint 1): the enemy base (not at peace) worth most, with its
+// defender's odds of 8 or more (halved unless a lone armed defender): its
+// citizens and twice the faction's bases in its region, by 32; twice and
+// one more with a unit of the faction next to it in the region, else an
+// eighth where the faction lacks air power for the defenders or the drop
+// pod tech; four times with event bit for the faction, three times for
+// base state 0x8, twice for 0x100000, twice for the faction's target base,
+// twice in the unit's region, four times where the faction's plan for the
+// region is up to defence; over 1 + (distance - 1) / (half the reach,
+// within 1 and 99). The last of equals wins. In half the reach the unit
+// heads for it (letter 'a') unless weak; else for the base of its own or a
+// pact partner's nearest it in reach. With an order, -1 with `now` (not at
+// a post), else -2; without, -3.
+static int air_bombard(int veh, int reach, int reach2, int region0, int now, int *px, int *py) {
+    struct veh *V = &game_vehs[veh];
+    int faction = V->faction, best = 0, bx = -1, by = -1, weak_best = 0;
+    const struct faction_data *F = &game_factions[faction];
+    for (int b = 0; b < *game_base_count; b++) {
+        const struct base *B = &game_bases[b];
+        if (B->faction == faction || (F->diplo_status[B->faction] & (TREATY_PACT | TREATY_TREATY | TREATY_TRUCE)))
+            continue;
+        int post = (V->state & VEH_STATE_ALERT) && V->order_auto_type == ALERT_BOMBARD;
+        if (post && (B->x != V->waypoint_x[1] || B->y != V->waypoint_y[1])) continue;
+        int s = stack_fix(veh_at(B->x, B->y));
+        if (s < 0) continue;
+        if (!post) {
+            const struct veh *S = &game_vehs[s];
+            int odds = air_odds(veh, faction, S->x, S->y, s);
+            int lone = 0;
+            if (occupied(tile(S->x, S->y), MAP_BASE)) {
+                int unarmed = stack_check(s, STACK_UNARMED, -1, -1, -1);
+                lone = stack_check(s, STACK_UNITS, -1, -1, -1) - unarmed == 1;
+            }
+            if (!lone) odds /= 2;
+            if (odds < 8) continue;
+        }
+        int region = tile(B->x, B->y)->region;
+        int value = (B->pop_size + 2 * F->region_total_bases[region]) * 32, next_to = 0;
+        for (int j = 1; j <= 8; j++) {
+            int x = xrange(B->x + game_radius_x[j]), y = B->y + game_radius_y[j];
+            if (!on_map(x, y)) continue;
+            const struct map_tile *t = tile(x, y);
+            if (t->region != region || owner_with(t, MAP_UNIT) != faction) continue;
+            next_to = 1;
+            value = value * 2 + 1;
+            break;
+        }
+        int weak = 0;
+        if (!next_to && !post) {
+            if (F->air_offense < 2 * stack_check(veh_at(B->x, B->y), STACK_UNITS, -1, -1, -1)) weak = 1;
+            if (!has_tech(game_abilities[abil_index(ABL_DROP_POD)].preq_tech, faction)) weak = 1;
+            if (weak) value /= 8;
+        }
+        if (B->event & (1u << faction)) value *= 4;
+        if (B->state & BASE_STATE_UNK_8) value *= 3;
+        if (B->state & BASE_STATE_UNK_100000) value *= 2;
+        if (b == F->attack_target_base) value *= 2;
+        if (region == region0) value *= 2;
+        if (F->region_base_plan[region] <= PLAN_DEFENSIVE) value *= 4;
+        int d = air_dist(*px, *py, B->x, B->y), r = game_range(reach / 2, 1, 99);
+        value /= (d - 1) / r + 1;
+        if (value < best) continue;
+        best = value, weak_best = weak, bx = B->x, by = B->y;
+    }
+    if (on_map(bx, by)) {
+        if (air_dist(*px, *py, bx, by) <= reach / 2) {
+            if (!weak_best) air_go(V, bx, by, 'a');
+        } else {
+            int best_dist = 9999;
+            for (int b = 0; b < *game_base_count; b++) {
+                const struct base *B = &game_bases[b];
+                if (B->faction != faction && !(F->diplo_status[B->faction] & TREATY_PACT)) continue;
+                int d = air_dist(bx, by, B->x, B->y);
+                if (reach2 < d || d >= best_dist) continue;
+                best_dist = d;
+                air_go(V, B->x, B->y, 'a');
+            }
+        }
+    }
+    if (V->order != ORDER_MOVE_TO) return -3;
+    if (!now || ((V->state & VEH_STATE_ALERT) && V->order_auto_type == ALERT_BOMBARD)) return -2;
+    return -1;
+}
+
+// The phases in turn. `home` lets an interceptor without a target go home
+// (action_home); `now` asks for -1 where the unit should attack at once.
+// A unit with a go-to elsewhere keeps it (-1 with `now`, unless an
+// interceptor). Aircraft aloft for a turn or more head home when they
+// must (action_home type 4); on alert to intercept or patrol, damaged
+// ones go home; explorers explore; missiles strike; then the phases above
+// by plan.
+int air_power(int veh, int home, int now, int *px, int *py) {
+    struct veh *V = &game_vehs[veh];
+    if (V->order == ORDER_MOVE_TO && (V->waypoint_x[0] != *px || V->waypoint_y[0] != *py)) {
+        if (!now || plan_of(V->proto) == PLAN_AIR_SUPERIORITY) return -2;
+        return -1;
+    }
+    int faction = V->faction, region0 = tile(*px, *py)->region, reach, reach2;
+    air_reach(veh, &reach, &reach2);
+    if (chassis_of(V->proto)->range && V->movement_turns) {
+        action_home(veh, 4);
+        if (V->order == ORDER_MOVE_TO) return -2;
+    }
+    uint32_t state = V->state;
+    int alert = state & VEH_STATE_ALERT, r;
+    if (alert && (V->order_auto_type == ALERT_INTERCEPT || V->order_auto_type == ALERT_PATROL)) {
+        if (V->damage) {
+            action_home(veh, 0);
+            return -2;
+        }
+        goto attack;
+    }
+    if (alert && V->order_auto_type == ALERT_BOMBARD) goto bombard;
+    if ((state & VEH_STATE_EXPLORE) ||
+        (alt_of(tile(*px, *py)) >= ALT_SHORE && game_factions[faction].region_base_plan[region0] == REGION_PLAN_COLONIZE)) {
+        if ((r = air_explore(veh, reach2, *px, *py)) != AIR_NEXT) return r;
+    }
+    if (chassis_of(V->proto)->missile) return air_missile(veh, px, py);
+attack:;
+    int plan = plan_of(V->proto);
+    if (plan == PLAN_AIR_SUPERIORITY || (alert && V->order_auto_type == ALERT_PATROL) || plan == PLAN_OFFENSIVE) {
+        if ((r = air_intercept(veh, reach, reach2, px, py)) != AIR_NEXT) return r;
+        if (plan != PLAN_OFFENSIVE) {
+            if (!home) return -3;
+            action_home(veh, 0);
+            return -2;
+        }
+    }
+    alert = V->state & VEH_STATE_ALERT;
+    if (alert && V->order_auto_type == ALERT_INTERCEPT) return air_alert(veh, reach, now, px, py);
+bombard:
+    if (plan_of(V->proto) != PLAN_OFFENSIVE && !(alert && V->order_auto_type == ALERT_BOMBARD)) return -3;
+    return air_bombard(veh, reach, reach2, region0, now, px, py);
+}
+
 // ---- Planet busters ----------------------------------------------------------------
 
 static int pb_weapon(int proto) { return game_weapons[proto_of(proto)->weapon].offense >= 99; }
@@ -692,6 +1362,11 @@ SHADOW_WRITER(AI, int, alien_base, (int a, int b, int c), (a, b, c), WRITES(game
 // A planet buster put down moves the unit and shows squares: all of the
 // game.
 SHADOW_WRITER(AI, int, enemy_planet_buster, (int a), (a), hooks_writes_game(&w_), "%d", a)
+// An air unit's move sets orders, puts missiles down and sets off payloads
+// (no fight or step of its own): all of the game, and the square it
+// returns.
+SHADOW_WRITER(AI, int, air_power, (int a, int b, int c, int *d, int *e), (a, b, c, d, e),
+              (hooks_writes_game(&w_), WRITES(d, sizeof(int)), WRITES(e, sizeof(int))), "%d, %d, %d", a, b, c)
 
 // The checks below follow units that search paths: Path_find gets what
 // the original's calls found below their stack, in turn (path.c).
@@ -1069,6 +1744,197 @@ static void sweep_alien_move(void) {
     move_hold_steps(0);
 }
 
+// A square near (x, y) within `radius` rings that is not another
+// faction's base (an air unit is never over one), or (x, y).
+static void air_square(int x, int y, int radius, int faction, int *sx, int *sy) {
+    near_square(x, y, radius, sx, sy);
+    int owner = owner_with(tile(*sx, *sy), MAP_BASE);
+    if (owner >= 0 && owner != faction) *sx = x, *sy = y;
+}
+
+// An enemy unit (often at war with the faction and seen), or one of the
+// faction's own (often an aircraft of a design from `air`, or a
+// transport, grounded), moved near (x, y).
+static void air_bring(int faction, int own, int x, int y, int radius, const int *air, int n_air) {
+    int u = pick_unit(own ? faction : -1);
+    if (u < 0 || (own ? game_vehs[u].faction != faction : game_vehs[u].faction == faction)) return;
+    int sx, sy;
+    air_square(x, y, radius, game_vehs[u].faction, &sx, &sy);
+    put(u, sx, sy);
+    struct veh *U = &game_vehs[u];
+    if (own) {
+        struct unit_proto *Q = &game_protos[U->proto];
+        if (rnd(2)) {
+            Q->chassis = (uint8_t)air[rnd(n_air)];
+            if (Q->plan == PLAN_AIR_SUPERIORITY || rnd(3) == 0) Q->plan = PLAN_COMBAT;
+        } else if (rnd(3) == 0) {
+            Q->plan = PLAN_NAVAL_TRANSPORT;
+        }
+        if (rnd(3)) U->moves_spent = (uint8_t)veh_speed(u, 0);
+    } else {
+        if (rnd(4)) game_factions[faction].diplo_status[U->faction] |= TREATY_VENDETTA;
+        if (rnd(4)) U->visibility |= (uint8_t)(1u << faction);
+        if (rnd(3) == 0) U->moves_spent = (uint8_t)veh_speed(u, 0);
+    }
+    if (rnd(4) == 0) U->order = rnd(2) ? ORDER_LOWER_LAND : ORDER_RAISE_LAND;
+    if (rnd(4) == 0) U->visibility ^= (uint8_t)(1u << faction);
+}
+
+// Air units of the AI's of every kind (a design made an air one, a missile
+// or a payload where needed) and plan, on alert (to bombard, intercept or
+// patrol, with a post), exploring, with a go-to, aloft for turns,
+// damaged, near their bases, enemy bases and the sea, with enemy units and
+// the faction's own grounded aircraft around them, formers on the coast,
+// raise-land goals, and treaties, regions' plans, air power and bases'
+// state varied.
+static void sweep_air_power(void) {
+    int air[CHASSIS_COUNT], n_air = 0, missiles[CHASSIS_COUNT], n_missiles = 0;
+    for (int c = 0; c < CHASSIS_COUNT; c++) {
+        if (game_chassis[c].triad != TRIAD_AIR) continue;
+        air[n_air++] = c;
+        if (game_chassis[c].missile) missiles[n_missiles++] = c;
+    }
+    if (!n_air) return;
+    static const int plans[] = {PLAN_OFFENSIVE, PLAN_OFFENSIVE, PLAN_OFFENSIVE, PLAN_AIR_SUPERIORITY, PLAN_AIR_SUPERIORITY,
+                                PLAN_AIR_SUPERIORITY, PLAN_COMBAT, PLAN_DEFENSIVE, PLAN_RECON, PLAN_NAVAL_SUPERIORITY,
+                                PLAN_COLONY, PLAN_TECTONIC, PLAN_FUNGAL};
+    static const uint32_t treaties[] = {TREATY_VENDETTA, TREATY_VENDETTA, TREATY_PACT, TREATY_TREATY, TREATY_TRUCE};
+    for (int k = 0; k < 64; k++) {
+        // An air unit of the AI's where there is one.
+        int v = -1;
+        for (int j = 0; j < 24; j++) {
+            int u = pick_unit(1 + rnd(FACTION_COUNT - 1));
+            if (u < 0 || !game_vehs[u].faction) continue;
+            v = u;
+            if (triad_of(game_vehs[u].proto) == TRIAD_AIR) break;
+        }
+        if (v < 0) break;
+        struct hook_writes w;
+        case_begin(&w);
+        struct veh *V = &game_vehs[v];
+        int f = V->faction;
+        struct faction_data *F = &game_factions[f];
+        struct unit_proto *P = &game_protos[V->proto];
+        if (triad_of(V->proto) != TRIAD_AIR || rnd(4) == 0) P->chassis = (uint8_t)air[rnd(n_air)];
+        if (n_missiles && k % 3 == 2) P->chassis = (uint8_t)missiles[rnd(n_missiles)];
+        if (rnd(3)) P->plan = (uint8_t)plans[rnd(13)];
+        if (game_chassis[P->chassis].missile && rnd(2)) P->plan = (uint8_t)(rnd(2) ? PLAN_TECTONIC : PLAN_FUNGAL);
+        if (rnd(4) == 0) P->cost = (uint8_t)(1 + rnd(12));  // not 0: compute_odds divides by it
+        *game_human_factions &= (uint8_t) ~(1u << f);
+        if (rnd(12) == 0) *game_human_factions |= (uint8_t)(1u << f);
+        // Where: near an enemy base, near or in one of its own, or anywhere.
+        int x = V->x, y = V->y;
+        if (*game_base_count) {
+            const struct base *B = &game_bases[rnd(*game_base_count)];
+            switch (k % 4) {
+            case 0:
+                for (int j = 0; j < 8 && B->faction == f; j++) B = &game_bases[rnd(*game_base_count)];
+                air_square(B->x, B->y, 1 + rnd(8), f, &x, &y);
+                F->diplo_status[B->faction] |= TREATY_VENDETTA;
+                if (rnd(3) == 0) F->diplo_status[B->faction] &= ~(uint32_t)(TREATY_PACT | TREATY_TREATY | TREATY_TRUCE);
+                break;
+            case 1:
+                air_square(B->x, B->y, rnd(3), f, &x, &y);
+                break;
+            case 2: {
+                int sx = rnd(*game_map_width), sy = rnd(*game_map_height);
+                if ((sx ^ sy) & 1) sx ^= 1;
+                if (on_map(sx, sy)) air_square(sx, sy, 0, f, &x, &y);
+                break;
+            }
+            }
+        }
+        int owner = owner_with(tile(x, y), MAP_BASE);
+        if (owner < 0 || owner == f) put(v, x, y);
+        x = V->x, y = V->y;
+        for (int j = rnd(5); j > 0; j--) air_bring(f, 0, x, y, 1 + rnd(rnd(2) ? 2 : 8), air, n_air);
+        for (int j = rnd(4); j > 0; j--) air_bring(f, 1, x, y, 1 + rnd(8), air, n_air);
+        // Its state.
+        V->moves_spent = (uint8_t)(rnd(3) ? 0 : rnd(12));
+        if (rnd(4) == 0) {  // a short reach left
+            int left = veh_speed(v, 0) - game_rules_basic->move_rate_roads * (1 + rnd(3));
+            V->moves_spent = (uint8_t)(left > 0 ? left : 0);
+        }
+        V->movement_turns = (uint8_t)(rnd(3) ? 0 : rnd(4));
+        V->damage = (uint8_t)(rnd(3) ? 0 : rnd(10));
+        if (rnd(3) == 0) V->state ^= VEH_STATE_ALERT;
+        if (rnd(6) == 0) V->state ^= VEH_STATE_EXPLORE;
+        static const int autos[] = {ALERT_BOMBARD, ALERT_INTERCEPT, ALERT_PATROL, 0};
+        V->order_auto_type = (uint8_t)(rnd(5) ? autos[rnd(4)] : rnd(16));
+        V->order = ORDER_NONE;
+        if (rnd(4) == 0) {
+            V->order = ORDER_MOVE_TO;
+            int wx = x, wy = y;
+            if (rnd(3) == 0) near_square(x, y, 1 + rnd(4), &wx, &wy);
+            V->waypoint_x[0] = (int16_t)wx, V->waypoint_y[0] = (int16_t)wy;
+        }
+        // Its post: an enemy base, a base of its own, or a square near it.
+        int px = x, py = y;
+        if (*game_base_count && rnd(3)) {
+            const struct base *B = &game_bases[rnd(*game_base_count)];
+            px = B->x, py = B->y;
+        } else if (rnd(2)) {
+            near_square(x, y, 1 + rnd(3), &px, &py);
+        }
+        V->waypoint_x[1] = (int16_t)px, V->waypoint_y[1] = (int16_t)py;
+        // The faction.
+        for (int j = rnd(4); j > 0; j--) {
+            int g = 1 + rnd(FACTION_COUNT - 1);
+            if (g == f) continue;
+            uint32_t t = treaties[rnd(5)];
+            F->diplo_status[g] ^= t;
+            if (rnd(2)) game_factions[g].diplo_status[f] ^= t;
+            if (rnd(4) == 0) game_factions[g].se_pending[SE_PLANET] = rnd(5) - 2;
+            if (rnd(4) == 0) game_factions[g].ranking = rnd(8);
+        }
+        int region = tile(x, y)->region;
+        if (rnd(3) == 0) F->region_base_plan[region] = (uint8_t)(rnd(3) ? rnd(9) : REGION_PLAN_COLONIZE);
+        if (rnd(3) == 0) F->region_total_bases[region] = (uint8_t)rnd(3);
+        for (int j = rnd(4); j > 0 && *game_base_count; j--) {
+            const struct base *B = &game_bases[rnd(*game_base_count)];
+            F->region_base_plan[tile(B->x, B->y)->region] = (uint8_t)rnd(4);
+        }
+        if (rnd(3) == 0) F->unk_84c = rnd(3) ? 0 : rnd(10), F->air_offense = rnd(20);
+        if (rnd(3) == 0 && *game_base_count) F->attack_target_base = rnd(*game_base_count);
+        if (rnd(10) == 0) F->flags ^= FACTION_FLAG_SEES_ALL;
+        if (rnd(6) == 0) F->flags ^= FACTION_FLAG_UNK_80000;
+        for (int j = rnd(4); j > 0; j--) {
+            struct goal *G = &F->goals[rnd(GOAL_COUNT)];
+            G->type = GOAL_RAISE_LAND, G->priority = (int16_t)rnd(20);
+            near_square(x, y, 1 + rnd(8), &px, &py);
+            G->x = px, G->y = py;
+        }
+        for (int j = rnd(4); j > 0 && *game_base_count; j--) {
+            struct base *B = &game_bases[rnd(*game_base_count)];
+            if (rnd(2)) B->event ^= 1u << f;
+            if (rnd(2)) B->state ^= rnd(2) ? BASE_STATE_UNK_8 : BASE_STATE_UNK_100000;
+            if (rnd(2)) B->pop_size = (int8_t)rnd(12);
+            if (rnd(2)) B->visibility ^= (uint8_t)(1u << f);
+        }
+        vary_squares(x, y);
+        if (rnd(4) == 0) tile(x, y)->bits ^= MAP_AIRBASE;
+        // Now and then an attack aircraft that sees no enemy unit (and so
+        // finds none to go for): it looks at bases to bombard.
+        if (k % 8 == 3) {
+            if (P->plan != PLAN_NAVAL_SUPERIORITY) P->plan = PLAN_OFFENSIVE;
+            if (rnd(2)) V->state &= ~(uint32_t)VEH_STATE_ALERT;
+            for (int u = 0; u < *game_veh_count; u++)
+                if (game_vehs[u].faction != f) {
+                    game_vehs[u].visibility &= (uint8_t) ~(1u << f);
+                    if (game_vehs[u].order == ORDER_LOWER_LAND) game_vehs[u].order = ORDER_NONE;
+                }
+        }
+        // The square it is asked about: its own, now and then one near.
+        int sx = x, sy = y;
+        if (rnd(8) == 0) air_square(x, y, 1, f, &sx, &sy);
+        // Not over another's base (a pact partner's, its treaty varied):
+        // the original divides by zero there for a short reach.
+        int over = owner_with(tile(sx, sy), MAP_BASE);
+        if (over < 0 || over == f) check_air_power(v, rnd(2), rnd(2), &sx, &sy);
+        hooks_writes_abandon(&w);
+    }
+}
+
 // A weapon a planet buster has, or -1.
 static int pb_weapon_index(void) {
     for (int i = 0; i < WEAPON_COUNT; i++)
@@ -1193,8 +2059,9 @@ static void sweep_enemy_turn(void) {
 
 // Once a turn, on a protected copy of the game: the bases native life
 // heads for, its moves (natives of every kind, transports with worms
-// aboard, spore launchers among improvements, near humans' bases), planet
-// busters near their targets, units' moves and factions' turns.
+// aboard, spore launchers among improvements, near humans' bases), air
+// units' moves, planet busters near their targets, units' moves and
+// factions' turns.
 static void ai_sweep(void) {
     if (!*game_map || !game_path->x || !game_path->map || *game_veh_count <= 0) return;
     int sweeping = hooks_sweeping;
@@ -1205,6 +2072,7 @@ static void ai_sweep(void) {
     hooks_writes_begin(&outer);
     sweep_alien_base();
     sweep_alien_move();
+    sweep_air_power();
     sweep_planet_buster();
     sweep_enemy_veh();
     sweep_enemy_turn();
@@ -1226,5 +2094,6 @@ static const struct hook ai_hooks[] = {
     HOOK(0x566810, alien_move, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x2c),            // sub esp, 0x2c
     HOOK(0x56a8a0, enemy_planet_buster, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x54),   // sub esp, 0x54
     HELD_HOOK(0x56b5b0, enemy_move, PUSH_EBP_MOV_EBP_ESP, 0x81, 0xec, 0xc4, 0x02, 0x00, 0x00),  // sub esp, 0x2c4
+    HOOK(0x5678c0, air_power, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x48),             // sub esp, 0x48
 };
 struct hook_module ai_module = {"ai", ai_hooks, HOOK_COUNT(ai_hooks), ai_sweep, NULL, -1};

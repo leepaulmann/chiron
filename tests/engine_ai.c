@@ -6,6 +6,7 @@
 
 #include "../src/engine/ai.h"
 #include "../src/engine/game.h"
+#include "../src/engine/veh.h"
 
 enum { W = 16, H = 12 };
 
@@ -24,7 +25,7 @@ static struct rules_chassis chassis[CHASSIS_COUNT];
 static struct rules_weapon weapons[WEAPON_COUNT];
 static struct rules_armor armor[ARMOR_COUNT];
 static struct rules_basic rules;
-static int32_t near_x[8] = {1, 2, 1, 0, -1, -2, -1, 0}, near_y[8] = {-1, 0, 1, 2, 1, 0, -1, -2};
+static int32_t near_x[9] = {1, 2, 1, 0, -1, -2, -1, 0, 0}, near_y[9] = {-1, 0, 1, 2, 1, 0, -1, -2, 0};
 static int32_t radius_x[RADIUS_SQUARES], radius_y[RADIUS_SQUARES], radius_count[9];
 static int16_t queue_x[W / 2 * H], queue_y[W / 2 * H];
 static int32_t path_map[W / 2 * H];
@@ -299,6 +300,109 @@ static void test_turn(void) {
     chassis[0].speed = 1;
 }
 
+// Air units: designs 4 a missile, 5 a tectonic payload, 6 an interceptor,
+// 7 a copter (a range of one turn).
+static void test_air_power(void) {
+    land();
+    chassis[4] = (struct rules_chassis){.speed = 12, .triad = TRIAD_AIR, .range = 1, .missile = 1};
+    chassis[5] = (struct rules_chassis){.speed = 8, .triad = TRIAD_AIR, .range = 1};
+    protos[4] = (struct unit_proto){.chassis = 4, .weapon = 1, .armor = 1, .plan = PLAN_COMBAT, .reactor = 1, .cost = 2};
+    protos[5] = (struct unit_proto){.chassis = 4, .weapon = 1, .armor = 1, .plan = 13, .reactor = 1, .cost = 2};
+    protos[6] = (struct unit_proto){.chassis = 2, .weapon = 1, .armor = 1, .plan = PLAN_AIR_SUPERIORITY, .reactor = 1};
+    protos[7] = (struct unit_proto){.chassis = 5, .weapon = 1, .armor = 1, .plan = PLAN_COMBAT, .reactor = 1};
+    int x = 4, y = 4;
+    // A go-to elsewhere is kept: -2, or -1 when asked to act now (not for
+    // an interceptor).
+    put_unit(0, 4, 4, 1, 3);
+    vehs[0].order = 0x18, vehs[0].waypoint_x[0] = 8, vehs[0].waypoint_y[0] = 4;
+    EXPECT(air_power(0, 0, 0, &x, &y), -2);
+    EXPECT(air_power(0, 0, 1, &x, &y), -1);
+    vehs[0].proto = 6;
+    EXPECT(air_power(0, 0, 1, &x, &y), -2);
+    // An explorer with two squares of reach left heads a square off, where
+    // most is unseen.
+    land();
+    put_unit(0, 4, 4, 1, 7);
+    vehs[0].state = 0x4000;
+    vehs[0].moves_spent = (uint8_t)(veh_speed(0, 0) - 6);
+    EXPECT(air_power(0, 0, 0, &x, &y), -2);
+    EXPECT(vehs[0].order, 0x18);
+    EXPECT(vehs[0].status_icon, 'a');
+    EXPECT(vehs[0].waypoint_x[0], 5);
+    EXPECT(vehs[0].waypoint_y[0], 3);
+    // All seen: a base of its own in reach, picked at random; with none, it
+    // stops.
+    for (int i = 0; i < W / 2 * H; i++) tiles[i].visibility = 1 << 1;
+    vehs[0].order = 0;
+    EXPECT(air_power(0, 0, 0, &x, &y), -3);
+    EXPECT(vehs[0].order, 0);
+    put_base(0, 6, 4, 1, 2);
+    rand_value = 7;
+    EXPECT(air_power(0, 0, 0, &x, &y), -2);
+    EXPECT(vehs[0].status_icon, 'c');
+    EXPECT(vehs[0].waypoint_x[0], 6);
+    // A missile with no target: alone it stays; one of two goes to a base
+    // in reach with fewer missiles, put down there.
+    land();
+    put_base(0, 6, 4, 1, 2);
+    put_unit(0, 4, 4, 1, 4);
+    x = 4, y = 4;
+    EXPECT(air_power(0, 0, 0, &x, &y), -3);
+    EXPECT(vehs[0].x, 4);
+    put_unit(1, 4, 4, 1, 4);
+    EXPECT(air_power(0, 0, 0, &x, &y), -3);
+    EXPECT(vehs[0].x, 6);
+    EXPECT(x, 6);
+    EXPECT(y, 4);
+    // A tectonic payload heads for a raise-land goal in reach.
+    land();
+    put_unit(0, 4, 4, 1, 5);
+    factions[1].goals[3] = (struct goal){.type = GOAL_RAISE_LAND, .priority = 5, .x = 8, .y = 4};
+    x = 4, y = 4;
+    EXPECT(air_power(0, 0, 0, &x, &y), -3);
+    EXPECT(vehs[0].order, 0x18);
+    EXPECT(vehs[0].status_icon, 'm');
+    EXPECT(vehs[0].waypoint_x[0], 8);
+    // An interceptor covers a grounded aircraft of its own out in the open.
+    land();
+    put_unit(0, 4, 4, 1, 6);
+    put_unit(1, 8, 4, 1, 3);
+    vehs[1].moves_spent = (uint8_t)veh_speed(1, 0);
+    EXPECT(air_power(0, 0, 0, &x, &y), -2);
+    EXPECT(vehs[0].status_icon, 'a');
+    EXPECT(vehs[0].waypoint_x[0], 8);
+    // With moves left it needs none: no target, nothing to do (-3), or home.
+    vehs[1].moves_spent = 0;
+    vehs[0].order = 0;
+    EXPECT(air_power(0, 0, 0, &x, &y), -3);
+    EXPECT(vehs[0].order, 0);
+    // On alert to intercept, an aircraft goes back to its post, or stays.
+    land();
+    put_unit(0, 4, 4, 1, 3);
+    vehs[0].state = 0x200, vehs[0].order_auto_type = 11;
+    vehs[0].waypoint_x[1] = 6, vehs[0].waypoint_y[1] = 6;
+    EXPECT(air_power(0, 0, 0, &x, &y), -2);
+    EXPECT(vehs[0].status_icon, 'l');
+    EXPECT(vehs[0].waypoint_x[0], 6);
+    vehs[0].order = 0, vehs[0].waypoint_x[1] = 4, vehs[0].waypoint_y[1] = 4;
+    EXPECT(air_power(0, 0, 0, &x, &y), -4);
+    // On alert to bombard the enemy base at its post: it heads there.
+    land();
+    put_base(0, 8, 4, 2, 3);
+    put_unit(1, 8, 4, 2, 1);
+    put_unit(0, 4, 4, 1, 3);
+    vehs[0].state = 0x200, vehs[0].order_auto_type = 10;
+    vehs[0].waypoint_x[1] = 8, vehs[0].waypoint_y[1] = 4;
+    EXPECT(air_power(0, 0, 1, &x, &y), -2);
+    EXPECT(vehs[0].status_icon, 'a');
+    EXPECT(vehs[0].waypoint_x[0], 8);
+    // At peace, it has none.
+    vehs[0].order = 0;
+    factions[1].diplo_status[2] = 0x4;  // a truce
+    EXPECT(air_power(0, 0, 1, &x, &y), -3);
+    EXPECT(vehs[0].order, 0);
+}
+
 int main(void) {
     game_map = &tiles_ptr, game_map_width = &width, game_map_height = &height, game_map_half_width = &half_width;
     game_map_area = &area, game_map_flat = &flat, game_bases = bases, game_base_count = &base_count;
@@ -328,6 +432,7 @@ int main(void) {
     test_alien_move();
     test_planet_buster();
     test_turn();
+    test_air_power();
     if (failures) return 1;
     printf("engine_ai: ok\n");
     return 0;
