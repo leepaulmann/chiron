@@ -50,17 +50,20 @@ static int patch_game_data_header(struct pe_image *exe) {
 // it never clears: it takes the maximum of each entry and what it finds.
 // What decides war then depends on whatever was on the stack, so the same
 // question asked from two places can get two answers. Thinker clears the
-// array too. The stub clears it right after the frame is set up.
+// array too. Asked about faction 0 (as the game does), it reads the word
+// below the array as well. The stub clears the eight words once the frame
+// is set up and the registers saved (after the prologue, which faction.c's
+// hook takes over).
 static int patch_wants_to_attack_counts(struct pe_image *exe) {
-    const uint32_t site = 0x55bc83, resume = 0x55bc89;
-    static const uint8_t original[] = {0x81, 0xec, 0x34, 0x01, 0x00, 0x00};  // sub esp, 0x134
+    const uint32_t site = 0x55bc89, resume = 0x55bc8f;
+    static const uint8_t original[] = {0x53, 0x56, 0x57, 0x8b, 0x7d, 0x08};  // push ebx, esi, edi; mov edi, [ebp+8]
     if (!code_matches(exe, site, original, sizeof(original))) return -1;
 
-    uint8_t *s = code_stub_alloc(sizeof(original) + 7 * 10 + 5), *p = s;
+    uint8_t *s = code_stub_alloc(sizeof(original) + 8 * 10 + 5), *p = s;
     if (!s) return -1;
-    memcpy(p, original, sizeof(original));  // the instruction we replaced
+    memcpy(p, original, sizeof(original));  // the instructions we replaced
     p += sizeof(original);
-    for (int32_t off = -0x130; off < -0x130 + 7 * 4; off += 4) {
+    for (int32_t off = -0x134; off < -0x130 + 7 * 4; off += 4) {
         *p++ = 0xc7;  // mov dword [ebp+off], 0
         *p++ = 0x85;
         memcpy(p, &off, 4);

@@ -244,8 +244,6 @@ int (*game_breed_mod)(int base, int faction);
 void (*game_do_all_draws)(void);
 void (*game_enemy_diplomacy)(int faction);
 void (*game_enemy_strategy)(int faction);
-void (*game_cause_friction)(int faction, int other, int friction);
-void (*game_treaty_on)(int faction, int other, uint32_t status);
 int (*game_reputation)(int faction, int other);
 void (*game_diplomacy_check)(int faction, int other, int unk);
 void (*game_communicate)(int faction, int other, int unk);
@@ -288,6 +286,13 @@ int32_t *game_gov_claims, *game_gov_claim_scores, *game_dome_depth_a, *game_dome
 int32_t *game_tech_unk_9a5e9c;
 const char *game_name_believers, *game_name_peacekeepers, *game_name_caretakers;
 int32_t *game_pbem, *game_diplo_state, *game_diplo_attack_chance, *game_diplo_hostility, *game_diplo_friction;
+int32_t *game_diplo_friction_faction, *game_diplo_friction_with;
+int32_t *game_trade_want_tech[4], *game_trade_want_value[4];
+int32_t *game_trade_offer_tech[2], *game_trade_offer_value[2], *game_trade_offer_project[2];
+int32_t *game_trade_project, *game_ambience_flags, *game_multi_win_visible;
+int (*game_ambience)(int sound);
+void *game_multi_win;
+struct proposal *game_proposals;
 int32_t (*game_diplo_state_with)[FACTION_COUNT];
 int (*game_social_ai)(int faction, int a, int b, int c, int d, int e);
 void (*game_call_council)(int faction);
@@ -639,8 +644,6 @@ void game_bind(struct pe_image *exe) {
     game_do_all_draws = (void *)code_at(exe, 0x5fcbb0);
     game_enemy_diplomacy = (void *)code_at(exe, 0x55f930);
     game_enemy_strategy = (void *)code_at(exe, 0x561080);
-    game_cause_friction = (void *)code_at(exe, 0x53a030);
-    game_treaty_on = (void *)code_at(exe, 0x55b870);
     game_reputation = (void *)code_at(exe, 0x53a100);
     game_diplomacy_check = (void *)code_at(exe, 0x53a980);
     game_communicate = (void *)code_at(exe, 0x54ffd0);
@@ -695,6 +698,26 @@ void game_bind(struct pe_image *exe) {
     game_diplo_attack_chance = (int32_t *)code_at(exe, 0x93faa0);
     game_diplo_hostility = (int32_t *)code_at(exe, 0x93fa60);
     game_diplo_friction = (int32_t *)code_at(exe, 0x93fa74);
+    game_diplo_friction_faction = (int32_t *)code_at(exe, 0x93fac0);
+    game_diplo_friction_with = (int32_t *)code_at(exe, 0x93fabc);
+    static const uint32_t want_tech[4] = {0x93faa8, 0x93fa18, 0x93fa1c, 0x93fa28};
+    static const uint32_t want_value[4] = {0x93f814, 0x93fa44, 0x93fa20, 0x93f7c0};
+    for (int i = 0; i < 4; i++) {
+        game_trade_want_tech[i] = (int32_t *)code_at(exe, want_tech[i]);
+        game_trade_want_value[i] = (int32_t *)code_at(exe, want_value[i]);
+    }
+    game_trade_offer_tech[0] = (int32_t *)code_at(exe, 0x93f800);
+    game_trade_offer_tech[1] = (int32_t *)code_at(exe, 0x93f80c);
+    game_trade_offer_value[0] = (int32_t *)code_at(exe, 0x93faa4);
+    game_trade_offer_value[1] = (int32_t *)code_at(exe, 0x93f7ec);
+    game_trade_offer_project[0] = (int32_t *)code_at(exe, 0x93fa6c);
+    game_trade_offer_project[1] = (int32_t *)code_at(exe, 0x93fa84);
+    game_trade_project = (int32_t *)code_at(exe, 0x93f7f4);
+    game_ambience_flags = (int32_t *)code_at(exe, 0x74da9c);
+    game_ambience = (void *)code_at(exe, 0x446b40);
+    game_multi_win = code_at(exe, 0x7fd648);
+    game_multi_win_visible = (int32_t *)code_at(exe, 0x7fe06c);
+    game_proposals = (struct proposal *)code_at(exe, 0x9a6828);
     game_social_ai = (void *)code_at(exe, 0x5b4790);
     game_call_council = (void *)code_at(exe, 0x52c880);
     game_more_rules = (uint32_t *)code_at(exe, 0x9a681c);

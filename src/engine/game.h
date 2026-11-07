@@ -111,7 +111,11 @@ struct faction_data {
     int32_t loan_payment[FACTION_COUNT];  // and paid to it each turn
     GAME_PAD(0x104, 0x124);
     int32_t integrity_blemishes;  // treaties broken
-    GAME_PAD(0x128, 0x1d0);
+    GAME_PAD(0x128, 0x12c);
+    int32_t diplo_gifts[FACTION_COUNT];  // gifts and bribes it has given each faction
+    GAME_PAD(0x14c, 0x1ac);
+    int32_t diplo_combat_count[FACTION_COUNT];  // its score in the current war with each, reset at a vendetta
+    GAME_PAD(0x1cc, 0x1d0);
     uint32_t base_governor_adv;  // the governor settings new bases start with
     int32_t atrocities;
     int32_t major_atrocities;
@@ -230,6 +234,8 @@ GAME_AT(struct faction_data, diplo_status, 0x18);
 GAME_AT(struct faction_data, diplo_merc, 0x98);
 GAME_AT(struct faction_data, diplo_patience, 0xb8);
 GAME_AT(struct faction_data, integrity_blemishes, 0x124);
+GAME_AT(struct faction_data, diplo_gifts, 0x12c);
+GAME_AT(struct faction_data, diplo_combat_count, 0x1ac);
 GAME_AT(struct faction_data, odp_deployed, 0x364);
 GAME_AT(struct faction_data, target_x, 0x3f0);
 GAME_AT(struct faction_data, mil_strength, 0x1060);
@@ -1179,8 +1185,6 @@ extern void (*game_enemy_diplomacy)(int faction);
 extern void (*game_enemy_strategy)(int faction);
 // The AI's diplomacy (Thinker's names). The first faction acts towards the
 // second unless noted.
-extern void (*game_cause_friction)(int faction, int other, int friction);
-extern void (*game_treaty_on)(int faction, int other, uint32_t status);  // sets TREATY_* bits both ways
 extern int (*game_reputation)(int faction, int other);
 extern void (*game_diplomacy_check)(int faction, int other, int unk);  // sets the game_diplo_* moods
 extern void (*game_communicate)(int faction, int other, int unk);       // talks to the player
@@ -1239,6 +1243,25 @@ extern int32_t (*game_diplo_state_with)[FACTION_COUNT];  // [player][faction] th
 extern int32_t *game_diplo_attack_chance;  // diplomacy_check's: the rival's openings to attack
 extern int32_t *game_diplo_hostility;      // and its hostility, 0 to 4
 extern int32_t *game_diplo_friction;
+extern int32_t *game_diplo_friction_faction, *game_diplo_friction_with;  // the AI and the player game_diplo_friction follows
+// tech_analysis()'s findings for a player and a rival: the four techs the
+// player could best give the rival and their worth to it; the two the rival
+// could best give the player, their worth to the player and the secret
+// project that makes each worth less (see faction.c), or -1; and the first
+// such project found.
+extern int32_t *game_trade_want_tech[4], *game_trade_want_value[4];
+extern int32_t *game_trade_offer_tech[2], *game_trade_offer_value[2], *game_trade_offer_project[2];
+extern int32_t *game_trade_project;
+extern int32_t *game_ambience_flags;  // bit 0: the player is at war, for the music
+extern int (*game_ambience)(int sound);
+extern void *game_multi_win;  // the multiplayer status window
+extern int32_t *game_multi_win_visible;
+// Planetary Council proposals.
+struct proposal {
+    char *name, *description;
+    int32_t preq_tech;
+};
+extern struct proposal *game_proposals;  // [11]
 extern int (*game_social_ai)(int faction, int a, int b, int c, int d, int e);
 extern void (*game_call_council)(int faction);
 // The Planetary Council.
