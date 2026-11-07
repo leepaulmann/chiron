@@ -1219,6 +1219,19 @@ extern void(__attribute__((thiscall)) * game_console_update_data)(void *console,
 extern void (*game_message_data)(int type, int unk, int a, int b, int c, int d);
 extern void *game_net_daemon;
 extern int(__attribute__((thiscall)) * game_net_daemon_receive)(void *daemon);
+// Units moving and their orders (move.c): a step in a direction (order_veh,
+// the whole move with its fights and finds), a former's work started, a
+// square named in a message, the labels for a road or tube finished, and a
+// network game's unit sent to the others or handed to the daemon.
+extern int (*game_order_veh)(int veh, int dir, int type);
+extern int (*game_action_terraform)(int veh, int terraform, int unk);
+extern void (*game_say_loc)(char *buf, int x, int y, int a, int b, int c);
+extern char *game_text_road_to_done, *game_text_tube_to_done;
+extern void (*game_synch_veh)(int veh);
+extern int(__attribute__((thiscall)) * game_net_order_veh)(void *daemon, int veh, int dir, int unk);
+extern int(__attribute__((thiscall)) * game_net_await_exec)(void *daemon, int unk);
+extern int(__attribute__((thiscall)) * game_net_await_synch)(void *daemon);
+extern void(__attribute__((thiscall)) * game_net_unlock_veh)(void *daemon);
 extern void (*game_del_site)(int faction, int type, int x, int y, int unk);
 extern void (*game_x_pop)(char *label, int unk);  // a popup from script.txt
 // base_at(): set while its "Base Bits Error" is being reported, and the two

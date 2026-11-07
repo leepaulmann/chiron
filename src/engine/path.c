@@ -713,7 +713,7 @@ extern struct hook_module path_module;
 
 // The game's state (with the map and the coarse map), and the path
 // object's table and queue.
-static void writes_paths(struct hook_writes *w, struct game_path *p) {
+void writes_paths(struct hook_writes *w, struct game_path *p) {
     hooks_writes_game(w);
     size_t area = (size_t)*game_map_area;
     if (p->map) hooks_writes_add(w, p->map, area * 4);
@@ -888,6 +888,16 @@ static int __attribute__((thiscall)) shadow_path_move(struct game_path *p, int v
     shadow_tick(PATH);
     return check_path_move(p, veh, faction);
 }
+
+// The same for a check of one of path_move's callers (move.c): forget what
+// the original's Path_find found, then hand it to ours, and put it back.
+void path_stale_reset(void) { nested_stale_seen = 0; }
+int32_t path_stale_take(void) {
+    int32_t saved = move_stale;
+    if (nested_stale_seen) move_stale = nested_stale;
+    return saved;
+}
+void path_stale_put(int32_t saved) { move_stale = saved; }
 
 // Path_sensors: each run gets its own copy of the square, and the
 // original's goes back to the caller.
