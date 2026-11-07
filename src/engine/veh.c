@@ -9,6 +9,8 @@
 // the armor table past its end; Chiron's callers do the same.
 #include "veh.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "base.h"
@@ -2581,6 +2583,707 @@ int compute_odds(int odds, int faction, int veh, int target, int base) {
     return odds;
 }
 
+// ---- Designs: names, retiring, pruning and proposing -------------------------
+
+enum {
+    ABLI_AMPHIBIOUS = 3, ABLI_AIR_SUPERIORITY = 5, ABLI_ARTILLERY = 15,  // abilities' bit numbers
+    WMODE_COLONY = 8, MPREF_ASK_UPGRADE = 0x100000, FACTION_RULE_ALIEN = 0x80,
+    PROTO_FLAG_RENAMED = 0x2, PROTO_FLAG_8 = 0x8, PROTO_FLAG_NO_ASK = 0x200,
+    LABEL_SCOUT = 146, LABEL_RECON = 182, LABEL_COLONY = 163, LABEL_ARTILLERY = 543, LABEL_BATTERY = 544,
+    LABEL_MARINES = 614, LABEL_INVADERS = 615, LABEL_MARK = 919,
+};
+
+static const char *str(char *s) { return game_strings_get(game_strings, s); }
+// A reactor's short name; reactors count from 1.
+static const char *reactor_name(int reactor) { return str(game_reactors[reactor - 1].short_name); }
+
+// Gives a name that another design (but one with the same parts) has a
+// mark number: "Mk 2" (labels.txt's word for it) added, or its last digit,
+// 2 to 8, raised by one. Returns 1 when it can't be (the mark word isn't at
+// the end, with no more than a character after it, and the digit is 9 or
+// none).
+static int name_mark(char *s) {
+    const char *mark = game_label(LABEL_MARK);
+    char *at = NULL;
+    for (char *p = strstr(s, mark); p; p = strstr(p + 1, mark)) at = p;
+    if (at && strlen(at) <= strlen(mark) + 1) {
+        signed char *c = (signed char *)&s[strlen(s) - 1];
+        if (*c >= '2' && *c < '9') {
+            (*c)++;
+            return 0;
+        }
+        return 1;
+    }
+    strcat(s, " ");
+    strcat(s, mark);
+    strcat(s, "2");
+    return 0;
+}
+
+// Names a design from its parts, built up from the game's text: an
+// ability's abbreviation (the first that has one, but for air superiority
+// on an aircraft, artillery, and amphibious pods on a slow land unit no
+// weaker in attack than defence, unless it is artillery too), then for
+// a defensive unit its armor and chassis, for an interceptor its weapon
+// and chassis, for a missile its warhead and reactor, for a noncombat unit
+// its reactor and chassis, and else its weapon and chassis, artillery or
+// marines. A design whose reactor is better than the faction's earlier
+// designs of its plan and chassis is named for the reactor instead of its
+// armor or weapon. A slow land unit no stronger than its speed is a scout,
+// or a police unit with the police ability, or a recon unit with a
+// weapon of 2 or more; so are fast units the AI keeps for that.
+//
+// A second name is built alongside, with the chassis' other names; it is
+// taken when the design's reactor and faction (or its armor or weapon, or
+// a fast scout) say so, or when the first is another design's name and
+// the second is not. A name in use gets a mark number. Returns name when
+// the second name was taken, else 0.
+//
+// Thinker's mod_name_proto() is a naming scheme of its own, not this one;
+// OpenSMACX has none of these design functions.
+//
+// Quirks kept: the police unit's second name loses one more character
+// than the first. After a mark number is given, the second name is
+// compared with the bytes before the first design (the end of the
+// abilities' table) once, as the scan restarts.
+//
+// name_parts builds the two names, and returns whether the second is the
+// one to take as things stand.
+static int name_parts(char *name, char *other, int proto, int faction, int chassis, int weapon, int armor,
+                      uint32_t abilities, int reactor) {
+    const struct rules_chassis *C = &game_chassis[chassis];
+    const struct rules_weapon *W = &game_weapons[weapon];
+    const struct rules_armor *A = &game_armor[armor];
+    const struct unit_proto *P = proto_of(proto);
+    name[0] = 0;
+    for (int i = 0; i < ABILITY_COUNT; i++) {
+        if (!(abilities & (1u << i))) continue;
+        if (!strlen(str(game_abilities[i].abbreviation))) continue;
+        if (i == ABLI_AIR_SUPERIORITY && C->triad == TRIAD_AIR) continue;
+        if (i == ABLI_ARTILLERY) continue;
+        if (i == ABLI_AMPHIBIOUS && C->speed == 1 && W->offense >= A->defense && !(abilities & ABL_ARTILLERY)) continue;
+        strcat(name, str(game_abilities[i].abbreviation));
+        strcat(name, " ");
+        break;
+    }
+    strcpy(other, name);
+    // A large design: its lesser strength above 3 (6 when that is its
+    // weapon), a ship's above one more, an aircraft's above half as much
+    // again, if the chassis has large names.
+    int large = 0, not_sea = 0;
+    if (W->mode < 3) {
+        int k, least;
+        if (A->defense <= W->offense) k = 3, least = A->defense;
+        else k = 6, least = W->offense;
+        if (C->triad == TRIAD_SEA) k++;
+        if (C->triad == TRIAD_AIR) k += k / 2;
+        if (least > k) large = 1;
+        not_sea = C->triad != TRIAD_SEA;
+        if (!strlen(str(C->offsv_name_lrg)) || !strlen(str(C->defsv_name_lrg))) large = 0;
+    }
+    int alt = ((reactor - 1) ^ faction) & 1, scout = 0;
+    int is_scout = P->group == 10 && !game_is_human(faction) && C->speed > 1;
+    if (!is_scout)
+        is_scout = C->speed >= W->offense && C->speed >= A->defense && W->offense >= 0 && C->triad == TRIAD_LAND;
+    if (is_scout && W->mode < 3) {
+        if (has_abil(proto, ABL_POLICE_2X)) {
+            if (strlen(name)) name[strlen(name) - 1] = 0;
+            if (strlen(other)) other[strlen(name) - 1] = 0;
+        } else {
+            int label = W->offense >= 2 ? LABEL_RECON : LABEL_SCOUT;
+            strcat(name, game_label(label));
+            strcat(other, game_label(label));
+        }
+        scout = 1;
+        alt = C->speed > 1;
+    }
+    int by_reactor = 0;
+    if (!scout)
+        for (int i = 0; i < 2 * BASIC_PROTOS; i++) {
+            const struct unit_proto *Q = proto_of((i < BASIC_PROTOS ? 0 : faction * BASIC_PROTOS) + i % BASIC_PROTOS);
+            if (!(Q->flags & PROTO_FLAG_ACTIVE) || Q->plan != P->plan || Q->chassis != P->chassis) continue;
+            if (Q->reactor >= P->reactor) {
+                by_reactor = 0;
+                break;
+            }
+            by_reactor = 1;
+        }
+    int off = W->offense, def = A->defense;
+    if (def > off && W->mode < 3 && off >= 0 && !(abilities & ABL_ARTILLERY)) {  // defensive
+        if (!scout) {
+            alt ^= def & 1;
+            const char *s = by_reactor ? reactor_name(reactor) : str(A->short_name);
+            strcat(name, s);
+            strcat(other, s);
+        }
+        strcat(name, " ");
+        strcat(other, " ");
+        strcat(name, str(C->defsv1_name));
+        if (scout && (proto & 1)) strcat(other, str(large && not_sea ? C->defsv_name_lrg : C->defsv1_name));
+        else strcat(other, str(large && !not_sea ? C->defsv_name_lrg : C->defsv2_name));
+    } else if (C->triad == TRIAD_AIR && (abilities & ABL_AIR_SUPERIORITY) && W->mode < 3 && off >= 0) {  // interceptor
+        if (!scout) {
+            const char *s = by_reactor ? reactor_name(reactor) : str(W->short_name);
+            strcat(name, s);
+            strcat(other, s);
+        }
+        strcat(name, " ");
+        strcat(other, " ");
+        strcat(name, str(C->defsv1_name));
+        if (scout && (proto & 1)) strcat(other, str(large && not_sea ? C->defsv_name_lrg : C->defsv1_name));
+        else strcat(other, str(large && !not_sea ? C->defsv_name_lrg : C->defsv2_name));
+    } else if (C->missile && off >= 99) {  // planet buster
+        strcat(name, reactor_name(reactor));
+        strcat(other, reactor_name(reactor));
+        strcat(name, " ");
+        strcat(other, " ");
+        strcat(name, str(W->short_name));
+        strcat(other, str(W->short_name));
+    } else if (C->missile && (weapon == WEAPON_TECTONIC_PAYLOAD || weapon == WEAPON_FUNGAL_PAYLOAD)) {
+        strcat(name, str(W->short_name));
+        strcat(other, str(W->short_name));
+        strcat(name, " ");
+        strcat(other, " ");
+        strcat(name, reactor_name(reactor));
+        strcat(other, reactor_name(reactor));
+        strcat(name, " ");
+        strcat(other, " ");
+        strcat(name, str(C->offsv1_name));
+        strcat(other, str(C->offsv1_name));
+    } else {
+        if (W->mode >= 3 && chassis) {  // noncombat, but on foot
+            if (reactor > 1) {
+                strcat(name, reactor_name(reactor));
+                strcat(other, reactor_name(reactor));
+                strcat(name, " ");
+                strcat(other, " ");
+            }
+            int m = W->mode;
+            if (!(m == WMODE_TRANSPORT && chassis == CHASSIS_FOIL)
+                && !(m == WMODE_TERRAFORM && C->triad == TRIAD_LAND && strchr(name, ' '))) {
+                if ((m == WMODE_COLONY || m == WMODE_TERRAFORM) && chassis == CHASSIS_FOIL) {
+                    strcat(name, game_label(LABEL_COLONY));
+                    strcat(other, game_label(LABEL_COLONY));
+                } else {
+                    strcat(name, str(C->offsv1_name));
+                    strcat(other, str(C->offsv2_name));
+                }
+                strcat(name, " ");
+                strcat(other, " ");
+            }
+        }
+        if (!scout) {
+            alt ^= off & 1;
+            strcat(name, str(W->short_name));
+            strcat(other, str(W->short_name));
+        }
+        if (W->mode < 3) {
+            if (abilities & ABL_ARTILLERY) {
+                strcat(name, " ");
+                strcat(name, game_label(LABEL_ARTILLERY));
+                strcat(other, " ");
+                strcat(other, game_label(LABEL_BATTERY));
+            } else if ((abilities & ABL_AMPHIBIOUS) && C->speed == 1 && off > def) {
+                strcat(name, " ");
+                strcat(name, game_label(LABEL_MARINES));
+                strcat(other, " ");
+                strcat(other, game_label(LABEL_INVADERS));
+            } else {
+                strcat(name, " ");
+                const char *lrg = str(C->offsv_name_lrg);
+                strcat(name, by_reactor ? reactor_name(reactor) : large && not_sea ? lrg : str(C->offsv1_name));
+                strcat(other, " ");
+                strcat(other, by_reactor ? reactor_name(reactor) : large && !not_sea ? lrg : str(C->offsv2_name));
+            }
+        }
+    }
+    return alt;
+}
+
+int name_proto(char *name, int proto, int faction, int chassis, int weapon, int armor, uint32_t abilities, int reactor) {
+    char other[256];
+    int alt = name_parts(name, other, proto, faction, chassis, weapon, armor, abilities, reactor);
+    // Names in use by the faction's designs and the basic ones, but for
+    // the design itself and designs of the same parts.
+    int same = !strcmp(name, other), stop = 0;
+    for (int i = 0; i < PROTO_COUNT; i++) {
+        if (i == proto) continue;
+        if (i / BASIC_PROTOS && i / BASIC_PROTOS != faction) continue;
+        const struct unit_proto *Q = proto_of(i);
+        if (Q->chassis == chassis && Q->weapon == weapon && Q->armor == armor && Q->reactor == reactor
+            && Q->abilities == abilities)
+            continue;
+        if (!stop && !strcmp(name, Q->name)) {
+            if (!same) alt = 1;
+            if (name_mark(name)) stop = 1;
+            i = -1;
+        }
+        if (same) continue;
+        if (!strcmp(other, ((const struct unit_proto *)game_protos + i)->name)) {
+            alt = 0;
+            if (name_mark(other)) stop = 1;
+            i = -1;
+        }
+    }
+    if (!alt) return 0;
+    strcpy(name, other);
+    return (int)(intptr_t)name;
+}
+
+// Adds a design to the faction's list of retired ones, in the next of its
+// 64 slots.
+static void bung_proto(int faction, int proto) {
+    struct faction_data *F = &game_factions[faction];
+    int i = F->bung_next;
+    F->bung_next = (i + 1) % 64;
+    struct bung *B = &game_bunglist[faction * 64 + i];
+    const struct unit_proto *P = proto_of(proto);
+    B->abilities = P->abilities;
+    B->chassis = P->chassis, B->weapon = P->weapon, B->armor = P->armor, B->reactor = P->reactor;
+}
+
+// Whether a human player's faction retired a design of these parts.
+static int is_bunged(int faction, int chassis, int weapon, int armor, uint32_t abilities, int reactor) {
+    if (!game_is_human(faction)) return 0;
+    for (int i = 0; i < 64; i++) {
+        const struct bung *B = &game_bunglist[faction * 64 + i];
+        if (B->chassis == chassis && B->weapon == weapon && B->armor == armor && B->abilities == abilities
+            && B->reactor == reactor)
+            return 1;
+    }
+    return 0;
+}
+
+// Retires a design: its units are disbanded, or, for the AI, refitted as
+// the faction's best other active design of its group (one not obsolete
+// to it, else the first found) where no human player sees them or they
+// are in a base. A unit in a base that can't be refitted becomes a scout
+// patrol if it is the only one of its kind there, or else is disbanded
+// with half its cost going to the base's minerals. A faction's own design
+// leaves the bases' queues (stockpile energy in place of the current
+// item), and is no longer active.
+//
+// Quirks kept: a unit is refitted only if it is the faction's own, but
+// the counts changed are always the faction's. An item removed from a
+// queue lets the next one go unchecked.
+void retire_proto(int proto, int faction) {
+    bung_proto(faction, proto);
+    int group = proto_of(proto)->group, best = -1, rank = -1;
+    for (int i = faction * BASIC_PROTOS; i < faction * BASIC_PROTOS + BASIC_PROTOS; i++) {
+        const struct unit_proto *Q = proto_of(i);
+        if (i == proto || !(Q->flags & PROTO_FLAG_ACTIVE) || Q->group != group) continue;
+        int r = (Q->obsolete_factions & (1u << faction)) ? 1 : 2;
+        if (r > rank) rank = r, best = i;
+    }
+    uint8_t *active = game_factions[faction].units_active;
+    for (int v = *game_veh_count - 1; v >= 0; v--) {
+        if (v >= *game_veh_count) continue;
+        struct veh *V = &game_vehs[v];
+        if (V->proto != proto) continue;
+        if (!game_is_human(faction)) {
+            if (best >= 0) {
+                int unseen = !(V->visibility & *game_human_factions) || faction_base(square(V->x, V->y), 1);
+                if (unseen && V->faction == faction) {
+                    V->proto = (int16_t)best;
+                    active[proto]--;
+                    active[best]++;
+                    continue;
+                }
+            }
+            int b = base_at(V->x, V->y);
+            if (b >= 0) {
+                if (stack_check(v, 1, -1, -1, -1) == 1) {
+                    V->proto = 2;
+                    active[proto]--;
+                    active[2]++;
+                    continue;
+                }
+                struct base *B = &game_bases[b];
+                B->minerals += proto_of(V->proto)->cost / 2;
+                B->minerals_2 = B->minerals;
+                B->production_last = B->queue[0];
+            }
+        }
+        kill(v);
+    }
+    if (proto < BASIC_PROTOS) return;
+    for (int b = 0; b < *game_base_count; b++) {
+        struct base *B = &game_bases[b];
+        for (int i = 0; i <= B->queue_size; i++) {
+            if (B->queue[i] != proto) continue;
+            if (!i) {
+                B->queue[0] = -FAC_STOCKPILE_ENERGY;
+                continue;
+            }
+            for (int k = i; k < B->queue_size; k++) B->queue[k] = B->queue[k + 1];
+            B->queue_size--;
+        }
+    }
+    game_protos[proto].flags &= (uint16_t)~PROTO_FLAG_ACTIVE;
+}
+
+// Whether design o is no better than design n in weapon (the same psi or
+// noncombat weapon, else no stronger), carrying capacity and armor (the
+// same psi armor, else rated no better for the faction).
+static int no_better_weapon(const struct unit_proto *o, const struct unit_proto *n) {
+    int w = game_weapons[o->weapon].offense;
+    return w <= 0 ? o->weapon == n->weapon : w <= game_weapons[n->weapon].offense;
+}
+static int no_better_armor(const struct unit_proto *o, const struct unit_proto *n, int faction) {
+    if (game_armor[o->armor].defense <= 0) return o->armor == n->armor;
+    return arm_val(o->armor, faction) <= arm_val(n->armor, faction);
+}
+static int speed_of(const struct unit_proto *p) { return game_chassis[p->chassis].speed; }
+static int range_of(const struct unit_proto *p) { return game_chassis[p->chassis].range; }
+static int triad_of(const struct unit_proto *p) { return game_chassis[p->chassis].triad; }
+
+// A design and its parts, for the upgrade question: "name (strengths
+// abilities)" into the text variable.
+static void say_design(int slot, int proto) {
+    char *t = game_battle_text;
+    t[0] = 0;
+    strcat(t, proto_of(proto)->name);
+    strcat(t, " ");
+    strcat(t, text(0x682e9c));
+    game_say_stats_2(t, proto);
+    if (proto_of(proto)->abilities) {
+        strcat(t, " ");
+        for (int i = 0; i < ABILITY_COUNT; i++)
+            if (proto_of(proto)->abilities & (1u << i)) strcat(t, str(game_abilities[i].abbreviation));
+    }
+    strcat(t, text(0x682e98));
+    game_parse_says(slot, t, -1, -1);
+}
+
+// A human player's designs: each that one of theirs supersedes is made
+// obsolete, and their bases building it build the new one instead, if the
+// player agrees (once for all bases; "always" agrees to the rest; "no"
+// keeps the design and asks no more after a second time). Only in a
+// network game or with the preference set. In a network game the player
+// is told instead.
+//
+// Quirk kept: the range compared is that of the design passed in, not the
+// new one.
+static void prune_human(int faction, int proto, int unk) {
+    uint8_t bit = (uint8_t)(1u << faction);
+    if (!*game_net_multiplayer && !(*game_more_preferences & MPREF_ASK_UPGRADE)) return;
+    struct faction_data *F = &game_factions[faction];
+    for (int i = 0; i < 2 * BASIC_PROTOS; i++) {
+        int a = i % BASIC_PROTOS;
+        if (i >= BASIC_PROTOS) a += faction * BASIC_PROTOS;
+        else if (!has_tech(proto_of(a)->preq_tech, faction)) continue;
+        struct unit_proto *A = &game_protos[a];
+        if ((A->obsolete_factions & bit) || !(A->flags & PROTO_FLAG_ACTIVE)) continue;
+        for (int j = 0; j < 2 * BASIC_PROTOS; j++) {
+            int b = j % BASIC_PROTOS + (j >= BASIC_PROTOS ? faction * BASIC_PROTOS : 0);
+            if (j == i) continue;
+            struct unit_proto *B = &game_protos[b];
+            uint16_t fl = B->flags;
+            if (!(fl & PROTO_FLAG_ACTIVE) || (B->obsolete_factions & bit)) continue;
+            if (b < BASIC_PROTOS && (game_weapons[B->weapon].offense < 0 || b == BSC_SPORE_LAUNCHER)) continue;
+            if (fl & PROTO_FLAG_NO_ASK) continue;
+            int asked = (fl & PROTO_FLAG_8) >> 3;
+            if (a >= BASIC_PROTOS && !(A->flags & PROTO_FLAG_BUILT) && (b < BASIC_PROTOS || (fl & PROTO_FLAG_BUILT)))
+                continue;
+            if (asked && B->reactor >= A->reactor) continue;
+            if (!no_better_weapon(B, A) || !no_better_armor(B, A, faction)) continue;
+            if (B->plan != 3) {
+                if ((game_weapons[B->weapon].offense > 1) != (game_weapons[A->weapon].offense > 1)) continue;
+                if ((game_armor[B->armor].defense > 1) != (game_armor[A->armor].defense > 1)) continue;
+            }
+            if (B->reactor > A->reactor || B->carry > A->carry) continue;
+            if (range_of(B) != range_of(proto_of(proto)) || triad_of(B) != triad_of(A) || speed_of(B) > speed_of(A))
+                continue;
+            if (B->abilities != A->abilities) {
+                if ((A->abilities ^ B->abilities) & 0xfffbd5fc) continue;
+                if (B->reactor >= A->reactor && (A->abilities & B->abilities) != B->abilities) {
+                    if (a < BASIC_PROTOS || F->units_active[b] || F->units_queue[b]) continue;
+                }
+            }
+            if (B->plan != A->plan) continue;
+            if (asked && (B->group != A->group || (A->abilities & B->abilities) != B->abilities)) continue;
+            if (B->cost < A->cost && B->reactor >= A->reactor && (b < BASIC_PROTOS || (B->flags & PROTO_FLAG_8)))
+                continue;
+            if (B->weapon == A->weapon && B->armor == A->armor && B->chassis == A->chassis && B->reactor == A->reactor
+                && (b < BASIC_PROTOS || a < BASIC_PROTOS))
+                continue;
+            if (b == proto) {
+                B->flags |= PROTO_FLAG_8;
+                if (unk) game_synch_obs(b);
+                continue;
+            }
+            B->obsolete_factions |= bit;
+            if (unk) game_synch_obs(b);
+            if (b < BASIC_PROTOS && !has_tech(B->preq_tech, faction)) continue;
+            int building = 0;
+            for (int k = 0; k < *game_base_count && !building; k++) {
+                const struct base *S = &game_bases[k];
+                if (S->faction != faction) continue;
+                for (int q = 0; q <= S->queue_size; q++)
+                    if (S->queue[q] == b) {
+                        building = 1;
+                        break;
+                    }
+            }
+            int replaced = 0, always = 0, kept = 0;
+            for (int k = 0; k < *game_base_count && !kept; k++) {
+                struct base *S = &game_bases[k];
+                if (S->faction != faction) continue;
+                int local = !*game_net_multiplayer && faction == *game_current_faction;
+                if (local && !building) continue;
+                if (!local || replaced) {
+                    if (!building) continue;
+                    if (unk && game_net_lock_base(game_net_daemon, k, 0, -1, -1)) continue;
+                }
+                if (!*game_net_multiplayer && faction == *game_current_faction && !replaced) {
+                    say_design(0, b);
+                    say_design(1, a);
+                    int answer;
+                    if (!(B->flags & PROTO_FLAG_NO_ASK) && !always) {
+                        answer = ((int (*)(char *, int))game_x_pop)(text(0x68f164), 0);
+                        if (answer > 1) always = 1;
+                    } else {
+                        answer = 1;
+                    }
+                    if (!always && ((B->flags & PROTO_FLAG_NO_ASK) || answer == 1)) {
+                        B->obsolete_factions &= (uint8_t)~bit;
+                        if (B->flags & PROTO_FLAG_8) B->flags |= PROTO_FLAG_NO_ASK;
+                        B->flags |= PROTO_FLAG_8;
+                        kept = 1;
+                        continue;
+                    }
+                }
+                for (int q = 0; q <= S->queue_size; q++)
+                    if (S->queue[q] == b) S->queue[q] = a;
+                replaced = 1;
+                if (*game_net_multiplayer && unk) game_net_unlock_base(game_net_daemon, k);
+            }
+            if (kept || !replaced || !*game_net_multiplayer || faction != *game_current_faction) continue;
+            say_design(0, b);
+            say_design(1, a);
+            int alien = game_faction_defs[faction].rule_flags & FACTION_RULE_ALIEN;
+            game_popp(*game_script_file, text(0x68f19c), 0, text(alien ? 0x68f174 : 0x68f190), 0);
+        }
+    }
+}
+
+// Marks the faction's designs that others supersede as obsolete to it.
+// First, once a design of its own has been built (or for a basic one),
+// each of its own designs not yet built is marked as a prototype already
+// built if, among the basic designs it has the tech for and its own built
+// designs, it has as good a weapon, armor and chassis (not necessarily on
+// one design). Then, for the AI, each active design of its own (a basic
+// one only with its tech) supersedes:
+//  - if built (or basic), the basic designs (but psi units and the spore
+//    launcher) of its group, triad and plan with a lesser reactor, or of
+//    its range and no better weapon, carrying capacity, armor or speed
+//    with no abilities it lacks or that differ in a set of them;
+//  - its own other designs of its group, triad and plan (only unbuilt ones
+//    if it isn't built) with a lesser reactor, or of its range, no better
+//    in all those, and, if built, with no abilities it lacks; none of a
+//    set may differ.
+// A human player's designs are handled by prune_human. With unk, each
+// design marked is sent to the other players in a network game.
+void prune_protos(int faction, int proto, int unk) {
+    uint8_t bit = (uint8_t)(1u << faction);
+    int first = faction * BASIC_PROTOS;
+    if (proto < BASIC_PROTOS || (proto_of(proto)->flags & PROTO_FLAG_BUILT)) {
+        for (int s = first; s < first + BASIC_PROTOS; s++) {
+            struct unit_proto *S = &game_protos[s];
+            if (!(S->flags & PROTO_FLAG_ACTIVE) || (S->flags & PROTO_FLAG_BUILT)) continue;
+            int w = 0, a = 0, c = 0;
+            for (int i = 0; i < 2 * BASIC_PROTOS; i++) {
+                int q = (i < BASIC_PROTOS ? 0 : first) + i % BASIC_PROTOS;
+                const struct unit_proto *Q = proto_of(q);
+                if (!(Q->flags & PROTO_FLAG_ACTIVE)) continue;
+                if (q < BASIC_PROTOS ? !has_tech(Q->preq_tech, faction) : !(Q->flags & PROTO_FLAG_BUILT)) continue;
+                if (Q->weapon == S->weapon) w = 1;
+                if (Q->armor == S->armor) a = 1;
+                if (Q->chassis == S->chassis) c = 1;
+                int off = game_weapons[S->weapon].offense, def = game_armor[S->armor].defense;
+                if (off > 0 && game_weapons[Q->weapon].offense >= off) w = 1;
+                if (def > 0 && game_armor[Q->armor].defense >= def) a = 1;
+                if (triad_of(Q) == triad_of(S) && speed_of(Q) >= speed_of(S)) c = 1;
+            }
+            if (w && a && c) S->flags |= 0x104;
+        }
+    }
+    if (game_is_human(faction)) {
+        prune_human(faction, proto, unk);
+        return;
+    }
+    for (int a = first; a < first + BASIC_PROTOS; a++) {
+        const struct unit_proto *A = proto_of(a);
+        if (!(A->flags & PROTO_FLAG_ACTIVE) || (A->obsolete_factions & bit)) continue;
+        int built;
+        if (a < BASIC_PROTOS) {
+            if (!has_tech(A->preq_tech, faction)) continue;
+            built = 1;
+        } else {
+            built = (A->flags & PROTO_FLAG_BUILT) != 0;
+        }
+        for (int j = 0; built && j < BASIC_PROTOS; j++) {
+            struct unit_proto *B = &game_protos[j];
+            if (!(B->flags & PROTO_FLAG_ACTIVE) || j == a) continue;
+            if (game_weapons[B->weapon].offense < 0 || j == BSC_SPORE_LAUNCHER) continue;
+            if (B->group != A->group || triad_of(B) != triad_of(A) || B->plan != A->plan) continue;
+            if (B->reactor >= A->reactor || game_weapons[B->weapon].offense < 0) {
+                if (range_of(B) != range_of(A) || !no_better_weapon(B, A) || B->carry > A->carry) continue;
+                if (!no_better_armor(B, A, faction) || speed_of(B) > speed_of(A)) continue;
+                if (game_bit_count(B->abilities & A->abilities) < game_bit_count(B->abilities)) continue;
+                if ((B->abilities ^ A->abilities) & 0x408418) continue;
+            }
+            B->obsolete_factions |= bit;
+            if (unk) game_synch_obs(j);
+        }
+        for (int k = first; k < first + BASIC_PROTOS; k++) {
+            struct unit_proto *C = &game_protos[k];
+            if (!(C->flags & PROTO_FLAG_ACTIVE) || k == a) continue;
+            if (C->group != A->group || triad_of(C) != triad_of(A) || C->plan != A->plan) continue;
+            if (!built && (C->flags & PROTO_FLAG_BUILT)) continue;
+            if (C->reactor >= A->reactor) {
+                if (C->carry > A->carry || range_of(C) != range_of(A) || !no_better_weapon(C, A)) continue;
+                if (!no_better_armor(C, A, faction) || speed_of(C) > speed_of(A)) continue;
+                if ((C->flags & PROTO_FLAG_BUILT)
+                    && game_bit_count(A->abilities & C->abilities) < game_bit_count(C->abilities))
+                    continue;
+                if ((A->abilities ^ C->abilities) & 0x408418) continue;
+            }
+            C->obsolete_factions |= bit;
+            if (unk) game_synch_obs(k);
+        }
+    }
+}
+
+// A design the faction has with these parts, found or proposed (the
+// design workshop's request aside, below). The plan (Thinker's ai_plan) is
+// in fact the group the design is for (10 also makes it a recon unit), -2 for one
+// taken over (marked already built), or below 0 for none. Returns -1
+// for a human player's design retired before or had already, and the
+// scout patrol for the plainest land unit.
+//
+// A design of these parts is used (with no ability the player's lacks,
+// for a human player; a set of abilities must match) and is no longer
+// obsolete. For the AI a design of the chassis, reactor and a set of
+// abilities whose weapon and armor are within 1 of these and of the
+// stronger of them is used, but for the University, which designs anyway.
+// Else a slot is taken: one of an obsolete design of its own with no
+// units or none being built (best of the group), an empty one, or one of
+// an obsolete design with no units, or of its group or with no units
+// being built, those with fewer units and none being built first. A design
+// in the slot is retired. The new design is made, named (the given name,
+// with an asterisk for each design that has it), and makes others
+// obsolete; the faction's bases building an obsolete design of its group
+// build it instead.
+int propose_proto(int faction, int chassis, int weapon, int armor, uint32_t abilities, int reactor, int plan, char *name) {
+    struct design_suggestion *S = game_design_suggestion;
+    struct faction_data *F = &game_factions[faction];
+    uint8_t bit = (uint8_t)(1u << faction);
+    if (S->mode) {
+        if (S->plan >= 0 && S->plan != plan) return -1;
+    } else if (is_bunged(faction, chassis, weapon, armor, abilities, reactor)) {
+        return -1;
+    }
+    if (game_chassis[chassis].speed == 1 && game_armor[armor].defense == 1 && game_weapons[weapon].offense == 1
+        && !S->mode)
+        return 2;
+    int off = weap_strat(weapon, faction), def = arm_strat(armor, faction);
+    int best = -1, best_score = 0;
+    for (int i = 0; i < 2 * BASIC_PROTOS; i++) {
+        int p = (i < BASIC_PROTOS ? 0 : faction * BASIC_PROTOS) + i % BASIC_PROTOS, score;
+        struct unit_proto *P = &game_protos[p];
+        if (p >= BASIC_PROTOS && (P->flags & PROTO_FLAG_ACTIVE) && (P->obsolete_factions & bit) && !F->units_active[p]
+            && !F->units_queue[p]) {
+            score = P->group == plan ? 0x2000 : 0x1000;
+        } else if (!(P->flags & PROTO_FLAG_ACTIVE)) {
+            if (p < BASIC_PROTOS) continue;
+            score = 0x800;
+        } else {
+            if (p < BASIC_PROTOS && !has_tech(P->preq_tech, faction)) continue;
+            int parts = P->chassis == chassis && P->weapon == weapon && P->armor == armor;
+            if (parts && P->abilities == abilities && P->reactor == reactor && !S->mode && game_is_human(faction))
+                return -1;
+            if (parts && !((P->abilities ^ abilities) & 0x44ae1b)
+                && ((P->abilities & abilities) == P->abilities || !game_is_human(faction)) && P->reactor == reactor) {
+                if (plan == -2) P->flags |= PROTO_FLAG_BUILT;
+                if (S->mode && S->mode <= 2) {
+                    S->abilities = abilities, S->weapon = weapon, S->armor = armor, S->chassis = chassis;
+                    S->reactor = reactor, S->mode = 2;
+                }
+                P->obsolete_factions &= (uint8_t)~bit;
+                return p;
+            }
+            if (p < BASIC_PROTOS) continue;
+            if ((P->obsolete_factions & bit) && !F->units_active[p]) {
+                score = 0x400;
+            } else {
+                if (P->chassis == chassis && P->reactor == reactor && !((P->abilities ^ abilities) & 0x48841a)) {
+                    int pw = weap_strat(P->weapon, faction), pa = arm_strat(P->armor, faction);
+                    int top = pw > pa ? pw : pa;
+                    if (off < top && abs(off - pw) < 2 && def < top + (pw == pa) && abs(def - pa) < 2
+                        && !game_is_human(faction) && strcmp(game_faction_defs[faction].filename, text(0x68f1a8)))
+                        return p;
+                }
+                if (P->group != plan && (F->units_active[p] || F->units_queue[p])) continue;
+                score = F->units_active[p] ? 0x40 : 0x240;
+                if (P->obsolete_factions & bit) score |= 0x100;
+                if (!F->units_queue[p]) score |= 0x80;
+                int crowd = P->cost * F->units_active[p] + F->units_queue[p];
+                score -= crowd < 0 ? 0 : crowd > 63 ? 63 : crowd;
+            }
+        }
+        if (score > best_score) best_score = score, best = p;
+    }
+    if (best < 0) return -1;
+    if (S->mode) {
+        if (S->mode <= 2) {
+            S->weapon = weapon, S->armor = armor, S->chassis = chassis, S->abilities = abilities;
+            S->reactor = reactor, S->plan = plan, S->mode = 3;
+        }
+        return -1;
+    }
+    struct unit_proto *P = &game_protos[best];
+    int was_free = !(P->flags & PROTO_FLAG_ACTIVE);
+    if (!was_free && !*game_net_multiplayer) retire_proto(best, faction);
+    make_proto(best, chassis, weapon, armor, abilities, reactor);
+    if (plan == -2) P->flags |= PROTO_FLAG_BUILT;
+    if (*game_difficulty <= 1) P->flags |= PROTO_FLAG_BUILT;
+    if (was_free) P->flags |= 0x40;
+    P->flags |= 0x80;
+    if (plan >= 0) {
+        P->group = (uint8_t)plan;
+        if (plan == 10) P->plan = 3;
+    }
+    if (name) {
+        char *n = P->name;  // the game's strcpy: a longer name runs on into the design
+        strcpy(n, name);
+        for (int j = 0; j < PROTO_COUNT; j++) {
+            if (j == best || (j / BASIC_PROTOS && j / BASIC_PROTOS != faction)) continue;
+            if (!strcmp(n, proto_of(j)->name)) {
+                strcat(n, text(0x68f1b0));
+                j = -1;
+            }
+        }
+    } else {
+        char buf[256];
+        name_proto(buf, best, faction, chassis, weapon, armor, abilities, reactor);
+        strncpy(P->name, buf, sizeof P->name);
+        P->name[sizeof P->name - 1] = 0;
+        P->flags &= (uint16_t)~PROTO_FLAG_RENAMED;
+    }
+    prune_protos(faction, best, 0);
+    for (int b = 0; b < *game_base_count; b++) {
+        struct base *B = &game_bases[b];
+        if (B->faction != faction) continue;
+        for (int k = 0; k <= B->queue_size; k++) {
+            int q = B->queue[k];
+            if (q >= 0 && (proto_of(q)->obsolete_factions & bit) && proto_of(q)->group == P->group) B->queue[k] = best;
+        }
+    }
+    if (*game_first_new_proto < 0) *game_first_new_proto = best;
+    return best;
+}
+
 extern struct hook_module veh_module;
 #define VEH (&veh_module)
 
@@ -2742,6 +3445,41 @@ SHADOW_WRITER(VEH, int, stack_veh, (int a, int b), (a, b), WRITES_STACKS, "%d, %
 SHADOW_WRITER(VEH, void, veh_kill, (int a), (a), hooks_writes_game(&w_), "%d", a)
 SHADOW_WRITER(VEH, void, stack_kill, (int a), (a), hooks_writes_game(&w_), "%d", a)
 SHADOW_WRITER(VEH, void, kill, (int a), (a), hooks_writes_game(&w_), "%d", a)
+// Designs. A name is written to the caller's buffer; the others write
+// widely. Where the original would ask a human player about upgrades (in a
+// network game, or with the preference set) the call is made unchecked, as
+// the question would be put inside a check.
+SHADOW_WRITER(VEH, int, name_proto, (char *a, int b, int c, int d, int e, int f, uint32_t g, int h),
+              (a, b, c, d, e, f, g, h), WRITES(a, 256), "%d, %d, %d, %d, %d, %#x, %d", b, c, d, e, f, (unsigned)g, h)
+SHADOW_WRITER(VEH, void, retire_proto, (int a, int b), (a, b), hooks_writes_game(&w_), "%d, %d", a, b)
+static int asks_player(int faction) {
+    return game_is_human(faction) && (*game_net_multiplayer || (*game_more_preferences & MPREF_ASK_UPGRADE));
+}
+SHADOW_WRITER_CHECK(void, prune_protos, (int a, int b, int c), (a, b, c), orig_prune_protos(a, b, c),
+                    hooks_writes_game(&w_), "%d, %d, %d", a, b, c)
+static void shadow_prune_protos(int a, int b, int c) {
+    if (hooks_nested || (asks_player(a) && !shadow_bypass())) {
+        orig_prune_protos(a, b, c);
+        return;
+    }
+    if (shadow_bypass()) {
+        prune_protos(a, b, c);
+        return;
+    }
+    stats_prune_protos.calls++;
+    shadow_tick(VEH);
+    check_prune_protos(a, b, c);
+}
+SHADOW_WRITER_CHECK(int, propose_proto, (int a, int b, int c, int d, uint32_t e, int f, int g, char *h),
+                    (a, b, c, d, e, f, g, h), orig_propose_proto(a, b, c, d, e, f, g, h), hooks_writes_game(&w_),
+                    "%d, %d, %d, %d, %#x, %d, %d, %s", a, b, c, d, (unsigned)e, f, g, h ? h : "-")
+static int shadow_propose_proto(int a, int b, int c, int d, uint32_t e, int f, int g, char *h) {
+    if (hooks_nested || (asks_player(a) && !shadow_bypass())) return orig_propose_proto(a, b, c, d, e, f, g, h);
+    if (shadow_bypass()) return propose_proto(a, b, c, d, e, f, g, h);
+    stats_propose_proto.calls++;
+    shadow_tick(VEH);
+    return check_propose_proto(a, b, c, d, e, f, g, h);
+}
 
 // Upgrades write the factions' energy and unit counts, units, the bases'
 // queues, designs, the "don't ask again" answer and the popup's text.
@@ -3489,6 +4227,152 @@ static void sweep_places(void) {
     }
 }
 
+// Designs named, retired, pruned and proposed.
+//
+// Names: every active design, again as a design of its own parts with
+// deep radar (no abbreviation) in some other slot of its faction, which
+// meets its own name; a third of the chassis with every weapon, two
+// armors and a spread of abilities; and a design whose name (either of its
+// two) is given to others of its faction with mark numbers after it (up
+// to 9 for the first name, which then stops; up to 7 for the second, as
+// at 9 the original would scan forever).
+static void sweep_names(void) {
+    int t = *game_turn;
+    char buf[256];
+    for (int p = 0; p < PROTO_COUNT; p++) {
+        const struct unit_proto *P = proto_of(p);
+        if (!(P->flags & PROTO_FLAG_ACTIVE)) continue;
+        int f = p >= BASIC_PROTOS ? p / BASIC_PROTOS : (p + t) % FACTION_COUNT;
+        check_name_proto(buf, p, f, P->chassis, P->weapon, P->armor, P->abilities, P->reactor);
+        int q = f * BASIC_PROTOS + (p + t) % BASIC_PROTOS;
+        check_name_proto(buf, q, f, P->chassis, P->weapon, P->armor, P->abilities ^ ABL_DEEP_RADAR, P->reactor);
+    }
+    static const uint32_t abls[] = {0, ABL_ARTILLERY, ABL_AMPHIBIOUS, ABL_AIR_SUPERIORITY, ABL_POLICE_2X,
+                                    ABL_AMPHIBIOUS | ABL_ARTILLERY, ABL_AIR_SUPERIORITY | ABL_DEEP_RADAR};
+    for (int c = t % 3; c < CHASSIS_COUNT; c += 3)
+        for (int w = 0; w < WEAPON_COUNT; w++) {
+            int k = c * 31 + w * 7 + t, f = k % FACTION_COUNT, r = k % 4 + 1;
+            int p = f * BASIC_PROTOS + k % BASIC_PROTOS;
+            for (int a = k % ARMOR_COUNT, n = 0; n < 2; n++, a = (a + 7) % ARMOR_COUNT) {
+                for (unsigned i = 0; i < sizeof abls / sizeof abls[0]; i++)
+                    check_name_proto(buf, p, f, c, w, a, abls[i], r);
+                uint32_t one = 1u << (k % ABILITY_COUNT), two = one | (1u << ((k + n) * 5 % ABILITY_COUNT));
+                check_name_proto(buf, p, f, c, w, a, one, r);
+                check_name_proto(buf, p, f, c, w, a, two, r);
+            }
+        }
+    int f = t % 7 + 1, ids[BASIC_PROTOS], n = 0;
+    for (int p = f * BASIC_PROTOS; p < (f + 1) * BASIC_PROTOS; p++)
+        if (game_protos[p].flags & PROTO_FLAG_ACTIVE) ids[n++] = p;
+    if (n < 3) return;
+    const struct unit_proto *P = proto_of(ids[t % n]);
+    char name[256], other[256];
+    name_parts(name, other, ids[t % n], f, P->chassis, P->weapon, P->armor, P->abilities, P->reactor);
+    int second = (t / 7) & 1, marks = second ? 7 : 9;
+    const char *given = second ? other : name;
+    char kept[BASIC_PROTOS][32];
+    int renamed[BASIC_PROTOS], m = 0;
+    for (int i = 0; i < n && m < marks; i++) {
+        struct unit_proto *Q = &game_protos[ids[i]];
+        if (ids[i] == ids[t % n] || (Q->chassis == P->chassis && Q->weapon == P->weapon && Q->armor == P->armor
+                                     && Q->reactor == P->reactor && Q->abilities == P->abilities))
+            continue;
+        memcpy(kept[m], Q->name, sizeof Q->name);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"  // cut to the name's size, as the game would
+        if (m) snprintf(Q->name, sizeof Q->name, "%s %s%d", given, game_label(LABEL_MARK), m + 1);
+        else snprintf(Q->name, sizeof Q->name, "%s", given);
+#pragma GCC diagnostic pop
+        renamed[m++] = ids[i];
+    }
+    check_name_proto(buf, ids[t % n], f, P->chassis, P->weapon, P->armor, P->abilities, P->reactor);
+    while (m--) memcpy(game_protos[renamed[m]].name, kept[m], sizeof kept[m]);
+}
+
+// A faction made a human player for a while: the upgrade question off,
+// or in a network game, with the player's faction it.
+struct as_human {
+    uint8_t human;
+    int32_t prefs, net, current;
+};
+static struct as_human as_human(int faction, int net) {
+    struct as_human h = {*game_human_factions, *game_more_preferences, *game_net_multiplayer, *game_current_faction};
+    *game_human_factions |= (uint8_t)(1u << faction);
+    *game_more_preferences &= ~MPREF_ASK_UPGRADE;
+    *game_net_multiplayer = net;
+    if (net) *game_current_faction = faction;
+    return h;
+}
+static void as_before(struct as_human h) {
+    *game_human_factions = h.human, *game_more_preferences = h.prefs;
+    *game_net_multiplayer = h.net, *game_current_faction = h.current;
+}
+
+// Whether every unit of the design is in a sound stack, as retiring it
+// kills some.
+static int units_sound(int proto) {
+    for (int v = 0; v < *game_veh_count; v++)
+        if (game_vehs[v].proto == proto && !stack_sound(v)) return 0;
+    return 1;
+}
+
+// Retiring: the designs of a few AI factions' units, as they are and with
+// the other designs of their group obsolete or not, one with a base of the
+// faction building it among other things, one with another faction (who
+// may see the units) a human player, and one with the faction a human
+// player.
+static void sweep_retire(void) {
+    int t = *game_turn, vehs = *game_veh_count, bases = *game_base_count;
+    for (int k = 0; k < 4 && vehs; k++) {
+        int v = (k * 53 + t) % vehs, found = 0;
+        for (int i = 0; i < vehs && !found; i++, v = (v + 1) % vehs) {
+            const struct veh *V = &game_vehs[v];
+            found = V->proto >= BASIC_PROTOS && V->proto / BASIC_PROTOS == V->faction && !game_is_human(V->faction)
+                    && units_sound(V->proto);
+            if (found) break;
+        }
+        if (!found) continue;
+        int p = game_vehs[v].proto, f = game_vehs[v].faction;
+        if (k == 1) {
+            int b = -1;
+            for (int i = 0; i < bases && b < 0; i++)
+                if (game_bases[(i + t) % bases].faction == f) b = (i + t) % bases;
+            if (b < 0) continue;
+            struct base *B = &game_bases[b];
+            int32_t size = B->queue_size, queue[10];
+            memcpy(queue, B->queue, sizeof queue);
+            const int32_t items[] = {p, -FAC_STOCKPILE_ENERGY, p, p, 2, p};
+            B->queue_size = (int32_t)(sizeof items / sizeof items[0]) - 1 - (int32_t)(t % 2);
+            memcpy(B->queue, items, sizeof items);
+            check_retire_proto(p, f);
+            B->queue_size = size;
+            memcpy(B->queue, queue, sizeof queue);
+        } else if (k == 2) {
+            struct as_human h = as_human((f + 1 + t % 6) % 7 + 1, 0);
+            check_retire_proto(p, f);
+            as_before(h);
+        } else if (k == 3) {
+            struct as_human h = as_human(f, 0);
+            check_retire_proto(p, f);
+            as_before(h);
+        } else {
+            // As it is, and with the other designs of its group by turns
+            // obsolete to the faction or not.
+            check_retire_proto(p, f);
+            uint8_t obsolete[BASIC_PROTOS];
+            struct unit_proto *own = &game_protos[f * BASIC_PROTOS];
+            for (int i = 0, n = 0; i < BASIC_PROTOS; i++) {
+                obsolete[i] = own[i].obsolete_factions;
+                if (f * BASIC_PROTOS + i == p || own[i].group != game_protos[p].group) continue;
+                if ((n++ + t) & 1) own[i].obsolete_factions |= (uint8_t)(1u << f);
+                else own[i].obsolete_factions &= (uint8_t)~(1u << f);
+            }
+            check_retire_proto(p, f);
+            for (int i = 0; i < BASIC_PROTOS; i++) own[i].obsolete_factions = obsolete[i];
+        }
+    }
+}
+
 // The AI's view of its enemies, for each faction, under several treaties
 // with the others, their best values made distinct, and with every tech.
 static void sweep_enemies(void) {
@@ -3569,6 +4453,99 @@ static void sweep_odds(void) {
         *A = sa, *D = sd;
         F->flags = flags, F->goals[0] = goal, *rp = plan;
     }
+}
+
+// Pruning: a few AI factions after a design of theirs built, one not yet
+// built and a basic one; and one as a human player, without the question
+// and in a network game (where the player is told, which is held).
+static void sweep_prune(void) {
+    int t = *game_turn;
+    for (int k = 0; k < 3; k++) {
+        int f = (t + k * 3) % 7 + 1, built = -1, unbuilt = -1;
+        if (game_is_human(f)) continue;
+        for (int p = f * BASIC_PROTOS; p < (f + 1) * BASIC_PROTOS; p++) {
+            uint16_t fl = game_protos[p].flags;
+            if (!(fl & PROTO_FLAG_ACTIVE)) continue;
+            if (fl & PROTO_FLAG_BUILT) built = p;
+            else unbuilt = p;
+        }
+        if (built >= 0) check_prune_protos(f, built, 0);
+        if (unbuilt >= 0) check_prune_protos(f, unbuilt, 0);
+        check_prune_protos(f, (t + k) % BASIC_PROTOS, 0);
+        if (k) continue;
+        int p = built >= 0 ? built : (t % BASIC_PROTOS);
+        struct as_human h = as_human(f, 0);
+        check_prune_protos(f, p, 0);
+        as_before(h);
+        h = as_human(f, 1);
+        check_prune_protos(f, p, 0);
+        check_prune_protos(f, unbuilt >= 0 ? unbuilt : p, 0);
+        as_before(h);
+    }
+}
+
+// Proposing, for two AI factions: their designs again (as they are, taken
+// over, with another reactor, weapon or ability, and by name), new designs
+// of a spread of parts, the plainest land unit, the design workshop's
+// request (for any group, and one), and as a human player.
+static void sweep_propose(void) {
+    int t = *game_turn;
+    struct design_suggestion *S = game_design_suggestion, kept = *S;
+    for (int k = 0; k < 2; k++) {
+        int f = (t * 3 + k * 4) % 7 + 1, ids[BASIC_PROTOS], n = 0;
+        if (game_is_human(f)) continue;
+        for (int p = 0; p < (f + 1) * BASIC_PROTOS; p++) {
+            if (p == BASIC_PROTOS) p = f * BASIC_PROTOS;
+            if (game_protos[p].flags & PROTO_FLAG_ACTIVE) ids[n++ % BASIC_PROTOS] = p;
+        }
+        if (n > BASIC_PROTOS) n = BASIC_PROTOS;
+        int j = n ? ids[(t + k * 7) % n] : 0;
+        const struct unit_proto *P = proto_of(j);
+        int c = P->chassis, w = P->weapon, a = P->armor, r = P->reactor;
+        uint32_t ab = P->abilities;
+        int g = P->group;
+        if (n) {
+            check_propose_proto(f, c, w, a, ab, r, g, NULL);
+            check_propose_proto(f, c, w, a, ab, r, -2, NULL);
+            check_propose_proto(f, c, w, a, ab ^ ABL_DEEP_RADAR, r, t % 12, NULL);
+            check_propose_proto(f, c, w, a, ab, r % 4 + 1, g, NULL);
+            check_propose_proto(f, c, (w + 1) % WEAPON_COUNT, a, ab, r, -1, NULL);
+            check_propose_proto(f, c, w, (a + 1) % ARMOR_COUNT, ab | (1u << (t % ABILITY_COUNT)), r, g, NULL);
+            char name[32];
+            memcpy(name, P->name, sizeof name);
+            name[31] = 0;
+            check_propose_proto(f, c, w, a, ab, r % 4 + 1, g, name);
+        }
+        int kk = t * 5 + k;
+        check_propose_proto(f, kk % CHASSIS_COUNT, (kk * 3) % WEAPON_COUNT, (kk * 7) % ARMOR_COUNT,
+                            (kk & 1) ? 1u << (kk % ABILITY_COUNT) : 0, kk % 4 + 1, kk % 12 - 1, NULL);
+        check_propose_proto(f, 0, 1, 0, 0, 1, 2, NULL);
+        S->mode = 1, S->plan = -1;
+        check_propose_proto(f, c, w, a, ab, r, g, NULL);
+        check_propose_proto(f, kk % CHASSIS_COUNT, (kk * 11) % WEAPON_COUNT, (kk * 3) % ARMOR_COUNT, 0, 1, g, NULL);
+        S->mode = 1 + (t & 1) * 2, S->plan = g;
+        check_propose_proto(f, c, (w + 2) % WEAPON_COUNT, a, ab, r, g, NULL);
+        check_propose_proto(f, c, w, a, ab, r, (g + 1) % 12, NULL);
+        *S = kept;
+        if (k || !n) continue;
+        struct as_human h = as_human(f, 0);
+        check_propose_proto(f, c, w, a, ab, r, g, NULL);
+        check_propose_proto(f, c, w, a, ab | ABL_DEEP_RADAR, r, g, NULL);
+        check_propose_proto(f, c, w, a, 0, r, g, NULL);
+        struct bung *B = &game_bunglist[f * 64 + t % 64], bung = *B;
+        B->abilities = ab, B->chassis = (uint8_t)c, B->weapon = (uint8_t)((w + 1) % WEAPON_COUNT);
+        B->armor = (uint8_t)a, B->reactor = (uint8_t)r;
+        check_propose_proto(f, c, (w + 1) % WEAPON_COUNT, a, ab, r, g, NULL);
+        *B = bung;
+        as_before(h);
+    }
+}
+
+static void sweep_protos(void) {
+    sweep_names();
+    sweep_retire();
+    sweep_prune();
+    sweep_propose();
 }
 
 // Every design against every faction and a spread of bases, units and
@@ -3662,6 +4639,7 @@ static void veh_sweep(void) {
     sweep_enemies();
     sweep_odds();
     sweep_stacks();
+    sweep_protos();
     hooks_sweeping = sweeping;
 }
 
@@ -3760,5 +4738,9 @@ static const struct hook veh_hooks[] = {
     HOOK(0x560d50, guard_check, PUSH_EBP_MOV_EBP_ESP, 0x56, 0x8b, 0x75, 0x0c),        // push esi; mov esi, [ebp+12]
     HOOK(0x560dd0, enemy_capabilities, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53),             // push ecx; push ebx
     HOOK(0x565f20, compute_odds, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x20),             // sub esp, 32
+    HOOK(0x57e040, name_proto, PUSH_EBP_MOV_EBP_ESP, 0x81, 0xec, 0xb8, 0x01, 0x00, 0x00),  // sub esp, 0x1b8
+    HOOK(0x57f1d0, retire_proto, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10),             // sub esp, 16
+    HOOK(0x57f4b0, prune_protos, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x30),             // sub esp, 48
+    HOOK(0x580860, propose_proto, PUSH_EBP_MOV_EBP_ESP, 0x81, 0xec, 0x1c, 0x01, 0x00, 0x00),  // sub esp, 0x11c
 };
 struct hook_module veh_module = {"veh", veh_hooks, HOOK_COUNT(veh_hooks), veh_sweep, NULL, -1};

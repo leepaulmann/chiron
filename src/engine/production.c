@@ -169,7 +169,7 @@ static void build_unit(int proto, int faction, int human) {
         p->flags |= PROTO_FLAG_BUILT;
         if (first) {
             int id = ID;
-            game_prune_protos(faction, proto, 0);
+            prune_protos(faction, proto, 0);
             ID = id;
             B = &game_bases[id];
             if (*game_computed_base_id != id) {

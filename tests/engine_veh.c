@@ -943,6 +943,104 @@ int main(void) {
     protos[64].plan = 0;
     veh_count = 0;
     veh_count = 0;
+
+    // Designs' names: the weapon and the chassis' offensive name, in its
+    // second form for odd factions; a defensive unit's armor and defensive
+    // name; a scout. A name in use gets a mark number, and so does the
+    // second name, which then gives way.
+    {
+        static char *names[] = {"Trooper", "Squad", "Legion", "Guard", "Sentry", "Bastion"};
+        static struct bung bungs[FACTION_COUNT * 64];
+        static struct design_suggestion suggestion;
+        static int32_t first_new = -1, difficulty = 3, more_prefs = 0;
+        static uint8_t humans = 0;
+        char buf[256];
+        game_bunglist = bungs, game_design_suggestion = &suggestion, game_first_new_proto = &first_new;
+        game_difficulty = &difficulty, game_more_preferences = &more_prefs, game_human_factions = &humans;
+        memset(protos, 0, sizeof protos);
+        chassis[0].offsv1_name = names[0], chassis[0].offsv2_name = names[1], chassis[0].offsv_name_lrg = names[2];
+        chassis[0].defsv1_name = names[3], chassis[0].defsv2_name = names[4], chassis[0].defsv_name_lrg = names[5];
+        weapons[0].short_name = "Rifle", weapons[2].short_name = "Gun", weapons[4].short_name = "Pistol";
+        weapons[4].offense = 1, armor[1].short_name = "Plate", armor[3].defense = 1;
+        for (int i = 0; i < REACTOR_COUNT; i++) reactors[i].short_name = "Core";
+        label_list[146] = "Scout", label_list[182] = "Recon", label_list[919] = "Mk";
+        EXPECT(name_proto(buf, 70, 1, 0, 2, 1, 0, 1) != 0, 1);
+        EXPECT(strcmp(buf, "Gun Squad"), 0);
+        EXPECT(name_proto(buf, 70, 2, 0, 2, 1, 0, 1), 0);
+        EXPECT(strcmp(buf, "Gun Trooper"), 0);
+        EXPECT(name_proto(buf, 71, 2, 0, 4, 1, 0, 1) != 0, 1);
+        EXPECT(strcmp(buf, "Plate Sentry"), 0);
+        name_proto(buf, 72, 1, 0, 4, 3, 0, 1);
+        EXPECT(strcmp(buf, "Scout Trooper"), 0);
+        strcpy(protos[64].name, "Gun Trooper"), strcpy(protos[65].name, "Gun Squad");
+        EXPECT(name_proto(buf, 70, 1, 0, 2, 1, 0, 1), 0);
+        EXPECT(strcmp(buf, "Gun Trooper Mk2"), 0);
+        strcpy(protos[66].name, "Gun Trooper Mk2");
+        name_proto(buf, 70, 1, 0, 2, 1, 0, 1);
+        EXPECT(strcmp(buf, "Gun Squad Mk2"), 0);
+
+        // Retiring a design: its unit refitted as the best other of its
+        // group (not obsolete), and it leaves the queues, stockpile energy
+        // taking its place at the head.
+        memset(protos, 0, sizeof protos);
+        protos[64] = (struct unit_proto){.weapon = 2, .armor = 1, .reactor = 1, .group = 3, .plan = 1,
+                                         .flags = PROTO_FLAG_ACTIVE};
+        protos[66] = (struct unit_proto){.weapon = 0, .armor = 1, .reactor = 1, .group = 3, .flags = PROTO_FLAG_ACTIVE};
+        protos[67] = (struct unit_proto){.weapon = 0, .armor = 1, .reactor = 1, .group = 3, .flags = PROTO_FLAG_ACTIVE,
+                                         .obsolete_factions = 1 << 1};
+        veh_count = 1;
+        vehs[0] = (struct veh){.x = 4, .y = 2, .proto = 64, .faction = 1, .next_in_stack = -1, .prev_in_stack = -1};
+        factions[1].units_active[64] = 1;
+        bases[0] = (struct base){.faction = 1, .queue_size = 2, .queue = {64, 3, 64}};
+        retire_proto(64, 1);
+        EXPECT(vehs[0].proto, 66);
+        EXPECT(factions[1].units_active[64] * 10 + factions[1].units_active[66], 1);
+        EXPECT(bases[0].queue_size, 1);
+        EXPECT(bases[0].queue[0], -FAC_STOCKPILE_ENERGY);
+        EXPECT(bases[0].queue[1], 3);
+        EXPECT(protos[64].flags & PROTO_FLAG_ACTIVE, 0);
+        EXPECT(bungs[64].weapon * 10 + bungs[64].reactor, 21);
+        EXPECT(factions[1].bung_next, 1);
+
+        // Pruning, for the AI: a built design makes one with a lesser
+        // reactor obsolete, and that one counts as built, its parts known.
+        memset(protos, 0, sizeof protos);
+        protos[64] = (struct unit_proto){.weapon = 2, .armor = 1, .reactor = 2, .group = 3, .plan = 1,
+                                         .flags = PROTO_FLAG_ACTIVE | PROTO_FLAG_BUILT};
+        protos[65] = (struct unit_proto){.weapon = 2, .armor = 1, .reactor = 1, .group = 3, .plan = 1,
+                                         .flags = PROTO_FLAG_ACTIVE};
+        prune_protos(1, 64, 0);
+        EXPECT(protos[65].obsolete_factions, 1 << 1);
+        EXPECT(protos[64].obsolete_factions, 0);
+        EXPECT(protos[65].flags, PROTO_FLAG_ACTIVE | 0x104);
+
+        // Proposing: the plainest land unit is the scout patrol; a design
+        // the faction has (with units) is no longer obsolete; a new one
+        // takes the slot of an obsolete design without units, is named and
+        // shown; a human player gets nothing retired or had already; the
+        // design workshop's request is recorded instead.
+        veh_count = 0, vehs[0] = (struct veh){0}, factions[1].units_active[64] = 1, factions[1].units_active[66] = 0;
+        EXPECT(propose_proto(1, 0, 4, 3, 0, 1, -1, NULL), 2);
+        protos[64].obsolete_factions = 1 << 1;
+        EXPECT(propose_proto(1, 0, 2, 1, 0, 2, 3, NULL), 64);
+        EXPECT(protos[64].obsolete_factions, 0);
+        EXPECT(propose_proto(1, 0, 0, 1, 0, 1, 5, NULL), 65);
+        EXPECT(protos[65].group, 5);
+        EXPECT(protos[65].weapon, 0);
+        EXPECT((protos[65].flags & 0x80) != 0, 1);
+        EXPECT(first_new, 65);
+        EXPECT(strcmp(protos[65].name, "Rifle Squad"), 0);
+        humans = 1 << 1;
+        EXPECT(propose_proto(1, 0, 2, 1, 0, 1, 3, NULL), -1);  // retired with 65's slot
+        EXPECT(propose_proto(1, 0, 2, 1, 0, 2, 3, NULL), -1);  // 64's parts
+        humans = 0;
+        suggestion.mode = 1, suggestion.plan = -1;
+        EXPECT(propose_proto(1, 0, 0, 3, 0, 1, 4, NULL), -1);
+        EXPECT(suggestion.mode * 10 + suggestion.armor, 33);
+        suggestion = (struct design_suggestion){0};
+        memset(protos, 0, sizeof protos);
+        bases[0] = (struct base){0};
+    }
     if (failures) return 1;
     printf("engine_veh: all tests passed\n");
     return 0;

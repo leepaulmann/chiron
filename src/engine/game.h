@@ -216,7 +216,8 @@ struct faction_data {
     uint32_t project_intel[8];
     int32_t corner_market_turn, corner_market_cost;  // when the energy market is cornered, and what it cost
     int32_t objective_bonus;  // objectives a scenario credits it with, besides those num_objectives() counts
-    GAME_PAD(0x2088, 0x2090);
+    GAME_PAD(0x2088, 0x208c);
+    int32_t bung_next;  // the next slot of the faction's game_bunglist to fill, 0 to 63
     uint32_t flags_ext;  // FACTION_FLAG_EXT_*
     int32_t air_offense, air_superiority;  // air units of each plan
     int32_t score;  // compute_score()'s last, doubled in an ironman game
@@ -420,7 +421,10 @@ _Static_assert(sizeof(struct rules_reactor) == 0xc, "rules_reactor size");
 enum { TRIAD_LAND, TRIAD_SEA, TRIAD_AIR };
 
 struct rules_chassis {
-    GAME_PAD(0x00, 0x48);
+    // Its names in designs (name_proto): offensive and defensive, each in
+    // two forms and a third for large designs.
+    char *offsv1_name, *offsv2_name, *offsv_name_lrg, *defsv1_name, *defsv2_name, *defsv_name_lrg;
+    GAME_PAD(0x18, 0x48);
     uint8_t speed;
     uint8_t triad;  // TRIAD_*
     uint8_t range;  // turns aloft for air units, else 0
@@ -1005,7 +1009,6 @@ extern void (*game_set_treaty)(int faction, int other, uint32_t status, int on);
 // For base_production().
 extern void (*game_base_reset)(int base, int unk);       // the AI (or governor) picks what to build next
 extern int (*game_veh_cost)(int proto, int base, int *unk);
-extern void (*game_prune_protos)(int faction, int proto, int unk);
 extern int (*game_morale_mod)(int base, int faction, int triad);
 extern void (*game_set_dirty)(void);
 extern void (*game_interlude)(int id, char *text, int unk1, int unk2);
@@ -1138,6 +1141,32 @@ extern int32_t *game_social_preqs;
 extern int (*game_aah_ooga)(int faction, int pact_faction);
 extern void (*game_social_set)(int faction);
 extern void (*game_consider_designs)(int faction);
+// Designs a faction retired (retire_proto), the last 64 for each faction,
+// which propose_proto won't bring back for a human player.
+struct bung {
+    uint32_t abilities;
+    uint8_t chassis, weapon, armor, reactor;
+};
+_Static_assert(sizeof(struct bung) == 8, "bung size");
+extern struct bung *game_bunglist;  // [FACTION_COUNT * 64]
+// The design workshop asking the AI for a suggestion: while mode is set,
+// propose_proto records its design here (mode 2 for one the faction has,
+// 3 for a new one) instead of making it; a plan of 0 or more only takes
+// designs of that group.
+struct design_suggestion {
+    uint32_t abilities;
+    int32_t plan, weapon, chassis, reactor, unk_14, unk_18, armor;
+    int32_t mode;
+};
+_Static_assert(sizeof(struct design_suggestion) == 0x24, "design_suggestion size");
+extern struct design_suggestion *game_design_suggestion;
+extern int32_t *game_first_new_proto;  // a design new with a tech, shown with it; -1 for none
+extern void (*game_synch_obs)(int proto);  // a design's obsolete bits, sent in a network game
+extern void (*game_say_stats_2)(char *text, int proto);  // a design's strengths, added to text
+// Network games: a base kept from the other players while it changes.
+extern void *game_net_daemon;
+extern int(__attribute__((thiscall)) * game_net_lock_base)(void *daemon, int base, int unk, int unk2, int unk3);
+extern void(__attribute__((thiscall)) * game_net_unlock_base)(void *daemon, int base);
 // Repairs: whether a unit carries others, and whether a base breeds native
 // life for its faction.
 extern int (*game_veh_cargo)(int veh);
