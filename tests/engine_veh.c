@@ -40,7 +40,6 @@ static int failures, objective;
     } while (0)
 
 static int objective_stub(int base) { return objective; }
-static int proto_cost_stub(int c, int w, int a, int abl, int r) { return 20; }
 static int veh_at_stub(int x, int y) { return -1; }
 static int32_t refs[5], *net_ref, battle;
 static int drawn_radius, drawn_tile, checked_base;
@@ -75,7 +74,7 @@ int main(void) {
     game_radius_x = radius_x, game_radius_y = radius_y, game_radius_near_x = near_x, game_radius_near_y = near_y;
     game_veh_lift_x = &lift[0], game_veh_find_dist = &lift[1], game_veh_lifted = &lift[2], game_veh_lift_y = &lift[3], game_veh_at_rebuilt = &lift[5];
     game_state = &state, game_current_faction = &current_faction, game_contribution = contribution_stub;
-    game_is_objective = objective_stub, game_proto_cost = proto_cost_stub, game_veh_at = veh_at_stub;
+    game_is_objective = objective_stub, game_veh_at = veh_at_stub;
     for (int i = 0; i < SP_COUNT; i++) projects[i] = -1;
     for (int i = 1; i < 9; i++) radius_x[i] = (i % 3) - 1, radius_y[i] = (i / 3 % 3) - 1;
     for (int i = 0; i < 8; i++) near_x[i] = radius_x[i + 1], near_y[i] = radius_y[i + 1];
@@ -139,7 +138,7 @@ int main(void) {
     // Cost: the prototype extra, by triad, unless already built or with a
     // Skunkworks; nothing extra for basic designs.
     int charged = -1;
-    EXPECT(veh_cost(64, 0, &charged), 10 + 10);
+    EXPECT(veh_cost(64, 0, &charged), 10 + (base_cost(64) * 50 + 50) / 100);
     EXPECT(charged, 1);
     EXPECT(veh_cost(65, 0, &charged), 8);
     EXPECT(charged, 0);
@@ -711,6 +710,43 @@ int main(void) {
     vehs[2].state = 0x80;
     EXPECT(best_defender(2, 0, 0), 2);
     EXPECT(best_defender(1, -1, 0), 2);
+
+    // The AI's parts: the fastest chassis (or one exactly as fast), the
+    // strongest weapon and armor within a cost, a weapon by mode.
+    for (int i = 0; i < CHASSIS_COUNT; i++) chassis[i].preq_tech = (int16_t)(i < 4 ? TECH_NONE : TECH_DISABLED);
+    chassis[3].speed = 10, chassis[3].triad = TRIAD_AIR;
+    EXPECT(pick_chassis(1, TRIAD_AIR, 0), 3);
+    EXPECT(pick_chassis(1, -1, 4), 1);
+    EXPECT(pick_chassis(1, TRIAD_LAND, 2), -1);
+    for (int i = 0; i < WEAPON_COUNT; i++) weapons[i].preq_tech = (int16_t)(i < 4 ? TECH_NONE : TECH_DISABLED);
+    weapons[0].cost = 2, weapons[2].offense = 6, weapons[2].cost = 5, weapons[3].mode = 7, weapons[3].cost = 1;
+    EXPECT(weapon_budget(1, 3, 0), 0);
+    EXPECT(weapon_budget(1, 9, 0), 2);
+    EXPECT(weapon_budget(1, -7, 0), 3);
+    for (int i = 0; i < ARMOR_COUNT; i++) armor[i].preq_tech = (int16_t)(i < 3 ? TECH_NONE : TECH_DISABLED);
+    armor[0].cost = 1, armor[1].cost = 3;
+    EXPECT(armor_budget(1, 2), 0);
+    EXPECT(armor_budget(1, 5), 1);
+
+    // A design's cost, with an ability; and a design filled in.
+    chassis[0].cost = 1;
+    EXPECT(proto_cost(0, 0, 1, 0, 1), 3);
+    abilities[4].cost = 2;
+    EXPECT(proto_cost(0, 0, 1, 1u << 4, 1), 5);
+    make_proto(70, 0, 0, 1, 0, 1);
+    EXPECT(protos[70].cost, 3);
+    EXPECT(protos[70].plan, 1);   // combat: weapon as strong as the armor
+    EXPECT(protos[70].group, 3);
+    EXPECT(protos[70].flags, PROTO_FLAG_ACTIVE);
+    EXPECT(protos[70].combat_factions, 1 << 1);
+    EXPECT(protos[70].icon, 0xff);
+    protos[70] = (struct unit_proto){0};
+
+    // A unit sent somewhere.
+    go_to(0, 7, 3, 1);
+    EXPECT(vehs[0].order, 0x18);
+    EXPECT(vehs[0].status_icon, 7);
+    EXPECT(vehs[0].waypoint_x[0] * 10 + vehs[0].waypoint_y[0], 31);
     veh_count = 0;
     if (failures) return 1;
     printf("engine_veh: all tests passed\n");

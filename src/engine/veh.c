@@ -33,13 +33,15 @@ enum {  // unit_proto.abilities
 enum {
     BSC_LOCUSTS_OF_CHIRON = 10, BSC_SEALURK = 14, BSC_SPORE_LAUNCHER = 15, BSC_FUNGAL_TOWER = 19,
     BSC_UNITY_MINING_LASER = 20, BASIC_PROTOS = 64, BSC_MIND_WORMS = 8, BSC_ISLE_OF_THE_DEEP = 9,
-    CHASSIS_HOVERTANK = 2, MAP_MAGTUBE = 0x8,
+    CHASSIS_HOVERTANK = 2, MAP_MAGTUBE = 0x8, ABILITY_COUNT = 29, ABILITY_FLAG_LAND_COST = 0x400,
+    WEAPON_CONVENTIONAL_PAYLOAD = 23, WEAPON_FUNGAL_PAYLOAD = 25, WEAPON_TECTONIC_PAYLOAD = 24, PLAN_COLONIZE = 8,
+    ABL_AMPHIBIOUS = 0x8, ABL_POLICE_2X = 0x400000,
     ABL_EMPATH = 0x800, ABL_BLINK_DISPLACER = 0x20000, ABL_TRANCE = 0x40000, ABL_COMM_JAMMER = 0x200, ABL_AAA = 0x100,
     MAP_BUNKER = 0x800, RULE_FLAG_FANATIC = 0x400, BONUS_DEFENSE = 17, BONUS_OFFENSE = 18,
     FAC_PERIMETER_DEFENSE = 4, FAC_TACHYON_FIELD = 5, FAC_FLECHETTE_DEFENSE = 39, SP_CITIZENS_DEFENSE_FORCE = 5,
     WEAPON_RESONANCE_LASER = 12, WEAPON_RESONANCE_BOLT = 13, ARMOR_PULSE_3 = 10, ARMOR_RESONANCE_3 = 11,
     ARMOR_PULSE_8 = 12, ARMOR_RESONANCE_8 = 13, VEH_STATE_AIRDROPPED = 0x20, VEH_STATE_DESIGNATED_DEFENDER = 0x80,
-    WEAPON_PROBE = 11, WEAPON_TECTONIC = 21, WMODE_TRANSPORT = 7, WMODE_PROBE = 11,
+    WEAPON_PROBE = 11, WEAPON_PROBE_TEAM = 21, WMODE_TRANSPORT = 7, WMODE_PROBE = 11,
     MAP_AIRBASE = 0x40000, VEH_STATE_UNK_4000000 = 0x4000000, VEH_STATE_MONOLITH_USED = 0x100,
     VEH_STATE_UNK_200 = 0x200, VEH_STATE_UNK_10000 = 0x10000, VEH_STATE_UNK_20000 = 0x20000, VEH_STATE_UNK_40000 = 0x40000,
     PLAN_TERRAFORM = 9, ORDER_HOLD = 2, ORDER_NONE = 0, ORDER_MOVE_TO = 0x18,
@@ -69,7 +71,7 @@ static inline int native(int proto) {
 
 // Whether the design has the ability, counting what the faction gets free
 // once it has the tech (an aliens' deep radar, a faction bonus), and the
-// algorithmic enhancement a tectonic payload gets from the Nethack
+// algorithmic enhancement a probe team gets from the Nethack
 // Terminus.
 int has_abil(int proto, uint32_t ability) {
     int f = proto / BASIC_PROTOS;
@@ -82,7 +84,7 @@ int has_abil(int proto, uint32_t ability) {
         int a = D->bonus_val1[i];
         if (has_tech(game_abilities[a].preq_tech, f) && (ability & (1u << (a & 31)))) return 1;
     }
-    return proto_of(proto)->weapon == WEAPON_TECTONIC && ability == ABL_ALGO_ENHANCEMENT
+    return proto_of(proto)->weapon == WEAPON_PROBE_TEAM && ability == ABL_ALGO_ENHANCEMENT
            && owns_project(SP_NETHACK_TERMINUS, f);
 }
 
@@ -296,7 +298,7 @@ int morale_veh(int veh, int riot, int faction_vs) {
 // A design's cost without the prototype extra.
 int base_cost(int proto) {
     const struct unit_proto *P = proto_of(proto);
-    return game_proto_cost(P->chassis, P->weapon, P->armor, 0, P->reactor);
+    return proto_cost(P->chassis, P->weapon, P->armor, 0, P->reactor);
 }
 
 // What a design costs at a base: a quarter off native units with a Brood
@@ -1174,6 +1176,227 @@ int hex_cost(int proto, int faction, int xs, int ys, int xd, int yd, int fast) {
     return cost;
 }
 
+// ---- Designs and orders --------------------------------------------------------
+
+// The fastest chassis a faction has for a triad (or any, -1), by speed
+// plus one; missiles only for -1. With a speed above 0, the first chassis
+// exactly that fast, or failing that the first faster one. For an air
+// chassis, -1 asks for a missile and -2 for one with a range of 1.
+int pick_chassis(int faction, int triad_, int speed) {
+    int best = 0, pick = -1;
+    for (int i = 0; i < CHASSIS_COUNT; i++) {
+        const struct rules_chassis *C = &game_chassis[i];
+        if (!has_tech(C->preq_tech, faction)) continue;
+        if (triad_ >= 0 && C->triad != triad_) continue;
+        if (C->missile && speed != -1) continue;
+        int v;
+        if (speed > 0) {
+            if (C->speed < speed) continue;
+            v = C->speed == speed ? 2 : 1;
+        } else {
+            if (triad_ == TRIAD_AIR && speed == -1 && !C->missile) continue;
+            if (triad_ == TRIAD_AIR && speed == -2 && C->range != 1) continue;
+            v = C->speed + 1;
+        }
+        if (v > best) best = v, pick = i;
+    }
+    return pick;
+}
+
+// The strongest weapon a faction has that costs at most `cost`: a combat
+// weapon short of a planet buster, not the conventional payload, and for
+// `combat_only` no psi either; the last of equals wins. A negative `cost`
+// asks for the first weapon of that mode instead. 0 for none.
+int weapon_budget(int faction, int cost, int combat_only) {
+    int best = -1, pick = 0;
+    for (int i = 0; i < WEAPON_COUNT; i++) {
+        const struct rules_weapon *W = &game_weapons[i];
+        if (!has_tech(W->preq_tech, faction)) continue;
+        if (cost < 0) {
+            if (W->mode == -cost) return i;
+            continue;
+        }
+        if (combat_only && W->mode > 1) continue;
+        if (W->cost > cost || W->mode >= 3 || W->offense >= 99 || i == WEAPON_CONVENTIONAL_PAYLOAD) continue;
+        if (W->offense * 2 >= best) best = W->offense * 2, pick = i;
+    }
+    return pick;
+}
+
+// The strongest armor a faction has that costs at most `cost`, not psi;
+// without the expansion, a faction counts pulse and resonance armor as 1.
+// The last of equals wins; 0 for none.
+int armor_budget(int faction, int cost) {
+    int best = -1, pick = 0;
+    for (int i = 0; i < ARMOR_COUNT; i++) {
+        const struct rules_armor *A = &game_armor[i];
+        if (!has_tech(A->preq_tech, faction) || A->cost > cost || A->defense < 0) continue;
+        int v = (faction >= 0 && !*game_expansion && i > 9 ? 1 : A->defense) * 2;
+        if (v >= best) best = v, pick = i;
+    }
+    return pick;
+}
+
+// What a design costs, in rows of minerals. Each ability adds its cost
+// factor (or one tied to the weapon, armor or speed costs), and one more
+// for each ability after the first that adds anything; on land, abilities
+// flagged for it cost one more each. Ships pay half for armor and the
+// reactor on speed; aircraft pay the reactor twice on speed and on armor
+// beyond 1. A planet buster costs its warhead.
+int proto_cost(int chassis, int weapon, int armor, uint32_t abilities, int reactor) {
+    int weap = game_weapons[weapon].cost, arm = game_armor[armor].cost, arm_cost = arm;
+    int speed = game_chassis[chassis].cost, extra = 0;
+    if (abilities) {
+        for (int i = 0; i < ABILITY_COUNT; i++) {
+            if (!(abilities & (1u << i))) continue;
+            if (extra) extra++;
+            int f = game_abilities[i].cost;
+            if (f >= 0) {
+                extra += f;
+                continue;
+            }
+            switch (f) {
+            case -1: {
+                int r = weap / arm;
+                extra += r < 0 ? 0 : r > 2 ? 2 : r;
+                break;
+            }
+            case -2: extra += weap - 1; break;
+            case -3: extra += arm - 1; break;
+            case -4: extra += speed - 1; break;
+            case -5: extra += arm + weap - 2; break;
+            case -6: extra += speed + weap - 2; break;
+            case -7: extra += speed + arm - 2; break;
+            }
+        }
+    }
+    int tr = game_chassis[chassis].triad;
+    if (tr == TRIAD_SEA) {
+        arm /= 2;
+        speed += reactor;
+    } else if (tr == TRIAD_AIR) {
+        speed += reactor * 2;
+        if (arm > 1) arm = arm * reactor * 2;
+    } else {
+        for (int i = 0; i < ABILITY_COUNT; i++)
+            if ((abilities & (1u << i)) && (game_abilities[i].flags & ABILITY_FLAG_LAND_COST)) extra++;
+    }
+    if (game_chassis[chassis].missile && game_weapons[weapon].offense >= 99) return weap;
+    int combat = arm / 2 + 1 > weap ? arm / 2 + 1 : weap;
+    int d = 2 << reactor;
+    int c = ((speed + arm) * combat + d / 2) / d;
+    if (speed == 1) c = c / 2 + 1;
+    if (weap > 1 && arm_cost > 1) c++;
+    if (tr == TRIAD_LAND && weap > 1 && arm_cost > 1 && speed > 1) c++;
+    if (tr == TRIAD_SEA) {
+        if (game_weapons[weapon].mode != WMODE_PROBE) c = (c + 1) / 2;
+    } else if (tr == TRIAD_AIR) {
+        c /= game_weapons[weapon].mode > 2 ? 2 : 4;
+    }
+    int least = reactor * 2 - reactor / 2;
+    if (c <= least) c = least;
+    if (combat == 1 && arm == 1 && speed == 1 && reactor == 1) c = 1;
+    return ((extra + 4) * c + 2) >> 2;
+}
+
+// Fills in a design: its parts, cost, capacity, plan and group, and flags.
+// A faction's own design (64 and up) is marked as a prototype already
+// built when the faction has, among the basic designs it has the tech for
+// and its own finished designs, parts as good as each of these (some
+// weapon, armor and chassis each, not necessarily on one design); with
+// the "seen online" flag if its last design slot has flag 0x10.
+void make_proto(int proto, int chassis, int weapon, int armor, uint32_t abilities, int reactor) {
+    int known = 0;
+    if (proto >= BASIC_PROTOS) {
+        int w = 0, a = 0, c = 0, p = 0;
+        for (int i = 0; i < 128; i++) {
+            p = i < BASIC_PROTOS ? i : i - BASIC_PROTOS + (proto - proto % BASIC_PROTOS);
+            const struct unit_proto *Q = proto_of(p);
+            if (!(Q->flags & PROTO_FLAG_ACTIVE)) continue;
+            if (p < BASIC_PROTOS ? !has_tech(Q->preq_tech, proto / BASIC_PROTOS) : !(Q->flags & PROTO_FLAG_BUILT)) continue;
+            if (Q->weapon == weapon) w = 1;
+            if (Q->armor == armor) a = 1;
+            if (Q->chassis == chassis) c = 1;
+            int off = game_weapons[weapon].offense, def = game_armor[armor].defense;
+            if (off > 0 && game_weapons[Q->weapon].offense >= off) w = 1;
+            if (def > 0 && game_armor[Q->armor].defense >= def) a = 1;
+            if (game_chassis[chassis].triad == game_chassis[Q->chassis].triad
+                && game_chassis[Q->chassis].speed >= game_chassis[chassis].speed)
+                c = 1;
+        }
+        if (w && a && c) known = p >= BASIC_PROTOS && (proto_of(p)->flags & 0x10) ? 3 : 1;
+    }
+    struct unit_proto *P = &game_protos[proto];
+    P->reactor = (uint8_t)reactor, P->chassis = (uint8_t)chassis, P->weapon = (uint8_t)weapon;
+    P->armor = (uint8_t)armor, P->abilities = abilities;
+    P->cost = (uint8_t)proto_cost(chassis, weapon, armor, abilities, reactor);
+    const struct rules_weapon *W = &game_weapons[weapon];
+    const struct rules_chassis *C = &game_chassis[chassis];
+    P->carry = W->mode == WMODE_TRANSPORT ? (uint8_t)transport_val(chassis, abilities, reactor) : 0;
+    int off = game_weapons[P->weapon].offense, def = game_armor[P->armor].defense;
+    if (C->missile) {
+        if (W->offense >= 99) P->plan = 5, P->group = 14;
+        else if (weapon == WEAPON_TECTONIC_PAYLOAD) P->plan = 13, P->group = 22;
+        else if (weapon == WEAPON_FUNGAL_PAYLOAD) P->plan = 14, P->group = 23;
+        else P->plan = 0, P->group = 13;
+    } else if (W->mode >= WMODE_TRANSPORT) {
+        P->plan = W->mode, P->group = (uint8_t)(W->mode + 0x20);
+    } else if (game_chassis[P->chassis].triad == TRIAD_SEA) {
+        P->plan = 6, P->group = 6;
+    } else if (game_chassis[P->chassis].triad == TRIAD_AIR) {
+        if (has_abil(proto, ABL_AIR_SUPERIORITY)) P->plan = 4, P->group = 9;
+        else P->plan = 0, P->group = 8;
+    } else {  // a land combat unit: offense, defense or combat, and its group
+        uint8_t sp = game_chassis[P->chassis].speed;
+        P->plan = def > 1 ? 2 : 0;
+        if (off >= def && P->plan == 2) P->plan = 1;
+        if (sp > 1 && off > def) P->plan = 0;
+        if (abilities & (ABL_ARTILLERY | ABL_DROP_POD | ABL_AMPHIBIOUS)) P->plan = 0;
+        P->group = 3;
+        if (def > off) P->group = 2;
+        if (off > def * 2) P->group = 1;
+        if (sp >= 2) P->group = 4;
+        if (sp >= 3) P->group = 5;
+        if (off == 1 && def == 1) {
+            P->group = 10;
+            if (sp > 1) P->plan = 3;
+            if (has_abil(proto, ABL_POLICE_2X)) P->plan = 2;
+        }
+    }
+    P->flags = !known ? PROTO_FLAG_ACTIVE : (known & 2) ? 0x115 : 0x105;
+    P->obsolete_factions = 0;
+    P->combat_factions = proto < BASIC_PROTOS ? 0xff : (uint8_t)(1u << (proto / BASIC_PROTOS));
+    P->icon = 0xff;
+}
+
+// Orders a unit to move to a square, with the AI's kind of move kept in
+// the byte the status letter uses; a colony pod's movement turns restart.
+void go_to(int veh, int type, int x, int y) {
+    struct veh *V = &game_vehs[veh];
+    V->order = ORDER_MOVE_TO;
+    V->status_icon = (uint8_t)type;
+    V->waypoint_x[0] = (int16_t)x, V->waypoint_y[0] = (int16_t)y;
+    if (proto_of(V->proto)->plan == PLAN_COLONIZE) V->movement_turns = 0;
+}
+
+// Sends the AI's loaded transports at sea at a base of another faction
+// they have no treaty with, when it is within a turn's move.
+void invasions(int base) {
+    const struct base *B = &game_bases[base];
+    int bx = B->x, by = B->y, bf = B->faction;
+    for (int i = 0; i < *game_veh_count; i++) {
+        struct veh *V = &game_vehs[i];
+        int f = V->faction;
+        if (!f || ((uint8_t)(1u << f) & *game_human_factions) || f == bf) continue;
+        if (game_factions[f].diplo_status[bf] & TREATY_TREATY) continue;
+        if ((square(V->x, V->y)->climate & 0xe0) >= ALT_SHORE_LINE << 5) continue;
+        if (!veh_cargo(i) || !stack_check(i, 3, TRIAD_LAND, -1, -1)) continue;
+        if (vector_dist(bx, by, V->x, V->y) > veh_speed(i, 0)) continue;
+        V->order = ORDER_MOVE_TO;
+        V->waypoint_x[0] = (int16_t)bx, V->waypoint_y[0] = (int16_t)by;
+    }
+}
+
 // One line of the battle report, when its side has room (the original's
 // inline add_bat, which doesn't skip a value of 0).
 static void report(int side, int value, const char *text) {
@@ -2018,6 +2241,15 @@ static void check_battle_compute(int a, int b, int *c, int *d, int e) {
     if (d) *d = want[1];
 }
 SHADOW_WRITER_ENTRY(VEH, void, battle_compute, (int a, int b, int *c, int *d, int e), (a, b, c, d, e))
+SHADOW3(VEH, int, pick_chassis, int, int, int)
+SHADOW3(VEH, int, weapon_budget, int, int, int)
+SHADOW2(VEH, int, armor_budget, int, int)
+SHADOW5(VEH, int, proto_cost, int, int, int, uint32_t, int)
+SHADOW_WRITER(VEH, void, make_proto, (int a, int b, int c, int d, uint32_t e, int f), (a, b, c, d, e, f),
+              WRITES(&game_protos[a], sizeof(struct unit_proto)), "%d, %d, %d, %d, %#x, %d", a, b, c, d, e, f)
+SHADOW_WRITER(VEH, void, go_to, (int a, int b, int c, int d), (a, b, c, d), WRITES(&game_vehs[a], sizeof(struct veh)),
+              "%d, %d, %d, %d", a, b, c, d)
+SHADOW_WRITER(VEH, void, invasions, (int a), (a), WRITES(game_vehs, VEH_COUNT * sizeof(struct veh)), "%d", a)
 SHADOW_WRITER(VEH, int, best_defender, (int a, int b, int c), (a, b, c), writes_battle(&w_), "%d, %d, %d", a, b, c)
 // Killing a unit renumbers units all over the game's memory.
 SHADOW_WRITER(VEH, int, veh_init, (int a, int b, int c, int d), (a, b, c, d), hooks_writes_game(&w_), "%d, %d, %d, %d", a,
@@ -2347,6 +2579,79 @@ static void sweep_battle(int v, int o, int k) {
     }
 }
 
+// Designs: the AI's picks of parts for each faction, every design's cost
+// and some variations, designs filled in again (and as something else),
+// and some units sent somewhere and transports at sea sent at bases.
+static void sweep_designs(void) {
+    int t = *game_turn, vehs = *game_veh_count, bases = *game_base_count;
+    // The parts each faction has, then every part, then every part with
+    // weapons and armor made coarser so that equals tie (the game's own
+    // tables have no tie that decides a pick).
+    uint8_t achieved[TECH_COUNT];
+    int8_t offense[WEAPON_COUNT], defense[ARMOR_COUNT];
+    memcpy(achieved, game_tech_achieved, sizeof achieved);
+    for (int i = 0; i < WEAPON_COUNT; i++) offense[i] = game_weapons[i].offense;
+    for (int i = 0; i < ARMOR_COUNT; i++) defense[i] = game_armor[i].defense;
+    for (int all = 0; all < 3; all++) {
+        if (all) memset(game_tech_achieved, 0xff, sizeof achieved);
+        if (all == 2) {
+            for (int i = 0; i < WEAPON_COUNT; i++)
+                if (offense[i] > 0 && offense[i] < 99) game_weapons[i].offense = (int8_t)(offense[i] / 5);
+            for (int i = 0; i < ARMOR_COUNT; i++)
+                if (defense[i] > 0) game_armor[i].defense = (int8_t)(defense[i] / 3);
+        }
+        for (int f = -1; f < FACTION_COUNT; f++) {
+            for (int tr = -1; tr <= 2; tr++)
+                for (int sp = -2; sp <= 9; sp++) check_pick_chassis(f, tr, sp);
+            for (int cost = -12; cost <= 32; cost++) {
+                check_weapon_budget(f, cost, 0);
+                check_weapon_budget(f, cost, 1);
+                check_armor_budget(f, cost);
+            }
+            check_weapon_budget(f, 99, 0);
+            check_armor_budget(f, 99);
+        }
+    }
+    memcpy(game_tech_achieved, achieved, sizeof achieved);
+    for (int i = 0; i < WEAPON_COUNT; i++) game_weapons[i].offense = offense[i];
+    for (int i = 0; i < ARMOR_COUNT; i++) game_armor[i].defense = defense[i];
+    for (int p = 0; p < PROTO_COUNT; p++) {
+        const struct unit_proto *P = proto_of(p);
+        if (!(P->flags & PROTO_FLAG_ACTIVE)) continue;
+        int k = p + t;
+        check_proto_cost(P->chassis, P->weapon, P->armor, P->abilities, P->reactor);
+        check_proto_cost(k % CHASSIS_COUNT, (k * 3) % WEAPON_COUNT, (k * 5) % ARMOR_COUNT,
+                         P->abilities | (1u << (k % ABILITY_COUNT)) | (1u << ((k * 7) % ABILITY_COUNT)), k % 4 + 1);
+        if (p % 4 == t % 4) {
+            check_make_proto(p, P->chassis, P->weapon, P->armor, P->abilities, P->reactor);
+            check_make_proto(p, k % CHASSIS_COUNT, (k * 3) % WEAPON_COUNT, (k * 5) % ARMOR_COUNT,
+                             (k & 1) ? 1u << (k % ABILITY_COUNT) : 0, k % 4 + 1);
+        }
+    }
+    for (int k = 0; k < 16 && vehs; k++) {
+        int v = (k * 37 + t) % vehs;
+        if (stack_sound(v)) check_go_to(v, k, game_vehs[(v + 1) % vehs].x, game_vehs[(v + 1) % vehs].y);
+    }
+    for (int b = t % 4; b < bases; b += 4) check_invasions(b);
+    // Loaded transports at sea with another faction's base brought closer
+    // a square at a time (only its position moves; invasions reads that).
+    for (int v = 0, n = 0; v < vehs && n < 3 && bases; v++) {
+        const struct veh *V = &game_vehs[v];
+        if (!V->faction || !stack_sound(v) || (square(V->x, V->y)->climate & 0xe0) >= ALT_SHORE_LINE << 5) continue;
+        if (!veh_cargo(v) || !stack_check(v, 3, TRIAD_LAND, -1, -1)) continue;
+        int b = (v + t) % bases;
+        for (int i = 0; i < bases && game_bases[b].faction == V->faction; i++) b = (b + 1) % bases;
+        struct base *B = &game_bases[b];
+        int16_t x = B->x, y = B->y;
+        for (int d = 0; d <= 12; d++) {
+            B->x = (int16_t)(V->x + d), B->y = V->y;
+            check_invasions(b);
+        }
+        B->x = x, B->y = y;
+        n++;
+    }
+}
+
 // The battle report: each side's modifiers from empty to full.
 static void sweep_battle_report(void) {
     int32_t held[2] = {game_battle_mod_count[0], game_battle_mod_count[1]};
@@ -2486,6 +2791,7 @@ static void veh_sweep(void) {
     for (int v = ((turn + 2) & 3); v < vehs; v += 4)
         if (stack_sound(v)) sweep_battle(v, (v * 5 + turn) % vehs, v * 3 + turn);
     sweep_battle_report();
+    sweep_designs();
     sweep_wake();
     sweep_varied();
     sweep_stacks();
@@ -2558,6 +2864,13 @@ static const struct hook veh_hooks[] = {
     HOOK(0x5010c0, defense_value, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0xf0, 0xfa, 0x68, 0x00),  // mov eax, [map_half_width]
     HOOK(0x5015b0, get_basic_offense, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),        // sub esp, 12
     HOOK(0x501940, get_basic_defense, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),        // sub esp, 8
+    HOOK(0x57eff0, pick_chassis, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),            // sub esp, 8
+    HOOK(0x57f0b0, weapon_budget, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53),                 // push ecx; push ebx
+    HOOK(0x57f150, armor_budget, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53),                  // push ecx; push ebx
+    HOOK(0x5a5a60, proto_cost, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x14),              // sub esp, 20
+    HOOK(0x5a5d40, make_proto, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x14),              // sub esp, 20
+    HOOK(0x560ad0, go_to, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                   // mov eax, [ebp+8]
+    HOOK(0x506490, invasions, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x14),               // sub esp, 20
     HOOK(0x501da0, battle_compute, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x2c),          // sub esp, 44
     HOOK(0x5044d0, best_defender, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x2c),           // sub esp, 44
     HOOK(0x593510, hex_cost, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x0d, 0xf0, 0xfa, 0x68, 0x00),  // push ecx; mov ecx, [...]

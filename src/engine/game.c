@@ -86,7 +86,6 @@ int32_t *game_psych_talents, *game_psych_drones, *game_psych_superdrones, *game_
 
 char *(__attribute__((thiscall)) * game_strings_get)(void *table, char *s);
 int (*game_climactic_battle)(void);
-int (*game_weapon_budget)(int faction, int condition, int check_mode);
 int (*game_wants_to_attack)(int faction, int other, int odds);
 int (*game_base_at)(int x, int y);
 int (*game_veh_at)(int x, int y);
@@ -119,7 +118,6 @@ int (*game_best_reactor)(int faction);
 void (*game_tech_research)(int faction, int labs);
 int (*game_kill)(int veh);
 int (*game_at_goal)(int faction, int type, int x, int y);
-int (*game_proto_cost)(int chassis, int weapon, int armor, int abilities, int reactor);
 int (*game_planet_buster2)(int proto);
 int (*game_at_climax)(int faction);
 int32_t *game_sunspot_duration, *game_ranked_faction;
@@ -437,7 +435,6 @@ void game_bind(struct pe_image *exe) {
 
     game_strings_get = (void *)code_at(exe, 0x6169a0);
     game_climactic_battle = (void *)code_at(exe, 0x539e40);
-    game_weapon_budget = (void *)code_at(exe, 0x57f0b0);
     game_wants_to_attack = (void *)code_at(exe, 0x55bc80);
     game_base_at = (void *)code_at(exe, 0x4e3a50);
     game_veh_at = (void *)code_at(exe, 0x5bfe90);
@@ -471,7 +468,6 @@ void game_bind(struct pe_image *exe) {
     game_kill = (void *)code_at(exe, 0x5c0b00);
     game_at_goal = (void *)code_at(exe, 0x579cc0);
     game_planet_buster2 = (void *)code_at(exe, 0x5004f0);
-    game_proto_cost = (void *)code_at(exe, 0x5a5a60);
     game_at_climax = (void *)code_at(exe, 0x539ef0);
     game_sunspot_duration = (int32_t *)code_at(exe, 0x9a6800);
     game_ranked_faction = (int32_t *)code_at(exe, 0x9a650c);

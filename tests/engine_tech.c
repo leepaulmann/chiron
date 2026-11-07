@@ -27,7 +27,6 @@ static int failures;
 // The string table hands back the strings it is given.
 static char *__attribute__((thiscall)) strings_get(void *table, char *s) { return s; }
 static int no_climax(void) { return 0; }
-static int budget(int faction, int condition, int check_mode) { return 1; }
 static int peaceful(int faction, int other, int odds) { return 0; }
 
 #define EXPECT_STR(expr, want)                                                   \
@@ -139,7 +138,6 @@ int main(void) {
     game_strings_get = strings_get;
     game_tech_name_buffer = tech_name_buf;
     game_climactic_battle = no_climax;
-    game_weapon_budget = budget;
     game_wants_to_attack = peaceful;
     game_turn = &turn;
     for (int i = 0; i < WEAPON_COUNT; i++) weapons[i].preq_tech = TECH_NONE;
@@ -154,7 +152,10 @@ int main(void) {
     reactors[1].preq_tech = 2;
     EXPECT(valid_tech_leap(2, 1), 0);  // unlocks a reactor
     reactors[1].preq_tech = 50;
-    weapons[5].preq_tech = 2, weapons[5].offense = 3;  // budget 1, so offense 3 is the most allowed
+    // weapon_budget() picks weapon 1, the only combat weapon, so offense 3
+    // is the most allowed (the original compares with the weapon's number).
+    for (int i = 0; i < WEAPON_COUNT; i++) weapons[i].mode = i == 1 ? 0 : 3;
+    weapons[5].preq_tech = 2, weapons[5].offense = 3;
     factions[1].ranking = 2;
     EXPECT(valid_tech_leap(2, 1), 1);
     factions[1].ranking = 3;

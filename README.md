@@ -176,7 +176,10 @@ module at a time. So far:
   morale in battle, the terrain's defense, the modifiers a battle report
   lists, and what each move costs; the strengths of both sides in a battle
   with every modifier (terrain, base defenses, altitude, sensors, psi,
-  air superiority and the rest), and which unit of a stack defends it.
+  air superiority and the rest), and which unit of a stack defends it;
+  the AI's choice of chassis, weapon and armor, what a design costs and
+  filling one in, sending a unit somewhere, and the AI's transports
+  turning on a nearby enemy base.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once

@@ -359,13 +359,16 @@ struct unit_proto {
     uint8_t plan;  // PLAN_*; up to PLAN_RECON for combat units
     uint8_t group;  // 21 for units that take no goals
     uint8_t obsolete_factions;  // bit per faction that has a better design
-    GAME_PAD(0x2d, 0x30);
+    uint8_t combat_factions;    // bit per faction that has met it in combat (all for a basic design)
+    uint8_t icon;               // 0xff until one is chosen
+    uint8_t unk_2f;
     uint16_t flags;  // PROTO_FLAG_*
     int16_t preq_tech;
 };
 enum { PROTO_FLAG_ACTIVE = 0x1, PROTO_FLAG_BUILT = 0x4, PROTO_FLAG_SEEN_ONLINE = 0x100 };
 _Static_assert(sizeof(struct unit_proto) == 0x34, "unit_proto size");
 GAME_AT(struct unit_proto, chassis, 0x24);
+GAME_AT(struct unit_proto, combat_factions, 0x2d);
 GAME_AT(struct unit_proto, plan, 0x2a);
 GAME_AT(struct unit_proto, obsolete_factions, 0x2c);
 GAME_AT(struct unit_proto, flags, 0x30);
@@ -405,13 +408,14 @@ struct rules_chassis {
     uint8_t triad;  // TRIAD_*
     uint8_t range;  // turns aloft for air units, else 0
     uint8_t cargo;  // units a transport of it carries, before the reactor
-    GAME_PAD(0x4c, 0x4d);
+    uint8_t cost;   // its part of a design's cost (proto_cost)
     uint8_t missile;
     GAME_PAD(0x4e, 0x8e);
     int16_t preq_tech;
 };
 _Static_assert(sizeof(struct rules_chassis) == 0x90, "rules_chassis size");
 GAME_AT(struct rules_chassis, cargo, 0x4b);
+GAME_AT(struct rules_chassis, missile, 0x4d);
 
 struct rules_facility {
     char *name;
@@ -924,7 +928,6 @@ extern uint8_t *game_base_globals;
 // Game functions the reimplementations call.
 extern char *(__attribute__((thiscall)) * game_strings_get)(void *table, char *s);
 extern int (*game_climactic_battle)(void);
-extern int (*game_weapon_budget)(int faction, int condition, int check_mode);
 extern int (*game_wants_to_attack)(int faction, int other, int odds);
 extern int (*game_base_at)(int x, int y);    // the base on the square, or -1
 extern int (*game_veh_at)(int x, int y);     // the top unit on the square, or -1
@@ -962,7 +965,6 @@ extern void (*game_tech_research)(int faction, int labs);
 extern int (*game_kill)(int veh);                    // disbands a unit
 extern int (*game_at_goal)(int faction, int type, int x, int y);
 extern int (*game_planet_buster2)(int proto);
-extern int (*game_proto_cost)(int chassis, int weapon, int armor, int abilities, int reactor);
 extern int (*game_at_climax)(int faction);
 extern int32_t *game_sunspot_duration;
 extern int32_t *game_ranked_faction;  // [2]: factions base_hurry() and social_ai() compare themselves with

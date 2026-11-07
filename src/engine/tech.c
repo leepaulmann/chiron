@@ -10,6 +10,7 @@
 
 #include "game.h"
 #include "shadow.h"
+#include "veh.h"
 
 static const struct rules_tech *tech_entry(uint32_t tech) { return &game_tech[tech]; }
 
@@ -89,7 +90,7 @@ int valid_tech_leap(int tech, int faction) {
     for (int i = 0; i < WEAPON_COUNT; i++)
         if (game_weapons[i].preq_tech == tech)
             return game_factions[faction].ranking <= 2 &&
-                   game_weapons[i].offense <= game_weapon_budget(faction, 99, 0) + 2;
+                   game_weapons[i].offense <= weapon_budget(faction, 99, 0) + 2;
     return 1;
 }
 
