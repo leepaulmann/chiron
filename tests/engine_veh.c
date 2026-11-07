@@ -28,7 +28,7 @@ static struct rules_ability abilities[32];
 static struct rules_tech techs[TECH_COUNT];
 static struct rules_basic rules_basic;
 static int32_t radius_x[RADIUS_SQUARES], radius_y[RADIUS_SQUARES], near_x[8], near_y[8];
-static int failures, objective;
+static int failures;
 
 #define EXPECT(expr, want)                                                       \
     do {                                                                         \
@@ -39,7 +39,6 @@ static int failures, objective;
         }                                                                        \
     } while (0)
 
-static int objective_stub(int base) { return objective; }
 static int veh_at_stub(int x, int y) { return -1; }
 static int32_t refs[5], *net_ref, battle;
 static int drawn_radius, drawn_tile, checked_base;
@@ -76,7 +75,7 @@ int main(void) {
     game_radius_x = radius_x, game_radius_y = radius_y, game_radius_near_x = near_x, game_radius_near_y = near_y;
     game_veh_lift_x = &lift[0], game_veh_find_dist = &lift[1], game_veh_lifted = &lift[2], game_veh_lift_y = &lift[3], game_veh_at_rebuilt = &lift[5];
     game_state = &state, game_current_faction = &current_faction, game_contribution = contribution_stub;
-    game_is_objective = objective_stub, game_veh_at = veh_at_stub;
+    game_veh_at = veh_at_stub;
     for (int i = 0; i < SP_COUNT; i++) projects[i] = -1;
     for (int i = 1; i < 9; i++) radius_x[i] = (i % 3) - 1, radius_y[i] = (i / 3 % 3) - 1;
     for (int i = 0; i < 8; i++) near_x[i] = radius_x[i + 1], near_y[i] = radius_y[i + 1];
@@ -202,7 +201,7 @@ int main(void) {
     bases[0].facilities_built[0] = 0;
     EXPECT(garrison_check(0), 2);  // (0 + 2) / 3 + (6 + 1) / 4 + 1
     bases[0].facilities_built[0] = 1 << 1;  // headquarters
-    objective = 1, factions[1].flags = 0x40000000;
+    bases[0].event |= 0x8000, factions[1].flags = 0x40000000;  // an objective
     EXPECT(garrison_check(0), 4);
     factions[1].region_base_plan[1] = PLAN_COLONY;
     EXPECT(garrison_check(0), 3);

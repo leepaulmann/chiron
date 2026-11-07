@@ -67,6 +67,7 @@ add_executable(chiron
   src/engine/strategy.c
   src/engine/build.c
   src/engine/veh.c
+  src/engine/score.c
   src/engine/tech.c
   src/engine/spot.c
   src/engine/council.c

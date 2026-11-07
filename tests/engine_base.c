@@ -103,7 +103,7 @@ static void give(int base, int facility) { bases[base].facilities_built[facility
 // Growth's messages and what it calls when a base is lost.
 static char growth_texts[0x200];
 static char *popb_label, *say_text;
-static int popb_flags, popb_count, objective, killed, eliminated;
+static int popb_flags, popb_count, killed, eliminated;
 static int popb_stub(char *label, int flags, int sound, char *picture, void *sprite) {
     popb_label = label, popb_flags = flags, popb_count++;
     return 0;
@@ -112,7 +112,6 @@ static int parse_say_stub(int slot, int text, int gender, int plural) {
     say_text = (char *)(intptr_t)text;
     return 0;
 }
-static int is_objective_stub(int base) { return objective; }
 static void base_kill_stub(int base) { killed = base + 1; }
 static int eliminate_stub(int faction, int by) { return eliminated = faction; }
 static void draw_tile_stub(int x, int y, int unk) {}
@@ -211,7 +210,7 @@ static void strategy_stub(int faction) { fu_calls[1]++; }
 static int social_ai_stub(int faction, int a, int b, int c, int d, int e) { return fu_calls[2]++, 0; }
 static void call_council_stub(int faction) { fu_calls[4]++; }
 static void auto_save_stub(void) { fu_calls[5]++; }
-static int year_stub(int turn) { return 2100 + turn; }
+static int32_t start_year = 2100;
 static void log_say5_stub(char *a, char *b, int n1, int n2, int n3) {}
 static int pumps, advances;
 static void pump_stub(void) { pumps++; }
@@ -996,7 +995,7 @@ int main(void) {
     static struct rules_facility facility_rules[FACILITY_COUNT] = {[FAC_HAB_COMPLEX] = {.name = "complex"}};
     game_facilities = facility_rules;
     game_growth_texts = growth_texts;
-    game_popb = popb_stub, game_parse_say = parse_say_stub, game_is_objective = is_objective_stub;
+    game_popb = popb_stub, game_parse_say = parse_say_stub;
     game_base_kill = base_kill_stub, game_eliminate_player = eliminate_stub;
     game_draw_tile = draw_tile_stub, game_draw_map = draw_map_stub;
     struct base saved_b1 = *b1;
@@ -1062,11 +1061,11 @@ int main(void) {
     EXPECT(popb_count, 1);
     state = 0;
     // A last objective of size 1 is kept; any other base is lost.
-    b1->pop_size = 1, b1->nutrients = -1, objective = 1;
+    b1->pop_size = 1, b1->nutrients = -1, b1->event |= 0x8000;  // an objective
     EXPECT(base_growth(), 0);
     EXPECT(b1->pop_size, 1);
     EXPECT(killed, 0);
-    objective = 0, b1->nutrients = -1;
+    b1->event &= ~0x8000u, b1->nutrients = -1;
     EXPECT(base_growth(), 1);
     EXPECT(killed, 2);
     EXPECT(eliminated, 1);
@@ -1720,7 +1719,7 @@ int main(void) {
     static int32_t council_pbem, council_pending;
     game_more_rules = &more_rules, game_pbem = &council_pbem, game_council_pending = &council_pending;
     projects[SP_EMPATH_GUILD] = 1;
-    game_auto_save = auto_save_stub, game_game_year = year_stub;
+    game_auto_save = auto_save_stub, game_start_year = &start_year;
     saved_b1 = *b1, saved_f1 = factions[1];
     saved_d1 = faction_defs[1];
     uint32_t saved_rules = rules;

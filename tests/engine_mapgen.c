@@ -73,7 +73,6 @@ static uint8_t human_factions;
 static int fake_veh_at(int x, int y) { (void)x, (void)y; return -1; }
 static int fake_stack_fix(int v) { return v; }
 static void fake_delete_landmark(int x, int y) { (void)x, (void)y; landmarks_deleted++; }
-static int fake_is_objective(int base) { (void)base; return 0; }
 static void fake_base_kill(int base) { (void)base; bases_killed++; }
 static int fake_veh_init(int unit, int f, int x, int y) { (void)unit, (void)f, (void)x, (void)y; return towers++; }
 
@@ -95,7 +94,7 @@ int main(void) {
     game_brush_stroke = &brush_stroke, game_cloud_cover = &cloud_cover, game_state = &state;
     game_landmarks = landmarks, game_natural = natural, game_strings_get = fake_strings_get, game_expansion = &expansion;
     game_bases = bases, game_veh_at = fake_veh_at, game_stack_fix = fake_stack_fix;
-    game_delete_landmark = fake_delete_landmark, game_is_objective = fake_is_objective;
+    game_delete_landmark = fake_delete_landmark;
     game_base_kill = fake_base_kill, game_veh_init = fake_veh_init;
     game_world_skip_territory = &skip_territory, game_battle_state = &battle_state, game_net_multiplayer = &net_game;
     game_control_turn = &control_turn, game_world_add_temperature = &add_temperature, game_halted = &halted;

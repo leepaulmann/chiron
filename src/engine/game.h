@@ -215,10 +215,14 @@ struct faction_data {
     // byte index and bit, so 8 bits a word.
     uint32_t project_intel[8];
     int32_t corner_market_turn, corner_market_cost;  // when the energy market is cornered, and what it cost
-    GAME_PAD(0x2084, 0x2090);
+    int32_t objective_bonus;  // objectives a scenario credits it with, besides those num_objectives() counts
+    GAME_PAD(0x2088, 0x2090);
     uint32_t flags_ext;  // FACTION_FLAG_EXT_*
     int32_t air_offense, air_superiority;  // air units of each plan
-    GAME_PAD(0x209c, 0x20cc);
+    int32_t score;  // compute_score()'s last, doubled in an ironman game
+    int32_t unk_20a0;
+    int32_t score_total;     // compute_score()'s default places for its total
+    int32_t score_parts[9];  // and the parts of it
 };
 _Static_assert(sizeof(struct faction_data) == 0x20cc, "faction_data size");
 GAME_AT(struct faction_data, diplo_status, 0x18);
@@ -240,6 +244,9 @@ GAME_AT(struct faction_data, target_kinds, 0x1078);
 GAME_AT(struct faction_data, region_force_rating, 0x127c);
 GAME_AT(struct faction_data, goals, 0x19fc);
 GAME_AT(struct faction_data, air_superiority, 0x2098);
+GAME_AT(struct faction_data, objective_bonus, 0x2084);
+GAME_AT(struct faction_data, score, 0x209c);
+GAME_AT(struct faction_data, score_parts, 0x20a8);
 GAME_AT(struct faction_data, last_base_turn, 0x14);
 GAME_AT(struct faction_data, base_sea_name_offset, 0x10);
 GAME_AT(struct faction_data, attack_target_base, 0x468);
@@ -964,7 +971,6 @@ extern void (*game_draw_radius)(int x, int y, int radius, int unk);           //
 extern int (*game_base_find2)(int x, int y, int faction);  // the nearest base of the faction, or -1
 extern void (*game_delete_landmark)(int x, int y);
 extern void (*game_set_fac)(int facility, int base, int on);
-extern int (*game_is_objective)(int base);
 extern int(__attribute__((thiscall)) * game_console_focus)(void *console, int x, int y, int faction);
 extern int (*game_parse_says)(int slot, char *text, int gender, int plural);
 extern int (*game_parse_say)(int slot, int text, int gender, int plural);
@@ -983,9 +989,21 @@ extern int (*game_planet_buster2)(int proto);
 extern int (*game_at_climax)(int faction);
 extern int32_t *game_sunspot_duration;
 extern int32_t *game_ranked_faction;  // [2]: factions base_hurry() and social_ai() compare themselves with
+// Scores and scenario objectives (score.c).
+extern int32_t *game_ranking_scores;  // [FACTION_COUNT] each faction's strength, as rankings() last weighed it
+extern int16_t (*game_turn_might)[FACTION_COUNT];  // [1000] the same by turn, for the replay
+// A scenario's objectives for a win and for a sudden-death win (9000 or more
+// for none), its score per objective held, and its score for a win.
+extern int32_t *game_objectives_required, *game_objectives_sudden_death, *game_objective_points;
+extern int32_t *game_victory_points;
+extern int32_t *game_start_year;            // the year of turn 0
+extern int32_t *game_scn_victory_facility;  // a scenario's facility that makes bases objectives
+// compute_score(): the Ascent's points, and each faction's share of the
+// population behind it ([0] the total).
+extern int32_t *game_score_ascent_points, *game_score_ascent_pop;
+extern void (*game_set_treaty)(int faction, int other, uint32_t status, int on);
 // For base_production().
 extern void (*game_base_reset)(int base, int unk);       // the AI (or governor) picks what to build next
-extern int (*game_ascending)(int faction);                 // may it build the Ascent to Transcendence
 extern int (*game_veh_cost)(int proto, int base, int *unk);
 extern void (*game_prune_protos)(int faction, int proto, int unk);
 extern int (*game_morale_mod)(int base, int faction, int triad);
@@ -995,7 +1013,6 @@ extern int (*game_generators)(int faction, int *count);
 extern void (*game_bit_set)(int x, int y, uint32_t bit, int on);
 extern void (*game_synch_bit)(int x, int y, int faction);
 extern int (*game_whose_territory)(int faction, int x, int y, int unk1, int unk2);
-extern int (*game_game_year)(int turn);
 extern void (*game_tech_advance)(int faction);
 extern void (*game_amovie_project)(int project);
 extern void (*game_amovie_project_2)(char *name);

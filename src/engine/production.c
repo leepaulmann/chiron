@@ -12,6 +12,7 @@
 
 #include "base.h"
 #include "game.h"
+#include "score.h"
 #include "shadow.h"
 #include "veh.h"
 
@@ -206,7 +207,7 @@ static void build_unit(int proto, int faction, int human) {
     if (faction == *game_current_faction) u->flags |= VEH_FLAG_PLAYERS;
     if (p->plan == PLAN_COLONY) {
         if (B->nutrients < 0) B->nutrients = 0;
-        if (B->pop_size > 1 || (game_factions[faction].diff_level > 1 && !game_is_objective(ID))) B->pop_size--;
+        if (B->pop_size > 1 || (game_factions[faction].diff_level > 1 && !is_objective(ID))) B->pop_size--;
         if (B->pop_size <= 0) {
             u->home_base = -1;
             game_base_kill(ID);
@@ -389,7 +390,7 @@ static void ascent(int faction) {
         *game_default_plural = 0;
         *game_default_gender = *(int32_t *)&game_faction_defs[faction];
         game_parse_says(5, (char *)&game_faction_defs[faction] + 0x34, -1, -1);
-        game_parse_num(2, game_game_year(*game_current_turn + 100));
+        game_parse_num(2, game_year(*game_current_turn + 100));
         game_parse_num(3, (*game_current_turn + 100) / 100);
         if (is_alien(faction)) game_interlude(0x1b, 0, 4, 0);
         else game_interlude(0x12, 0, 3, 0);
@@ -668,7 +669,7 @@ static int human_finishing(int fac) {
     for (int i = 0; i < *game_base_count; i++) {
         const struct base *bi = &game_bases[i];
         if (!is_human(bi->faction) || bi->queue[0] != item) continue;
-        if (item == -FAC_ASCENT && !game_ascending(bi->faction)) continue;
+        if (item == -FAC_ASCENT && !ascending(bi->faction)) continue;
         int cost = cost_factor(bi->faction, 1, -1) * game_facilities[fac].cost;
         if (bi->minerals + bi->surplus[RESOURCE_MINERAL] >= cost) return 1;
     }
@@ -686,7 +687,7 @@ static void produce(int faction, int human, uint8_t *pop) {
         int fac = -item, proj = fac >= FAC_FIRST_PROJECT ? fac - FAC_FIRST_PROJECT : -1;
         int sat = fac >= FAC_SKY_HYDRO_LAB && fac < FAC_STOCKPILE_ENERGY;
         int cost = cost_factor(B->faction, 1, -1) * game_facilities[fac].cost;
-        if (B->minerals >= cost && proj == SP_ASCENT_TO_TRANSCENDENCE && !game_ascending(faction)) {
+        if (B->minerals >= cost && proj == SP_ASCENT_TO_TRANSCENDENCE && !ascending(faction)) {
             game_popb(text(0x6898f8), 0x1000, -1, text(0x6898e8), 0);
             return;
         }

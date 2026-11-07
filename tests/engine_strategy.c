@@ -25,6 +25,7 @@ static struct rules_armor armor[ARMOR_COUNT];
 static struct rules_tech techs[TECH_COUNT];
 static uint8_t achieved[TECH_COUNT];
 static int32_t expansion = 1;
+static uint32_t rules;
 static uint8_t humans, alive = 1 << 1 | 1 << 2;
 static int32_t near_x[9] = {1, 2, 1, 0, -1, -2, -1, 0, 0}, near_y[9] = {-1, 0, 1, 2, 1, 0, -1, -2, 0};
 static int32_t radius_x[RADIUS_SQUARES], radius_y[RADIUS_SQUARES];
@@ -91,7 +92,7 @@ int main(void) {
     for (int i = 1; i < RADIUS_SQUARES; i++) radius_x[i] = i < 9 ? near_x[i - 1] : 1000, radius_y[i] = i < 9 ? near_y[i - 1] : 0;
     game_add_goal = add_goal_stub, game_veh_at = veh_at_stub, game_stack_fix = identity;
     game_stack_check = stack_stub;
-    game_is_objective = zero1, game_terraform_cost = terraform_stub, game_base_reset = base_reset_stub;
+    game_rules = &rules, game_terraform_cost = terraform_stub, game_base_reset = base_reset_stub;
     game_weapons = weapons, game_armor = armor, game_tech = techs, game_tech_achieved = achieved;
     game_expansion = &expansion, game_weap_val = zero2, game_arm_val = zero2, game_planet_buster = zero1;
     game_console_upgrade = upgrade_stub, game_kill = kill_stub, game_veh_kill = kill_stub, game_veh_sleep = nothing1;

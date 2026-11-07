@@ -14,6 +14,7 @@
 #include "base.h"
 #include "game.h"
 #include "map.h"
+#include "score.h"
 #include "shadow.h"
 #include "spot.h"
 #include "tech.h"
@@ -333,8 +334,8 @@ int garrison_check(int base) {
     int projects = 0;
     for (int i = 0; i < SP_COUNT; i++) projects += game_secret_projects[i] == base;
     int g = (projects + 2) / 3 + (B->pop_size + 1) / 4 + 1;
-    if (built(base, FAC_HEADQUARTERS) || (T->bits & MAP_UNK_40000000_) || game_is_objective(base)) g++;
-    if (game_is_objective(base) && (game_factions[f].flags & FACTION_FLAG_UNK_40000000)) g++;
+    if (built(base, FAC_HEADQUARTERS) || (T->bits & MAP_UNK_40000000_) || is_objective(base)) g++;
+    if (is_objective(base) && (game_factions[f].flags & FACTION_FLAG_UNK_40000000)) g++;
     if (game_factions[f].region_base_plan[region] == PLAN_COLONY) g--;
     int z = zoc_sea(B->x, B->y, f) - 1;
     if (z > 0 && ((game_factions[f].diplo_status[z] & 0x30) || (game_factions[z].diplo_status[f] & 0x20)

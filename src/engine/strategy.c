@@ -9,6 +9,7 @@
 #include "base.h"
 #include "game.h"
 #include "map.h"
+#include "score.h"
 #include "shadow.h"
 #include "strategy.h"
 #include "veh.h"
@@ -90,7 +91,7 @@ static void rival_base_goals(int faction, int b) {
         if (me->flags & FFLAG_ATTACK_HQ) pri *= 2;
         if (game_factions[owner].corner_market_turn > *game_turn) pri *= 8;
     }
-    if ((me->attack_target_base == b && (me->diplo_status[owner] & TREATY_VENDETTA)) || game_is_objective(b)) pri *= 4;
+    if ((me->attack_target_base == b && (me->diplo_status[owner] & TREATY_VENDETTA)) || is_objective(b)) pri *= 4;
     game_add_goal(faction, GOAL_ATTACK, pri, x, y, -1);
     int tx = base->terraform_x, ty = base->terraform_y;
     if (!on_map(tx, ty)) return;

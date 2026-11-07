@@ -11,6 +11,7 @@
 #include "game.h"
 #include "map.h"
 #include "mapgen.h"
+#include "score.h"
 #include "shadow.h"
 #include "social.h"
 #include "spot.h"
@@ -2070,7 +2071,7 @@ static void corner_energy_market(int faction) {
     *game_parse_gender = d->noun_gender, *game_parse_plural = d->noun_plural;
     game_parse_says(2, d->noun, -1, -1);
     game_parse_says(3, d->adjective, -1, -1);
-    game_parse_num(0, game_game_year(f->corner_market_turn));
+    game_parse_num(0, game_year(f->corner_market_turn));
     game_popp(*game_script_file, text(0x68ba38), 0, text(0x68ba28), 0);
 }
 

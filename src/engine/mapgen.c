@@ -12,6 +12,7 @@
 #include "base.h"
 #include "game.h"
 #include "map.h"
+#include "score.h"
 #include "shadow.h"
 
 static inline struct map_tile *tile(int x, int y) { return &(*game_map)[(x >> 1) + y * *game_map_half_width]; }
@@ -51,7 +52,7 @@ static int flood_base(int b) {
     int f = base->faction;
     game_factions[f].flags |= FACTION_FLAG_BASE_SUBMERGED;
     game_base_submerged_count[f]++;
-    if (game_is_objective(b) && base->pop_size < 1) base->pop_size = 1;
+    if (is_objective(b) && base->pop_size < 1) base->pop_size = 1;
     if (base->pop_size > 0) return 0;
     if (game_factions[f].base_count > 1 && (!*game_net_multiplayer || *game_control_turn)) {
         if (!*game_battle_state) flood_message(base, 0);

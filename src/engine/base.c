@@ -18,6 +18,7 @@
 
 #include "game.h"
 #include "map.h"
+#include "score.h"
 #include "shadow.h"
 #include "build.h"
 #include "tech.h"
@@ -1326,7 +1327,7 @@ static int starve(struct base *b, int id, int faction) {
             if ((t->bits & MAP_BASE) && (t->owner_site & 0xf) < 8) u->order = 0;
         }
     growth_popb(msg_starve, faction, 0x4000, 14);
-    if (!game_is_objective(id) || b->pop_size > 1) {
+    if (!is_objective(id) || b->pop_size > 1) {
         b->pop_size--;
         if (b->pop_size <= 0) {
             game_base_kill(id);
