@@ -95,6 +95,7 @@ int (*game_rand)(void);
 void *(*game_getptd)(void);
 int (*game_random)(int min, int max);
 void (*game_random_reseed)(int seed);
+uint32_t *game_random_seed;
 void (*game_do_all_non_input)(void);
 int (*game_best_specialist)(void);
 int (*game_has_abil)(int proto, uint32_t ability);
@@ -450,6 +451,7 @@ void game_bind(struct pe_image *exe) {
     game_getptd = (void *)code_at(exe, 0x6491c3);
     game_random = (void *)code_at(exe, 0x625810);
     game_random_reseed = (void *)code_at(exe, 0x6257e0);
+    game_random_seed = (uint32_t *)code_at(exe, 0x9bb568);
     game_do_all_non_input = (void *)code_at(exe, 0x5fcb20);
     game_best_specialist = (void *)code_at(exe, 0x4e4020);
     game_has_abil = (void *)code_at(exe, 0x5bf1f0);

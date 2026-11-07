@@ -939,6 +939,7 @@ extern int (*game_rand)(void);                    // the C runtime's rand()
 extern void *(*game_getptd)(void);                // the C runtime's per-thread data
 extern int (*game_random)(int min, int max);      // the game's own generator: min to max - 1
 extern void (*game_random_reseed)(int seed);
+extern uint32_t *game_random_seed;              // game_random()'s state
 extern void (*game_do_all_non_input)(void);       // redraws and the message pump
 extern int (*game_best_specialist)(void);         // for the current base
 extern int (*game_has_abil)(int proto, uint32_t ability);
