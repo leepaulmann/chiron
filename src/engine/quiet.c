@@ -227,6 +227,10 @@ HELD_THIS(base_win_zoom, (void *self, int base, int unk), (self, base, unk), (c_
 HELD_THIS(base_win_check_base, (void *self, int base), (self, base), c_.arg[0] = base, orig_base_win_check_base(SELF, a_[0]))
 HELD_THIS(base_win_check_loc, (void *self, int x, int y, int unk), (self, x, y, unk),
           (c_.arg[0] = x, c_.arg[1] = y, c_.arg[2] = unk), orig_base_win_check_loc(SELF, a_[0], a_[1], a_[2]))
+// A notice in the message bar, such as a unit's promotion.
+HELD_THIS(netmsg_pop, (void *self, char *label, int delay, int unk, char *sound), (self, label, delay, unk, sound),
+          (hooks_ui_text(&c_, 0, label), hooks_ui_text(&c_, 1, sound), c_.arg[0] = delay, c_.arg[1] = unk),
+          orig_netmsg_pop(SELF, TEXT(0), a_[0], a_[1], TEXT(1)))
 // Movies and help for secret projects.
 HELD(void, amovie_project, (void)0, (int project), (project), (c_.arg[0] = project), orig_amovie_project(a_[0]))
 HELD(void, amovie_project_2, (void)0, (char *name), (name), (hooks_ui_text(&c_, 0, name)), orig_amovie_project_2(TEXT(0)))
@@ -370,5 +374,6 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x60c9b0, listbox_update_changes, 0xa1, 0x28, 0x7b, 0x9b, 0x00, 0x53),        // mov eax, [0x9b7b28]; push ebx
     QUIET_HOOK(0x41a620, base_win_base_killed, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x57, 0x8b, 0xf1),  // push ebx, esi, edi; mov esi, ecx
     QUIET_HOOK(0x41a7e0, base_win_check_loc, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x8b, 0xd9),        // push ebx; mov ebx, ecx
+    QUIET_HOOK(0x47a890, netmsg_pop, SEH_PROLOGUE),
 };
 struct hook_module quiet_module = {"quiet", quiet_hooks, HOOK_COUNT(quiet_hooks), NULL, NULL, -1};

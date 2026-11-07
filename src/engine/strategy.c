@@ -11,6 +11,7 @@
 #include "map.h"
 #include "shadow.h"
 #include "strategy.h"
+#include "veh.h"
 
 enum {
     ORDER_HOLD = 2, ORDER_FARM = 4, ORDER_MOVE_TO = 0x18,
@@ -811,7 +812,7 @@ void enemy_strategy(int faction) {
     if (!is_human(faction))
         for (int b = 0; b < *game_base_count; b++)
             if (game_bases[b].faction == faction && game_bases[b].queue[0] == -FAC_STOCKPILE_ENERGY) game_base_reset(b, 0);
-    game_enemy_capabilities(faction);
+    enemy_capabilities(faction);
     me->enemy_missiles = me->enemy_air_attackers = me->enemy_naval_reactors = me->enemy_transports = 0;
     me->air_superiority = me->air_offense = 0;
     for (int v = *game_veh_count - 1; v >= 0; v--) {

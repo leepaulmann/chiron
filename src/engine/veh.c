@@ -2098,6 +2098,488 @@ void kill(int veh) {
     else
         game_draw_tile(x, y, 2);
 }
+// ---- Upgrades and promotion -------------------------------------------------
+
+enum {
+    ABL_HIGH_MORALE = 0x4000, SP_NANO_FACTORY = 22, WEAPON_PSI_ATTACK = 15, ARMOR_PSI_DEFENSE = 9,
+    WMODE_TERRAFORM = 9,
+    // Abilities that set a design apart from another for upgrades: police,
+    // artillery, antigrav struts, drop pods, amphibious pods.
+    ABL_UPGRADE_SET = ABL_POLICE_2X | ABL_ARTILLERY | ABL_ANTIGRAV_STRUTS | ABL_DROP_POD | ABL_AMPHIBIOUS,
+    ABL_SMACX = ABL_SOPORIFIC_GAS | ABL_DISSOCIATIVE_WAVE | ABL_MARINE_DETACHMENT | ABL_FUEL_NANOCELLS
+                | ABL_ALGO_ENHANCEMENT,
+};
+enum {  // rules_ability.flags: where an ability may go
+    AFLAG_LAND = 0x1, AFLAG_SEA = 0x2, AFLAG_AIR = 0x4, AFLAG_COMBAT = 0x8, AFLAG_TERRAFORMER = 0x10,
+    AFLAG_NONCOMBAT = 0x20, AFLAG_NOT_PROBE = 0x40, AFLAG_NOT_PSI = 0x80, AFLAG_TRANSPORT = 0x100,
+    AFLAG_SLOW_CHASSIS = 0x200, AFLAG_PROBE = 0x800,
+};
+
+// Energy to upgrade one unit of the old design to the new: the new
+// design's cost (much more for a design not yet built: cost and a half,
+// times one more than that), plus how much its weapon's and armor's costs
+// and its chassis' speed exceed the old one's; halved with the Nano
+// Factory.
+int upgrade_cost(int faction, int proto_new, int proto_old) {
+    const struct unit_proto *N = proto_of(proto_new), *O = proto_of(proto_old);
+    int cost = N->cost;
+    if (proto_new >= BASIC_PROTOS && !(N->flags & PROTO_FLAG_BUILT)) {
+        int c = cost + (cost + 1) / 2;
+        cost = c * (c + 1);
+    }
+    int w = game_weapons[N->weapon].cost - game_weapons[O->weapon].cost;
+    int a = game_armor[N->armor].cost - game_armor[O->armor].cost;
+    int s = game_chassis[N->chassis].speed - game_chassis[O->chassis].speed;
+    cost += (w > 0 ? w : 0) + (a > 0 ? a : 0) + (s > 0 ? s : 0);
+    if (owns_project(SP_NANO_FACTORY, faction)) cost /= 2;
+    return cost;
+}
+
+// Upgrade every unit of the faction's old design to the new one: pay for
+// them all (ten times upgrade_cost each), turn them over (a unit gains a
+// level of morale, up to Elite, with high morale training, or loses one
+// without it), put the new design in place of the old in the bases'
+// queues, mark the new design built (if anything was paid) and retire the
+// old one (a faction design). A human's map is redrawn, and the console
+// refreshed for the player.
+void do_upgrade(int faction, int proto_new, int proto_old) {
+    struct faction_data *F = &game_factions[faction];
+    int cost = upgrade_cost(faction, proto_new, proto_old) * F->units_active[proto_old] * 10;
+    F->energy_credits -= cost;
+    for (int v = 0; v < *game_veh_count; v++) {
+        struct veh *V = &game_vehs[v];
+        if (V->faction != faction || V->proto != proto_old) continue;
+        F->units_active[proto_old]--;
+        F->units_active[proto_new]++;
+        V->proto = (int16_t)proto_new;
+        if (has_abil(proto_new, ABL_HIGH_MORALE) && !has_abil(proto_old, ABL_HIGH_MORALE))
+            V->morale = (uint8_t)(V->morale + 1 > 6 ? 6 : V->morale + 1);
+        if (!has_abil(proto_new, ABL_HIGH_MORALE) && has_abil(proto_old, ABL_HIGH_MORALE))
+            V->morale = (uint8_t)(V->morale == 0 ? 0 : V->morale - 1 > 6 ? 6 : V->morale - 1);
+    }
+    for (int b = 0; b < *game_base_count; b++) {
+        struct base *B = &game_bases[b];
+        if (B->faction != faction) continue;
+        for (int i = 0; i <= B->queue_size; i++)
+            if (B->queue[i] == proto_old) B->queue[i] = proto_new;
+    }
+    if (proto_new >= BASIC_PROTOS && cost) game_protos[proto_new].flags |= PROTO_FLAG_BUILT;
+    if (proto_old >= BASIC_PROTOS) game_protos[proto_old].flags &= (uint16_t)~PROTO_FLAG_ACTIVE;
+    if (game_is_human(faction)) game_draw_map(1);
+    if (faction == *game_current_faction) game_console_update_data(game_console, 0);
+}
+
+// A design as the upgrade popup shows it: name, stats and abilities.
+static void describe_design(char *t, int proto) {
+    t[0] = 0;
+    strcat(t, proto_of(proto)->name);
+    strcat(t, text(0x682820));
+    strcat(t, text(0x682e9c));
+    game_say_stats_2(t, proto);
+    if (proto_of(proto)->abilities) {
+        strcat(t, text(0x682820));
+        for (int a = 0; a < ABILITY_COUNT; a++)
+            if (has_abil(proto, 1u << a)) strcat(t, game_strings_get(game_strings, game_abilities[a].abbreviation));
+    }
+    strcat(t, text(0x682e98));
+}
+
+// Offer to upgrade the faction's units of the old design to the new;
+// non-zero if they were (or, in a network game, if the other players were
+// told to). Not once the game is over until the final score is done. The
+// AI upgrades when the cost, less a discount that grows with the
+// difficulty level and the top-ranked faction's ranking, stays within a
+// share of its energy set by its power and tech priorities (more for a
+// defensive design); the discount halves once it has more energy than the
+// other ranked faction and 1000, and goes at 2000. The player is asked
+// (unless an earlier answer said not to ask again), or told when there
+// isn't enough energy; quietly (`quiet`), only if warnings bit 4 is set:
+// the original tests that bit, not the faction's. Nothing to pay asks
+// nothing, and does nothing quietly or for the AI.
+int upgrade_prototype(int faction, int proto_new, int proto_old, int quiet) {
+    if ((*game_state & GAME_STATE_DONE) && !(*game_state & GAME_STATE_FINAL_SCORE_DONE)) return 0;
+    struct faction_data *F = &game_factions[faction];
+    int cost = upgrade_cost(faction, proto_new, proto_old) * F->units_active[proto_old] * 10;
+    uint8_t bit = (uint8_t)(1u << (faction & 31));
+    if (!cost && (quiet || !(*game_human_factions & bit))) return 0;
+    if (!(*game_human_factions & bit)) {
+        int discount = *game_difficulty * cost / 10 / (8 - game_factions[game_ranked_faction[0]].ranking);
+        int credits = F->energy_credits;
+        if (credits > game_factions[game_ranked_faction[1]].energy_credits) {
+            if (credits >= 1000) discount /= 2;
+            if (credits >= 2000) discount = 0;
+        }
+        int share = ((proto_of(proto_new)->plan == PLAN_DEFENSIVE) + F->ai_power + F->ai_tech) * 2 + 1;
+        if (cost - discount > share * credits / 8) return 0;
+    } else {
+        if (faction != *game_current_faction) return 0;
+        if (cost) {
+            describe_design(game_battle_text, proto_old);
+            game_parse_says(0, game_battle_text, -1, -1);
+            describe_design(game_battle_text, proto_new);
+            game_parse_says(1, game_battle_text, -1, -1);
+            game_parse_num(0, cost);
+            game_parse_num(1, F->energy_credits);
+            game_parse_num(2, F->units_active[proto_old]);
+            // The popup: for aliens or not, short of energy or not, for a
+            // prototype or not; its picture by triad (land, sea, air).
+            static const uint32_t pics[2][2][3] = {{{0x6896d0, 0x6896c0, 0x6896b4}, {0x689770, 0x689760, 0x689754}},
+                                                   {{0x689684, 0x689674, 0x689664}, {0x68971c, 0x68970c, 0x6896fc}}};
+            static const uint32_t labels[2][2][2] = {{{0x6896ec, 0x6896dc}, {0x689790, 0x68977c}},
+                                                     {{0x6896a4, 0x689694}, {0x689740, 0x68972c}}};
+            int prototype = !(proto_of(proto_new)->flags & PROTO_FLAG_BUILT), tr = triad(proto_new);
+            int alien = (game_faction_defs[faction].rule_flags & RULE_FLAG_ALIEN) != 0;
+            int short_ = cost > F->energy_credits;
+            char *pic = text(pics[alien][short_][tr == TRIAD_AIR ? 2 : tr == TRIAD_SEA ? 1 : 0]);
+            char *label = text(labels[alien][short_][prototype]);
+            if (short_) {
+                if (quiet && !(*game_warnings & 4)) return 0;
+                game_popp(*game_script_file, label, 0, pic, 0);
+                return 0;
+            }
+            if (!*game_base_proto_upkeep) {
+                int answer = game_popp(*game_script_file, label, 0, pic, 0);
+                if (!answer) return 0;
+                if (answer > 1) *game_base_proto_upkeep = 1;
+            }
+        }
+    }
+    if ((*game_human_factions & bit) && *game_net_multiplayer) {
+        game_message_data(0x2411, 0, faction, proto_new, proto_old, 0);
+        if (game_net_daemon_receive(game_net_daemon))
+            while (game_net_daemon_receive(game_net_daemon)) {
+            }
+        return 1;
+    }
+    do_upgrade(faction, proto_new, proto_old);
+    return 1;
+}
+
+// Offer to upgrade, quietly, the faction's units of each design obsolete
+// for it to the new design: those of the same plan, group, triad and
+// chassis that it has units of, and the same of police, artillery,
+// antigrav struts, drop pods and amphibious pods, where the new design's
+// weapon (the same one, for a design with no attack), armor and speed are
+// no better than the old one's. (The comparisons run that way in the
+// original.)
+void upgrade_prototypes(int faction, int proto) {
+    const struct unit_proto *N = proto_of(proto);
+    uint8_t bit = (uint8_t)(1u << (faction & 31));
+    game_protos[proto].flags &= (uint16_t)~PROTO_FLAG_SEEN_ONLINE;
+    for (int i = 0; i < 2 * BASIC_PROTOS; i++) {
+        int p = i < BASIC_PROTOS ? i : faction * BASIC_PROTOS + i % BASIC_PROTOS;
+        if (p == proto) continue;
+        const struct unit_proto *O = proto_of(p);
+        if (!(O->flags & PROTO_FLAG_ACTIVE) || !(O->obsolete_factions & bit)) continue;
+        if (O->plan != N->plan || O->group != N->group || triad(p) != triad(proto)) continue;
+        if (!game_factions[faction].units_active[p]) continue;
+        int offense = game_weapons[N->weapon].offense;
+        if (offense ? offense > game_weapons[O->weapon].offense : N->weapon != O->weapon) continue;
+        if (has_abil(p, ABL_UPGRADE_SET) != has_abil(proto, ABL_UPGRADE_SET)) continue;
+        if (game_armor[N->armor].defense > game_armor[O->armor].defense) continue;
+        if (game_chassis[N->chassis].speed > game_chassis[O->chassis].speed || N->chassis != O->chassis) continue;
+        upgrade_prototype(faction, proto, p, 1);
+    }
+}
+
+// After a battle: the unit may gain a level of morale, short of Elite and
+// unless it is a missile or an unarmored non-combat unit; past
+// Disciplined (as morale_veh counts it) only on an even rand(). The
+// player is told of a human unit's new rank, under native life's names
+// for native units.
+void promote(int veh) {
+    struct veh *V = &game_vehs[veh];
+    const struct unit_proto *P = proto_of(V->proto);
+    if (game_chassis[P->chassis].missile) return;
+    if (P->plan >= PLAN_COLONY && game_armor[P->armor].defense <= 1) return;
+    if (morale_veh(veh, 1, 0) >= 6 || V->morale >= 6) return;
+    if (morale_veh(veh, 1, 0) > 2 && game_rand() % 2) return;
+    int before = morale_veh(veh, 1, 0);
+    V->morale++;
+    if (V->faction != *game_current_faction || !game_is_human(V->faction)) return;
+    int m = morale_veh(veh, 1, 0);
+    if (m == before) return;
+    game_parse_says(1, (char *)P->name, -1, -1);
+    if (V->proto < BASIC_PROTOS && game_weapons[P->weapon].offense < 0) {
+        game_parse_say(0, (int)(intptr_t)game_morale_names[m][1], -1, -1);
+        game_netmsg_pop(game_netmsg, text(0x68a0c0), -5000, 0, text(0x68a0b0));
+    } else {
+        game_parse_say(0, (int)(intptr_t)game_morale_names[m][0], -1, -1);
+        game_netmsg_pop(game_netmsg, text(0x68a0a8), -5000, 0, text(0x68a098));
+    }
+}
+
+// ---- Abilities ---------------------------------------------------------------
+
+// Give a design with no abilities yet the lowest one of `ability`, if the
+// faction has its tech and doesn't get it free (a faction bonus). Like
+// the original, never returns for no ability.
+void add_abil(uint32_t *abilities, uint32_t ability, int faction) {
+    if (*abilities) return;
+    int a = 0;
+    for (int32_t v = (int32_t)ability; !(v & 1); v >>= 1) a++;
+    if (!has_tech(game_abilities[a].preq_tech, faction)) return;
+    const struct faction_def *D = &game_faction_defs[faction];
+    for (int i = 0; i < D->bonus_count; i++)
+        if (D->bonus_id[i] == BONUS_FREE_ABILITY && has_tech(game_abilities[D->bonus_val1[i]].preq_tech, faction)
+            && a == D->bonus_val1[i])
+            return;
+    *abilities |= 1u << a;
+}
+
+// Whether the ability (an index) may go on a design of these parts: never
+// on a missile, and only on the triads, kinds of unit and chassis its
+// flags allow; without the expansion, none of Alien Crossfire's.
+int abil_cond(int ability, int chassis, int weapon, int armor) {
+    const struct rules_chassis *C = &game_chassis[chassis];
+    if (C->missile) return 0;
+    uint32_t flags = game_abilities[ability].flags;
+    if (C->triad == TRIAD_LAND && !(flags & AFLAG_LAND)) return 0;
+    if (C->triad == TRIAD_SEA && !(flags & AFLAG_SEA)) return 0;
+    if (C->triad == TRIAD_AIR && !(flags & AFLAG_AIR)) return 0;
+    int offense = game_weapons[weapon].offense, mode = game_weapons[weapon].mode;
+    if (offense) {
+        if (!(flags & AFLAG_COMBAT)) return 0;
+    } else if (!(flags & (mode == WMODE_TERRAFORM ? AFLAG_TERRAFORMER : AFLAG_NONCOMBAT))) {
+        return 0;
+    }
+    if (mode == WMODE_PROBE ? (flags & AFLAG_NOT_PROBE) != 0 : (flags & AFLAG_PROBE) != 0) return 0;
+    if (!*game_expansion && ((1u << (ability & 31)) & ABL_SMACX)) return 0;
+    if ((offense < 0 || game_armor[armor].defense < 0) && (flags & AFLAG_NOT_PSI)) return 0;
+    if ((flags & AFLAG_TRANSPORT) && mode != WMODE_TRANSPORT) return 0;
+    if ((flags & AFLAG_SLOW_CHASSIS) && C->speed > 1) return 0;
+    return 1;
+}
+
+// ---- The AI's look at bases, squares and other factions ---------------------
+
+// Whether a base is on the coast (see is_coast).
+int is_port(int base, int base_radius) { return is_coast(game_bases[base].x, game_bases[base].y, base_radius); }
+
+// Defenders for a base, as garrison_check asks, less one past five and
+// another past two.
+int defensive_check(int base) {
+    int n = garrison_check(base);
+    if (n > 5) n--;
+    if (n > 2) n--;
+    return n;
+}
+
+// Units to guard the faction's bases in a land region: one for every few
+// bases, fewer the more the faction likes to fight and fewer still where
+// it colonizes; one a base where it defends, and with faction flag
+// 0x40000000.
+int guard_check(int faction, int region) {
+    if (region >= LAND_REGION_COUNT) return 0;
+    const struct faction_data *F = &game_factions[faction];
+    int per = 2 - F->ai_fight;
+    if (F->region_base_plan[region] == PLAN_COLONY) per += 2;
+    else if (F->region_base_plan[region] == PLAN_DEFENSIVE) per = 1;
+    if (F->flags & FACTION_FLAG_UNK_40000000) per = 1;
+    return (F->region_total_bases[region] + per - 1) / per;
+}
+
+static int wrap_x(int x) {
+    if (*game_map_flat & 1) return x;
+    return x < 0 ? x + *game_map_width : x >= *game_map_width ? x - *game_map_width : x;
+}
+static int own_sensor_at(int faction, int x, int y) {
+    return is_sensor(x, y) && whose_territory(faction, x, y, NULL, 0) == faction;
+}
+
+// Whether a convoy may gather at a square: none of the units there
+// already carries resources (stack_check 9), and no base within two
+// squares works it.
+int can_convoy(int x, int y) {
+    if (stack_check(veh_at(x, y), 9, 3, -1, -1)) return 0;
+    for (int b = 0; b < *game_base_count; b++) {
+        const struct base *B = &game_bases[b];
+        if (vector_dist(x, y, B->x, B->y) > 2) continue;
+        int r = radius_move(B->x, B->y, x, y, BASE_RADIUS_SQUARES);
+        if (r >= 0 && (B->worked_tiles & (1u << r))) return 0;
+    }
+    return 1;
+}
+
+// Whether the AI should put a sensor on a square of its territory: none
+// of its own sensors within two squares; next to one of its bases with
+// none of its sensors near, or by its border; and a square that's no
+// good for much else (no special resource, no base, bore, condenser,
+// monolith, mine or solar collector; rocky, arid, or fungus above the
+// deep sea). Fungus there needs the tech to improve it.
+int good_sensor(int faction, int x, int y) {
+    if (whose_territory(faction, x, y, NULL, 0) != faction) return 0;
+    const struct map_tile *T = square(x, y);
+    if ((T->bits & MAP_FUNGUS) && (T->climate & 0xe0) >= 0x40
+        && !has_tech(game_rules_basic->tech_improve_fungus, faction))
+        return 0;
+    int why = 0;
+    for (int i = 0; i < 25; i++) {
+        int x2 = wrap_x(x + game_radius_x[i]), y2 = y + game_radius_y[i];
+        if (!on_map_(x2, y2)) continue;
+        if (own_sensor_at(faction, x2, y2)) return 0;
+        if (i >= 9) continue;
+        int b = base_at(x2, y2);
+        if (b >= 0 && game_bases[b].faction == faction) {
+            why |= 2;
+            int j = 0;
+            for (; j < 25; j++) {
+                int x3 = wrap_x(x2 + game_radius_x[j]), y3 = y2 + game_radius_y[j];
+                if (on_map_(x3, y3) && own_sensor_at(faction, x3, y3)) break;
+            }
+            if (j == 25) why |= 4;
+        }
+        if (whose_territory(faction, x2, y2, NULL, 0) != faction) why |= 1;
+    }
+    if (!why || bonus_at(x, y, 0)) return 0;
+    if ((T->bits & MAP_BASE) && (T->owner_site & 0xf) < 8) return 0;
+    if (T->bits & (MAP_THERMAL_BORE | MAP_CONDENSER | MAP_MONOLITH | MAP_MINE | MAP_SOLAR)) return 0;
+    if ((T->rocky_lock & 0xc0) > 0x40 || !(T->climate & 0x18)) return 1;
+    return (T->bits & MAP_FUNGUS) && (T->climate & 0xe0) >= 0x40;
+}
+
+// The faction's best weapon, armor and psi strengths (as weap_strat and
+// arm_strat rate them) and land speed; and its enemies' best: of the
+// factions it has a vendetta with, failing that any it has no treaty with,
+// then any it has a commlink with, then any but its pact partners.
+void enemy_capabilities(int faction) {
+    struct faction_data *F = &game_factions[faction];
+    F->best_psi_offense = veh_avail(BSC_MIND_WORMS, faction, -1) ? weap_strat(WEAPON_PSI_ATTACK, faction) : 0;
+    F->best_weapon_value = 1;
+    for (int w = 0; w < WEAPON_COUNT; w++) {
+        if (!has_tech(game_weapons[w].preq_tech, faction) || game_weapons[w].offense >= 99) continue;
+        int v = weap_strat(w, faction);
+        if (game_weapons[w].offense < 0 && v >= F->best_psi_offense) F->best_psi_offense = v;
+        if (v >= F->best_weapon_value) F->best_weapon_value = v;
+    }
+    F->best_psi_defense = veh_avail(BSC_MIND_WORMS, faction, -1) ? arm_strat(ARMOR_PSI_DEFENSE, faction) : 0;
+    F->best_armor_value = 1;
+    for (int a = 0; a < ARMOR_COUNT; a++) {
+        if (!has_tech(game_armor[a].preq_tech, faction)) continue;
+        int v = arm_strat(a, faction);
+        if (game_armor[a].defense < 0 && v >= F->best_psi_defense) F->best_psi_defense = v;
+        if (v >= F->best_armor_value) F->best_armor_value = v;
+    }
+    F->best_land_speed = 1;
+    for (int c = 0; c < CHASSIS_COUNT; c++) {
+        const struct rules_chassis *C = &game_chassis[c];
+        if (has_tech(C->preq_tech, faction) && C->triad == TRIAD_LAND && C->speed >= F->best_land_speed)
+            F->best_land_speed = C->speed;
+    }
+    F->enemy_best_weapon_value = F->enemy_best_armor_value = F->enemy_best_land_speed = 0;
+    F->enemy_best_psi_offense = F->enemy_best_psi_defense = 0;
+#define MAX_(a, b) ((a) > (b) ? (a) : (b))
+    for (int pass = 0; pass < 4 && !F->enemy_best_weapon_value; pass++)
+        for (int g = 1; g < FACTION_COUNT; g++) {
+            uint32_t d = F->diplo_status[g];
+            if (g == faction || (d & TREATY_PACT)) continue;
+            if (pass == 0 && !(d & TREATY_VENDETTA)) continue;
+            if (pass <= 1 && (d & TREATY_TREATY)) continue;
+            if (pass <= 2 && !(d & TREATY_COMMLINK)) continue;
+            const struct faction_data *G = &game_factions[g];
+            F->enemy_best_weapon_value = MAX_(F->enemy_best_weapon_value, G->best_weapon_value);
+            F->enemy_best_armor_value = MAX_(F->enemy_best_armor_value, G->best_armor_value);
+            F->enemy_best_land_speed = MAX_(F->enemy_best_land_speed, G->best_land_speed);
+            F->enemy_best_psi_offense = MAX_(F->enemy_best_psi_offense, G->best_psi_offense);
+            F->enemy_best_psi_defense = MAX_(F->enemy_best_psi_defense, G->best_psi_defense);
+        }
+#undef MAX_
+}
+
+// The AI's odds for its unit attacking the target, from `odds` (the
+// battle's, scaled by the caller): weighed by the cost of what it would
+// destroy against its own unit's (out in the open, the target's whole
+// stack, a fifth for each unit after the first, and half again with an
+// artifact there), and raised against support units, for land combat
+// units where the region's plan is to attack, at a base or one of its
+// goals (in the unit's own element, or where at most one combat unit
+// defends the base), and for the target's flag 0x20. Aircraft gain more
+// against formers (bombers, and at sea where bases are submerged, or on
+// orders 0x14 and 0x15) and missiles against units at sea, and at a base
+// with its land units next to it or with drop pod troops built; other
+// units at a base, by how many of its land units stand around it. Air
+// superiority units count half against armed units, other air attackers
+// a third (two thirds where the region's plan is defense). `base` is the
+// target's base, -1 for none, or less to look it up.
+int compute_odds(int odds, int faction, int veh, int target, int base) {
+    const struct veh *A = &game_vehs[veh], *D = &game_vehs[target];
+    const struct unit_proto *PA = proto_of(A->proto), *PD = proto_of(D->proto);
+    int x = D->x, y = D->y, tr = triad(A->proto), plan = PA->plan;
+    int missile = game_chassis[PA->chassis].missile;
+    if (base < -1) base = base_at(x, y);
+    const struct faction_data *F = &game_factions[faction];
+    int region_plan = F->region_base_plan[square(x, y)->region];
+    int v;
+    if (base < 0) {
+        int c = PD->cost;
+        v = ((stack_check(target, 7, -1, -1, -1) - c) / 5 + c) * odds;
+        if (stack_check(target, 2, 12, -1, -1)) v = v * 3 / 2;
+    } else {
+        v = PD->cost * odds;
+    }
+    odds = v / PA->cost;
+    if (PD->plan >= PLAN_NAVAL_TRANSPORT) odds *= 2;
+    if (plan <= PLAN_COMBAT && region_plan == PLAN_OFFENSIVE && tr == TRIAD_LAND) odds = odds * 3 / 2;
+    int sea = (square(x, y)->climate & 0xe0) < (ALT_SHORE_LINE << 5);
+    if (base >= 0 || game_at_goal(faction, 0, x, y)) {
+        if ((tr == TRIAD_SEA) == sea && tr != TRIAD_AIR)
+            odds *= 2;
+        else if (base >= 0 && stack_check(target, 1, -1, -1, -1) - stack_check(target, 0x13, -1, -1, -1) <= 1)
+            odds *= 2;
+    }
+    if (D->flags & 0x20) odds *= 4;
+    if (tr == TRIAD_AIR) {
+        if (missile && sea && base < 0) odds *= 2;
+        if (stack_check(target, 2, 9, -1, -1)) {
+            if (!missile) odds *= 2;
+            if (sea && (F->flags & FACTION_FLAG_BASE_SUBMERGED)) odds *= 2;
+            if (D->order == 0x14) odds *= 2;
+            if (D->order == 0x15) odds *= 2;
+        }
+        if (base >= 0) {
+            for (int i = 0; i < 8; i++) {
+                int x2 = wrap_x(x + game_radius_near_x[i]), y2 = y + game_radius_near_y[i];
+                if (!on_map_(x2, y2)) continue;
+                int u = veh_at(x2, y2);  // like the original, reads before the first unit for none
+                if (game_vehs[u].faction == faction && stack_check(u, 3, 0, -1, -1)) {
+                    odds *= 2;
+                    break;
+                }
+            }
+            int n = stack_check(target, 1, -1, -1, -1) - stack_check(target, 0x13, -1, -1, -1);
+            if (n <= F->units_active[A->proto] / 10 + 1)
+                for (int j = 0; j < BASIC_PROTOS; j++) {
+                    int p = faction * BASIC_PROTOS + j;
+                    uint16_t fl = game_protos[p].flags;
+                    if ((fl & PROTO_FLAG_ACTIVE) && (fl & PROTO_FLAG_BUILT) && F->units_active[p]
+                        && has_abil(p, ABL_DROP_POD)) {
+                        odds *= 2;
+                        if (missile) odds *= 2;
+                        break;
+                    }
+                }
+        }
+    } else if (base >= 0) {
+        int around = 0;
+        for (int i = 0; i < 8; i++) {
+            int x2 = wrap_x(x + game_radius_near_x[i]), y2 = y + game_radius_near_y[i];
+            if (!on_map_(x2, y2)) continue;
+            int u = veh_at(x2, y2);
+            if (game_vehs[u].faction == faction) around += stack_check(u, 3, 0, -1, -1);
+        }
+        int s = stack_check(target, 0x10, -1, -1, -1);
+        if (s)
+            while (around > s && odds < 1000000) odds *= 2, around -= s;
+    }
+    if (plan == PLAN_AIR_SUPERIORITY) {
+        if (triad(D->proto) == TRIAD_AIR) return odds;
+        return game_weapons[PD->weapon].offense ? odds / 2 : odds;
+    }
+    if (tr == TRIAD_AIR && plan == PLAN_OFFENSIVE && !missile)
+        return region_plan == PLAN_DEFENSIVE ? 2 * odds / 3 : odds / 3;
+    return odds;
+}
+
 extern struct hook_module veh_module;
 #define VEH (&veh_module)
 
@@ -2259,6 +2741,81 @@ SHADOW_WRITER(VEH, int, stack_veh, (int a, int b), (a, b), WRITES_STACKS, "%d, %
 SHADOW_WRITER(VEH, void, veh_kill, (int a), (a), hooks_writes_game(&w_), "%d", a)
 SHADOW_WRITER(VEH, void, stack_kill, (int a), (a), hooks_writes_game(&w_), "%d", a)
 SHADOW_WRITER(VEH, void, kill, (int a), (a), hooks_writes_game(&w_), "%d", a)
+
+// Upgrades write the factions' energy and unit counts, units, the bases'
+// queues, designs, the "don't ask again" answer and the popup's text.
+static void writes_upgrade(struct hook_writes *w) {
+    hooks_writes_add(w, game_factions, FACTION_COUNT * sizeof(struct faction_data));
+    hooks_writes_add(w, game_vehs, VEH_COUNT * sizeof(struct veh));
+    hooks_writes_add(w, game_bases, BASE_COUNT * sizeof(struct base));
+    hooks_writes_add(w, game_protos, PROTO_COUNT * sizeof(struct unit_proto));
+    hooks_writes_add(w, game_base_proto_upkeep, 4);
+    hooks_writes_add(w, game_battle_text, 0x400);
+}
+SHADOW3(VEH, int, upgrade_cost, int, int, int)
+SHADOW_WRITER(VEH, void, do_upgrade, (int a, int b, int c), (a, b, c), writes_upgrade(&w_), "%d, %d, %d", a, b, c)
+// The player is asked whether to upgrade, and a check can't give the
+// answer (held popups give 0): a human's upgrades run unchecked. A sweep
+// checks them, both runs getting 0.
+SHADOW_WRITER_CHECK(int, upgrade_prototype, (int a, int b, int c, int d), (a, b, c, d), orig_upgrade_prototype(a, b, c, d),
+                    writes_upgrade(&w_), "%d, %d, %d, %d", a, b, c, d)
+static int shadow_upgrade_prototype(int a, int b, int c, int d) {
+    if (hooks_nested) return orig_upgrade_prototype(a, b, c, d);
+    if (shadow_bypass()) return upgrade_prototype(a, b, c, d);
+    stats_upgrade_prototype.calls++;
+    shadow_tick(VEH);
+    if (game_is_human(a)) {
+        hooks_nested++;
+        int r = orig_upgrade_prototype(a, b, c, d);
+        hooks_nested--;
+        return r;
+    }
+    return check_upgrade_prototype(a, b, c, d);
+}
+SHADOW_WRITER_CHECK(void, upgrade_prototypes, (int a, int b), (a, b), orig_upgrade_prototypes(a, b), writes_upgrade(&w_),
+                    "%d, %d", a, b)
+static void shadow_upgrade_prototypes(int a, int b) {
+    if (hooks_nested) {
+        orig_upgrade_prototypes(a, b);
+        return;
+    }
+    if (shadow_bypass()) {
+        upgrade_prototypes(a, b);
+        return;
+    }
+    stats_upgrade_prototypes.calls++;
+    shadow_tick(VEH);
+    if (game_is_human(a)) {
+        hooks_nested++;
+        orig_upgrade_prototypes(a, b);
+        hooks_nested--;
+        return;
+    }
+    check_upgrade_prototypes(a, b);
+}
+SHADOW_WRITER(VEH, void, promote, (int a), (a), (WRITES(&game_vehs[a], sizeof(struct veh)), WRITES(game_rand_state(), 4)),
+              "%d", a)
+// add_abil() writes its first argument: both runs get the same copy.
+SHADOW_DECLARE(void, add_abil, (uint32_t *a, uint32_t b, int c))
+static void check_add_abil(uint32_t *a, uint32_t b, int c) {
+    uint32_t want = *a, got = *a;
+    hooks_nested++;
+    orig_add_abil(&want, b, c);
+    hooks_nested--;
+    add_abil(&got, b, c);
+    if (got != want) hooks_mismatch(&stats_add_abil, "(%#x, %#x, %d) = %#x, original %#x", *a, b, c, got, want);
+    *a = want;
+}
+SHADOW_WRITER_ENTRY(VEH, void, add_abil, (uint32_t *a, uint32_t b, int c), (a, b, c))
+SHADOW4(VEH, int, abil_cond, int, int, int, int)
+SHADOW2(VEH, int, is_port, int, int)
+SHADOW2(VEH, int, can_convoy, int, int)
+SHADOW3(VEH, int, good_sensor, int, int, int)
+SHADOW1(VEH, int, defensive_check, int)
+SHADOW2(VEH, int, guard_check, int, int)
+SHADOW_WRITER(VEH, void, enemy_capabilities, (int a), (a),
+              WRITES(&game_factions[a].best_weapon_value, 10 * sizeof(int32_t)), "%d", a)
+SHADOW5(VEH, int, compute_odds, int, int, int, int, int)
 
 // veh_at() is called constantly, so it's checked as a query; a square the
 // map marks with units but where the original found none (it then logs
@@ -2711,6 +3268,308 @@ static void sweep_wake(void) {
     check_wake_stack(-1);
 }
 
+// Upgrades, for each faction: the cost between every two of its designs;
+// some upgrades as the AI, its energy varied, and as the player (whose
+// popups give both runs 0), with and without the "don't ask again"
+// answer and the warning bit; and the upgrades a new design offers, with
+// every design obsolete for it. Once with the game over.
+static void sweep_upgrades(void) {
+    int t = *game_turn;
+    uint8_t humans = *game_human_factions;
+    int32_t current = *game_current_faction, upkeep = *game_base_proto_upkeep, warnings = *game_warnings;
+    uint32_t state = *game_state;
+    for (int f = 1; f < FACTION_COUNT; f++) {
+        struct faction_data *F = &game_factions[f];
+        int designs[2 * BASIC_PROTOS], n = 0, owned[2 * BASIC_PROTOS], m = 0;
+        for (int i = 0; i < 2 * BASIC_PROTOS; i++) {
+            int p = i < BASIC_PROTOS ? i : f * BASIC_PROTOS + i - BASIC_PROTOS;
+            if (!(game_protos[p].flags & PROTO_FLAG_ACTIVE)) continue;
+            designs[n++] = p;
+            if (F->units_active[p]) owned[m++] = p;
+        }
+        if (!n) continue;
+        for (int i = 0; i < n; i += 1 + (n > 24))
+            for (int j = 0; j < n; j++) {
+                check_upgrade_cost(f, designs[i], designs[j]);
+                // And the new design as one built or not.
+                uint16_t *flags = &game_protos[designs[i]].flags, kept = *flags;
+                *flags ^= PROTO_FLAG_BUILT;
+                check_upgrade_cost(f, designs[i], designs[j]);
+                *flags = kept;
+            }
+        if (!m) continue;
+        int32_t credits = F->energy_credits;
+        for (int k = 0; k < 8; k++) {
+            int a = designs[(k * 7 + t) % n], b = owned[(k * 3 + t) % m];
+            F->energy_credits = (k & 1) ? credits : (k * 977 + t * 31) % 2600;
+            if (k == 7) *game_state = GAME_STATE_DONE | (t & 1 ? GAME_STATE_FINAL_SCORE_DONE : 0);
+            check_upgrade_prototype(f, a, b, (k >> 1) & 1);
+            *game_state = state;
+            if (k < 2) check_do_upgrade(f, a, b);
+            *game_human_factions = (uint8_t)(humans | (1u << f));
+            *game_current_faction = (k & 4) ? current : f;
+            *game_base_proto_upkeep = k & 1;
+            *game_warnings = (k & 2) ? 4 : 0;
+            check_upgrade_prototype(f, a, b, (k >> 1) & 1);
+            check_upgrade_prototype(f, b, b, k & 1);
+            *game_human_factions = humans, *game_current_faction = current;
+            *game_base_proto_upkeep = upkeep, *game_warnings = warnings;
+        }
+        uint8_t obsolete[2 * BASIC_PROTOS];
+        for (int i = 0; i < n; i++) obsolete[i] = game_protos[designs[i]].obsolete_factions;
+        for (int k = 0; k < 3; k++) {
+            if (k) {
+                for (int i = 0; i < n; i++) game_protos[designs[i]].obsolete_factions |= (uint8_t)(1u << f);
+                F->energy_credits = k == 1 ? credits : 5000;
+            }
+            for (int i = (t + k) % 3; i < n; i += 3) check_upgrade_prototypes(f, designs[i]);
+        }
+        for (int i = 0; i < n; i++) game_protos[designs[i]].obsolete_factions = obsolete[i];
+        F->energy_credits = credits;
+    }
+}
+
+// Promotion: some units as they are, at each morale, as the player's (and
+// as native life's), and as missiles.
+static void sweep_promote(void) {
+    int t = *game_turn, vehs = *game_veh_count;
+    uint8_t humans = *game_human_factions;
+    for (int k = 0; k < 24 && vehs; k++) {
+        int v = (k * 29 + t) % vehs;
+        struct veh *V = &game_vehs[v];
+        struct veh saved = *V;
+        check_promote(v);
+        for (int m = 0; m <= 6; m += 1 + (k & 1)) {
+            V->morale = (uint8_t)m;
+            check_promote(v);
+            *game_human_factions = (uint8_t)(humans | (1u << V->faction));
+            V->faction = (uint8_t)*game_current_faction;
+            *game_human_factions |= (uint8_t)(1u << V->faction);
+            check_promote(v);
+            V->proto = (k & 2) ? BSC_MIND_WORMS : (int16_t)(k * 5 % BASIC_PROTOS);
+            if (game_protos[V->proto].flags & PROTO_FLAG_ACTIVE) check_promote(v);
+            *V = saved;
+            *game_human_factions = humans;
+        }
+        struct rules_chassis *C = &game_chassis[proto_of(V->proto)->chassis];
+        uint8_t missile = C->missile;
+        C->missile = 1;
+        check_promote(v);
+        C->missile = missile;
+    }
+}
+
+// Abilities: each one on every chassis and weapon with three armors, with
+// and without the expansion, and with its flags varied; each added to a design with none and with
+// some, for each faction, also with it as a free faction bonus.
+static void sweep_abilities(void) {
+    int t = *game_turn;
+    int32_t expansion = *game_expansion;
+    for (int e = 0; e < 3; e++) {
+        *game_expansion = e == 1 ? !expansion : expansion;
+        for (int a = 0; a < ABILITY_COUNT; a++)
+            for (int c = 0; c < CHASSIS_COUNT; c++)
+                for (int w = 0; w < WEAPON_COUNT; w++) {
+                    check_abil_cond(a, c, w, 0);
+                    check_abil_cond(a, c, w, ARMOR_PSI_DEFENSE);
+                    check_abil_cond(a, c, w, (a + c + w + t) % ARMOR_COUNT);
+                    if (e < 2) continue;
+                    // The flags varied (the game's own leave some unused).
+                    uint32_t *flags = &game_abilities[a].flags, kept = *flags;
+                    *flags = kept ^ (0xfffu & (0x9e3779b9u * (uint32_t)(a * 31 + c * 7 + w + t)) >> 4);
+                    check_abil_cond(a, c, w, (a + w) % ARMOR_COUNT);
+                    *flags = kept;
+                }
+    }
+    *game_expansion = expansion;
+    for (int f = 0; f < FACTION_COUNT; f++) {
+        struct faction_def *D = &game_faction_defs[f];
+        for (int round = 0; round < 2; round++) {
+            int32_t count = D->bonus_count, id = D->bonus_id[7], val = D->bonus_val1[7];
+            for (int a = 0; a < ABILITY_COUNT; a++) {
+                if (round) {
+                    if (count >= 8) break;
+                    D->bonus_count = count + 1, D->bonus_id[count] = BONUS_FREE_ABILITY;
+                    D->bonus_val1[count] = (a + t) % 3 ? a : (a + 1) % ABILITY_COUNT;
+                }
+                uint32_t none = 0, some = 1u << ((a + t) % ABILITY_COUNT);
+                check_add_abil(&none, 1u << a, f);
+                check_add_abil(&some, 1u << a, f);
+                none = 0;
+                check_add_abil(&none, (1u << a) | 0x80000000u, f);
+                if (round) D->bonus_count = count, D->bonus_id[count] = id, D->bonus_val1[count] = val;
+            }
+        }
+    }
+}
+
+// Bases, regions and squares: every base as a port and for defenders;
+// each faction's guards for each region (and past the land regions),
+// with its fighting priority, plans and flag varied; convoys on the
+// squares around bases, with a unit there carrying; sensors around the
+// faction's bases (for the base's faction and another), with the square's
+// terrain varied and with a sensor next to it.
+static void sweep_places(void) {
+    int t = *game_turn, bases = *game_base_count;
+    for (int b = 0; b < bases; b++) {
+        check_is_port(b, 0);
+        check_is_port(b, 1);
+        struct base *B = &game_bases[b];
+        int8_t pop = B->pop_size;
+        for (int k = 0; k < 6; k++) {
+            B->pop_size = (int8_t)(k * 5 + 1 + (b + t) % 4);
+            check_defensive_check(b);
+        }
+        B->pop_size = pop;
+    }
+    for (int f = 0; f < FACTION_COUNT; f++) {
+        struct faction_data *F = &game_factions[f];
+        int32_t fight = F->ai_fight;
+        uint32_t flags = F->flags;
+        uint8_t plans[LAND_REGION_COUNT];
+        memcpy(plans, F->region_base_plan, sizeof plans);
+        for (int k = 0; k < 4; k++) {
+            if (k) {
+                F->ai_fight = (f + k + t) % 3 - 1;
+                for (int r = 0; r < LAND_REGION_COUNT; r++)
+                    F->region_base_plan[r] = (uint8_t)((r + k) % 3 == 0 ? PLAN_COLONY : (r + k) % 3 == 1 ? PLAN_DEFENSIVE : r % 5);
+                if (k == 3) F->flags ^= FACTION_FLAG_UNK_40000000;
+            }
+            for (int r = 0; r <= LAND_REGION_COUNT + 1; r++) check_guard_check(f, r);
+        }
+        F->ai_fight = fight, F->flags = flags;
+        memcpy(F->region_base_plan, plans, sizeof plans);
+    }
+    for (int b = t % 2; b < bases; b += 2) {
+        const struct base *B = &game_bases[b];
+        for (int i = 0; i < 25; i++) {
+            int x = xrange(B->x + game_radius_x[i]), y = B->y + game_radius_y[i];
+            if (on_map_(x, y)) check_can_convoy(x, y);
+        }
+    }
+    for (int k = 0; k < 8 && *game_veh_count; k++) {
+        struct veh *V = &game_vehs[(k * 31 + t) % *game_veh_count];
+        if (!stack_sound((int)(V - game_vehs)) || !on_map_(V->x, V->y)) continue;
+        uint8_t order = V->order;
+        V->order = (uint8_t)(k & 1 ? 3 : order);
+        check_can_convoy(V->x, V->y);
+        V->order = order;
+    }
+    for (int b = t % 3; b < bases; b += 3) {
+        const struct base *B = &game_bases[b];
+        int f = B->faction;
+        for (int i = 0; i < 25; i++) {
+            int x = xrange(B->x + game_radius_x[i]), y = B->y + game_radius_y[i];
+            if (!on_map_(x, y)) continue;
+            check_good_sensor(f, x, y);
+            if (i % 4 == b % 4) check_good_sensor((f + 1 + i) % FACTION_COUNT, x, y);
+            if (i < 1 || i > 8) continue;
+            struct map_tile *T = square(x, y), saved = *T;
+            static const uint32_t bits[] = {MAP_FUNGUS, MAP_MINE, MAP_SOLAR, MAP_MONOLITH, MAP_FUNGUS | MAP_ROAD, 0};
+            for (int k = 0; k < 6; k++) {
+                T->bits = (saved.bits & ~(uint32_t)(MAP_FUNGUS | MAP_MINE | MAP_SOLAR | MAP_MONOLITH | MAP_CONDENSER
+                                                     | MAP_THERMAL_BORE | MAP_RESOURCE))
+                          | bits[(k + i + t) % 6];
+                T->rocky_lock = (uint8_t)((saved.rocky_lock & 0x3f) | ((k + i) % 3) << 6);
+                T->climate = (uint8_t)((saved.climate & 0x07) | ((k + b) % 3) << 3 | ((k & 1) ? saved.climate & 0xe0 : (k + i) % 5 << 5));
+                check_good_sensor(f, x, y);
+            }
+            *T = saved;
+            // A sensor of its own next to it, or further.
+            int j = 9 + (i + t) % 16;
+            int sx = xrange(x + game_radius_x[j]), sy = y + game_radius_y[j];
+            if (!on_map_(sx, sy)) continue;
+            struct map_tile *S = square(sx, sy);
+            uint32_t sbits = S->bits;
+            S->bits |= MAP_SENSOR;
+            check_good_sensor(f, x, y);
+            S->bits = sbits;
+        }
+    }
+}
+
+// The AI's view of its enemies, for each faction, under several treaties
+// with the others, their best values made distinct, and with every tech.
+static void sweep_enemies(void) {
+    int t = *game_turn;
+    int32_t best[FACTION_COUNT][5];
+    for (int g = 0; g < FACTION_COUNT; g++) {
+        struct faction_data *G = &game_factions[g];
+        memcpy(best[g], &G->best_weapon_value, sizeof best[g]);
+    }
+    static const uint32_t treaties[] = {TREATY_VENDETTA | TREATY_COMMLINK, TREATY_TREATY | TREATY_COMMLINK, TREATY_COMMLINK,
+                                        0, TREATY_PACT | TREATY_COMMLINK, TREATY_VENDETTA, TREATY_VENDETTA | TREATY_TREATY};
+    uint8_t achieved[TECH_COUNT];
+    memcpy(achieved, game_tech_achieved, sizeof achieved);
+    for (int round = 0; round < 3; round++) {
+        if (round == 2) memset(game_tech_achieved, 0xff, sizeof achieved);
+        for (int f = 0; f < FACTION_COUNT; f++) {
+            struct faction_data *F = &game_factions[f];
+            uint32_t diplo[FACTION_COUNT];
+            memcpy(diplo, F->diplo_status, sizeof diplo);
+            for (int k = 0; k < 4; k++) {
+                if (k) {
+                    for (int g = 0; g < FACTION_COUNT; g++) {
+                        uint32_t d = treaties[(g * k + f + t) % 7];
+                        F->diplo_status[g] = (diplo[g] & ~(uint32_t)(TREATY_PACT | TREATY_TREATY | TREATY_COMMLINK | TREATY_VENDETTA)) | d;
+                    }
+                    for (int g = 0; g < FACTION_COUNT; g++) {
+                        struct faction_data *G = &game_factions[g];
+                        int32_t *b = &G->best_weapon_value;
+                        for (int i = 0; i < 5; i++) b[i] = round ? (g * 7 + i * 3 + k + t) % 13 : best[g][i];
+                    }
+                }
+                check_enemy_capabilities(f);
+            }
+            memcpy(F->diplo_status, diplo, sizeof diplo);
+        }
+        for (int g = 0; g < FACTION_COUNT; g++) memcpy(&game_factions[g].best_weapon_value, best[g], sizeof best[g]);
+    }
+    memcpy(game_tech_achieved, achieved, sizeof achieved);
+}
+
+// The AI's odds: some of its units against other factions' units, out in
+// the open, at their bases and looked up, as each kind of design (air
+// ones included), with the region's plan, a goal at the square, the
+// faction's flag and the target's flags and orders varied.
+static void sweep_odds(void) {
+    int t = *game_turn, vehs = *game_veh_count, bases = *game_base_count;
+    int designs[PROTO_COUNT], count = 0;
+    for (int p = 0; p < PROTO_COUNT; p++)
+        if ((game_protos[p].flags & PROTO_FLAG_ACTIVE) && game_protos[p].cost) designs[count++] = p;
+    for (int k = 0; k < 40 && vehs && count; k++) {
+        int v = (k * 41 + t) % vehs, o = (k * 17 + t * 3 + 1) % vehs;
+        if (!stack_sound(o) || !on_map_(game_vehs[o].x, game_vehs[o].y)) continue;
+        struct veh *A = &game_vehs[v], *D = &game_vehs[o];
+        struct veh sa = *A, sd = *D;
+        int f = (k & 3) ? A->faction : (A->faction + k) % FACTION_COUNT;
+        struct faction_data *F = &game_factions[f];
+        uint32_t flags = F->flags;
+        struct goal goal = F->goals[0];
+        uint8_t *rp = &F->region_base_plan[square(D->x, D->y)->region], plan = *rp;
+        int b = base_at(D->x, D->y);
+        for (int r = 0; r < 4; r++) {
+            if (r) {
+                A->proto = (int16_t)designs[(k * 13 + r * 7 + t) % count];
+                *rp = (uint8_t)(r == 1 ? PLAN_OFFENSIVE : r == 2 ? PLAN_DEFENSIVE : (k + t) % 9);
+                D->flags ^= (uint16_t)((r & 1) ? 0x20 : 0);
+                D->order = (uint8_t)(r == 2 ? 0x14 : r == 3 ? 0x15 : D->order);
+                if (r == 2) F->flags ^= FACTION_FLAG_BASE_SUBMERGED;
+                if (r == 3) F->goals[0] = (struct goal){0, 1, D->x, D->y, -1};
+            }
+            if (!proto_of(A->proto)->cost) continue;
+            static const int odds[] = {1, 7, 100, 999};
+            int n = odds[(k + r) % 4];
+            check_compute_odds(n, f, v, o, -1);
+            check_compute_odds(n, f, v, o, -2);
+            if (b >= 0) check_compute_odds(n, f, v, o, b);
+            if (bases) check_compute_odds(n * 3, f, v, o, (k + r + t) % bases);
+        }
+        *A = sa, *D = sd;
+        F->flags = flags, F->goals[0] = goal, *rp = plan;
+    }
+}
+
 // Every design against every faction and a spread of bases, units and
 // values.
 static void veh_sweep(void) {
@@ -2795,6 +3654,12 @@ static void veh_sweep(void) {
     sweep_designs();
     sweep_wake();
     sweep_varied();
+    sweep_upgrades();
+    sweep_promote();
+    sweep_abilities();
+    sweep_places();
+    sweep_enemies();
+    sweep_odds();
     sweep_stacks();
     hooks_sweeping = sweeping;
 }
@@ -2880,5 +3745,19 @@ static const struct hook veh_hooks[] = {
     HOOK(0x5c08c0, veh_kill, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),                 // sub esp, 8
     HOOK(0x5b9510, stack_kill, PUSH_EBP_MOV_EBP_ESP, 0x56, 0x8b, 0x75, 0x08),         // push esi; mov esi, [ebp+8]
     HOOK(0x5c0b00, kill, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10),                     // sub esp, 16
+    HOOK(0x4efd50, upgrade_cost, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x0c),             // mov eax, [ebp+12]
+    HOOK(0x4efb50, do_upgrade, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53),                     // push ecx; push ebx
+    HOOK(0x4efe80, upgrade_prototype, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),        // sub esp, 12
+    HOOK(0x4f0460, upgrade_prototypes, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),       // sub esp, 8
+    HOOK(0x5062b0, promote, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x57),                  // push ebx; push esi; push edi
+    HOOK(0x581190, add_abil, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                 // mov eax, [ebp+8]
+    HOOK(0x584b50, abil_cond, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x0c),                // mov eax, [ebp+12]
+    HOOK(0x579a00, is_port, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                  // mov eax, [ebp+8]
+    HOOK(0x564d90, can_convoy, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x45, 0x0c),         // push ecx; mov eax, [ebp+12]
+    HOOK(0x564eb0, good_sensor, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x14),              // sub esp, 20
+    HOOK(0x560d30, defensive_check, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),          // mov eax, [ebp+8]
+    HOOK(0x560d50, guard_check, PUSH_EBP_MOV_EBP_ESP, 0x56, 0x8b, 0x75, 0x0c),        // push esi; mov esi, [ebp+12]
+    HOOK(0x560dd0, enemy_capabilities, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53),             // push ecx; push ebx
+    HOOK(0x565f20, compute_odds, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x20),             // sub esp, 32
 };
 struct hook_module veh_module = {"veh", veh_hooks, HOOK_COUNT(veh_hooks), veh_sweep, NULL, -1};

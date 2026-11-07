@@ -13,6 +13,7 @@
 #include "base.h"
 #include "game.h"
 #include "shadow.h"
+#include "veh.h"
 
 static inline struct map_tile *tile(int x, int y) { return &(*game_map)[(x >> 1) + y * *game_map_half_width]; }
 static inline int has_facility(int base, int facility) { return game_has_facility(&game_bases[base], facility); }
@@ -263,7 +264,7 @@ static void build_unit(int proto, int faction, int human) {
                     int q = i < 64 ? i : i % 64 + faction * 64;
                     uint16_t f = game_protos[q].flags;
                     if ((f & PROTO_FLAG_ACTIVE) && (f & PROTO_FLAG_BUILT) && (f & PROTO_FLAG_SEEN_ONLINE))
-                        game_upgrade_prototypes(faction, q);
+                        upgrade_prototypes(faction, q);
                 }
         }
     }

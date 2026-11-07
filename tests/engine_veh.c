@@ -60,6 +60,10 @@ static char battle_text[256];
 static char *label_list[1200], **labels_ptr = label_list;
 static int32_t mod_counts[4], mods[8], morales[2];
 static char mod_labels[8][80], *terrain;
+static int drawn_map, console_updates, goal_here;
+static void draw_map_stub(int u) { drawn_map++; }
+static void __attribute__((thiscall)) console_update_stub(void *c, int u) { console_updates++; }
+static int at_goal_stub(int f, int type, int x, int y) { return goal_here; }
 
 int main(void) {
     game_map = &tiles_ptr, game_map_width = &width, game_map_height = &height, game_map_half_width = &half_width;
@@ -749,6 +753,196 @@ int main(void) {
     EXPECT(vehs[0].order, 0x18);
     EXPECT(vehs[0].status_icon, 7);
     EXPECT(vehs[0].waypoint_x[0] * 10 + vehs[0].waypoint_y[0], 31);
+
+    // Upgrade costs: the new design's cost and its parts' and speed's
+    // gains; much more for a design not yet built; halved with the Nano
+    // Factory.
+    EXPECT(upgrade_cost(1, 65, 64), 8 + 7);
+    EXPECT(upgrade_cost(1, 64, 65), 15 * 16 + 2 + 3);
+    projects[22] = 1;
+    EXPECT(upgrade_cost(1, 64, 65), (15 * 16 + 2 + 3) / 2);
+    projects[22] = -1;
+
+    // An upgrade: paid for, the unit turned over (with a level of morale
+    // for high morale training), the queue changed, the old design retired.
+    {
+        static uint8_t humans = 0;
+        static int32_t difficulty = 3, ranked[2] = {2, 3}, warnings = 0, proto_upkeep = 0;
+        game_human_factions = &humans, game_difficulty = &difficulty, game_ranked_faction = ranked;
+        game_warnings = &warnings, game_base_proto_upkeep = &proto_upkeep;
+        game_draw_map = draw_map_stub, game_console_update_data = console_update_stub;
+        veh_count = 1;
+        vehs[0] = (struct veh){.x = 2, .y = 2, .proto = 64, .faction = 1, .morale = 2, .next_in_stack = -1, .prev_in_stack = -1};
+        factions[1].units_active[64] = 1, factions[1].energy_credits = 1000;
+        bases[1].faction = 1, bases[1].queue_size = 1, bases[1].queue[0] = 3, bases[1].queue[1] = 64;
+        protos[65].abilities |= 0x4000;
+        do_upgrade(1, 65, 64);
+        EXPECT(factions[1].energy_credits, 1000 - 150);
+        EXPECT(vehs[0].proto, 65);
+        EXPECT(vehs[0].morale, 3);
+        EXPECT(factions[1].units_active[64] * 10 + factions[1].units_active[65], 1);
+        EXPECT(bases[1].queue[1], 65);
+        EXPECT(protos[64].flags & PROTO_FLAG_ACTIVE, 0);
+        EXPECT(drawn_map * 10 + console_updates, 1);  // the player's, not human
+        protos[64].flags |= PROTO_FLAG_ACTIVE;
+
+        // The AI's choice: within an eighth of its energy for each step
+        // of its priorities, less the discount.
+        vehs[0].proto = 64, factions[1].units_active[64] = 1, factions[1].units_active[65] = 0;
+        factions[1].energy_credits = 1200, factions[1].ai_power = 0, factions[1].ai_tech = 0;
+        factions[2].ranking = 6, factions[3].energy_credits = 5000;
+        EXPECT(upgrade_prototype(1, 65, 64, 1), 1);  // 150 - 3 * 150 / 10 / 2 = 128 <= 150
+        EXPECT(vehs[0].proto, 65);
+        vehs[0].proto = 64, factions[1].units_active[64] = 1, factions[1].units_active[65] = 0;
+        factions[1].energy_credits = 1000;
+        EXPECT(upgrade_prototype(1, 65, 64, 1), 0);  // 128 > 125
+        factions[3].energy_credits = 0;
+        EXPECT(upgrade_prototype(1, 65, 64, 1), 0);  // more energy than the other: 150 - 11 > 125
+        factions[1].energy_credits = 2000;
+        EXPECT(upgrade_prototype(1, 65, 64, 1), 1);  // no discount, but 150 <= 250
+        state = GAME_STATE_DONE;
+        EXPECT(upgrade_prototype(1, 65, 64, 1), 0);
+        state = 0;
+
+        // Obsolete designs: the faction's units of a design of the same
+        // plan, group, triad and chassis, the new one's parts no better.
+        vehs[0].proto = 64, factions[1].units_active[64] = 1, factions[1].units_active[65] = 0;
+        factions[1].energy_credits = 5000, protos[64].flags |= PROTO_FLAG_ACTIVE;
+        protos[66] = protos[64];
+        protos[66].flags = PROTO_FLAG_ACTIVE | PROTO_FLAG_BUILT, protos[66].armor = 0, protos[64].obsolete_factions = 1 << 1;
+        upgrade_prototypes(1, 66);
+        EXPECT(vehs[0].proto, 66);
+        vehs[0].proto = 64, factions[1].units_active[64] = 1, factions[1].units_active[66] = 0;
+        protos[66].weapon = 2;  // a stronger weapon
+        upgrade_prototypes(1, 66);
+        EXPECT(vehs[0].proto, 64);
+        protos[66] = (struct unit_proto){0}, protos[64].obsolete_factions = 0, protos[65].abilities &= ~0x4000u;
+        bases[1].queue_size = 0;
+
+        // Promotion: a level, unless a missile; the player told.
+        vehs[0].morale = 0;
+        promote(0);
+        EXPECT(vehs[0].morale, 1);
+        chassis[0].missile = 1;
+        promote(0);
+        EXPECT(vehs[0].morale, 1);
+        chassis[0].missile = 0;
+        vehs[0].morale = 6;
+        promote(0);
+        EXPECT(vehs[0].morale, 6);
+        veh_count = 0;
+    }
+
+    // Abilities: one the faction gets free isn't added, nor one without
+    // its tech; nothing is added to a design with abilities.
+    uint32_t abls = 0;
+    defs[1].bonus_count = 1;
+    add_abil(&abls, 1u << 4, 1);
+    EXPECT(abls, 0);
+    add_abil(&abls, 1u << 5, 1);
+    EXPECT(abls, 0);
+    abilities[5].preq_tech = TECH_NONE;
+    add_abil(&abls, (1u << 5) | (1u << 9), 1);
+    EXPECT(abls, 1u << 5);
+    add_abil(&abls, 1u << 6, 1);
+    EXPECT(abls, 1u << 5);
+    abilities[4].flags = 0x1 | 0x8;  // land, combat
+    EXPECT(abil_cond(4, 0, 0, 1), 1);
+    EXPECT(abil_cond(4, 1, 0, 1), 0);  // at sea
+    EXPECT(abil_cond(4, 0, 3, 1), 0);  // no weapon
+    abilities[4].flags |= 0x20 | 0x100;  // non-combat, transports only
+    EXPECT(abil_cond(4, 0, 3, 1), 1);
+    weapons[3].mode = 8;
+    EXPECT(abil_cond(4, 0, 3, 1), 0);
+    weapons[3].mode = 7, abilities[4].flags |= 0x80;  // not psi
+    EXPECT(abil_cond(4, 0, 3, 2), 0);
+    abilities[24].flags = 0xff & ~0x80;
+    EXPECT(abil_cond(24, 0, 0, 0), 1);
+    expansion = 0;
+    EXPECT(abil_cond(24, 0, 0, 0), 0);
+    expansion = 1;
+
+    // Guards for a region, and none past the land regions.
+    factions[1].flags = 0;
+    factions[1].region_total_bases[3] = 5;
+    EXPECT(guard_check(1, 3), 3);
+    factions[1].region_base_plan[3] = PLAN_COLONY;
+    EXPECT(guard_check(1, 3), 2);
+    factions[1].ai_fight = -1;
+    EXPECT(guard_check(1, 3), 1);
+    factions[1].region_base_plan[3] = PLAN_DEFENSIVE;
+    EXPECT(guard_check(1, 3), 5);
+    EXPECT(guard_check(1, 64), 0);
+    factions[1].ai_fight = 0, factions[1].region_base_plan[3] = 0;
+
+    // The enemy's best: from factions at war first, else those with no treaty.
+    factions[2].best_weapon_value = 9, factions[3].best_weapon_value = 5, factions[3].best_land_speed = 2;
+    factions[1].diplo_status[2] = TREATY_COMMLINK, factions[1].diplo_status[3] = TREATY_COMMLINK | TREATY_VENDETTA;
+    enemy_capabilities(1);
+    EXPECT(factions[1].best_weapon_value, 6);
+    EXPECT(factions[1].enemy_best_weapon_value, 5);
+    EXPECT(factions[1].enemy_best_land_speed, 2);
+    factions[1].diplo_status[3] = TREATY_PACT;
+    enemy_capabilities(1);
+    EXPECT(factions[1].enemy_best_weapon_value, 9);
+    EXPECT(factions[1].enemy_best_land_speed, 0);
+    factions[1].diplo_status[2] = factions[1].diplo_status[3] = 0;
+
+    // A port: by the sea.
+    EXPECT(is_port(1, 0), 0);
+    tiles[3 + 3 * (W / 2)].climate = 0;  // (7, 3) is ocean
+    EXPECT(is_port(1, 0) != 0, 1);
+    tiles[3 + 3 * (W / 2)].climate = 3 << 5;
+
+    // Convoys: not on a square a base works.
+    bases[0].worked_tiles = bases[1].worked_tiles = 0;
+    EXPECT(can_convoy(6, 3), 1);
+    bases[1].worked_tiles = 1u << 1;  // (6, 3)
+    EXPECT(can_convoy(6, 3), 0);
+    bases[1].worked_tiles = 0;
+
+    // A sensor: in its territory next to its base, on rocky or arid
+    // ground, but not on a mine or by another of its sensors.
+    {
+        static int32_t seed = 0;
+        game_map_seed = &seed;
+        struct map_tile *b = &tiles[3 + 4 * (W / 2)], *t = &tiles[2 + 3 * (W / 2)];  // (6, 4) and (5, 3)
+        b->bits |= MAP_BASE;
+        EXPECT(good_sensor(1, 5, 3), 0);  // no one's territory
+        for (int i = 0; i < W / 2 * H; i++) tiles[i].territory = 1;
+        t->climate = 3 << 5 | 1 << 3;
+        EXPECT(good_sensor(1, 5, 3), 0);  // rainy flat land
+        t->climate = 3 << 5;  // arid
+        EXPECT(good_sensor(1, 5, 3), 1);
+        t->bits |= MAP_MINE;
+        EXPECT(good_sensor(1, 5, 3), 0);
+        t->bits &= ~(uint32_t)MAP_MINE, tiles[1 + 2 * (W / 2)].bits |= MAP_SENSOR;  // (3, 2)
+        EXPECT(good_sensor(1, 5, 3), 1);  // out of reach
+        tiles[3 + 2 * (W / 2)].bits |= MAP_SENSOR;  // (6, 2)
+        EXPECT(good_sensor(1, 5, 3), 0);
+        tiles[1 + 2 * (W / 2)].bits &= ~MAP_SENSOR, tiles[3 + 2 * (W / 2)].bits &= ~MAP_SENSOR;
+        for (int i = 0; i < W / 2 * H; i++) tiles[i].territory = 0;
+        t->climate = 3 << 5, b->bits &= ~(uint32_t)MAP_BASE;
+    }
+
+    // The AI's odds: by the cost of what it would destroy against its own
+    // unit's, half again on land where it means to attack, doubled at a
+    // goal for a unit in its element.
+    game_at_goal = at_goal_stub, factions[1].region_base_plan[1] = 0;
+    veh_count = 2;
+    vehs[0] = (struct veh){.x = 2, .y = 2, .proto = 64, .faction = 1, .next_in_stack = -1, .prev_in_stack = -1};
+    vehs[1] = (struct veh){.x = 4, .y = 2, .proto = 65, .faction = 2, .next_in_stack = -1, .prev_in_stack = -1};
+    EXPECT(compute_odds(100, 1, 0, 1, -1), 8 * 100 / 10 * 3 / 2);
+    goal_here = 1;
+    EXPECT(compute_odds(100, 1, 0, 1, -1), 8 * 100 / 10 * 3 / 2 * 2);
+    goal_here = 0;
+    vehs[1].flags = 0x20;
+    EXPECT(compute_odds(100, 1, 0, 1, -1), 8 * 100 / 10 * 3 / 2 * 4);
+    vehs[1].flags = 0;
+    protos[64].plan = PLAN_AIR_SUPERIORITY;
+    EXPECT(compute_odds(100, 1, 0, 1, -1), 80);  // against an air unit
+    protos[64].plan = 0;
+    veh_count = 0;
     veh_count = 0;
     if (failures) return 1;
     printf("engine_veh: all tests passed\n");

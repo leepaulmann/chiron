@@ -167,7 +167,7 @@ struct faction_data {
     int32_t best_psi_defense, best_armor_value, best_land_speed;
     int32_t enemy_best_weapon_value;
     int32_t enemy_best_armor_value;
-    GAME_PAD(0x834, 0x840);
+    int32_t enemy_best_land_speed, enemy_best_psi_offense, enemy_best_psi_defense;
     // Counted by enemy_strategy among the units of factions it has a
     // commlink with and isn't at peace with: transports, the reactors of
     // naval superiority ships, air attackers that can pierce its best
@@ -230,6 +230,7 @@ GAME_AT(struct faction_data, diplo_stolen_techs, 0x200);
 GAME_AT(struct faction_data, best_armor_value, 0x824);
 GAME_AT(struct faction_data, sites, 0x1eac);
 GAME_AT(struct faction_data, enemy_best_armor_value, 0x830);
+GAME_AT(struct faction_data, enemy_best_psi_defense, 0x83c);
 GAME_AT(struct faction_data, enemy_missiles, 0x850);
 GAME_AT(struct faction_data, mil_attack, 0x1064);
 GAME_AT(struct faction_data, target_kinds, 0x1078);
@@ -979,7 +980,6 @@ extern int (*game_ascending)(int faction);                 // may it build the A
 extern int (*game_veh_cost)(int proto, int base, int *unk);
 extern void (*game_prune_protos)(int faction, int proto, int unk);
 extern int (*game_morale_mod)(int base, int faction, int triad);
-extern void (*game_upgrade_prototypes)(int faction, int proto);
 extern void (*game_set_dirty)(void);
 extern void (*game_interlude)(int id, char *text, int unk1, int unk2);
 extern int (*game_generators)(int faction, int *count);
@@ -1147,8 +1147,18 @@ extern int (*game_want_monolith)(int veh);
 extern void (*game_bases_reset)(int region, int faction, int same_plan);  // rethinks the region's builds
 extern int (*game_terraform_cost)(int x, int y, int faction);
 extern int (*game_contiguous)(int faction, int other, int region, int by_sea);
-extern void (*game_enemy_capabilities)(int faction);
 extern int(__attribute__((thiscall)) * game_console_upgrade)(void *console, int veh);  // 0 when it can't
+// For upgrades and promotions: a design's stats as text, each morale
+// level's name (and native life's), the message bar's notices, the
+// console's refresh, and a network game's message to the other players.
+extern void (*game_say_stats_2)(char *buf, int proto);
+extern char *(*game_morale_names)[2];
+extern void *game_netmsg;
+extern void(__attribute__((thiscall)) * game_netmsg_pop)(void *netmsg, char *label, int delay, int unk, char *sound);
+extern void(__attribute__((thiscall)) * game_console_update_data)(void *console, int unk);
+extern void (*game_message_data)(int type, int unk, int a, int b, int c, int d);
+extern void *game_net_daemon;
+extern int(__attribute__((thiscall)) * game_net_daemon_receive)(void *daemon);
 extern void (*game_del_site)(int faction, int type, int x, int y, int unk);
 extern void (*game_x_pop)(char *label, int unk);  // a popup from script.txt
 // base_at(): set while its "Base Bits Error" is being reported, and the two
