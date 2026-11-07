@@ -2110,7 +2110,7 @@ void faction_upkeep(int faction) {
     if (!f->base_count && !f->units_active[PROTO_COLONY_POD] && !f->units_active[PROTO_SEA_ESCAPE_POD])
         game_eliminate_player(faction, 0);
     *game_control_upkeep_a = 0;
-    int32_t *path = game_path;
+    int32_t *path = (int32_t *)game_path;
     path[6] = path[7] = -1;  // the path finder's destination
     uint32_t state = *game_state;
     if (full_turn(state)) {
@@ -2206,7 +2206,7 @@ void name_base_release(void) { held_name.on = 0; }
 // tables of the game's path finder (from the heap, sized by the map), which
 // base_connect() leaves its last search in and reads again.
 static void writes_path(struct hook_writes *w) {
-    struct { int32_t *map; int16_t *x, *y; } *p = game_path;
+    struct { int32_t *map; int16_t *x, *y; } *p = (void *)game_path;
     size_t area = (size_t)*game_map_area;
     if (p->map) hooks_writes_add(w, p->map, area * 4);
     if (p->x) hooks_writes_add(w, p->x, area * 2);

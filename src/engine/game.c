@@ -102,7 +102,7 @@ int (*game_has_abil)(int proto, uint32_t ability);
 void(__attribute__((thiscall)) * game_path_continents)(void *path);
 int(__attribute__((thiscall)) * game_path_find)(void *path, int x1, int y1, int x2, int y2, int veh, int faction, int flags, int unk);
 int(__attribute__((thiscall)) * game_path_sensors)(void *path, int faction, int *x, int *y);
-void *game_path;
+struct game_path *game_path;
 void (*game_draw_radius)(int x, int y, int radius, int unk);
 int (*game_base_find2)(int x, int y, int faction);
 void (*game_delete_landmark)(int x, int y);
@@ -466,7 +466,7 @@ void game_bind(struct pe_image *exe) {
     game_path_continents = (void *)code_at(exe, 0x59c790);
     game_path_find = (void *)code_at(exe, 0x59a530);
     game_path_sensors = (void *)code_at(exe, 0x59cca0);
-    game_path = code_at(exe, 0x945b00);
+    game_path = (struct game_path *)code_at(exe, 0x945b00);
     game_draw_radius = (void *)code_at(exe, 0x46aef0);
     game_base_find2 = (void *)code_at(exe, 0x4e3c60);
     game_delete_landmark = (void *)code_at(exe, 0x5927d0);

@@ -1712,7 +1712,7 @@ int main(void) {
     // with no bases or colony pods is out.
     static uint8_t social_table[SOCIAL_CATEGORIES * SOCIAL_CATEGORY_SIZE];
     static int32_t path_table[16];
-    game_social_effects = social_table, game_path = path_table;
+    game_social_effects = social_table, game_path = (void *)path_table;
     game_enemy_diplomacy = diplomacy_stub, game_enemy_strategy = strategy_stub, game_social_ai = social_ai_stub;
     game_call_council = call_council_stub;
     // The Council can be called: faction 1 holds the Empath Guild.

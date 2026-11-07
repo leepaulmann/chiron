@@ -988,7 +988,7 @@ extern struct hook_module strategy_module;
 // The AI's strategy writes the game's state and, through bases_reset(),
 // may search paths.
 static void writes_path(struct hook_writes *w) {
-    struct { int32_t *map; int16_t *x, *y; } *p = game_path;
+    struct { int32_t *map; int16_t *x, *y; } *p = (void *)game_path;
     size_t area = (size_t)*game_map_area;
     if (p->map) hooks_writes_add(w, p->map, area * 4);
     if (p->x) hooks_writes_add(w, p->x, area * 2);

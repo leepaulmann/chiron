@@ -1239,7 +1239,21 @@ extern struct rules_ability *game_abilities;
 extern int (*game_abil_index)(uint32_t flag);
 extern int (*game_can_terraform)(int faction, int x, int y, int unk, int base);
 extern int (*game_terrain_avail)(int terraform, int sea, int faction);
-extern void *game_path;
+// The path finder's object: a table the size of the map, and the x and y
+// lists it uses as a queue (squares are added at `tail` and taken from
+// `head`).
+struct game_path {
+    int32_t *map;
+    int16_t *x, *y;
+    int32_t tail, head;
+    int32_t faction;
+    int32_t x_dst, y_dst;
+    int32_t unk_20;
+    int32_t faction2;
+    int32_t veh;
+};
+_Static_assert(sizeof(struct game_path) == 0x2c, "game_path size");
+extern struct game_path *game_path;
 
 // Point the variables above at a loaded terranx.exe.
 void game_bind(struct pe_image *exe);
