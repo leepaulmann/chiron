@@ -216,7 +216,10 @@ module at a time. So far:
   base, nerve stapling, bombarding and pillaging, artillery fire,
   self-destruct, obliterating a base, tectonic and fungal missiles, and
   psi gates;
-- combat around the battle: units killed (artifacts captured, the
+- combat: the battle itself (who fights, artillery and air superiority,
+  the odds a player is shown, nerve gas, the rounds, boarding, retreat,
+  promotion, collateral damage, bases falling, and the battle report);
+  units killed (artifacts captured, the
   credits for native life), stacks and chaff cleared after a fight,
   attacks that break treaties, interceptors scrambled, orbital defenses
   shooting down a missile, planet busters, and probe teams' odds and
