@@ -200,9 +200,12 @@ module at a time. So far:
 - spotting: what a unit sees as it moves (squares, bases and units, the
   contacts it makes and the units it wakes), and the squares, bases and
   stacks a faction has seen;
-- the path finder's map work: numbering every continent and sea, which
-  seas each continent touches, the coarse map the AI plans on, and the
-  land a faction holds around a square;
+- the path finder: the route search behind every unit's moves (with its
+  costs for terrain, roads, fungus, zones of control and borders), a
+  unit's next step towards its waypoint, zones of control, the AI's choice
+  of sensor sites; and its map work: numbering every continent and sea,
+  which seas each continent touches, the coarse map the AI plans on, and
+  the land a faction holds around a square;
 - scores: the year, objectives, the factions' rankings (with the AI's
   rolls to turn on the leader), the score and its rating by difficulty;
 - the Planetary Council: votes, who may stand for governor, whether a
