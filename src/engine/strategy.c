@@ -1120,4 +1120,7 @@ static const struct hook strategy_hooks[] = {
     HOOK(0x579e00, init_goals, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),            // mov eax, [ebp+8]
     HOOK(0x579e70, del_site, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x45, 0x08),        // push ecx; mov eax, [ebp+8]
 };
-struct hook_module strategy_module = {"strategy", strategy_hooks, HOOK_COUNT(strategy_hooks), strategy_sweep, NULL, -1};
+// The path finder is called only from inside other checks, so its sweep
+// runs with the strategy sweep, once a turn.
+extern struct hook_module path_module;
+struct hook_module strategy_module = {"strategy", strategy_hooks, HOOK_COUNT(strategy_hooks), strategy_sweep, &path_module, -1};

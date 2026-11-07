@@ -194,10 +194,20 @@ module at a time. So far:
   decision, the units and queues switched) and promoting units; which
   abilities a design may have; ports, convoys and sensor sites; the
   garrisons the AI wants; its view of its enemies' best units, and its
-  odds of an attack;
+  odds of an attack; naming designs, retiring them (their units refitted,
+  turned scouts or disbanded), marking superseded ones obsolete, and
+  proposing new ones;
 - spotting: what a unit sees as it moves (squares, bases and units, the
   contacts it makes and the units it wakes), and the squares, bases and
-  stacks a faction has seen.
+  stacks a faction has seen;
+- the path finder's map work: numbering every continent and sea, which
+  seas each continent touches, the coarse map the AI plans on, and the
+  land a faction holds around a square;
+- scores: the year, objectives, the factions' rankings (with the AI's
+  rolls to turn on the leader), the score and its rating by difficulty;
+- the Planetary Council: votes, who may stand for governor, whether a
+  faction may call the Council, and the AI's stand and vote on each
+  proposal.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once
