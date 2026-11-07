@@ -179,6 +179,59 @@ int main(void) {
     EXPECT(vehs[0].status_icon, 0);
     EXPECT(kills, 0);
 
+    // Goals and sites, on faction 3's.
+    {
+        struct faction_data *F = &factions[3];
+        init_goals(3);
+        EXPECT(F->goals[0].type, -1);
+        EXPECT(F->sites[SITE_COUNT - 1].type, -1);
+        add_goal(3, 2, 3, 4, 2, 7);
+        EXPECT(F->goals[0].type, 2);
+        EXPECT(F->goals[0].base, 7);
+        EXPECT(at_goal(3, 2, 4, 2), 1);
+        EXPECT(at_goal(3, 3, 4, 2), 0);
+        add_goal(3, 2, 5, 4, 2, 9);  // raises the priority, keeps the base
+        EXPECT(F->goals[0].priority, 5);
+        EXPECT(F->goals[0].base, 7);
+        add_goal(3, 2, 1, 4, 2, 9);  // never lowers it
+        EXPECT(F->goals[0].priority, 5);
+        add_goal(3, 2, 1, W, 2, -1);  // off the map
+        add_goal(3, 2, 1, 0, -1, -1);
+        EXPECT(F->goals[1].type, -1);
+        // Full: the new goal replaces the one of least value below it.
+        for (int i = 0; i < GOAL_COUNT; i++) F->goals[i] = (struct goal){1, 6, i % W, 0, 0};
+        F->goals[10].priority = 4, F->goals[20].priority = -3, F->goals[30].priority = 2;
+        add_goal(3, 5, 5, 1, 3, -1);
+        EXPECT(F->goals[20].type, 5);  // worth 100 - 3, against 20 - 4 and 20 - 2
+        EXPECT(F->goals[30].type, 1);
+        add_goal(3, 5, 1, 2, 3, -1);  // nothing left below priority 1
+        EXPECT(at_goal(3, 5, 2, 3), 0);
+        // A new site adds a goal to match.
+        init_goals(3);
+        add_site(3, 3, 2, 4, 2);
+        EXPECT(F->sites[0].type, 3);
+        EXPECT(at_site(3, 3, 4, 2), 1);
+        EXPECT(at_goal(3, 3, 4, 2), 1);
+        add_site(3, 3, 4, 4, 2);
+        EXPECT(F->sites[0].priority, 4);
+        EXPECT(F->goals[0].priority, 2);  // only a new site adds a goal
+        // wipe_goals: negates this turn's goals, frees last turn's, adds the sites back.
+        F->goals[1] = (struct goal){6, -2, 1, 1, 0};
+        F->goals[2] = (struct goal){6, 3, 3, 1, 0};
+        wipe_goals(3);
+        EXPECT(F->goals[1].type, -1);
+        EXPECT(F->goals[2].priority, -3);
+        EXPECT(F->goals[0].priority, 4);  // the site's goal again, at the site's priority
+        // del_site: within the distance, and the goals at those sites.
+        add_site(3, 8, 1, 2, 4);
+        del_site(3, 8, 6, 4, 2);
+        EXPECT(at_site(3, 8, 2, 4), 1);
+        del_site(3, 8, 4, 4, 2);
+        EXPECT(at_site(3, 8, 2, 4), 0);
+        EXPECT(at_goal(3, 8, 2, 4), 0);
+        EXPECT(at_site(3, 3, 4, 2), 1);
+    }
+
     if (failures) return 1;
     printf("engine_strategy: all tests passed\n");
     return 0;

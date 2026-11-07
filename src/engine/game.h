@@ -86,7 +86,7 @@ struct goal {
     int32_t x, y, base;
 };
 _Static_assert(sizeof(struct goal) == 0x10, "goal size");
-enum { GOAL_COUNT = 75 };
+enum { GOAL_COUNT = 75, SITE_COUNT = 25 };
 enum {
     GOAL_ATTACK = 0, GOAL_DEFEND = 2, GOAL_SCOUT = 3, GOAL_UNK_6 = 6, GOAL_COLONIZE = 8, GOAL_TERRAFORM = 9,
     GOAL_ARTILLERY = 16, GOAL_RAISE_LAND = 41,
@@ -206,7 +206,7 @@ struct faction_data {
     uint8_t region_territory_pods[REGION_COUNT];
     uint8_t region_base_plan[REGION_COUNT];  // PLAN_* for the AI
     struct goal goals[GOAL_COUNT];  // the AI's, for this turn
-    struct goal sites[25];  // places the AI means to settle (type 3) or otherwise act on
+    struct goal sites[SITE_COUNT];  // places the AI means to settle (type 3) or otherwise act on
     GAME_PAD(0x203c, 0x205c);
     // News of the secret projects other factions have begun: bitmask()'s
     // byte index and bit, so 8 bits a word.
@@ -454,7 +454,7 @@ enum { FACTION_FLAG_MAP_REVEALED = 0x200, FACTION_FLAG_MAINT_HALF = 0x20, FACTIO
 
 enum { TREATY_UNK_8000000 = 0x8000000 };  // with TREATY_COMMLINK, whose_territory() names the owner
 
-enum { GAME_STATE_DONE = 0x1, GAME_STATE_FINAL_SCORE_DONE = 0x8, GAME_STATE_OMNISCIENT = 0x80, GAME_STATE_RANKED = 0x200 /* set by rankings() late in the game */, GAME_STATE_VOLCANO = 0x20000, GAME_STATE_PERIHELION = 0x100000 };  // game_state bits
+enum { GAME_STATE_DONE = 0x1, GAME_STATE_FINAL_SCORE_DONE = 0x8, GAME_STATE_OMNISCIENT = 0x80, GAME_STATE_RANKED = 0x200 /* set by rankings() late in the game */, GAME_STATE_DEBUG = 0x1000, GAME_STATE_VOLCANO = 0x20000, GAME_STATE_PERIHELION = 0x100000 };  // game_state bits
 enum { FACTION_FLAG_BASE_SUBMERGED = 0x80000 };  // faction_data.flags
 
 // ---- The map -------------------------------------------------------------------
@@ -1165,6 +1165,10 @@ extern void (*game_x_pop)(char *label, int unk);  // a popup from script.txt
 // flags that decide whether the popup shows and the Ctrl key is read.
 extern int32_t *game_base_bits_reporting, *game_base_bits_popup, *game_base_bits_quiet;
 extern void (*game_wipe_goals)(int faction);
+// The debugging build's warning (format, arguments), and add_site()'s format and buffer for it.
+extern void (*game_danger)(const char *format, char *buffer, int a, int b, int c);
+extern const char *game_text_add_site;
+extern char *game_text_buffer;
 // The AI's choice of what a base builds.
 extern int (*game_speed_proto)(int proto);              // moves a turn, in thirds
 extern int (*game_worm_mod)(int base, int faction);     // morale against native life

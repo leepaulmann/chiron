@@ -506,6 +506,36 @@ int main(void) {
     EXPECT(at(7, 1)->territory, -1);
     EXPECT(at(7, 1)->bits2 & MAP2_CHANGED, MAP2_CHANGED);
 
+    // world_site, on plain land (rainfall 1, rockiness 1) with no resources
+    // or pods: the 8 neighbours count as forest-like ground, the square
+    // itself against, (7 * 3 + 6) / 4 = 6.
+    {
+        static struct map_tile saved[W / 2 * H];
+        memcpy(saved, tiles, sizeof tiles);
+        int seed = *game_map_seed, saved_turn = turn;
+        *game_map_seed = 0, turn = 0;
+        for (int i = 0; i < W / 2 * H; i++)
+            tiles[i] = (struct map_tile){.climate = 3 << 5 | 1 << 3, .rocky_lock = 1 << 6, .region = 1, .territory = -1};
+        EXPECT(world_site(4, 2, 0), 6);
+        EXPECT(world_site(4, 2, 1), 6);  // the wrong kind, but no bases near
+        for (int i = 0; i < W / 2 * H; i++) tiles[i].bits = MAP_RIVER;
+        EXPECT(world_site(4, 2, 0), 8);  // 9 rivers, / 4
+        for (int i = 0; i < W / 2 * H; i++) tiles[i].bits = MAP_BASE_RADIUS;
+        EXPECT(world_site(4, 2, 0), 1);
+        for (int i = 0; i < W / 2 * H; i++) tiles[i].bits = MAP_FUNGUS;
+        EXPECT(world_site(4, 2, 0), 0);  // fungus on the square itself
+        at(4, 2)->bits = 0;
+        EXPECT(world_site(4, 2, 0), 3);  // 8 fungus squares farmed: (8 + 1) / 3
+        turn = 151;
+        EXPECT(world_site(4, 2, 0), 1);  // late in the game fungus counts against
+        at(4, 2)->bits = MAP_MONOLITH;
+        EXPECT(world_site(4, 2, 0), 0);
+        at(4, 2)->bits = 0, at(4, 2)->rocky_lock = 2 << 6;
+        EXPECT(world_site(4, 2, 0), 0);
+        memcpy(tiles, saved, sizeof tiles);
+        *game_map_seed = seed, turn = saved_turn;
+    }
+
     if (failures) return 1;
     puts("PASS");
     return 0;

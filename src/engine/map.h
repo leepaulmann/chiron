@@ -32,6 +32,7 @@ int elev_at(int x, int y);
 int minerals_at(int x, int y);
 int bonus_at(int x, int y, int unused);
 int goody_at(int x, int y);
+int world_site(int x, int y, int sea);  // how good a place for a base, 0 to 15
 
 // Around a square.
 int is_coast(int x, int y, int base_radius);

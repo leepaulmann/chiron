@@ -160,7 +160,9 @@ module at a time. So far:
   rivals'), the goals they suggest, disbanding obsolete and stranded units,
   each region's plan of offense, defense or expansion, raising land
   towards other regions, choosing a base to attack from, and every unit's
-  orders;
+  orders; and the goals and sites it keeps (adding, finding and removing
+  them, and carrying them from turn to turn) with its rating of each
+  square as a place for a new base;
 - what a base builds next, for the AI and the governor: every unit,
   facility and secret project it can build, scored by the faction's
   priorities and what its bases and units already cover; then setting it,

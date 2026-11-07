@@ -757,6 +757,92 @@ void reset_territory(void) {
         }
 }
 
+// How good a square is for a new base, from 1 to 15, or 0 where none may
+// go; `sea` asks for a sea base. Bases already near count against it
+// (twice over when the square is the wrong kind for the base), and so does
+// rocky ground. Resources, landmarks, pods, farmland, sea within reach of
+// a large body of water and rivers count for it, the square itself less
+// or against. Late in the game (after turn 150) fungus in the radius
+// counts against it as well.
+//
+// The original keeps a pointer to the last square of the radius it looked
+// at (the outermost on the map), and adds 4 if that square, not the base's
+// own, has bits 0x4000 or 0x40000000 set; this is kept.
+int world_site(int x, int y, int sea) {
+    int near = 0;  // bases in the outer ring, the nearest four doubly so
+    for (int i = 21; i < 49; i++) {
+        int x2 = xrange(x + game_radius_x[i]), y2 = y + game_radius_y[i];
+        if (!on_map(x2, y2)) continue;
+        const struct map_tile *t = tile(x2, y2);
+        if (!(t->bits & MAP_BASE)) continue;
+        near++;
+        if (i - 21 >= 4) continue;
+        near++;
+        if ((tile(x, y)->climate & 0xe0) < 0x60 && (t->climate & 0xe0) < 0x60) near += 2;
+    }
+    int score = 0, farms = 0, forest = 0, fungus = 0, rocky = 0, big_sea = 0, rivers = 0, deep = 0, ocean = 0;
+    const struct map_tile *last = NULL;
+    for (int i = 0; i < 21; i++) {
+        int x2 = xrange(x + game_radius_x[i]), y2 = y + game_radius_y[i];
+        if (!on_map(x2, y2)) continue;
+        const struct map_tile *t = last = tile(x2, y2);
+        int alt = t->climate & 0xe0;
+        if (alt < 0x60) {
+            ocean++;
+            if (alt < 0x40) deep++;
+            if (i < 9 && game_continents[t->region].tile_count >= 50) big_sea = 1;
+            if (!i) continue;
+            if (bonus_at(x2, y2, 1) && !((t->bits & MAP_FUNGUS) && alt >= 0x40)) score++;
+            continue;
+        }
+        int rock = t->rocky_lock >> 6;
+        if (rock && i && rock > 1) rocky++;
+        if (!(t->bits & MAP_FUNGUS)) {
+            if (bonus_at(x2, y2, 1)) score += i ? 2 : -1;
+            int32_t lm = (int32_t)t->bits2, code = (int32_t)(t->bits2 & MAP2_LANDMARK_CODE);
+            if ((lm & 0x80000002) == 2 && code < 0x9000000) score += i ? 1 : -1;  // volcano
+            if ((lm & 0x80000001) == 1 && code < 0x9000000) score += i ? 2 : -1;  // crater
+            if ((lm & 0x80000008) == 8) score += i ? 1 : -3;                      // uranium flats
+            if ((lm & 0x80000004) == 4 && alt >= 0x60) score += 2;               // jungle
+            if (i && goody_at(x2, y2)) score++;
+        }
+        int wet = t->climate >> 3 & 3;  // the original also totals this, and never uses it
+        int elev = (t->climate >> 5) - 2;
+        if (elev < 0) elev = 0;
+        if (rock == 2 || (t->bits2 & 0x80000002) == 2) wet = 0;
+        uint32_t bits = t->bits;
+        int fung = bits & MAP_FUNGUS;
+        if (fung) fungus++;
+        if (bits & MAP_BASE_RADIUS) continue;
+        if (bits & (MAP_FOREST | MAP_MONOLITH)) {
+            forest += i ? 1 : -1;
+            if ((bits & MAP_MONOLITH) && !(bits & MAP_FOREST) && (wet > 1 || elev > 1)) forest += i ? 1 : -2;
+        } else if (wet && rock == 1) {
+            if (elev && !fung) {
+                forest += i ? 1 : -1;
+            } else {
+                farms += i ? 1 : -1;
+                if (wet > 1 && !fung) farms += i ? 1 : -1;
+            }
+        }
+        if (bits & MAP_RIVER) rivers++;
+    }
+    int v = score + rivers / 4;
+    if (big_sea) v += sea ? -2 : 4;
+    if (last->bits & (MAP_UNK_4000 | MAP_UNK_40000000)) v += 4;
+    if (sea) v += deep / 2 + (ocean - big_sea) / 2;
+    else v -= deep / 2 + (ocean - big_sea) / 2;
+    v += (forest * 3 + 6) / 4 + (farms + 1) / 3;
+    if (*game_turn > 150) v -= fungus / 3;
+    const struct map_tile *t = tile(x, y);
+    int alt = t->climate & 0xe0, wrong = (alt < 0x60) != sea;
+    v -= rocky / 4 + (wrong + 1) * near;
+    if (((t->bits & MAP_FUNGUS) && alt >= 0x40) || (t->bits & MAP_MONOLITH)) return 0;
+    if ((t->rocky_lock & 0xc0) > 0x40 && alt >= 0x60) return 0;
+    if (wrong && near >= 4) return 0;
+    return v < 1 ? 1 : v > 15 ? 15 : v;
+}
+
 // ---- Hooks and shadow checks ------------------------------------------------
 
 // Functions that read squares or bases start the sweep; the others can be
@@ -790,6 +876,7 @@ SHADOW2(MAP, int, elev_at, int, int)
 SHADOW2(MAP, int, minerals_at, int, int)
 SHADOW3(MAP, int, bonus_at, int, int, int)
 SHADOW2(MAP, int, goody_at, int, int)
+SHADOW3(MAP, int, world_site, int, int, int)
 SHADOW3(MAP, int, is_coast, int, int, int)
 SHADOW3(MAP, int, find_landmark, int, int, int)
 SHADOW2(MAP, int, near_landmark, int, int)
@@ -906,6 +993,14 @@ static void sweep_squares(void) {
             check_minerals_at(x, y);
             check_bonus_at(x, y, 0);
             check_goody_at(x, y);
+            check_world_site(x, y, 0);
+            check_world_site(x, y, 1);
+            if ((x + y + slice) % 16 == 0) {  // the other side of turn 150
+                int turn = *game_turn;
+                *game_turn = turn > 150 ? 0 : 151;
+                check_world_site(x, y, 0);
+                *game_turn = turn;
+            }
             check_is_coast(x, y, 0);
             check_is_coast(x, y, 1);
             for (int f = 0; f < FACTION_COUNT; f++) {
@@ -1071,6 +1166,7 @@ static const struct hook map_hooks[] = {
     HOOK(0x591f00, minerals_at, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x0c),
     HOOK(0x592030, bonus_at, PUSH_EBP_MOV_EBP_ESP, LOAD_HALF_WIDTH),
     HOOK(0x592140, goody_at, PUSH_EBP_MOV_EBP_ESP, LOAD_HALF_WIDTH),
+    HOOK(0x5c4fd0, world_site, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x3c),  // sub esp, 60
     HOOK(0x4e49d0, is_coast, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x45, 0x10),  // push ecx; mov eax, [ebp+16]
     HOOK(0x592550, find_landmark, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x45, 0x10),
     HOOK(0x5c5bd0, near_landmark, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x8b, 0x1d, 0x8c, 0x98, 0x94, 0x00),  // push ebx; mov ebx, [0x94988c]

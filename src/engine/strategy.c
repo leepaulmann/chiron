@@ -867,6 +867,121 @@ void enemy_strategy(int faction) {
     game_wipe_goals(faction);
 }
 
+// The AI's goals and sites. Each faction keeps 75 goals, rebuilt every
+// turn, and 25 sites, longer-lived goals (places to settle, mostly) that
+// wipe_goals() turns back into goals each turn. A goal of type -1 is a
+// free slot.
+
+// Adds a goal at a square on the map, or raises the priority of one of the
+// same type already there (its base is left as it was). Otherwise the goal
+// takes a free slot or, failing that, the one of least value whose
+// priority is below the new one's: a free slot counts 1000, a goal of
+// priority p above 0 counts 20 - p, and one of priority 0 or below (last
+// turn's, which wipe_goals() negated) 100 + p. If every goal is worth more
+// to keep, the new one is dropped.
+void add_goal(int faction, int type, int priority, int x, int y, int base) {
+    if (y < 0 || y >= *game_map_height || x < 0 || x >= *game_map_width) return;
+    struct goal *goals = game_factions[faction].goals;
+    for (int i = 0; i < GOAL_COUNT; i++) {
+        struct goal *g = &goals[i];
+        if (g->x == x && g->y == y && g->type == type) {
+            if (g->priority < priority) g->priority = (int16_t)priority;
+            return;
+        }
+    }
+    int best = -1, best_score = 0;
+    for (int i = 0; i < GOAL_COUNT; i++) {
+        const struct goal *g = &goals[i];
+        if (g->type >= 0 && g->priority >= priority) continue;
+        int score = g->type < 0 ? 1000 : g->priority > 0 ? 20 - g->priority : g->priority + 100;
+        if (score > best_score) best_score = score, best = i;
+    }
+    if (best < 0) return;
+    struct goal *g = &goals[best];
+    g->x = x, g->y = y, g->type = (int16_t)type, g->priority = (int16_t)priority, g->base = base;
+}
+
+// Adds a site the same way, then a goal to match it. Unlike add_goal()
+// there is no range check, the replacement counts any goal of positive or
+// negative priority as 20 - p, and the site's base is never set. The
+// debugging build's warning for a square off the map grid (x + y odd) is
+// kept.
+void add_site(int faction, int type, int priority, int x, int y) {
+    if (((x ^ y) & 1) && (*game_state & GAME_STATE_DEBUG)) game_danger(game_text_add_site, game_text_buffer, x, y, type);
+    struct goal *sites = game_factions[faction].sites;
+    for (int i = 0; i < SITE_COUNT; i++) {
+        struct goal *s = &sites[i];
+        if (s->x == x && s->y == y && s->type == type) {
+            if (s->priority < priority) s->priority = (int16_t)priority;
+            return;
+        }
+    }
+    int best = -1, best_score = 0;
+    for (int i = 0; i < SITE_COUNT; i++) {
+        const struct goal *s = &sites[i];
+        if (s->type >= 0 && s->priority >= priority) continue;
+        int score = s->type < 0 ? 1000 : 20 - s->priority;
+        if (score > best_score) best_score = score, best = i;
+    }
+    if (best < 0) return;
+    struct goal *s = &sites[best];
+    s->x = x, s->y = y, s->type = (int16_t)type, s->priority = (int16_t)priority;
+    add_goal(faction, s->type, (int16_t)priority, s->x, s->y, -1);
+}
+
+int at_goal(int faction, int type, int x, int y) {
+    const struct goal *goals = game_factions[faction].goals;
+    for (int i = 0; i < GOAL_COUNT; i++)
+        if (goals[i].x == x && goals[i].y == y && goals[i].type == type) return 1;
+    return 0;
+}
+
+int at_site(int faction, int type, int x, int y) {
+    const struct goal *sites = game_factions[faction].sites;
+    for (int i = 0; i < SITE_COUNT; i++)
+        if (sites[i].x == x && sites[i].y == y && sites[i].type == type) return 1;
+    return 0;
+}
+
+// At the end of a faction's strategy: this turn's goals are kept with
+// their priorities negated, so they lose out to new ones (and a goal whose
+// priority was already negative, from the turn before, is freed); then
+// each site is added back as a goal.
+void wipe_goals(int faction) {
+    struct faction_data *F = &game_factions[faction];
+    for (int i = 0; i < GOAL_COUNT; i++) {
+        struct goal *g = &F->goals[i];
+        if (g->priority < 0) g->type = -1;
+        else g->priority = (int16_t)-g->priority;
+    }
+    for (int i = 0; i < SITE_COUNT; i++) {
+        const struct goal *s = &F->sites[i];
+        if (s->type >= 0) add_goal(faction, s->type, s->priority, s->x, s->y, -1);
+    }
+}
+
+// Frees every goal and site.
+void init_goals(int faction) {
+    struct faction_data *F = &game_factions[faction];
+    for (int i = 0; i < GOAL_COUNT; i++) F->goals[i] = (struct goal){-1, 0, 0, 0, 0};
+    for (int i = 0; i < SITE_COUNT; i++) F->sites[i] = (struct goal){-1, 0, 0, 0, 0};
+}
+
+// Removes the sites of a type within a distance of a square, and the goals
+// of that type at those sites.
+void del_site(int faction, int type, int x, int y, int dist) {
+    struct faction_data *F = &game_factions[faction];
+    for (int i = 0; i < SITE_COUNT; i++) {
+        struct goal *s = &F->sites[i];
+        if (s->type != type || vector_dist(x, y, s->x, s->y) > dist) continue;
+        s->type = -1, s->priority = 0;
+        for (int j = 0; j < GOAL_COUNT; j++) {
+            struct goal *g = &F->goals[j];
+            if (g->x == s->x && g->y == s->y && g->type == type) g->type = -1;
+        }
+    }
+}
+
 extern struct hook_module strategy_module;
 #define STRATEGY (&strategy_module)
 
@@ -881,12 +996,106 @@ static void writes_path(struct hook_writes *w) {
 }
 SHADOW_WRITER(STRATEGY, void, enemy_strategy, (int a), (a), (hooks_writes_game(&w_), writes_path(&w_)), "%d", a)
 
+// The goal and site functions write only the faction's goals and sites,
+// which lie together.
+#define WRITES_GOALS(f) WRITES(game_factions[f].goals, sizeof game_factions[f].goals + sizeof game_factions[f].sites)
+SHADOW_WRITER(STRATEGY, void, add_goal, (int a, int b, int c, int d, int e, int f), (a, b, c, d, e, f), WRITES_GOALS(a),
+              "%d, %d, %d, %d, %d, %d", a, b, c, d, e, f)
+SHADOW_WRITER(STRATEGY, void, add_site, (int a, int b, int c, int d, int e), (a, b, c, d, e), WRITES_GOALS(a),
+              "%d, %d, %d, %d, %d", a, b, c, d, e)
+SHADOW4(STRATEGY, int, at_goal, int, int, int, int)
+SHADOW4(STRATEGY, int, at_site, int, int, int, int)
+SHADOW_WRITER(STRATEGY, void, wipe_goals, (int a), (a), WRITES_GOALS(a), "%d", a)
+SHADOW_WRITER(STRATEGY, void, init_goals, (int a), (a), WRITES_GOALS(a), "%d", a)
+SHADOW_WRITER(STRATEGY, void, del_site, (int a, int b, int c, int d, int e), (a, b, c, d, e), WRITES_GOALS(a),
+              "%d, %d, %d, %d, %d", a, b, c, d, e)
+
+// A faction's goals and sites, with the checks of every function on them;
+// then again with every slot taken, at priorities from -3 to 6, so new
+// goals and sites must replace old ones.
+static void sweep_goals_of(int f, int turn) {
+    struct faction_data *F = &game_factions[f];
+    int w = *game_map_width, h = *game_map_height;
+    for (int i = 0; i < GOAL_COUNT; i++) {
+        const struct goal *g = &F->goals[i];
+        if (g->type < 0 && i % 8) continue;
+        check_at_goal(f, g->type, g->x, g->y);
+        check_at_goal(f, g->type + 1, g->x, g->y);
+        check_at_goal(f, g->type, g->x + 2, g->y);
+        check_at_goal(f, g->type, g->x, g->y - 2);
+        if (g->type >= 0) {
+            check_add_goal(f, g->type, g->priority + (i % 3) - 1, g->x, g->y, i);
+            check_at_site(f, g->type, g->x, g->y);
+        }
+    }
+    for (int i = 0; i < SITE_COUNT; i++) {
+        const struct goal *s = &F->sites[i];
+        check_at_site(f, s->type, s->x, s->y);
+        check_at_site(f, s->type, s->x, s->y + 2);
+        check_at_goal(f, s->type, s->x, s->y);
+        if (s->type < 0) continue;
+        check_add_site(f, s->type, s->priority + (i % 3) - 1, s->x, s->y);
+        for (int d = 0; d < 4; d++) {
+            check_del_site(f, s->type, s->x + d, s->y + (d & 1), d);
+            check_del_site(f, s->type, s->x + 2 * d + 1, s->y + 1, d + (turn & 1));
+            check_del_site(f, s->type, (s->x + w - d - 1) % w, s->y + 1, d + 1);
+        }
+        check_del_site(f, s->type + 1, s->x, s->y, 2);
+    }
+    for (int p = -2; p < 7; p++) {
+        int x = (turn * 7 + p * 5) % w, y = (turn * 3 + p * 11) % h;
+        x = (x & ~1) | (y & 1);
+        check_add_goal(f, (turn + p) % 12, p, x, y, -1);
+        check_add_site(f, (turn + p) % 5 + 3, p, x, y);
+        check_del_site(f, 8, x, y, p);
+    }
+    check_add_goal(f, 2, 3, -1, 0, -1);
+    check_add_goal(f, 2, 3, w, 0, -1);
+    check_add_goal(f, 2, 3, 0, -1, -1);
+    check_add_goal(f, 2, 3, 0, h, -1);
+    check_add_goal(f, 2, 3, w - 1, h - 1, -1);
+    check_add_site(f, 3, 2, w + 4, h + 2);
+    check_wipe_goals(f);
+    check_init_goals(f);
+}
+
+static void sweep_goals(void) {
+    int turn = *game_turn;
+    for (int f = 0; f < FACTION_COUNT; f++) {
+        if (f && !(*game_factions_alive >> f & 1)) continue;
+        sweep_goals_of(f, turn);
+        if ((f + turn) % 3) continue;
+        // Every slot taken, then the map made flat or round.
+        struct faction_data *F = &game_factions[f];
+        struct goal goals[GOAL_COUNT], sites[SITE_COUNT];
+        memcpy(goals, F->goals, sizeof goals);
+        memcpy(sites, F->sites, sizeof sites);
+        for (int i = 0; i < GOAL_COUNT; i++) {
+            struct goal *g = &F->goals[i];
+            if (g->type < 0) g->type = (int16_t)(i % 7), g->x = (i * 6 + turn) % *game_map_width, g->y = i % *game_map_height;
+            g->priority = (int16_t)((i + turn) % 10 - 3);
+        }
+        for (int i = 0; i < SITE_COUNT; i++) {
+            struct goal *s = &F->sites[i];
+            if (s->type < 0) s->type = (int16_t)(i % 4 + 3), s->x = (i * 10 + turn) % *game_map_width, s->y = i * 2 % *game_map_height;
+            s->priority = (int16_t)((i * 3 + turn) % 10 - 3);
+        }
+        sweep_goals_of(f, turn);
+        *game_map_flat ^= 1;
+        sweep_goals_of(f, turn + 1);
+        *game_map_flat ^= 1;
+        memcpy(F->goals, goals, sizeof goals);
+        memcpy(F->sites, sites, sizeof sites);
+    }
+}
+
 // Each faction's strategy, and on alternate turns one of them as the
 // player's would run.
 static void strategy_sweep(void) {
     if (!*game_map) return;
     int sweeping = hooks_sweeping;
     hooks_sweeping = 1;
+    sweep_goals();
     for (int f = 1; f < FACTION_COUNT; f++)
         if (*game_factions_alive >> f & 1) check_enemy_strategy(f);
     int f = *game_turn % (FACTION_COUNT - 1) + 1;
@@ -902,5 +1111,12 @@ static void strategy_sweep(void) {
 #define PUSH_EBP_MOV_EBP_ESP 0x55, 0x8b, 0xec
 static const struct hook strategy_hooks[] = {
     HOOK(0x561080, enemy_strategy, PUSH_EBP_MOV_EBP_ESP, 0x81, 0xec, 0x88, 0x02, 0x00, 0x00),  // sub esp, 0x288
+    HOOK(0x579a30, add_goal, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x8b, 0x5d, 0x18),        // push ebx; mov ebx, [ebp+24]
+    HOOK(0x579b70, add_site, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53, 0x56),              // push ecx; push ebx; push esi
+    HOOK(0x579cc0, at_goal, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),               // mov eax, [ebp+8]
+    HOOK(0x579d20, at_site, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),               // mov eax, [ebp+8]
+    HOOK(0x579d80, wipe_goals, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x57),            // push ebx; push esi; push edi
+    HOOK(0x579e00, init_goals, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),            // mov eax, [ebp+8]
+    HOOK(0x579e70, del_site, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x45, 0x08),        // push ecx; mov eax, [ebp+8]
 };
 struct hook_module strategy_module = {"strategy", strategy_hooks, HOOK_COUNT(strategy_hooks), strategy_sweep, NULL, -1};
