@@ -158,7 +158,10 @@ module at a time. So far:
   satellites; its moods, patience, the reputation a faction has, whether
   it would go to war or unite against a runaway leader, what a base or a
   loan is worth to it, which techs it would trade, and the treaties and
-  agendas set and broken between factions;
+  agendas set and broken between factions; and how it stands towards
+  each rival before talks (fear, tribute, hostility, goodwill), the
+  designs it mentions, first contact, units pressing into another's
+  territory, atrocities, double-crosses, and pacts coming to an end;
 - the AI's strategy each turn: its census of bases and units (and its
   rivals'), the goals they suggest, disbanding obsolete and stranded units,
   each region's plan of offense, defense or expansion, raising land
@@ -207,7 +210,12 @@ module at a time. So far:
   stacks a faction has seen;
 - units' orders: setting a course (a transport's landing square), a base
   waiting for a transport, going to a waypoint, building a road or tube to
-  a square, finding the way home to a base or carrier, and patrols;
+  a square, finding the way home to a base or carrier, and patrols; and
+  carrying out orders: terraforming (its cost, the AI's choice of work,
+  a former's turn of work and what the finished work does), founding a
+  base, nerve stapling, bombarding and pillaging, artillery fire,
+  self-destruct, obliterating a base, tectonic and fungal missiles, and
+  psi gates;
 - combat around the battle: units killed (artifacts captured, the
   credits for native life), stacks and chaff cleared after a fight,
   attacks that break treaties, interceptors scrambled, orbital defenses
