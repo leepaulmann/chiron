@@ -205,6 +205,9 @@ module at a time. So far:
 - spotting: what a unit sees as it moves (squares, bases and units, the
   contacts it makes and the units it wakes), and the squares, bases and
   stacks a faction has seen;
+- units' orders: setting a course (a transport's landing square), a base
+  waiting for a transport, going to a waypoint, building a road or tube to
+  a square, finding the way home to a base or carrier, and patrols;
 - the path finder: the route search behind every unit's moves (with its
   costs for terrain, roads, fungus, zones of control and borders), a
   unit's next step towards its waypoint, zones of control, the AI's choice
