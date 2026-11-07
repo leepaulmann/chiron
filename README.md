@@ -155,7 +155,10 @@ module at a time. So far:
   corner the energy market; and the AI's diplomacy each turn: betrayals,
   meetings and tech trades between AIs, calls to the player, complaints
   about its territory, the friction between them, and orbital attacks on
-  satellites;
+  satellites; its moods, patience, the reputation a faction has, whether
+  it would go to war or unite against a runaway leader, what a base or a
+  loan is worth to it, which techs it would trade, and the treaties and
+  agendas set and broken between factions;
 - the AI's strategy each turn: its census of bases and units (and its
   rivals'), the goals they suggest, disbanding obsolete and stranded units,
   each region's plan of offense, defense or expansion, raising land
