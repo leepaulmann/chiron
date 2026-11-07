@@ -2273,4 +2273,7 @@ static const struct hook events_hooks[] = {
     HOOK(0x5b4600, social_set, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10),      // sub esp, 0x10
     HOOK(0x5b5620, social_select, PUSH_EBP_MOV_EBP_ESP, 0xa0, 0xc0, 0x64, 0x9a, 0x00),  // mov al, [0x9a64c0]
 };
-struct hook_module events_module = {"events", events_hooks, HOOK_COUNT(events_hooks), events_sweep, NULL, -1};
+// The game calls setup.c's functions mostly as a game starts and as a faction
+// is put out (eliminate_player): their sweep runs after this one.
+extern struct hook_module setup_module;
+struct hook_module events_module = {"events", events_hooks, HOOK_COUNT(events_hooks), events_sweep, &setup_module, -1};

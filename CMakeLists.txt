@@ -76,6 +76,7 @@ add_executable(chiron
   src/engine/events.c
   src/engine/combat.c
   src/engine/ai.c
+  src/engine/setup.c
   src/loader/pe.c
   src/loader/teb.c
   src/loader/thunks.c

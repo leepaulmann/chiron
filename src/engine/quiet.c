@@ -345,6 +345,13 @@ HELD_THIS(battle_win_pulse_timer, (void *self), (self), (void)0, orig_battle_win
 HELD(void, prefs_save, (void)0, (int unk), (unk), (c_.arg[0] = unk), orig_prefs_save(a_[0]))
 HELD(void, mon_enemy_destroyed, (void)0, (int faction, int other), (faction, other),
      (c_.arg[0] = faction, c_.arg[1] = other), orig_mon_enemy_destroyed(a_[0], a_[1]))
+// A new game writes two settings to the preferences file and deletes the
+// undo saves: held, so a sweep's checks of it leave the files alone.
+HELD(void, prefs_put, (void)0, (char *key, char *value), (key, value),
+     (hooks_ui_text(&c_, 0, key), hooks_ui_text(&c_, 1, value)), orig_prefs_put(TEXT(0), TEXT(1)))
+HELD(void, prefs_put_2, (void)0, (char *key, int value, int flag), (key, value, flag),
+     (hooks_ui_text(&c_, 0, key), c_.arg[0] = value, c_.arg[1] = flag), orig_prefs_put_2(TEXT(0), a_[0], a_[1]))
+HELD(void, wipe_undo, (void)0, (void), (), (void)0, orig_wipe_undo())
 
 // The heap guard: nothing may allocate from the game's heap, or free to
 // it, while state is protected, as a check puts back the heap's
@@ -472,5 +479,8 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x446b10, fx_engine_pitch, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x81, 0xec, 0x28, 0x00, 0x00),  // mov eax, [ecx+0x28ec]
     QUIET_HOOK(0x477320, mon_conquer_base, MON_PROLOGUE),
     QUIET_HOOK(0x477a60, mon_killed_faction, MON_PROLOGUE),
+    QUIET_HOOK(0x59e510, prefs_put, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0xcc, 0x00, 0x69, 0x00),  // mov eax, [0x6900cc]
+    QUIET_HOOK(0x59e530, prefs_put_2, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x50),              // sub esp, 0x50
+    QUIET_HOOK(0x5abec0, wipe_undo, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x50),
 };
 struct hook_module quiet_module = {"quiet", quiet_hooks, HOOK_COUNT(quiet_hooks), NULL, NULL, -1};

@@ -1510,6 +1510,20 @@ extern void(__attribute__((thiscall)) * game_fx_fade)(void *fx, int id);
 extern void(__attribute__((thiscall)) * game_fx_stop)(void *fx, int id);
 extern uint32_t(__attribute__((stdcall)) * *game_char_lower)(char *s);  // CharLowerA, as imported
 extern char *game_parse_text;  // the text variables parse_says() fills, 256 bytes each
+// A new game (setup_game): the preferences file, and the game's state
+// cleared; time warp, or the balance of the factions' starts.
+extern void (*game_prefs_put)(char *key, char *value);
+extern int (*game_prefs_get_2)(char *key, int value, int flag);
+extern void (*game_prefs_load)(int unk);
+extern void (*game_prefs_put_2)(char *key, int value, int flag);
+extern void (*game_prefs_use)(void);
+extern void (*game_clear_monuments)(void), (*game_wipe_undo)(void), (*game_clear_all_offers)(void);
+extern void (*game_clear_hotseat_chat)(void), (*game_clear_council_notify)(void), (*game_clear_tamper)(void);
+extern void (*game_time_warp)(void), (*game_balance)(void);
+// A network game closed when its player is out of it.
+extern void(__attribute__((thiscall)) * game_net_daemon_hang_up)(void *daemon);
+extern void(__attribute__((thiscall)) * game_lock_clear)(void *lock);
+extern void(__attribute__((thiscall)) * game_alpha_net_close)(void *daemon);
 
 // Point the variables above at a loaded terranx.exe.
 void game_bind(struct pe_image *exe);

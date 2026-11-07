@@ -431,6 +431,17 @@ void(__attribute__((thiscall)) * game_fx_fade)(void *fx, int id);
 void(__attribute__((thiscall)) * game_fx_stop)(void *fx, int id);
 uint32_t(__attribute__((stdcall)) * *game_char_lower)(char *s);
 char *game_parse_text;
+void (*game_prefs_put)(char *key, char *value);
+int (*game_prefs_get_2)(char *key, int value, int flag);
+void (*game_prefs_load)(int unk);
+void (*game_prefs_put_2)(char *key, int value, int flag);
+void (*game_prefs_use)(void);
+void (*game_clear_monuments)(void), (*game_wipe_undo)(void), (*game_clear_all_offers)(void);
+void (*game_clear_hotseat_chat)(void), (*game_clear_council_notify)(void), (*game_clear_tamper)(void);
+void (*game_time_warp)(void), (*game_balance)(void);
+void(__attribute__((thiscall)) * game_net_daemon_hang_up)(void *daemon);
+void(__attribute__((thiscall)) * game_lock_clear)(void *lock);
+void(__attribute__((thiscall)) * game_alpha_net_close)(void *daemon);
 
 void game_bind(struct pe_image *exe) {
     game_tech = (struct rules_tech *)code_at(exe, 0x94f358);
@@ -1002,4 +1013,20 @@ void game_bind(struct pe_image *exe) {
     game_fx_stop = (void *)code_at(exe, 0x446a90);
     game_char_lower = (void *)code_at(exe, 0x669344);
     game_parse_text = (char *)code_at(exe, 0x9bb5e8);
+    game_prefs_put = (void *)code_at(exe, 0x59e510);
+    game_prefs_get_2 = (void *)code_at(exe, 0x59db40);
+    game_prefs_load = (void *)code_at(exe, 0x59dcf0);
+    game_prefs_put_2 = (void *)code_at(exe, 0x59e530);
+    game_prefs_use = (void *)code_at(exe, 0x59e950);
+    game_clear_monuments = (void *)code_at(exe, 0x476b30);
+    game_wipe_undo = (void *)code_at(exe, 0x5abec0);
+    game_clear_all_offers = (void *)code_at(exe, 0x441250);
+    game_clear_hotseat_chat = (void *)code_at(exe, 0x440f80);
+    game_clear_council_notify = (void *)code_at(exe, 0x4243f0);
+    game_clear_tamper = (void *)code_at(exe, 0x51e390);
+    game_time_warp = (void *)code_at(exe, 0x5aede0);
+    game_balance = (void *)code_at(exe, 0x5b0420);
+    game_net_daemon_hang_up = (void *)code_at(exe, 0x52e050);
+    game_lock_clear = (void *)code_at(exe, 0x5900d0);
+    game_alpha_net_close = (void *)code_at(exe, 0x4e25b0);
 }
