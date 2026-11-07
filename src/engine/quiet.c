@@ -248,10 +248,26 @@ HELD_THIS(netmsg_pop, (void *self, char *label, int delay, int unk, char *sound)
           (hooks_ui_text(&c_, 0, label), hooks_ui_text(&c_, 1, sound), c_.arg[0] = delay, c_.arg[1] = unk),
           orig_netmsg_pop(SELF, TEXT(0), a_[0], a_[1], TEXT(1)))
 // Combat: an interceptor shown flying to its target, which waits on the
-// clock, and a sound effect (a planet buster's).
-HELD(void, veh_scoot, (void)0, (int veh, int x, int y, int dir, int unk), (veh, x, y, dir, unk),
-     (c_.arg[0] = veh, c_.arg[1] = x, c_.arg[2] = y, c_.arg[3] = dir, c_.arg[5] = unk),
-     orig_veh_scoot(a_[0], a_[1], a_[2], a_[3], a_[5]))
+// clock, and a sound effect (a planet buster's). An attacker's step
+// towards its target is dropped instead while combat.c sets
+// quiet_drop_scoot: the battle takes the unit out of its stack for it,
+// which the step expects, so shown afterwards it would fail.
+int quiet_drop_scoot;
+static void (*orig_veh_scoot)(int veh, int x, int y, int dir, int unk);
+static struct hook_stats stats_veh_scoot = {"(held veh_scoot)"};
+static void replay_veh_scoot(const struct hook_ui_call *c) {
+    orig_veh_scoot(c->arg[0], c->arg[1], c->arg[2], c->arg[3], c->arg[5]);
+}
+static void shadow_veh_scoot(int veh, int x, int y, int dir, int unk) {
+    if (!hooks_protecting()) {
+        orig_veh_scoot(veh, x, y, dir, unk);
+        return;
+    }
+    stats_veh_scoot.calls++;
+    if (quiet_drop_scoot) return;
+    struct hook_ui_call c = {.name = "veh_scoot", .replay = replay_veh_scoot, .arg = {veh, x, y, dir, 0, unk}};
+    hooks_ui_hold(&c);
+}
 HELD_THIS(fx_play, (void *self, int id), (self, id), c_.arg[0] = id, orig_fx_play(SELF, a_[0]))
 // Movies and help for secret projects.
 HELD(void, amovie_project, (void)0, (int project), (project), (c_.arg[0] = project), orig_amovie_project(a_[0]))
@@ -294,6 +310,26 @@ HELD(void, tech_research, (void)0, (int faction, int labs), (faction, labs), (c_
 // calls it last in a faction's turn but for the autosave, which a check of
 // faction_upkeep() leaves out, so made after the check it comes in order.
 HELD(void, call_council, (void)0, (int faction), (faction), (c_.arg[0] = faction), orig_call_council(a_[0]))
+
+// The battle (battle_fight_2): the status and battle windows drawn, the
+// map squares around the fight redrawn, and input put aside. The battle
+// window made the interface's mode, and its timer restarted after a
+// question, are held, so that they come once and in order; so are the
+// preferences saved (after a pause the player may turn off), and the
+// monument to an enemy destroyed, which updates the Monuments window as
+// the others do.
+QUIET(flush_input, "(quiet flush_input)", (void), ())
+QUIET(draw_tile_fixup, "(quiet draw_tile_fixup)", (int x, int y, int a, int b), (x, y, a, b))
+QUIET(draw_tile_fixup_2, "(quiet draw_tile_fixup_2)", (int x1, int y1, int x2, int y2, int a, int b), (x1, y1, x2, y2, a, b))
+QUIET_THIS(void, status_win_draw, (void)0, (void *win, int veh_att, int veh_def, int off, int def, int combat),
+           (win, veh_att, veh_def, off, def, combat))
+QUIET_THIS(void, status_win_reset, (void)0, (void *win), (win))
+QUIET_THIS(void, battle_win_clear, (void)0, (void *win), (win))
+HELD_THIS(set_iface_mode, (void *self), (self), (void)0, orig_set_iface_mode(SELF))
+HELD_THIS(battle_win_pulse_timer, (void *self), (self), (void)0, orig_battle_win_pulse_timer(SELF))
+HELD(void, prefs_save, (void)0, (int unk), (unk), (c_.arg[0] = unk), orig_prefs_save(a_[0]))
+HELD(void, mon_enemy_destroyed, (void)0, (int faction, int other), (faction, other),
+     (c_.arg[0] = faction, c_.arg[1] = other), orig_mon_enemy_destroyed(a_[0], a_[1]))
 
 // The heap guard: nothing may allocate from the game's heap, or free to
 // it, while state is protected, as a check puts back the heap's
@@ -405,5 +441,15 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x446b40, ambience, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0x90, 0x64, 0x9a, 0x00),     // mov eax, [0x9a6490]
     QUIET_HOOK(0x446960, fx_play_loc, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0x90, 0x64, 0x9a, 0x00),  // mov eax, [0x9a6490]
     QUIET_HOOK(0x41a8b0, base_win_check_veh, PUSH_EBP_MOV_EBP_ESP, 0x56, 0x57, 0x8b, 0xf1),  // push esi; push edi; mov esi, ecx
+    QUIET_HOOK(0x5fd120, flush_input, 0x83, 0xec, 0x1c, 0x8d, 0x44, 0x24, 0x00),               // sub esp, 28; lea eax, [esp]
+    QUIET_HOOK(0x46af90, draw_tile_fixup, PUSH_EBP_MOV_EBP_ESP, 0xa0, 0x94, 0x64, 0x9a, 0x00),  // mov al, [0x9a6494]
+    QUIET_HOOK(0x46b040, draw_tile_fixup_2, PUSH_EBP_MOV_EBP_ESP, 0xa0, 0x94, 0x64, 0x9a, 0x00),
+    QUIET_HOOK(0x4b8830, status_win_draw, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10),             // sub esp, 16
+    QUIET_HOOK(0x4b8970, status_win_reset, 0x8b, 0x81, 0xd4, 0x15, 0x00, 0x00),                // mov eax, [ecx+0x15d4]
+    QUIET_HOOK(0x422c50, battle_win_clear, 0x56, 0x8b, 0xf1, 0x68, 0x28, 0xd5, 0x78, 0x00),   // push esi; mov esi, ecx; push 0x78d528
+    QUIET_HOOK(0x45d310, set_iface_mode, 0x56, 0x8b, 0xf1, 0x8b, 0x0d, 0x2c, 0x39, 0x7d, 0x00),  // push esi; mov esi, ecx; mov ecx, [0x7d392c]
+    QUIET_HOOK(0x421b20, battle_win_pulse_timer, 0x6a, 0x05, 0x68, 0x88, 0x13, 0x00, 0x00),    // push 5; push 5000
+    QUIET_HOOK(0x59e5d0, prefs_save, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x54),                  // sub esp, 0x54
+    QUIET_HOOK(0x477210, mon_enemy_destroyed, MON_PROLOGUE),
 };
 struct hook_module quiet_module = {"quiet", quiet_hooks, HOOK_COUNT(quiet_hooks), NULL, NULL, -1};

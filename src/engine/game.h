@@ -685,7 +685,10 @@ struct rules_basic {
     int32_t retool_strictness;  // which changes of production lose minerals (base_making)
     int32_t retool_penalty;     // the percentage lost, for humans
     int32_t retool_exemption;  // the most minerals a human's base carries over after building
-    GAME_PAD(0xfc, 0x114);
+    GAME_PAD(0xfc, 0x108);
+    // The most damage artillery deals, in percent: to units in a base or
+    // bunker, on land in the open, and at sea.
+    int32_t max_dmg_arty_base_bunker, max_dmg_arty_open, max_dmg_arty_sea;
     int32_t warming_num, warming_den;  // how fast ecological damage warms the planet
     GAME_PAD(0x11c, 0x128);
     int32_t oblit_atrocity;  // non-zero: obliterating a base is an atrocity
@@ -1429,6 +1432,31 @@ extern void (*game_veh_scoot)(int veh, int x, int y, int dir, int unk);
 // the window that lets a human choose.
 extern int (*game_tech_pick)(int faction, int unk, int other, char *label);
 extern void (*game_major_atrocity)(int faction, int victim);
+// The battle (battle_fight_2): the caller's flags (1: the player may be
+// asked, of treaties and odds; 2: the attack is made, not only weighed),
+// the units the map draws fighting (or -1), and battles won and lost.
+extern int32_t *game_veh_draw_att, *game_veh_draw_def;
+extern int32_t *game_faction_combat_win, *game_faction_combat_loss;  // [FACTION_COUNT]
+extern int32_t *game_base_win_zoomed;  // non-zero while the base window is open
+extern int32_t *game_status_win_battle;  // set while the status window shows a battle
+extern void *game_battle_win, *game_status_win, *game_main_interface;
+extern void(__attribute__((thiscall)) * game_status_win_draw)(void *win, int veh_att, int veh_def, int off, int def,
+                                                              int combat);
+extern void(__attribute__((thiscall)) * game_status_win_reset)(void *win);
+extern void(__attribute__((thiscall)) * game_status_win_redraw)(void *win);
+extern void(__attribute__((thiscall)) * game_set_iface_mode)(void *win);  // SubInterface_set_iface_mode
+extern void(__attribute__((thiscall)) * game_battle_win_clear)(void *win);
+extern void(__attribute__((thiscall)) * game_battle_win_stop_timer)(void *win);
+extern void(__attribute__((thiscall)) * game_battle_win_pulse_timer)(void *win);
+extern void(__attribute__((thiscall)) * game_base_win_focus)(void *win);
+extern void (*game_flush_input)(void);
+extern void (*game_prefs_save)(int unk);
+extern int (*game_break_treaty)(int faction, int other, uint32_t treaties);  // asks; non-zero: the attack is called off
+extern void (*game_say_stats_3)(char *text, int proto);
+extern void (*game_mon_enemy_destroyed)(int faction, int other);
+extern int (*game_pop3)(char *label, char *picture, int faction, int x, int y);
+extern void (*game_draw_tile_fixup)(int x, int y, int a, int b);
+extern void (*game_draw_tile_fixup_2)(int x1, int y1, int x2, int y2, int a, int b);
 
 // Point the variables above at a loaded terranx.exe.
 void game_bind(struct pe_image *exe);

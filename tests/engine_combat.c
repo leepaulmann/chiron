@@ -5,6 +5,7 @@
 
 #include "../src/engine/combat.h"
 #include "../src/engine/game.h"
+#include "../src/engine/veh.h"
 
 enum { W = 16, H = 12 };
 
@@ -58,6 +59,160 @@ static void log_say_stub(char *t, int a, int b, int c) {}
 static void __attribute__((thiscall)) deletion_stub(void *l, int v) {}
 static void __attribute__((thiscall)) check_base_stub(void *w, int b) {}
 static void __attribute__((thiscall)) check_loc_stub(void *w, int x, int y, int u) {}
+
+// ---- The battle ---------------------------------------------------------------
+
+static struct rules_armor armor[ARMOR_COUNT];
+static struct rules_reactor reactors[REACTOR_COUNT];
+static struct rules_ability abilities[32];
+static struct rules_basic rules_basic;
+static struct rules_tech techs[TECH_COUNT];
+static uint8_t achieved[TECH_COUNT];
+static int32_t near_x[9], near_y[9], projects[SP_COUNT], expansion = 1, more_prefs, attack_flags, draw_att, draw_def;
+static int32_t combat_win[FACTION_COUNT], combat_loss[FACTION_COUNT], zoomed, status_battle, mod_counts[4], mods[8];
+static int32_t morales[2], bits_quiet, pbem, proposal_passes[11], rebuilt, multi_visible;
+static uint32_t rules, draw_state;
+static char mod_labels[8][80], *terrain, *label_list[1200], **labels_ptr = label_list;
+static uint8_t window[64];  // stands in for the game's window objects
+static int rolls[64], roll_n, roll_i, kept_treaty, booms, monuments;
+static int roll_stub(void) { return roll_i < roll_n ? rolls[roll_i++] : 0; }
+static char *__attribute__((thiscall)) strings_get_stub(void *t, char *s) { return s; }
+static int16_t __attribute__((stdcall)) key_stub(int key) { return 0; }
+static void __attribute__((thiscall)) win_stub(void *w) {}
+static void __attribute__((thiscall)) status_draw_stub(void *w, int a, int b, int c, int d, int e) {}
+static void __attribute__((thiscall)) console_update_stub(void *c, int u) {}
+static int __attribute__((thiscall)) focus_stub(void *c, int x, int y, int f) { return 1; }
+static int break_treaty_stub(int f, int o, uint32_t t) { return kept_treaty; }
+static void mon_stub(int f, int o) { monuments++; }
+static void boom_stub(int x, int y, int f) { booms++; }
+static void tile_stub(int x, int y, int u) {}
+static void fixup_stub(int x, int y, int a, int b) {}
+static void fixup2_stub(int x1, int y1, int x2, int y2, int a, int b) {}
+static void void_stub(void) {}
+static int tut_stub(int b) { return 0; }
+static void synch_stub(int x, int y, int f) {}
+static void scoot_stub(int v, int x, int y, int d, int u) {}
+static void wait_stub(int ms) {}
+static void interlude_stub(int id, char *t, int a, int b) {}
+static int pop2_stub(char *l, char *p, int b) { return 0; }
+static int parse_say_stub(int slot, int text, int g, int p) { return 0; }
+static void synch_veh_stub(int v) {}
+
+// Puts unit v alone at (x, y): faction f, design p.
+static void place(int v, int x, int y, int f, int p) {
+    vehs[v] = (struct veh){.x = (int16_t)x, .y = (int16_t)y, .proto = (int16_t)p, .faction = (uint8_t)f, .home_base = -1,
+                           .next_in_stack = -1, .prev_in_stack = -1, .morale = 2};
+    at(x, y)->bits |= MAP_UNIT;
+}
+// The attacker's rolls high (it wins every round) or low.
+static void rolls_for(int attacker_wins, int n) {
+    roll_n = 2 * n, roll_i = 0;
+    for (int i = 0; i < n; i++) rolls[2 * i] = attacker_wins ? 999 : 0, rolls[2 * i + 1] = attacker_wins ? 0 : 999;
+}
+
+static void test_battles(void) {
+    game_armor = armor, game_reactors = reactors, game_abilities = abilities, game_rules_basic = &rules_basic;
+    game_tech = techs, game_tech_achieved = achieved, game_expansion = &expansion, game_secret_projects = projects;
+    game_radius_near_x = near_x, game_radius_near_y = near_y, game_rules = &rules, game_more_preferences = &more_prefs;
+    game_strings_get = strings_get_stub, game_labels = &labels_ptr, game_battle_mod_count = mod_counts;
+    game_battle_mod = mods, game_battle_mod_label = mod_labels, game_battle_morale = morales;
+    game_battle_terrain = &terrain, game_get_async_key_state = key_stub, game_veh_attack_flags = &attack_flags;
+    game_veh_draw_att = &draw_att, game_veh_draw_def = &draw_def, game_faction_combat_win = combat_win;
+    game_faction_combat_loss = combat_loss, game_base_win_zoomed = &zoomed, game_status_win_battle = &status_battle;
+    game_battle_win = game_status_win = game_tut_win = game_main_interface = game_console = window;
+    game_status_win_draw = status_draw_stub, game_status_win_reset = win_stub, game_status_win_redraw = win_stub;
+    game_set_iface_mode = win_stub, game_battle_win_clear = win_stub, game_battle_win_stop_timer = win_stub;
+    game_battle_win_pulse_timer = win_stub, game_base_win_focus = win_stub, game_graphic_win_redraw = win_stub;
+    game_console_update_data = console_update_stub, game_console_focus = focus_stub, game_break_treaty = break_treaty_stub;
+    game_mon_enemy_destroyed = mon_stub, game_boom = boom_stub, game_draw_tile = tile_stub;
+    game_draw_tile_fixup = fixup_stub, game_draw_tile_fixup_2 = fixup2_stub, game_flush_input = void_stub;
+    game_do_all_draws = void_stub, game_tut_check2 = tut_stub, game_base_bits_quiet = &bits_quiet, game_pbem = &pbem;
+    game_proposal_passes = proposal_passes, game_draw_state = &draw_state, game_synch_bit = synch_stub;
+    game_veh_at_rebuilt = &rebuilt, game_rand = roll_stub;
+    game_multi_win_visible = &multi_visible, game_veh_scoot = scoot_stub, game_clock_wait = wait_stub;
+    game_interlude = interlude_stub, game_pop2 = pop2_stub, game_parse_say = parse_say_stub, game_synch_veh = synch_veh_stub;
+    for (int i = 0; i < 1200; i++) label_list[i] = "Label";
+    for (int i = 0; i < 8; i++) near_x[i] = radius_x[i + 1], near_y[i] = radius_y[i + 1];
+    for (int i = 0; i < SP_COUNT; i++) projects[i] = -1;
+    for (int i = 0; i < TECH_COUNT; i++) techs[i].preq1 = techs[i].preq2 = TECH_NONE;
+    rules_basic.move_rate_roads = 3;
+    rules_basic.artillery_damage_num = 3, rules_basic.artillery_damage_den = 2;
+    rules_basic.max_dmg_arty_base_bunker = 50, rules_basic.max_dmg_arty_open = 99, rules_basic.max_dmg_arty_sea = 100;
+    chassis[0].speed = 1, chassis[0].triad = TRIAD_LAND;
+    weapons[1].offense = 4, armor[1].defense = 1;
+    // Faction 1's infantry (design 70) and faction 2's (71), alike.
+    protos[70] = (struct unit_proto){.chassis = 0, .weapon = 1, .armor = 1, .reactor = 1, .flags = PROTO_FLAG_ACTIVE};
+    protos[71] = protos[70];
+    protos[72] = protos[70], protos[72].abilities = 0x8000;  // artillery
+    factions[1].diff_level = factions[2].diff_level = 3;
+    factions[1].base_count = factions[2].base_count = 2;
+    humans = 0, current = 7, attack_flags = 3, base_count = 0;
+    for (int i = 0; i < W / 2 * H; i++) tiles[i].bits = 0;
+
+    // The odds: the attacker's strength over one more than the defender's,
+    // eight times; the defender named.
+    veh_count = 2;
+    place(0, 4, 4, 1, 70);
+    place(1, 5, 5, 2, 71);  // offset 2 from (4, 4)
+    int off, def, def_id = -1;
+    battle_compute(0, 1, &off, &def, 0);
+    EXPECT(battle_fight_2(0, 2, 5, 5, 0, 0, &def_id), 8 * off / (def + 1));
+    EXPECT(def_id, 1);
+    EXPECT(battle_fight(0, 2, 0, 0, NULL), 8 * off / (def + 1));
+    EXPECT(vehs[0].moves_spent, 0);
+
+    // The attacker wins every round: the defender dies in ten, the
+    // attacker spends a road move and is marked, and the war is scored.
+    rolls_for(1, 10);
+    *game_current_veh = 0;
+    EXPECT(battle_fight_2(0, 2, 5, 5, 0, 1, NULL), 1);
+    EXPECT(veh_count, 1);
+    EXPECT(vehs[0].moves_spent, 3);
+    EXPECT(vehs[0].state & 0x44, 0x44);
+    EXPECT(factions[1].diplo_combat_count[2], 1);
+    EXPECT(combat_win[1], 1);
+    EXPECT(combat_loss[2], 1);
+    EXPECT(monuments, 1);
+    EXPECT(factions[2].units_lost[71], 1);
+    EXPECT(factions[2].diplo_status[1] & TREATY_VENDETTA, TREATY_VENDETTA);  // an act of aggression
+    EXPECT(protos[70].combat_factions & 1 << 2, 1 << 2);
+
+    // The attacker loses every round, and dies with its stack.
+    place(1, 5, 5, 2, 71);
+    veh_count = 2, vehs[0].moves_spent = 0;
+    rolls_for(0, 10);
+    EXPECT(battle_fight_2(0, 2, 5, 5, 0, 1, NULL), 0);
+    EXPECT(veh_count, 1);
+    EXPECT(vehs[0].faction, 2);
+    EXPECT(combat_win[2], 1);
+    EXPECT(factions[2].diplo_combat_count[1], 1);
+
+    // Artillery two squares off shells but can't kill in the open: it
+    // leaves the rules' share of hit points.
+    place(0, 5, 5, 2, 71);
+    place(1, 7, 5, 1, 72);  // radius table offset 6 is (-2, 0)
+    veh_count = 2;
+    rules_basic.artillery_damage_num = 100;
+    roll_n = 1, roll_i = 0, rolls[0] = 998;
+    EXPECT(battle_fight_2(1, 6, 5, 5, 1, 1, NULL), 0);
+    EXPECT(vehs[0].damage, 9);  // 10 hit points, at least 1% kept
+    EXPECT(veh_count, 2);
+
+    // The player kept a treaty (2), or called off a hopeless attack (1):
+    // the moves spent are given back.
+    humans = 1 << 1, current = 1, kept_treaty = 1;
+    place(0, 8, 4, 2, 71);
+    vehs[1].moves_spent = 0, vehs[1].proto = 70;
+    EXPECT(battle_fight_2(1, 1, 8, 4, 0, 1, NULL), 2);
+    kept_treaty = 0;
+    vehs[1].damage = 9;  // one hit point left: odds far below one in two
+    popp_answer = 0, popps = 0;
+    EXPECT(battle_fight_2(1, 1, 8, 4, 0, 1, NULL), 1);
+    EXPECT(popps, 1);
+    EXPECT(vehs[1].moves_spent, 0);
+    EXPECT(vehs[1].damage, 9);
+    humans = 0, current = 7;
+}
 
 int main(void) {
     static uint8_t image[0x300000];  // strings, from 0x400000; empty but for those set below
@@ -205,6 +360,8 @@ int main(void) {
     battle_kill_stack(0, &killed, NULL, NULL, -1, -1);
     EXPECT(veh_count, 0);
     EXPECT(killed, 4);
+
+    test_battles();
 
     if (failures) return 1;
     printf("engine_combat: ok\n");

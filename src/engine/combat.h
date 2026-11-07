@@ -31,3 +31,9 @@ int interceptor(int faction_def, int faction_att, int x, int y);
 int shoot(int faction_att, int faction_def, int x, int y);
 // A planet buster's detonation at (x, y).
 void planet_busting(int veh, int x, int y);
+// A battle: the unit attacks (tx, ty), at `offset` from it in the radius
+// table (table_offset) or among the eight squares around. With option 0
+// only the odds are weighed (the defender in *def_id). See combat.c for
+// what it returns.
+int battle_fight_2(int veh_att, int offset, int tx, int ty, int table_offset, int option, int *def_id);
+int battle_fight(int veh, int offset, int table_offset, int option, int *def_id);
