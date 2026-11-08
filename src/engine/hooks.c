@@ -90,7 +90,10 @@ void hooks_shadow_tick(struct hook_module *m) {
     m->last_turn = *game_turn;
     m->sweeps++;
     double start = now_ms();
+    const char *outer = hooks_sweep_module;
+    hooks_sweep_module = m->name;
     m->sweep();
+    hooks_sweep_module = outer;
     double ms = now_ms() - start;
     m->sweep_ms_total += ms;
     if (ms > m->sweep_ms_max) m->sweep_ms_max = ms;
@@ -108,6 +111,7 @@ void hooks_mismatch(struct hook_stats *s, const char *fmt, ...) {
 }
 
 int hooks_sweeping;
+const char *hooks_sweep_module;
 void (*hooks_hold_time)(int hold);
 
 // Two save buffers per nesting level: the memory before the original ran,

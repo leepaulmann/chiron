@@ -233,7 +233,11 @@ module at a time. So far:
   credits for native life), stacks and chaff cleared after a fight,
   attacks that break treaties, interceptors scrambled, orbital defenses
   shooting down a missile, planet busters, and probe teams' odds and
-  their thefts of techs and energy;
+  their thefts of techs and energy; and a probe team's whole mission (the
+  AI's choice of action, research stolen, sabotage, drained energy, riots,
+  assassinated researchers, mind control of bases and units, the genetic
+  plague, freeing a captive leader, framing a rival, the team caught or
+  coming home, and the victim's answer);
 - what units find on the map: supply and unity pods with all their
   outcomes, monoliths, and artifacts studied at a Network Node;
 - the path finder: the route search behind every unit's moves (with its

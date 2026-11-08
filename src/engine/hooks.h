@@ -83,6 +83,8 @@ struct hook_writes {
 };
 
 extern int hooks_sweeping;
+// The module whose sweep is running (innermost), or NULL: for reports.
+extern const char *hooks_sweep_module;
 
 // Set by the host: holds the game's clock still for this thread while
 // nonzero calls outnumber zero ones. Checks of writing functions hold it, so

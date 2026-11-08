@@ -373,7 +373,9 @@ void heap_guard(int is_free, uint32_t esp) {
     struct hook_stats *s = is_free ? &stats_heap_free : &stats_heap_malloc;
     s->calls++;
     if (++s->mismatches > 3) return;
-    fprintf(stderr, "chiron: shadow mismatch: game heap %s while state is protected\n", is_free ? "free" : "malloc");
+    fprintf(stderr, "chiron: shadow mismatch: game heap %s while state is protected%s%s%s\n", is_free ? "free" : "malloc",
+            hooks_sweep_module ? " (in the " : "", hooks_sweep_module ? hooks_sweep_module : "",
+            hooks_sweep_module ? " sweep)" : "");
     if (modules_scan_stack) modules_scan_stack(esp);
 }
 // Entered in place of malloc and free: registers kept, then on to them.
