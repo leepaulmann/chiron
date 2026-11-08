@@ -261,6 +261,10 @@ module at a time. So far:
   both the original and Chiron every N turns and compares the files byte
   for byte, and `CHIRON_SAVE_CHECK_LOAD=1` also loads each one's file with
   the other and compares game memory;
+- the rules: reading alphax.txt (every section, the basic unit designs
+  and the factions drawn) and the faction files. `CHIRON_RULES_CHECK=1`
+  makes each read with both the original and Chiron and compares all the
+  tables they fill;
 - the Planetary Council: votes, who may stand for governor, whether a
   faction may call the Council, and the AI's stand and vote on each
   proposal.
