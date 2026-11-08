@@ -1418,14 +1418,16 @@ static int em_body(int veh, const int32_t *frame) {
     int exploring = V->state & 0x4000;
     int human_bit = 1 << faction;
     // Locals the original shares between its sections.
-    // Those it doesn't set first hold what lay below its stack (FRAME_AT),
-    // which some of its paths read.
+    // The six that some of its paths read before setting them hold what
+    // lay below its stack (FRAME_AT): [ebp-0x4] (a site deleted, 0x570b60),
+    // [ebp-0x24] (a base, 0x572cd3), [ebp-0x38] (five places), [ebp-0x70]
+    // (0x5775b1), and [ebp-0x48] and [ebp-0x78] (naval transports', which
+    // the original moves). No path reads the others before setting them,
+    // so they start at 0 rather than at leftovers only ours could see.
     int dir84 = -1, l88 = 0, lc8 = 0, lc4 = 0, lb8 = 0, l90 = 0, lbc = 0;
-    int l74 = FRAME_AT(frame, 0x70), l3c = FRAME_AT(frame, 0x38), l2c = FRAME_AT(frame, 0x28);
-    int l7c = FRAME_AT(frame, 0x78), l28 = FRAME_AT(frame, 0x24), l20 = FRAME_AT(frame, 0x1c);
-    int l8 = FRAME_AT(frame, 0x4), lc = FRAME_AT(frame, 0x8), l4c = FRAME_AT(frame, 0x48);
-    int l30 = FRAME_AT(frame, 0x2c), l58 = FRAME_AT(frame, 0x54), l5c = FRAME_AT(frame, 0x58);
-    int l24 = FRAME_AT(frame, 0x20), l34 = FRAME_AT(frame, 0x30);
+    int l74 = FRAME_AT(frame, 0x70), l3c = FRAME_AT(frame, 0x38), l28 = FRAME_AT(frame, 0x24);
+    int l8 = FRAME_AT(frame, 0x4), l4c = FRAME_AT(frame, 0x48), l7c = FRAME_AT(frame, 0x78);
+    int l2c = 0, l20 = 0, lc = 0, l30 = 0, l58 = 0, l5c = 0, l24 = 0, l34 = 0;
     int l48 = recon_800, l50 = own_terr, l6c = human_bit;
     if (forced) goto at_57138d;
     if ((V->flags & 0x440) && !game_is_human(faction)) {
@@ -2531,6 +2533,11 @@ at_5702f7:
                 }
             }
         }
+    } else {
+        // Not a land unit on land, or on its way with a base near: the
+        // original goes straight on (to 0x570c89), past the colony pod's
+        // search below for its own base when in a friend's territory.
+        goto at_5702ed_speed;
     }
     if (plan == PLAN_COLONIZATION && V->order != ORDER_MOVE_TO && (l74 = whose_territory(faction, x, y, NULL, 0)) >= 0 &&
         l74 != faction && (F->diplo_status[l74] & 3) && (l28 = base_find_3(x, y, faction, region, -1, -1)) >= 0) {
@@ -4603,6 +4610,10 @@ int held_enemy_move(int veh) {
 static unsigned long long enemy_move_unchecked;
 static int32_t em_arg_veh __attribute__((used)), em_ret __attribute__((used));
 static int32_t em_arg_frame[FRAME_WORDS] __attribute__((used));
+// The frames of the game's last calls, for the sweep.
+enum { EM_FRAMES = 16 };
+static int32_t em_frames[EM_FRAMES][FRAME_WORDS];
+static unsigned em_frames_kept;
 static void probe_enemy_move(int veh, const int32_t *frame) {
     struct hook_writes w_ = {0};
     writes_paths(&w_, game_path);
@@ -4649,7 +4660,11 @@ static int check_enemy_move(int veh, const int32_t *frame) {
                 "chiron:   base searches: %d, last %d (%d, %d, %d) = %d; original's %d, last %d (%d, %d, %d) = %d\n",
                 b_->count, b_->kind, b_->x, b_->y, b_->faction, b_->dist, found.count, found.kind, found.x, found.y,
                 found.faction, found.dist);
-    if (diff_) hooks_mismatch(&stats_enemy_move, "(%d, stale %d) %s [%s]", veh, FRAME_AT(frame, 0x38), diff_, was_);
+    // The words it may read unset: [ebp-0x38] as "stale", the others after.
+    if (diff_)
+        hooks_mismatch(&stats_enemy_move, "(%d, stale %d) %s [%s; unset %x %x %x %x %x]", veh, FRAME_AT(frame, 0x38),
+                       diff_, was_, FRAME_AT(frame, 0x4), FRAME_AT(frame, 0x24), FRAME_AT(frame, 0x48),
+                       FRAME_AT(frame, 0x70), FRAME_AT(frame, 0x78));
     hooks_ui_release();
     return want;
 }
@@ -4666,6 +4681,7 @@ int ai_pre_enemy_move(void) {
     int32_t frame[FRAME_WORDS];
     memcpy(frame, em_arg_frame, sizeof frame);
     if (shadow_bypass()) return 1;
+    memcpy(em_frames[em_frames_kept++ % EM_FRAMES], frame, sizeof frame);
     stats_enemy_move.calls++;
     shadow_tick(AI);
     int v = veh < 0 ? -1 - veh : veh;
@@ -5332,7 +5348,17 @@ static void sweep_enemy_move(void) {
             // Another faction's unit next to it.
             int u = pick_unit(-1), x, y;
             near_square(V->x, V->y, 1 + rnd(2), &x, &y);
-            if (u >= 0 && u != v && (x != V->x || y != V->y) && !occupied(tile(x, y), MAP_BASE)) put(u, x, y);
+            if (u >= 0 && u != v && (x != V->x || y != V->y) && !occupied(tile(x, y), MAP_BASE)) {
+                put(u, x, y);
+                // Now and then a faction's mind worms, at war with it.
+                struct veh *U = &game_vehs[u];
+                if (rnd(3) == 0 && U->faction && U->faction != f && alt_of(tile(x, y)) >= ALT_SHORE) {
+                    U->proto = 8;
+                    U->order = rnd(2) ? ORDER_MOVE_TO : ORDER_NONE;
+                    F->diplo_status[U->faction] = (F->diplo_status[U->faction] | TREATY_VENDETTA) &
+                                                  ~(uint32_t)(TREATY_PACT | TREATY_TREATY | TREATY_TRUCE);
+                }
+            }
         }
         vary_squares(V->x, V->y);
         if (rival_on_square(v)) {
@@ -5340,13 +5366,20 @@ static void sweep_enemy_move(void) {
             continue;
         }
         int veh = rnd(10) ? v : -1 - v;
-        // What lies where the original's locals go: nothing, or the
-        // leftovers of other calls (made up, small enough to index the
-        // game's tables safely), the fungus search's word
-        // among them.
+        // What lies where the original's locals go: nothing, small
+        // leftovers, a stack's leftovers (return addresses and pointers
+        // into Chiron's image, 0x08xxxxxx, among small words), or what lay
+        // there in one of the game's recent calls. The words the original
+        // reads unset are kept small enough to index the game's tables
+        // (the fungus search's word, a flag, anything).
         int32_t frame[FRAME_WORDS];
-        int fill = rnd(2);
-        for (int i = 0; i < FRAME_WORDS; i++) frame[i] = !fill ? 0 : rnd(64) - 8;
+        int fill = rnd(4);
+        for (int i = 0; i < FRAME_WORDS; i++)
+            frame[i] = !fill ? 0 : fill == 1 || rnd(2) ? rnd(64) - 8 : (int32_t)(0x08000000u | (rnd32() & 0x1ffffcu));
+        if (fill == 3 && em_frames_kept)
+            memcpy(frame, em_frames[rnd(em_frames_kept < EM_FRAMES ? (int)em_frames_kept : EM_FRAMES)], sizeof frame);
+        static const int unset[] = {0x4, 0x24, 0x48, 0x70, 0x78};
+        if (fill) for (int i = 0; i < 5; i++) FRAME_AT(frame, unset[i]) = rnd(64) - 8;
         FRAME_AT(frame, 0x38) = rnd(3) ? 0 : rnd(3) ? 1 : (int32_t)rnd32();
         em_swept++;
         probe_enemy_move(veh, frame);
