@@ -549,8 +549,9 @@ static int32_t move_stale = 1;
 // the original's Path_find calls found, in order (path_stale_record).
 enum { STALE_LOG = 8192 };  // enemy_move's site searches make thousands
 static int32_t stale_log[STALE_LOG];
-static int stale_logging, stale_replaying, stale_n, stale_next;
+static int stale_logging, stale_replaying, stale_n, stale_next, stale_asked;
 static int32_t stale_for_move(void) {
+    if (stale_replaying) stale_asked++;
     if (stale_replaying && stale_next < stale_n) return stale_log[stale_next++];
     return move_stale;
 }
@@ -909,9 +910,11 @@ int32_t path_stale_take(void) {
 }
 void path_stale_put(int32_t saved) { move_stale = saved; }
 void path_stale_record(void) { stale_logging = 1, stale_replaying = 0, stale_n = 0; }
-void path_stale_replay(void) { stale_logging = 0, stale_replaying = 1, stale_next = 0; }
+void path_stale_replay(void) { stale_logging = 0, stale_replaying = 1, stale_next = stale_asked = 0; }
 void path_stale_stop(void) { stale_logging = stale_replaying = 0; }
 int32_t path_stale_next(void) { return stale_for_move(); }
+int path_stale_logged(void) { return stale_n; }
+int path_stale_used(void) { return stale_asked; }
 
 // Path_sensors: each run gets its own copy of the square, and the
 // original's goes back to the caller.

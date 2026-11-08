@@ -36,3 +36,7 @@ void path_stale_stop(void);
 // The word for a Path_find call of one's own made outside path_move (as
 // path_find_at's `stale`): the next one replayed, or path_move's.
 int32_t path_stale_next(void);
+// How many Path_find calls the original's run made (recorded) and ours
+// took words for (replayed), for a check to compare.
+int path_stale_logged(void);
+int path_stale_used(void);

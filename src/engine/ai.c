@@ -1371,7 +1371,16 @@ static int em_body(int veh, int32_t stale) {
     struct veh *V = &game_vehs[veh];
     int net_own = *game_net_multiplayer && V->faction == *game_current_faction;
     game_do_all_non_input();
-    if (!V->faction && !net_own) return alien_move(veh);
+    if (!V->faction && !net_own) {
+        // Native life (alien_move), whose fights and attacks are noted
+        // too while probing.
+        if (!em_probing) return alien_move(veh);
+        probing = 1, probe_fight = probe_destroy = probe_threat = 0;
+        int r = alien_move(veh);
+        probing = 0;
+        if (probe_fight || probe_destroy || probe_threat) em_risky = 1;
+        return r;
+    }
     int proto = V->proto, faction = V->faction, y = V->y, x = V->x;
     int plan = proto_of(proto)->plan, triad = triad_of(proto);
     struct faction_data *F = &game_factions[faction];
@@ -4582,16 +4591,28 @@ static void probe_enemy_move(int veh, int32_t stale) {
 }
 static int check_enemy_move(int veh, int32_t stale) {
     struct hook_writes w_ = {0};
+    // The unit as it was, for the report.
+    const struct veh *U_ = &game_vehs[veh < 0 ? -1 - veh : veh];
+    char was_[128];
+    snprintf(was_, sizeof was_, "proto %d plan %d faction %d order %d auto %d state %x flags %x icon %d at (%d, %d)",
+             U_->proto, proto_of(U_->proto)->plan, U_->faction, U_->order, U_->order_auto_type, U_->state, U_->flags,
+             U_->status_icon, U_->x, U_->y);
     check_begin(&w_);
     int want = em_call_stale(orig_enemy_move, veh, stale);
     check_middle(&w_);
     em_probing = 1, em_risky = 0;
     int got = em_body(veh, stale);
     em_probing = 0;
+    int searches = path_stale_logged(), searched = path_stale_used();
     path_stale_stop();
     const char *diff_ = hooks_writes_end(&w_, got, want);
     if (!diff_ && em_risky) diff_ = "would carry a move out";
-    if (diff_) hooks_mismatch(&stats_enemy_move, "(%d, stale %d) %s", veh, stale, diff_);
+    static char count_[64];
+    if (!diff_ && searched != searches) {
+        snprintf(count_, sizeof count_, "searched paths %d times, original %d", searched, searches);
+        diff_ = count_;
+    }
+    if (diff_) hooks_mismatch(&stats_enemy_move, "(%d, stale %d) %s [%s]", veh, stale, diff_, was_);
     hooks_ui_release();
     return want;
 }
@@ -5150,11 +5171,12 @@ static void sweep_enemy_move(void) {
                                       0x20000000, 0x1000200, 0x2000200, 0x80000000u, 0x20};
     move_hold_steps(1);
     for (int k = 0; k < 48; k++) {
-        int v = pick_unit(1 + rnd(FACTION_COUNT - 1));
+        int native = k % 16 == 15;  // now and then native life, through alien_move
+        int v = pick_unit(native ? 0 : 1 + rnd(FACTION_COUNT - 1));
         if (v < 0) break;
         struct veh *V = &game_vehs[v];
         int f = V->faction;
-        if (!f) continue;
+        if ((f == 0) != native) continue;
         struct hook_writes w;
         case_begin(&w);
         struct faction_data *F = &game_factions[f];
