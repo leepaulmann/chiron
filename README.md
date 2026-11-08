@@ -270,7 +270,11 @@ module at a time. So far:
   tables they fill;
 - the Planetary Council: votes, who may stand for governor, whether a
   faction may call the Council, and the AI's stand and vote on each
-  proposal.
+  proposal; calling it (the proposal put, the waits between calls), what a
+  passed proposal does (Unity core, solar shade, melting the caps, the
+  Supreme Leader with objections, surrender or the player's answer), and
+  the price an AI leader asks for its vote. The session's window and its
+  tally are still the game's own.
 
 `--original` runs only the game's own code. `CHIRON_REIMPL=shadow` runs both
 on every call, returns the original's answer, and logs any difference; once
