@@ -5,9 +5,8 @@
 // (Brendan Casey, GPL-3.0-or-later).
 //
 // The AI's choice of a move for one of its own units, enemy_move(), is
-// reimplemented here too, but for naval transports (left to the original);
-// enemy_veh() calls it through the game's pointer, so that the sweeps can
-// hold it.
+// reimplemented here too, naval transports' section included; enemy_veh()
+// calls it through the game's pointer, so that the sweeps can hold it.
 #include "ai.h"
 
 #include <stddef.h>
@@ -1262,9 +1261,6 @@ int enemy_planet_buster(int veh) {
 // left), so they are kept as one set here too, named after their offsets
 // in its frame (l2c is [ebp-0x28], Ghidra's local_2c), with the clearer
 // ones named for what they first hold.
-//
-// Naval transports are the exception: their section is left to the
-// original, which runs for them from the start (em_ours()).
 
 enum {
     PLAN_RECONNAISSANCE = 3, PLAN_COLONIZATION = 8, PLAN_TERRAFORMING = 9,
@@ -1288,8 +1284,6 @@ static int stack_top_of(int veh) {
 enum { FRAME_WORDS = 0x2c4 / 4 };
 #define FRAME_AT(f, k) ((f)[(0x2c4 - (k)) / 4])
 
-// Whether ours handles the unit: all but naval transports.
-static int em_ours(int veh) { return proto_of(game_vehs[veh].proto)->plan != PLAN_NAVAL_TRANSPORT; }
 
 // The calls that carry a move out, rather than choose it: fights, attacks
 // on squares (which end in a step), air drops, probe teams' missions, bases
@@ -3409,9 +3403,489 @@ at_574a7e:
 at_574a88:
     if (plan == PLAN_NAVAL_SUPERIORITY) del_site(faction, 6, x, y, 0);
     forced = 0, l48 = 0, l30 = 0, l58 = 0, l34 = 0;
-    // Transports (PLAN_NAVAL_TRANSPORT) are left to the original from the
-    // start (em_ours()), so the original's section for them isn't here.
+    if (plan == PLAN_NAVAL_TRANSPORT) {
+        // ---- Naval transports (0x574ac4) ----
+        // Its passengers: the land units on its square of its faction,
+        // not carrying others, nor besieging (state 0x40000) unless a
+        // base is near or (0x60000) the region's plan is 7. In port
+        // (own_dist 0, where the stack is sorted first), units on hold
+        // (order 2) come aboard when fit (damage up to a third of their
+        // power), but artifacts only at sea; of those up to plan 8,
+        // defenders, garrisons (state 0x10000000), combat or recon units
+        // with no defender in their stack, and units of a stack without
+        // defenders, combat or recon units (stack_check 16) are kept:
+        // the first [ebp-0x48] of them (a word the original may not have
+        // set on this path, as here) stay, and past those, where the
+        // region's plan is 2 or less, only one comes aboard. At sea,
+        // those sentried for it (order 1, waypoint the transport or none)
+        // or idle with a base near count, the unfit apart (l58).
+        // Otherwise artifacts hold, formers
+        // are left, defenders up to [ebp-0x48] hold in port, the unfit
+        // hold in port, and the rest come aboard. l30 collects the fit
+        // passengers' plans as bits (combat units as plans 0-2), `forced`
+        // counts them all.
+        if (!own_dist) stack_sort_2(veh);
+        l5c = 0;
+        for (l20 = veh_top(veh); l20 >= 0; l20 = game_vehs[l20].next_in_stack) {
+            struct veh *U = &game_vehs[l20];
+            if (l20 == veh || triad_of(U->proto) != TRIAD_LAND) continue;
+            if (veh_cargo(l20) || U->faction != faction) continue;
+            if ((U->state & 0x40000) && !near_dist && !((U->state & 0x20000) && region_plan == 7)) continue;
+            int fit = U->damage <= proto_power(l20) / 3;
+            if (U->order == 2) {
+                int up = proto_of(U->proto)->plan;
+                if (own_dist || (up == PLAN_ALIEN_ARTIFACT && !at_sea) || !fit) continue;
+                if (up <= 8) {
+                    if (!(up == PLAN_DEFENSIVE || (U->state & 0x10000000) ||
+                          (!stack_check(l20, 2, 2, -1, -1) && (proto_of(U->proto)->plan == 1 || proto_of(U->proto)->plan == 3)) ||
+                          !stack_check(l20, 16, -1, -1, -1)))
+                        goto tr_take;
+                    if (++l48 <= l4c) continue;
+                    if (region_plan <= 2 && l5c) continue;
+                    l5c++;
+                }
+            tr_take:
+                forced++;
+                U->order = ORDER_NONE;
+                up = proto_of(U->proto)->plan;
+                if (up == 1) l30 |= 7;
+                else l30 |= 1 << up;
+                continue;
+            }
+            if (at_sea) {
+                if ((U->order == 1 && (U->waypoint_x[0] < 0 || U->waypoint_x[0] == veh)) || (!U->order && near_dist)) {
+                    forced++;
+                    if (fit) {
+                        int up = proto_of(U->proto)->plan;
+                        if (up == 1) l30 |= 7;
+                        else l30 |= 1 << up;
+                    } else {
+                        l58++;
+                    }
+                    continue;
+                }
+            } else if (proto_of(U->proto)->plan == PLAN_ALIEN_ARTIFACT) {
+                U->order = 2;
+                continue;
+            }
+            int up = proto_of(U->proto)->plan;
+            if (up == PLAN_TERRAFORMING) continue;
+            if (up == PLAN_DEFENSIVE && l48 < l4c) {
+                if (!own_dist) {
+                    l48++;
+                    U->order = 2;
+                    continue;
+                }
+            } else if (!own_dist && !fit) {
+                U->order = 2;
+                continue;
+            }
+            forced++;
+            U->order = ORDER_NONE;
+            if (fit) {
+                up = proto_of(U->proto)->plan;
+                if (up == 1) l30 |= 7;
+                else l30 |= 1 << up;
+            }
+        }
+        // Empty, it drops a course for a port or an invasion.
+        if (!forced && V->order == ORDER_MOVE_TO &&
+            (V->status_icon == 'J' || V->status_icon == 'r' || V->status_icon == 'I' || V->status_icon == 'E'))
+            V->order = ORDER_NONE;
+        // l34: 2 with combat units (or 0x800, plan 11) aboard, 1 with only
+        // colony pods and no combat units.
+        if ((l30 & 0xf) || (l30 & 0x800)) {
+            l34 = 2;
+            if ((l30 & 0x100) && !(l30 & 3)) l34 = 1;
+        }
+        if ((V->status_icon == 'E' || V->status_icon == 'r' || V->status_icon == 'I') &&
+            (!l34 || V->order != ORDER_MOVE_TO))
+            V->status_icon = '-';
+        if (l90 || (V->order == ORDER_MOVE_TO && V->status_icon == 'd')) goto at_57543f;
+        if (((l30 & 0x1000) && near_dist) ||
+            (l58 && l58 >= forced && (near_dist <= 8 || *game_current_turn < 50))) {
+            // Supply crawlers aboard, or mostly the hurt: to the nearest
+            // port of its own on this sea (a base with state 0x400 a
+            // thousand further), or stay in the one it is in.
+            l2c = 9999;
+            for (l28 = 0; l28 < *game_base_count; l28++) {
+                const struct base *B = &game_bases[l28];
+                if (B->faction != faction || !base_on_sea(l28, region)) continue;
+                l3c = vector_dist_offset(x_dist(x, B->x), abs(y - B->y));
+                if (!l3c) goto at_578b34;
+                if (B->state & 0x400) l3c += 1000;
+                if (l3c < l2c) {
+                    l2c = l3c;
+                    go_to(veh, 'a', B->x, B->y);
+                }
+            }
+        }
+        {
+            // Room left: unless full (or held at 0x20000000 with nobody
+            // aboard: none), it gathers passengers if empty, or (but in
+            // port) when half empty or more, without colony pods.
+            int room = veh_cargo(veh) - forced;
+            if ((V->state & 0x20000000) && !forced) room = 0;
+            if (room != veh_cargo(veh) && (own_dist || room < veh_cargo(veh) / 2 || (l30 & 0x100))) goto at_57543f;
+        }
+        // A port of its own to gather an invasion at (go_to 'e'): one on
+        // the faction's target's continent when it has flag 0x800 (the
+        // target itself, with fewer than two transports there), else ports
+        // on continents whose plan isn't 2, with combat units to spare
+        // (or region flags 3 or 0x1800), not planned for already (ai_plan)
+        // unless bound there or the port it is in; reachable by sea. The
+        // nearer the better, doubled unless the region's plan is 7, flag
+        // 0x800 or its own course (then only every eighth turn), doubled
+        // with other transports there; less the spare units.
+        l2c = 9999, terr = 0;
+        for (l28 = 0; l28 < *game_base_count; l28++) {
+            const struct base *B = &game_bases[l28];
+            if (B->faction != faction || !is_port(l28, 0)) continue;
+            l6c = tile(B->x, B->y)->region;
+            if (F->region_base_plan[l6c] == 2) continue;
+            l50 = abs(y - B->y);
+            l48 = (l50 + x_dist(x, B->x)) >> 1;
+            l3c = l48;
+            int at_wp = V->waypoint_x[0] == B->x && V->waypoint_y[0] == B->y;
+            if (F->target_x >= 0 && l6c == tile(F->target_x, F->target_y)->region) {
+                l50 = 1;
+                if (!(F->flags & 0x800) || B->x != F->target_x || B->y != F->target_y) continue;
+                if (stack_check(veh_at(B->x, B->y), 2, 7, -1, -1) >= (!l48 || at_wp ? 2 : 1)) continue;
+            } else {
+                if (B->ai_plan && !(V->order == ORDER_MOVE_TO && at_wp) &&
+                    !(!own_dist && own_base == l28 && stack_check(veh, 2, 7, -1, -1) <= 1))
+                    continue;
+                at_wp = V->waypoint_x[0] == B->x && V->waypoint_y[0] == B->y;
+                if (stack_check(veh_at(B->x, B->y), 2, 7, -1, -1) >= (!l48 || at_wp ? 2 : 1)) continue;
+                l50 = 0;
+            }
+            if (!(own_dist ? base_on_sea(l28, region) : port_to_port(own_base, l28))) continue;
+            if (!(F->region_total_combat_units[l6c] > F->region_total_bases[l6c] * 2 + 1 ||
+                  (F->region_flags[l6c] & 3) || (F->region_flags[l6c] & 0x1800)))
+                continue;
+            int s = l48 + 4;
+            l3c = s;
+            if (F->region_base_plan[l6c] != 7 && !(F->region_flags[l6c] & 0x800) &&
+                !(V->waypoint_x[0] == B->x && V->waypoint_y[0] == B->y)) {
+                if ((*game_current_turn + l28 + veh) & 7) continue;
+                s *= 2;
+            }
+            if (stack_check(veh_at(B->x, B->y), 2, 7, faction, -1) > !l48) s *= 2;
+            s += F->region_total_bases[l6c] * 2 - F->region_total_combat_units[l6c];
+            l3c = s;
+            if (s < l2c) {
+                l7c = l28, l2c = s, l5c = F->region_base_plan[l6c], terr = l50;
+                go_to(veh, 'e', B->x, B->y);
+            }
+        }
+        {
+            // Passengers called to it (assemble_passengers), 6 at most
+            // for the target or a region planned 7, else 2; when for the
+            // target, or near enough. l7c may be a word the original
+            // never set, when no port was found.
+            int prio = terr || l5c == 7 ? 6 : 2;
+            prio = game_range(prio, 0, veh_cargo(veh));
+            if (terr || l2c <= veh_moves(veh) * prio / 2) assemble_passengers(l7c, l5c, prio);
+        }
+    at_57543f:
+        // Arrived where it gathers: the base nearest it (which may be
+        // none: the original then marks the word before the bases) is
+        // marked.
+        if (V->status_icon == 'e' && V->waypoint_x[0] == x && V->waypoint_y[0] == y)
+            game_bases[near_base].state |= 1;
+        if (forced > l58 && V->status_icon != 'E') {
+            // Unloading: a land square next to it, of a continent (not
+            // the pole regions), in its own or open land or an enemy's to
+            // invade, not held by another's units; worth it when the
+            // continent's plan isn't one its passengers serve, or for the
+            // hurt (l58), or to found bases on an empty continent.
+            for (l5c = 0; l5c < 0x20; l5c += 4) {
+                int i = l5c / 4;
+                l8 = xrange(game_radius_near_x[i] + x), lc = game_radius_near_y[i] + y;
+                if (!on_map(l8, lc) || alt_of(tile(l8, lc)) < ALT_SHORE) continue;
+                l6c = tile(l8, lc)->region;
+                if ((l6c & 0x3f) == 0x3f || !(l6c & 0x3f)) continue;
+                l58 = hurt > 2;
+                l74 = whose_territory(faction, l8, lc, NULL, 0);
+                if (l74 >= 0 && l74 != faction) {
+                    uint32_t st = F->diplo_status[l74];
+                    if (st & 1) continue;
+                    if (st & 0xc10) {
+                        if (l34) l58 = 1;
+                        goto tr_c65d;
+                    }
+                    if (st & 2) {
+                        if (!(*game_human_factions & (1 << l74)) || !l34 ||
+                            *game_current_turn - game_factions[l74].diplo_spoke[faction] < 16)
+                            continue;
+                        diplomacy_check(l74, faction, 0);
+                        if (!*game_diplo_hostility && !*game_diplo_great_satan) continue;
+                    } else if (st & 4) {
+                        if (!(*game_human_factions & (1 << l74)) ||
+                            *game_current_turn - game_factions[l74].diplo_spoke[faction] < 16)
+                            continue;
+                    }
+                    if (!(F->diplo_status[l74] & 8) && l34 && !(l30 & 0x100)) l58 = 1;
+                }
+            tr_c65d:
+                l74 = veh_who(l8, lc);
+                if (l74 >= 0 && l74 != faction) continue;
+                if ((l30 & 0x100) && game_continents[l6c].open_terrain >= 4 &&
+                    (!F->region_total_bases[l6c] || F->region_base_plan[l6c] == 8)) {
+                    if (!l34 && F->region_base_plan[region] <= 2) goto tr_c77c;
+                    l58 = 1;
+                }
+                if (!l34) goto tr_c77c;
+                if (!l58 && !F->region_total_bases[l6c] && F->region_base_plan[l6c] == 8) {
+                    for (l74 = 1; l74 < 8; l74++)
+                        if (game_factions[l74].region_total_bases[l6c] &&
+                            ((F->diplo_status[l74] & 0x10) || !(F->diplo_status[l74] & 8) ||
+                             *game_current_turn - game_factions[l74].diplo_spoke[faction] > 16))
+                            l58 = 1;
+                }
+                if (F->region_base_plan[l6c] <= 2) {
+                    l58 = 1;
+                    goto tr_c787;
+                }
+            tr_c77c:
+                if (!l58) continue;
+            tr_c787:;
+                int pick;
+                if (!(l30 & (1 << F->region_base_plan[l6c])) && hurt <= 2 && !(*game_state & 0x100) &&
+                    (V->order != ORDER_MOVE_TO || l6c != tile(V->waypoint_x[0], V->waypoint_y[0])->region ||
+                     V->status_icon == 'e')) {
+                    // A passenger sentried for it, from that continent:
+                    // only into land it may enter.
+                    for (l20 = veh_top(veh); l20 >= 0; l20 = game_vehs[l20].next_in_stack) {
+                        const struct veh *U = &game_vehs[l20];
+                        if (triad_of(U->proto) == TRIAD_LAND && U->order == 1 &&
+                            (U->waypoint_x[0] < 0 || U->waypoint_x[0] == veh) && U->home_base >= 0 &&
+                            tile(game_bases[U->home_base].x, game_bases[U->home_base].y)->region == l6c)
+                            break;
+                    }
+                    if (l20 >= 0) {
+                        l74 = zoc_veh(l8, lc, faction);
+                        if (l74 <= 1) continue;
+                        uint32_t st = F->diplo_status[l74 - 1];
+                        if (!((st & 0x10) && l34 && (l30 & 3)) && (st & 8)) continue;
+                        if (!l58) continue;
+                        pick = -1;
+                        goto tr_c949;
+                    }
+                }
+                if (!l58) continue;
+                pick = l58;
+            tr_c949:
+                // Unloaded: next to the square, among the nine round it on
+                // its own sea (open or its own), the one with most of the
+                // continent's squares round it (bases of factions counted
+                // five times), with moves left and a base near; its land
+                // units' orders cleared.
+                dir84 = -1;
+                if (veh_moves(veh) >= game_rules_basic->move_rate_roads && near_dist && pick > 0) {
+                    l2c = -1;
+                    for (l34 = 0; l34 < 9; l34++) {
+                        l8 = xrange(game_radius_x[l34] + x), lc = game_radius_y[l34] + y;
+                        if (!on_map(l8, lc) || tile(l8, lc)->region != region) continue;
+                        if (veh_who(l8, lc) >= 0 && veh_who(l8, lc) != faction) continue;
+                        l24 = 0;
+                        for (int k = 1; k <= 8; k++) {
+                            int nx = xrange(game_radius_x[k] + l8), ny = game_radius_y[k] + lc;
+                            if (!on_map(nx, ny) || tile(nx, ny)->region != l6c) continue;
+                            if (base_who(nx, ny) > 0) l24 += 4;
+                            l24++;
+                        }
+                        if (l24 > l2c) l2c = l24, dir84 = l34 - 1;
+                    }
+                }
+                for (l20 = veh_top(veh); l20 >= 0; l20 = game_vehs[l20].next_in_stack)
+                    if (triad_of(game_vehs[l20].proto) == TRIAD_LAND) game_vehs[l20].order = ORDER_NONE;
+                V->status_icon = 'u';
+                if (lbc) return 0;
+                goto at_578b26;
+            }
+        }
+        if (lbc) return 0;
+        if (l90) goto at_57717f;
+        if (V->order == ORDER_MOVE_TO) {
+            if (V->status_icon == 'd') goto at_57717f;
+        } else if ((l30 & 0x100) && l34 < 1) {
+            // Colony pods only: the empty continent of ten squares or
+            // more, with few others' bases, that is biggest for its
+            // distance, at a coast square between rows 10 and height - 10
+            // where it has one (the last such found), else its last.
+            int32_t cy[64], cx[64];
+            for (int i = 0; i < 64; i++) cy[i] = -1;
+            for (int i = 0; i < 64; i++) cx[i] = -1;
+            for (lc = 1; lc < *game_map_height - 1; lc++) {
+                for (l8 = lc & 1; l8 < *game_map_width; l8 += 2) {
+                    int r = tile(l8, lc)->region;
+                    if (r >= 0x40) continue;
+                    if ((cy[r] < 10 || cy[r] > *game_map_height - 10) && is_coast(l8, lc, 0)) cx[r] = l8, cy[r] = lc;
+                }
+            }
+            l7c = -1, l2c = 0;
+            for (l6c = 1, l5c = 0; l5c < 0xfc; l6c++, l5c += 4) {
+                const struct continent *C = &game_continents[l6c];
+                if (C->tile_count < 10 || F->region_total_bases[l6c] || !on_map(cx[l6c], cy[l6c])) continue;
+                int k = 0;
+                for (l74 = 1; l74 < 8; l74++) {
+                    if (!game_factions[l74].region_total_bases[l6c]) continue;
+                    k++;
+                    if (game_factions[l74].region_total_bases[l6c] * 20 > C->tile_count / 4) k += 2;
+                    if (F->diplo_status[l74] & 7) k += 2;
+                }
+                if (k > 1) continue;
+                int v = C->tile_count * 100 / (vector_dist_offset(x_dist(x, cx[l6c]), abs(y - cy[l6c])) + 1);
+                if (v >= l2c) l2c = v, l7c = l6c;
+            }
+            // The original walks these with a pointer in [ebp-0x44].
+            l48 = (int)(intptr_t)&game_continents[64];
+            if (l7c >= 0) set_course(veh, 'c', cx[l7c], cy[l7c]);
+        }
+        if (V->order != ORDER_MOVE_TO && l34) {
+            // Combat units aboard: its own base on a continent planned 2
+            // (defence) it can reach, the nearer the better, halved when
+            // empty and when a goal of type 2 is there, first when its
+            // faction's attack target is on that continent (go_to 'E').
+            l2c = 9999;
+            for (l28 = 0; l28 < *game_base_count; l28++) {
+                const struct base *B = &game_bases[l28];
+                if (B->faction != faction) continue;
+                l6c = tile(B->x, B->y)->region;
+                if (F->region_base_plan[l6c] != 2) continue;
+                if (!(own_dist ? base_on_sea(l28, region) : port_to_port(own_base, l28))) continue;
+                l50 = x;
+                int d = (abs(y - B->y) + x_dist(x, B->x)) >> 1;
+                l3c = d;
+                if (veh_who(B->x, B->y) < 0) l3c = d = d / 2;
+                if (at_goal(faction, 2, B->x, B->y)) l3c = d = d / 2;
+                int t = F->attack_target_base;
+                if (t >= 0 && (F->diplo_status[game_bases[t].faction] & 0x10) &&
+                    tile(game_bases[t].x, game_bases[t].y)->region == l6c)
+                    l3c = d = 0;
+                if (d < l2c) {
+                    l2c = d;
+                    go_to(veh, 'E', B->x, B->y);
+                }
+            }
+            if (V->order != ORDER_MOVE_TO && l34 > 1) {
+                // An invasion (set_course 'I'): an enemy base across the
+                // sea, objectives, its attack target, or (every fourth
+                // turn by base) any, of a faction it's at war with (or
+                // a human under a treaty or truce it may break), on a
+                // continent its passengers aren't from unless at war and
+                // it isn't wanted; the nearer the better (doubled when
+                // unseen), the Ascent, headquarters (more for flag
+                // 0x200000 and a cornered market), objectives and those
+                // marked 0x40 or vendetta (empty ones more) first, the
+                // attack target at once, and weak garrisons of a human of
+                // high difficulty or one it hates.
+                l2c = 9999;
+                for (l28 = 0; l28 < *game_base_count; l28++) {
+                    const struct base *B = &game_bases[l28];
+                    if (B->faction == faction) continue;
+                    if (!(is_objective(l28) || (F->flags & 0x200000) || F->attack_target_base == l28 ||
+                          !((*game_current_turn + l28) & 3)))
+                        continue;
+                    int bf = B->faction;
+                    l34 = faction * 0x833;
+                    uint32_t st = F->diplo_status[bf];
+                    if (st & 1) continue;
+                    if ((st & 2) && (!(*game_human_factions & (1 << bf)) || !(st & 0xc00))) continue;
+                    if ((st & 4) && (!(*game_human_factions & (1 << bf)) ||
+                                     (!(st & 0xc00) && *game_current_turn - game_factions[bf].diplo_spoke[faction] < 16)))
+                        continue;
+                    int r = tile(B->x, B->y)->region;
+                    if (r == region && !at_sea) continue;
+                    if (!(own_dist ? sea_coast(r, region) : port_to_coast(own_base, r))) continue;
+                    l58 = 1;
+                    for (l20 = veh_top(veh); l20 >= 0; l20 = game_vehs[l20].next_in_stack) {
+                        int h = game_vehs[l20].home_base;
+                        if (h >= 0 && tile(game_bases[h].x, game_bases[h].y)->region == r) l58 = 0;
+                    }
+                    if (!l58 && !(F->diplo_status[bf] & 0x10) && (F->diplo_status[bf] & 8) && !(*game_state & 0x100) &&
+                        !(l30 & (1 << F->region_base_plan[r])))
+                        continue;
+                    int d = ((abs(y - B->y) + x_dist(x, B->x)) >> 1) << 5;
+                    if (B->faction != faction && !(B->visibility & (1 << faction))) d *= 2;
+                    if (B->queue[0] == BUILD_ASCENT) d /= 4;
+                    if (has_fac(1, l28, 0)) {
+                        d /= 2;
+                        if (F->flags & 0x200000) d /= 2;
+                        if (game_factions[bf].corner_market_turn > *game_current_turn) d /= 8;
+                    }
+                    if (is_objective(l28)) {
+                        d /= 2;
+                        if (F->flags & 0x80000000) d /= 2;
+                    }
+                    st = F->diplo_status[bf];
+                    if (st & 0x40) d /= 2;
+                    if (st & 0x10) {
+                        d /= 2;
+                        if (veh_who(B->x, B->y) < 0) d /= 2;
+                        if (F->attack_target_base == l28) d = 0;
+                    }
+                    if (has_fac(1, l28, 0)) d /= 2;
+                    l20 = veh_at(B->x, B->y);
+                    if (l20 < 0 || (l50 = stack_check(l20, 14, -1, -1, -1)) < garrison_check(l28)) {
+                        if ((*game_human_factions & (1 << bf)) &&
+                            (game_factions[bf].diff_level >= 4 || (F->flags & 0x200) || (F->diplo_status[bf] & 0x1000)))
+                            d /= 2;
+                    }
+                    l3c = d;
+                    if (d < l2c) {
+                        l2c = d;
+                        set_course(veh, 'I', B->x, B->y);
+                    }
+                }
+                // The original walks the bases with a pointer in [ebp-0x48].
+                if (*game_base_count > 0) l4c = (int)(intptr_t)&game_bases[*game_base_count].faction;
+            }
+            if (V->order != ORDER_MOVE_TO) {
+                // Elsewhere: its own port on another continent, of a plan
+                // (not 7) its passengers serve, without colony pods aboard
+                // (go_to 'r').
+                l2c = 9999;
+                for (l28 = 0; l28 < *game_base_count; l28++) {
+                    const struct base *B = &game_bases[l28];
+                    if (B->faction != faction) continue;
+                    int r = tile(B->x, B->y)->region;
+                    if (region == r || F->region_base_plan[r] == 7 || (l30 & 0x100) ||
+                        !(l30 & (1 << F->region_base_plan[r])))
+                        continue;
+                    if (!(own_dist ? base_on_sea(l28, region) : port_to_port(own_base, l28))) continue;
+                    l50 = abs(y - B->y);
+                    l3c = (l50 + x_dist(x, B->x)) >> 1;
+                    if (l3c < l2c) {
+                        l2c = l3c;
+                        go_to(veh, 'r', B->x, B->y);
+                    }
+                }
+            }
+            if (V->order != ORDER_MOVE_TO) {
+                // Or the first empty continent two squares out (in the
+                // radius table's order) on its sea, when its passengers
+                // serve the plan of the region it is in (set_course
+                // 'J').
+                for (int k = 1; k < RADIUS_SQUARES; k++) {
+                    l8 = xrange(x + game_radius_x[k] * 2), lc = y + game_radius_y[k] * 2;
+                    if (!on_map(l8, lc) || alt_of(tile(l8, lc)) < ALT_SHORE) continue;
+                    int r = tile(l8, lc)->region;
+                    if ((r & 0x3f) == 0x3f || !(r & 0x3f) || F->region_total_bases[r] ||
+                        !(l30 & (1 << F->region_base_plan[region])))
+                        continue;
+                    if (own_dist ? sea_coast(r, region) : port_to_coast(own_base, r)) {
+                        set_course(veh, 'J', l8, lc);
+                        break;
+                    }
+                }
+            }
+        }
+        goto at_57666a;
+    }
     if (l90) goto at_577071;
+at_57666a:
     if (V->order == ORDER_MOVE_TO && V->status_icon == 'd') goto at_577071;
     if (plan == PLAN_NAVAL_SUPERIORITY) {
         if (proto_of(V->proto)->group == GROUP_NO_GOALS) {
@@ -4238,11 +4712,7 @@ __asm__(".text\n"
         "    addl $0x2d8, %esp\n"
         "    ret\n");
 _Static_assert(FRAME_WORDS == 0xb1, "the entries copy 0xb1 words");
-int enemy_move_at(int veh, const int32_t *frame) {
-    int v = veh < 0 ? -1 - veh : veh;
-    if (!em_ours(v)) return em_call_frame(orig_enemy_move, veh, frame);
-    return em_body(veh, frame);
-}
+int enemy_move_at(int veh, const int32_t *frame) { return em_body(veh, frame); }
 
 // ---- The AI's turn around its units ---------------------------------------------
 
@@ -4685,7 +5155,7 @@ int ai_pre_enemy_move(void) {
     stats_enemy_move.calls++;
     shadow_tick(AI);
     int v = veh < 0 ? -1 - veh : veh;
-    if (!em_ours(v) || !em_checkable(v)) {
+    if (!em_checkable(v)) {
         enemy_move_unchecked++;
         return 0;
     }
@@ -5218,11 +5688,36 @@ static int rival_on_square(int v) {
     return 0;
 }
 
+// The unit's move (now and then forced), with what lies where the
+// original's locals go varied, unless it would carry a move out.
+static unsigned em_swept, em_swept_risky;
+static void em_sweep_one(int v) {
+    int veh = rnd(10) ? v : -1 - v;
+    // What lies where the original's locals go: nothing, small
+    // leftovers, a stack's leftovers (return addresses and pointers
+    // into Chiron's image, 0x08xxxxxx, among small words), or what lay
+    // there in one of the game's recent calls. The words the original
+    // reads unset are kept small enough to index the game's tables
+    // (the fungus search's word, a flag, anything).
+    int32_t frame[FRAME_WORDS];
+    int fill = rnd(4);
+    for (int i = 0; i < FRAME_WORDS; i++)
+        frame[i] = !fill ? 0 : fill == 1 || rnd(2) ? rnd(64) - 8 : (int32_t)(0x08000000u | (rnd32() & 0x1ffffcu));
+    if (fill == 3 && em_frames_kept)
+        memcpy(frame, em_frames[rnd(em_frames_kept < EM_FRAMES ? (int)em_frames_kept : EM_FRAMES)], sizeof frame);
+    static const int unset[] = {0x4, 0x24, 0x48, 0x70, 0x78};
+    if (fill) for (int i = 0; i < 5; i++) FRAME_AT(frame, unset[i]) = rnd(64) - 8;
+    FRAME_AT(frame, 0x38) = rnd(3) ? 0 : rnd(3) ? 1 : (int32_t)rnd32();
+    em_swept++;
+    probe_enemy_move(veh, frame);
+    if (em_risky) em_swept_risky++;
+    else check_enemy_move(veh, frame);
+}
+
 // A unit's move, of AI units of every kind and the player's automated
 // ones, with their orders, state, damage and surroundings varied, and the
 // faction's plans for the continent; with the step held. Moves carried
 // out (see probe_enemy_move) are left out.
-static unsigned em_swept, em_swept_risky;
 static void sweep_enemy_move(void) {
     static const uint8_t icons[] = {0, 'F', 'd', 'X', '/', '6', '-', 'p', '3', '4', '5', 'b', 'R'};
     static const uint32_t states[] = {0x200, 0x4000, 0x40000, 0x60000, 0x10000, 0x10000000, 0x40000000, 0x100, 0x8,
@@ -5273,10 +5768,6 @@ static void sweep_enemy_move(void) {
             if (B->faction == f && q >= 0) put(v, B->x, B->y), p = q;
         }
         if (p >= 0) V->proto = (int16_t)p;
-        if (!em_ours(v)) {
-            hooks_writes_abandon(&w);
-            continue;
-        }
         // Its orders and state.
         switch (rnd(7)) {
         case 0: V->order = ORDER_NONE; break;
@@ -5365,26 +5856,203 @@ static void sweep_enemy_move(void) {
             hooks_writes_abandon(&w);
             continue;
         }
-        int veh = rnd(10) ? v : -1 - v;
-        // What lies where the original's locals go: nothing, small
-        // leftovers, a stack's leftovers (return addresses and pointers
-        // into Chiron's image, 0x08xxxxxx, among small words), or what lay
-        // there in one of the game's recent calls. The words the original
-        // reads unset are kept small enough to index the game's tables
-        // (the fungus search's word, a flag, anything).
-        int32_t frame[FRAME_WORDS];
-        int fill = rnd(4);
-        for (int i = 0; i < FRAME_WORDS; i++)
-            frame[i] = !fill ? 0 : fill == 1 || rnd(2) ? rnd(64) - 8 : (int32_t)(0x08000000u | (rnd32() & 0x1ffffcu));
-        if (fill == 3 && em_frames_kept)
-            memcpy(frame, em_frames[rnd(em_frames_kept < EM_FRAMES ? (int)em_frames_kept : EM_FRAMES)], sizeof frame);
-        static const int unset[] = {0x4, 0x24, 0x48, 0x70, 0x78};
-        if (fill) for (int i = 0; i < 5; i++) FRAME_AT(frame, unset[i]) = rnd(64) - 8;
-        FRAME_AT(frame, 0x38) = rnd(3) ? 0 : rnd(3) ? 1 : (int32_t)rnd32();
-        em_swept++;
-        probe_enemy_move(veh, frame);
-        if (em_risky) em_swept_risky++;
-        else check_enemy_move(veh, frame);
+        em_sweep_one(v);
+        hooks_writes_abandon(&w);
+    }
+    move_hold_steps(0);
+}
+
+// A transport design of the faction's or a basic one; or -1.
+static int pick_transport(int faction) {
+    for (int k = 0; k < 64; k++) {
+        int p = rnd(2) ? rnd(BASIC_PROTOS) : faction * BASIC_PROTOS + rnd(BASIC_PROTOS);
+        const struct unit_proto *P = proto_of(p);
+        if (P->name[0] && P->plan == PLAN_NAVAL_TRANSPORT && triad_of(p) == TRIAD_SEA) return p;
+    }
+    return -1;
+}
+
+// A sea square within `radius` rings of (x, y) (`open`: away from any
+// coast), or -1 in *sx.
+static void sea_near(int x, int y, int radius, int open, int *sx, int *sy) {
+    *sx = -1;
+    for (int j = 0; j < 16; j++) {
+        int nx, ny, coast = 0;
+        near_square(x, y, radius, &nx, &ny);
+        if (alt_of(tile(nx, ny)) >= ALT_SHORE || occupied(tile(nx, ny), MAP_BASE)) continue;
+        for (int i = 0; i < 8 && open; i++) {
+            int ax = xrange(nx + game_radius_near_x[i]), ay = ny + game_radius_near_y[i];
+            if (on_map(ax, ay) && alt_of(tile(ax, ay)) >= ALT_SHORE) coast = 1;
+        }
+        if (coast) continue;
+        *sx = nx, *sy = ny;
+        return;
+    }
+}
+
+// Naval transports' moves: a transport of a faction's at sea (next to a
+// coast, its own or another's, or out at sea) or in one of its ports,
+// carrying land units of its faction (sentried aboard for it or for none,
+// holding or idle; of every plan, some hurt, besieging or garrisons, from
+// bases on this continent or others) up to its capacity, or none; with
+// escorts and other factions' units near, and the faction's target,
+// attack target, flags, plans for continents, treaties and bases' plans
+// varied; as enemy_move's sweep does for other units.
+static void sweep_transport(void) {
+    static const uint8_t icons[] = {0, 'e', 'E', 'r', 'I', 'J', 'a', 'd', '-', 'u', 'c', '6'};
+    static const int plans[] = {0, 1, 2, 3, 8, 9, 10, 11, 12, -1}, settlers[] = {8, 2, 3, 11, 8};
+    move_hold_steps(1);
+    for (int k = 0; k < 48 && *game_base_count > 0; k++) {
+        int f = 1 + rnd(FACTION_COUNT - 1);
+        int v = pick_unit(f), p = pick_transport(f);
+        if (v < 0 || p < 0 || game_vehs[v].faction != f) continue;
+        struct hook_writes w;
+        case_begin(&w);
+        struct veh *V = &game_vehs[v];
+        struct faction_data *F = &game_factions[f];
+        V->proto = (int16_t)p;
+        // Where: in a port of its own, or at sea near a base (any
+        // faction's) or out from one, or near another unit.
+        const struct base *B = &game_bases[rnd(*game_base_count)];
+        int x = -1, y = -1, where = rnd(6);
+        if (!where) {
+            for (int j = 0; j < 8 && x < 0; j++, B = &game_bases[rnd(*game_base_count)])
+                if (B->faction == f && is_port((int)(B - game_bases), 0)) x = B->x, y = B->y;
+        } else if (where < 3) {
+            sea_near(B->x, B->y, where, 0, &x, &y);
+        } else if (where < 5) {
+            // Out at sea, mostly off a port of its own.
+            for (int j = 0; j < 8 && B->faction != f && rnd(4); j++) B = &game_bases[rnd(*game_base_count)];
+            sea_near(B->x, B->y, 2 + rnd(6), 1, &x, &y);
+        } else {
+            int u = pick_unit(-1);
+            if (u >= 0) sea_near(game_vehs[u].x, game_vehs[u].y, 1 + rnd(2), 0, &x, &y);
+        }
+        if (x < 0) {
+            hooks_writes_abandon(&w);
+            continue;
+        }
+        put(v, x, y);
+        int sea = alt_of(tile(x, y)) < ALT_SHORE;
+        // Its passengers.
+        // Now and then only colony pods (with defenders, scouts or probe
+        // teams), or one kind of unit.
+        int room = veh_cargo(v), n = rnd(3) ? rnd(room + 1) : 0, mix = rnd(5), one = plans[rnd(10)];
+        if (!mix && n < 2 && room >= 2) n = 2;
+        for (int j = 0; j < n; j++) {
+            int u = pick_unit(f);
+            int q = pick_proto(f, 0, !mix ? settlers[j % 5] : mix == 1 ? one : mix == 2 ? PLAN_COLONIZATION : plans[rnd(10)]);
+            if (u < 0 || u == v || q < 0 || game_vehs[u].faction != f || veh_cargo(u)) continue;
+            struct veh *U = &game_vehs[u];
+            U->proto = (int16_t)q;
+            put(u, x, y);
+            int r = rnd(8);
+            U->order = (uint8_t)(sea ? (r < 5 ? 1 : r < 7 ? 0 : 2) : (r < 3 ? 1 : r < 6 ? 2 : 0));
+            if (U->order == 1) U->waypoint_x[0] = (int16_t)(rnd(4) ? v : -1), U->waypoint_y[0] = 0;
+            U->damage = (uint8_t)(rnd(3) || proto_of(q)->plan == PLAN_ALIEN_ARTIFACT
+                                      ? 0
+                                      : rnd(game_range(proto_of(q)->reactor, 1, 100) * 10));
+            U->state &= ~0x10060000u;
+            if (rnd(6) == 0) U->state |= rnd(2) ? 0x40000 : 0x60000;
+            if (rnd(6) == 0) U->state |= 0x10000000;
+            int h = rnd(*game_base_count);
+            U->home_base = (int16_t)(rnd(5) && game_bases[h].faction == f ? h : rnd(4) ? U->home_base : -1);
+        }
+        // Its orders and state.
+        V->order = ORDER_NONE;
+        if (rnd(3) == 0) {
+            const struct base *T = &game_bases[rnd(*game_base_count)];
+            V->order = ORDER_MOVE_TO;
+            V->waypoint_x[0] = T->x, V->waypoint_y[0] = T->y;
+            if (rnd(3) == 0) V->waypoint_x[0] = (int16_t)x, V->waypoint_y[0] = (int16_t)y;
+        } else if (rnd(4) == 0) {
+            V->order = 2;
+        }
+        V->status_icon = icons[rnd(12)];
+        V->state &= ~0x20010000u;
+        if (rnd(5) == 0) V->state |= 0x20000000;
+        if (rnd(4) == 0) V->state |= 0x10000;
+        V->moves_spent = (uint8_t)(rnd(3) ? 0 : rnd(10));
+        V->damage = (uint8_t)(rnd(3) ? 0 : rnd(game_range(proto_of(p)->reactor, 1, 100) * 10));
+        if (rnd(4) == 0) V->home_base = (int16_t)(rnd(*game_base_count + 1) - 1);
+        // An escort with it, now and then; others near.
+        if (rnd(4) == 0) {
+            int u = pick_unit(f), q = pick_proto(f, 1, PLAN_NAVAL_SUPERIORITY);
+            if (u >= 0 && u != v && q >= 0 && game_vehs[u].faction == f && !veh_cargo(u) && sea)
+                game_vehs[u].proto = (int16_t)q, put(u, x, y);
+        }
+        for (int j = rnd(3); j > 0; j--) {
+            int u = pick_unit(-1), nx, ny;
+            near_square(x, y, 1 + rnd(2), &nx, &ny);
+            if (u >= 0 && u != v && (nx != x || ny != y) && !occupied(tile(nx, ny), MAP_BASE) && !veh_cargo(u) &&
+                triad_of(game_vehs[u].proto) != TRIAD_AIR &&
+                (alt_of(tile(nx, ny)) < ALT_SHORE) == (triad_of(game_vehs[u].proto) == TRIAD_SEA))
+                put(u, nx, ny);
+        }
+        // The faction's plans: the continents near, its target and attack
+        // target, its flags; treaties; bases' plans.
+        for (int j = rnd(4); j > 0; j--) {
+            int nx, ny;
+            near_square(x, y, 1 + rnd(3), &nx, &ny);
+            int r = tile(nx, ny)->region;
+            switch (rnd(4)) {
+            case 0: F->region_base_plan[r] = (uint8_t)rnd(9); break;
+            case 1: F->region_flags[r] ^= (uint16_t)(rnd(2) ? 3 : rnd(2) ? 0x800 : 0x1800); break;
+            case 2: F->region_total_combat_units[r] = (uint16_t)rnd(12); break;
+            default: F->region_total_bases[r] = (uint8_t)rnd(4); break;
+            }
+        }
+        if (rnd(3) == 0) F->region_base_plan[tile(x, y)->region] = (uint8_t)rnd(9);
+        for (int j = rnd(3); j > 0; j--) {
+            // Its ports' continents: plans its passengers may serve.
+            const struct base *P = &game_bases[rnd(*game_base_count)];
+            if (P->faction == f) F->region_base_plan[tile(P->x, P->y)->region] = (uint8_t)rnd(4);
+        }
+        if (rnd(4) == 0) {
+            const struct base *T = &game_bases[rnd(*game_base_count)];
+            F->target_x = rnd(5) ? T->x : -1, F->target_y = T->y;
+        }
+        if (rnd(4) == 0) F->attack_target_base = rnd(*game_base_count + 1) - 1;
+        if (rnd(3) == 0) {
+            static const uint32_t flags[] = {0x800, 0x200000, 0x80000000u, 0x200, 0x20000000};
+            F->flags ^= flags[rnd(5)];
+        }
+        if (rnd(3) == 0) {
+            int o = 1 + rnd(FACTION_COUNT - 1);
+            static const uint32_t treaty[] = {TREATY_PACT, TREATY_TREATY, TREATY_TRUCE, TREATY_VENDETTA, 0x20, 0x40,
+                                              0x400, 0x800, 0x1000, 0x8};
+            if (o != f) F->diplo_status[o] ^= treaty[rnd(10)];
+            if (o != f && rnd(3) == 0)
+                F->diplo_status[o] = (F->diplo_status[o] | TREATY_VENDETTA) & ~(uint32_t)(TREATY_PACT | TREATY_TREATY | TREATY_TRUCE);
+            if (rnd(2)) game_factions[o].diplo_spoke[f] = *game_current_turn - rnd(30);
+        }
+        if (rnd(4) == 0) game_bases[rnd(*game_base_count)].ai_plan = (uint8_t)rnd(3);
+        int scene = rnd(4);
+        if (scene) {
+            // No continent of its own to defend (nowhere to reinforce);
+            // at peace (nowhere to invade: its ports elsewhere, or with
+            // its continents planned 7 not even those, and empty coasts
+            // left), or at war with all.
+            int seven = scene == 2, war = scene == 3;
+            for (int o = 1; o < FACTION_COUNT; o++)
+                if (o != f)
+                    F->diplo_status[o] = war ? (F->diplo_status[o] | TREATY_VENDETTA) &
+                                                   ~(uint32_t)(TREATY_PACT | TREATY_TREATY | TREATY_TRUCE)
+                                             : (F->diplo_status[o] | TREATY_TREATY) & ~(uint32_t)TREATY_VENDETTA;
+            for (int b = 0; b < *game_base_count; b++) {
+                static const uint8_t calm[] = {0, 1, 3, 0, 1, 8};
+                if (game_bases[b].faction == f)
+                    F->region_base_plan[tile(game_bases[b].x, game_bases[b].y)->region] = seven ? 7 : calm[rnd(6)];
+            }
+        }
+        if (rnd(8) == 0) game_bases[rnd(*game_base_count)].queue[0] = BUILD_ASCENT;
+        if (rnd(6) == 0) *game_human_factions ^= (uint8_t)(1u << f);
+        if (rnd(4) == 0) *game_current_turn = rnd(300);
+        if (rival_on_square(v)) {
+            hooks_writes_abandon(&w);
+            continue;
+        }
+        em_sweep_one(v);
         hooks_writes_abandon(&w);
     }
     move_hold_steps(0);
@@ -5410,6 +6078,7 @@ static void ai_sweep(void) {
     sweep_enemy_veh();
     sweep_enemy_turn();
     sweep_enemy_move();
+    sweep_transport();
     hooks_writes_abandon(&outer);
     hooks_sweeping = sweeping;
     if (*game_turn % 25 == 0)

@@ -420,6 +420,20 @@ static void test_enemy_move(void) {
     EXPECT(enemy_move(0), 0);
     EXPECT(vehs[0].order, 0);
     EXPECT(vehs[0].state & 0x200, 0);
+    // A transport at sea next to an empty continent, with a combat unit
+    // sentried aboard for no transport in particular: it unloads there
+    // (status 'u'), its passenger's orders cleared.
+    land();
+    for (int y = 0; y < H; y++)
+        for (int x = 6 + (y & 1); x < W; x += 2) at(x, y)->climate = 1 << 5, at(x, y)->region = 0x41;
+    protos[5] = (struct unit_proto){.chassis = 1, .weapon = 2, .armor = 1, .plan = PLAN_NAVAL_TRANSPORT, .reactor = 1,
+                                    .carry = 2};
+    put_unit(0, 6, 4, 2, 5);
+    put_unit(1, 6, 4, 2, 1);
+    vehs[1].order = 1, vehs[1].waypoint_x[0] = -1;
+    enemy_move(0);
+    EXPECT(vehs[0].status_icon, 'u');
+    EXPECT(vehs[1].order, 0);
 }
 
 int main(void) {

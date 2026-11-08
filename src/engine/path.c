@@ -847,7 +847,10 @@ int shadow_path_find_in(struct game_path *p, int x1, int y1, int x2, int y2, int
         if (stale_logging && stale_n < STALE_LOG) stale_log[stale_n++] = stale;
         return path_stale_call((void *)orig_path_find, p, a, stale);
     }
-    if (shadow_bypass()) return find_at(p, a, stale);
+    // Inside a check, a call ours makes through the game's code (contiguous
+    // from assemble_passengers or diplomacy_check, say) gets the word the
+    // original's call there found, in turn, while the check replays them.
+    if (shadow_bypass()) return find_at(p, a, stale_replaying ? stale_for_move() : stale);
     stats_path_find.calls++;
     shadow_tick(PATH);
     return check_path_find(p, a, stale);
