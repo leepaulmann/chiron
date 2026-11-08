@@ -17,3 +17,7 @@
 /traces/
 *.idb
 *.i64
+
+# Claude Code: per-user approvals (may hold secrets) and agent worktrees
+/.claude/settings.local.json
+/.claude/worktrees/
