@@ -1549,6 +1549,23 @@ extern void(__attribute__((thiscall)) * game_net_daemon_hang_up)(void *daemon);
 extern void(__attribute__((thiscall)) * game_lock_clear)(void *lock);
 extern void(__attribute__((thiscall)) * game_alpha_net_close)(void *daemon);
 
+// Saved games (save.c): the game's C runtime file functions, which take
+// its own FILE (passed as void *), its allocator, and what loading calls.
+extern size_t (*game_fread)(void *buf, size_t len, size_t count, void *fp);
+extern size_t (*game_fwrite)(const void *buf, size_t len, size_t count, void *fp);
+extern int (*game_fclose)(void *fp), (*game_fseek)(void *fp, long offset, int origin);
+extern int (*game_fgetc)(void *fp), (*game_fputc)(int c, void *fp);
+extern void *(*game_env_open)(const char *name, const char *mode);  // fopen in the game's folders
+extern int (*game_remove)(const char *name);
+extern void *(*game_mem_get)(size_t size);  // malloc, or the game stops when out of memory
+extern void (*game_free)(void *p);
+extern int (*game_map_init)(void);  // allocates the map for the size set
+extern void(__attribute__((thiscall)) * game_map_win_close)(void *win);
+extern void(__attribute__((thiscall)) * game_path_init)(void *path);
+extern void (*game_check_tamper)(void);
+// A string list's add: the text at list->src_text, under id.
+extern void(__attribute__((thiscall)) * game_string_list_add)(void *list, int id);
+
 // Point the variables above at a loaded terranx.exe.
 void game_bind(struct pe_image *exe);
 
