@@ -1435,6 +1435,25 @@ extern void (*game_text_get)(void);
 extern char *(*game_text_item)(void);
 extern void (*game_text_close)(void);
 extern char **game_text_line;
+// The rest of it the rules readers (rules.c) use: the next item kept in the
+// string table, as a number, as binary digits; the index of a file's
+// sections. The string table (game_strings), the labels, a button's bubble
+// help, a faction's art, the factions chosen in the settings, and the C
+// runtime's case-blind compares and atoi (the game's own, for their locale
+// and overflow).
+extern char *(*game_text_item_string)(void);
+extern int (*game_text_item_number)(void), (*game_text_item_binary)(void);
+extern void (*game_text_clear_index)(void);
+extern void (*game_text_make_index)(char *file);
+extern int (*game_labels_init)(void);
+extern int(__attribute__((thiscall)) * game_strings_init)(void *table, int size);
+extern char *(__attribute__((thiscall)) * game_strings_put)(void *table, char *s);
+extern int(__attribute__((thiscall)) * game_button_set_bubble_text)(void *button, char *s);
+extern void (*game_load_faction_art)(int faction);
+extern void (*game_prefs_fac_load)(void);
+extern int (*game_stricmp)(const char *a, const char *b);
+extern int (*game_strnicmp)(const char *a, const char *b, size_t n);
+extern int (*game_atoi)(const char *s);
 
 // The AI's terraforming.
 struct rules_ability {
