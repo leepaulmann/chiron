@@ -248,6 +248,9 @@ module at a time. So far:
   the land a faction holds around a square;
 - scores: the year, objectives, the factions' rankings (with the AI's
   rolls to turn on the leader), the score and its rating by difficulty;
+- diplomacy: the AI's answers when the player threatens it, asks for
+  energy, or proposes a pact or a treaty (the price it asks, techs and
+  help wanted, surrender, the treaty made);
 - events: the turn's random events (perihelion and the base and world
   events), a faction put out of the game, and the faction modifiers and
   social choices set when it starts;
