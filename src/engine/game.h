@@ -117,7 +117,7 @@ struct faction_data {
     int32_t diplo_betrayed[FACTION_COUNT];  // times each faction double-crossed it
     int32_t diplo_combat_total[FACTION_COUNT];  // its score in all its wars with each
     int32_t diplo_combat_count[FACTION_COUNT];  // its score in the current war with each, reset at a vendetta
-    GAME_PAD(0x1cc, 0x1d0);
+    uint32_t maps_traded;  // bit per faction whose maps it has had in a trade, and those they had
     uint32_t base_governor_adv;  // the governor settings new bases start with
     int32_t atrocities;
     int32_t major_atrocities;
@@ -237,6 +237,7 @@ GAME_AT(struct faction_data, diplo_merc, 0x98);
 GAME_AT(struct faction_data, diplo_patience, 0xb8);
 GAME_AT(struct faction_data, integrity_blemishes, 0x124);
 GAME_AT(struct faction_data, diplo_gifts, 0x12c);
+GAME_AT(struct faction_data, maps_traded, 0x1cc);
 GAME_AT(struct faction_data, diplo_combat_count, 0x1ac);
 GAME_AT(struct faction_data, odp_deployed, 0x364);
 GAME_AT(struct faction_data, target_x, 0x3f0);
@@ -1361,7 +1362,9 @@ extern int32_t *game_diplo_tribute, *game_diplo_fear, *game_diplo_conquest_fear,
     *game_diplo_enemy_allies, *game_diplo_enemy_ally, *game_diplo_prev_hostility, *game_diplo_goodwill,
     *game_diplo_help_faction, *game_diplo_unmet_enemy, *game_diplo_player_enemy, *game_diplo_unmet_faction,
     *game_diplo_mutual_faction, *game_diplo_rival_wars, *game_diplo_can_surrender, *game_diplo_can_betray,
-    *game_diplo_best_proto, *game_diplo_mention_proto, *game_diplo_caption_off, *game_diplo_caption_mode;
+    *game_diplo_best_proto, *game_diplo_mention_proto, *game_diplo_caption_off, *game_diplo_caption_mode,
+    *game_diplo_maps_news;
+// game_diplo_maps_news: 1 once a map trade showed the first faction something new.
 extern int32_t *game_diplo_region_factions;  // [REGION_COUNT] bit per faction with its headquarters or many bases there
 extern int32_t *game_encounter_x, *game_encounter_y;  // where two factions met, while they talk
 extern int32_t *game_un_charter_a, *game_un_charter_b;  // the UN Charter stands while a <= b

@@ -58,10 +58,28 @@ static int pacts, treaties;
 static void pact_stub2(int f, int o) { pacts++; }
 static void treaty_stub(int f, int o) { treaties++; }
 static char *pacts_stub(int f, int o) { return "pacts"; }
+// The popups the gifts and joint attacks keep on their stacks: the menu's
+// items and its answer.
+static int items[16], n_items, menu_answer, popups;
+static void __attribute__((thiscall)) pop_stub(void *pop) {}
+static int __attribute__((thiscall)) pop_start_stub(void *pop, char *file, char *label, int a, int b, int c, int d) {
+    return popups++, 0;
+}
+static void __attribute__((thiscall)) sprite_box_stub(void *box, void *sprite, int a, int b) {}
+static void __attribute__((thiscall)) item_stub(void *dialogs, char *text, int id) {
+    if (n_items < 16) items[n_items] = id;
+    n_items++;
+}
+static int __attribute__((thiscall)) exec_stub(void *pop, int a, int b) { return menu_answer; }
+static int contiguous_stub(int f, int o, int region, int sea) { return 0; }
+static char *pacts1_stub(int f) { return "pacts"; }
+static int x_pop_stub(char *label, int unk) { return 0; }
+static char pop_file[16];
 
 static void reset(void) {
     memset(factions, 0, sizeof factions);
     n_shown = said = answer_with = captions = energy_updates = 0;
+    n_items = menu_answer = popups = 0;
     talk_rep = player_pacts = rival_pacts = help_faction = accepted_faction = runaway = strong_pacts = goodwill = 0;
     captured = can_surrender = alter_fear = enemy_allies = pacts = treaties = 0;
     fear = friction = prev_hostility = attack_chance = exposed = satan = can_betray = 0;
@@ -107,6 +125,11 @@ int main(void) {
     game_diplo_enemy_allies = &enemy_allies, game_faction_rankings = rankings, game_ranked_faction = ranked;
     game_ranking_scores = scores, game_pact_of_brotherhood = pact_stub2, game_make_treaty = treaty_stub;
     game_get_phrase = phrase_stub, game_get_pacts_2 = pacts_stub;
+    game_popup_ctor = pop_stub, game_popup_close = pop_stub, game_scroll_close = pop_stub;
+    game_flat_button_dtor = pop_stub, game_graphic_win_dtor = pop_stub, game_base_pop_dtor = pop_stub;
+    game_popup_start = pop_start_stub, game_sprite_box_sprite = sprite_box_stub, game_dialogs_item = item_stub;
+    game_base_pop_exec_3 = exec_stub, game_pop_file = pop_file, game_contiguous = contiguous_stub;
+    game_get_pacts = pacts1_stub, game_get_him_her = phrase_stub, game_x_pop = x_pop_stub;
 
     // An AI set on betrayal declares a vendetta at once.
     reset();
@@ -295,6 +318,141 @@ int main(void) {
     factions[2].flags |= 0x400000;
     EXPECT(propose_treaty(1, 2), 1);
     EXPECT(treaties, 1);
+
+    // ---- make_gift
+    proposal = 1;
+    // Energy: the menu lists the player's 400 and its halves in 25s, down
+    // to nothing. 200 given to an AI with 300, from a player with 400, on
+    // turn 100: a large gift. Friction falls by 4 (40 in fifths: 10 at a
+    // half, 20 at a third, 10 at a quarter: 13; then 17 / -5 * 3 / 2),
+    // grudges go, the gift counts twice, and patience falls by 3.
+    reset();
+    counter = 5, menu_answer = 200;
+    factions[1].energy_credits = 400, factions[2].energy_credits = 300;
+    factions[2].diplo_friction[1] = 10, factions[1].integrity_blemishes = 3;
+    factions[1].diplo_status[2] |= TREATY_WANT_REVENGE;
+    make_gift(1, 2);
+    EXPECT(n_items, 6);
+    EXPECT(items[0], 400);
+    EXPECT(items[2], 100);
+    EXPECT(items[4], 25);
+    EXPECT(items[5], 0);
+    EXPECT(factions[1].energy_credits, 200);
+    EXPECT(factions[2].energy_credits, 500);
+    EXPECT(factions[2].diplo_friction[1], 6);
+    EXPECT(factions[1].diplo_status[2] & TREATY_WANT_REVENGE, 0);
+    EXPECT(factions[1].diplo_gifts[2], 2);
+    EXPECT(factions[2].diplo_patience[1], -3);
+    EXPECT(n_shown, 1);
+    EXPECT(shown[0], 1);
+    // 50 is a fair gift only to an AI with 200 or less: here not, so it
+    // isn't counted; patience falls by 2.
+    reset();
+    counter = 5, menu_answer = 50, turn = 40;
+    factions[1].energy_credits = 300, factions[2].energy_credits = 300;
+    factions[1].integrity_blemishes = 3;
+    make_gift(1, 2);
+    EXPECT(factions[1].energy_credits, 250);
+    EXPECT(factions[1].diplo_gifts[2], 0);
+    EXPECT(factions[2].diplo_patience[1], -2);
+    // Nothing picked: nothing given, nothing said.
+    reset();
+    counter = 5, menu_answer = 0;
+    factions[1].energy_credits = 300;
+    make_gift(1, 2);
+    EXPECT(factions[1].energy_credits, 300);
+    EXPECT(n_shown, 0);
+    turn = 100;
+
+    // ---- propose_attack
+    proposal = 8;
+    // An AI at war with the target already says so.
+    reset();
+    counter = 1, proposal_faction = 3;
+    factions[2].diplo_status[3] |= TREATY_VENDETTA;
+    EXPECT(propose_attack(1, 2), 1);
+    EXPECT(shown[0], 0x68da74);
+    // One out of touch with it (no commlink, not neighbours) and not in a
+    // pact with the player refuses.
+    reset();
+    counter = 1, proposal_faction = 3;
+    factions[2].diplo_status[3] = 0;
+    EXPECT(propose_attack(1, 2), 1);
+    EXPECT(shown[0], 0x68da84);
+    // Energy: the target's strength 100, five times, by the AI's will to
+    // fight (2), half again for a target that is no enemy of the player
+    // nor human: 1500. Paid, the AI declares a vendetta on the target.
+    reset();
+    counter = 5, proposal_faction = 3, menu_answer = 1;
+    for (int i = 0; i < 4; i++) want_tech[i] = -1;
+    factions[3].mil_strength = 100;
+    factions[1].energy_credits = 2000;
+    EXPECT(propose_attack(1, 2), 1);
+    EXPECT(factions[1].energy_credits, 500);
+    EXPECT(factions[2].energy_credits, 1500);
+    EXPECT(factions[2].diplo_status[3] & TREATY_VENDETTA, TREATY_VENDETTA);
+    EXPECT(factions[2].diplo_status[3] & TREATY_UNK_40, TREATY_UNK_40);
+    EXPECT(factions[2].diplo_status[1] & TREATY_UNK_80, TREATY_UNK_80);
+    EXPECT(popups, 2);  // the price, and the menu to pay it
+    // A player who can't pay isn't offered the menu.
+    reset();
+    counter = 5, proposal_faction = 3;
+    factions[3].mil_strength = 100;
+    factions[1].energy_credits = 1000;
+    EXPECT(propose_attack(1, 2), 1);
+    EXPECT(popups, 1);
+    EXPECT(factions[2].diplo_status[3] & TREATY_VENDETTA, 0);
+    // A threat from a player the AI has nothing against, which it
+    // wouldn't fight anyway: turned away without a word.
+    reset();
+    counter = 3, proposal_faction = 3;
+    EXPECT(propose_attack(1, 2), 0);
+    EXPECT(n_shown, 0);
+    // One that surrendered to the player joins at once.
+    reset();
+    counter = 3, proposal_faction = 3;
+    factions[1].diplo_status[2] |= TREATY_PACT, factions[2].diplo_status[1] |= TREATY_PACT | 0x2000000;
+    EXPECT(propose_attack(1, 2), 1);
+    EXPECT(factions[2].diplo_status[3] & TREATY_VENDETTA, TREATY_VENDETTA);
+
+    // ---- buy_tech
+    // The world map (valued 2) for 13 eight-turn spans: 26, in 25s rounded
+    // up, at least 100. A player with 50 can't pay for research, so no
+    // price is named; nor for friendship, nor with nothing to sell.
+    static uint8_t achieved[10000];
+    game_tech_achieved = achieved;
+    reset();
+    offer_tech[0] = 9999, want_tech[0] = -1;
+    factions[1].energy_credits = 50;
+    EXPECT(buy_tech(1, 2, 4, 0, 4), 0);
+    EXPECT(buy_tech(1, 2, 1, 0, 4), 0);
+    offer_tech[0] = -1;
+    EXPECT(buy_tech(1, 2, 5, 0, 4), 0);
+    EXPECT(n_shown, 0);
+    EXPECT(second, 2);
+
+    // ---- trade_maps
+    // Each learns what the other has seen, with what the other last saw
+    // there; news for the first, who learned something.
+    {
+        static struct map_tile tiles[3];
+        static struct map_tile *map = tiles;
+        static int32_t area = 3, news;
+        game_map = &map, game_map_area = &area, game_diplo_maps_news = &news;
+        reset();
+        current = 3;
+        tiles[0].visibility = 1 << 1, tiles[0].bits = 0xf0, tiles[0].bits_seen[0] = 0x3c;
+        tiles[1].visibility = 1 << 2;
+        trade_maps(1, 2);
+        EXPECT(tiles[0].visibility, 6);
+        EXPECT(tiles[0].bits_seen[1], 0x30);
+        EXPECT(tiles[1].visibility, 6);
+        EXPECT(tiles[2].visibility, 0);
+        EXPECT(news, 1);
+        EXPECT(factions[1].maps_traded, 1 << 2);
+        EXPECT(factions[2].maps_traded, 6);
+        current = 1;
+    }
 
     if (failures) printf("%d failures\n", failures);
     else printf("ok\n");

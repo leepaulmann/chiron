@@ -11,6 +11,21 @@ int propose_pact(int faction, int other);
 // The player proposes a treaty; the same.
 int propose_treaty(int faction, int other);
 
+// The player gives the AI a gift: energy, research or a base.
+void make_gift(int faction, int other);
+// The player asks the AI to join an attack on a third faction; 0 when a
+// threat is turned away without a word.
+int propose_attack(int faction, int other);
+// The player offers to buy the tech (or commlink, or prototype) the AI
+// could give; 0 if no price is named.
+int buy_tech(int faction, int other, int counter, int high, int proposal);
+// Two factions trade maps.
+void trade_maps(int faction, int other);
+// A base ceded in the talks to `faction`.
+void give_a_base(int base, int faction);
+// The player asks the AI for one of its bases; 0 once it changed hands.
+int base_swap(int faction, int other);
+
 // Shadow mode (quiet.c): in a sweep's copies of the game, the answers the
 // diplomacy window's dialogs give, in turn, and the next one to give.
 enum { QUIET_TALK_ANSWERS = 8 };

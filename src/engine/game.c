@@ -362,7 +362,8 @@ int32_t *game_diplo_second, *game_diplo_tribute, *game_diplo_fear, *game_diplo_c
     *game_diplo_enemy_allies, *game_diplo_enemy_ally, *game_diplo_prev_hostility, *game_diplo_goodwill,
     *game_diplo_help_faction, *game_diplo_unmet_enemy, *game_diplo_player_enemy, *game_diplo_unmet_faction,
     *game_diplo_mutual_faction, *game_diplo_rival_wars, *game_diplo_can_surrender, *game_diplo_can_betray,
-    *game_diplo_best_proto, *game_diplo_mention_proto, *game_diplo_caption_off, *game_diplo_caption_mode;
+    *game_diplo_best_proto, *game_diplo_mention_proto, *game_diplo_caption_off, *game_diplo_caption_mode,
+    *game_diplo_maps_news;
 int32_t *game_diplo_region_factions, *game_encounter_x, *game_encounter_y, *game_un_charter_a, *game_un_charter_b;
 int32_t *game_net_income, *game_console_veh_mode;
 void **game_faction_portraits;
@@ -1004,7 +1005,7 @@ void game_bind(struct pe_image *exe) {
         {&game_diplo_mention_proto, 0x93fa40}, {&game_diplo_caption_off, 0x93fac8}, {&game_diplo_caption_mode, 0x93facc},
         {&game_diplo_region_factions, 0x93f818}, {&game_encounter_x, 0x68d43c}, {&game_encounter_y, 0x68d440},
         {&game_un_charter_a, 0x9a6638}, {&game_un_charter_b, 0x9a663c}, {&game_net_income, 0x749c0c},
-        {&game_console_veh_mode, 0x939288},
+        {&game_console_veh_mode, 0x939288}, {&game_diplo_maps_news, 0x93fad8},
     };
     for (unsigned i = 0; i < sizeof(talk) / sizeof(talk[0]); i++) *talk[i].p = (int32_t *)code_at(exe, talk[i].addr);
     game_faction_portraits = (void **)code_at(exe, 0x6846d8);
