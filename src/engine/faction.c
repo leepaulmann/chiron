@@ -2564,4 +2564,7 @@ static const struct hook faction_hooks[] = {
     HOOK(0x55eee0, atrocity, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),                    // sub esp, 12
     HOOK(0x55f450, major_atrocity, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x58),              // sub esp, 0x58
 };
-struct hook_module faction_module = {"faction", faction_hooks, HOOK_COUNT(faction_hooks), faction_sweep, NULL, -1};
+// The diplomacy talks (diplomacy.c) are swept with it: the game calls them
+// only when a human player talks.
+extern struct hook_module diplomacy_module;
+struct hook_module faction_module = {"faction", faction_hooks, HOOK_COUNT(faction_hooks), faction_sweep, &diplomacy_module, -1};

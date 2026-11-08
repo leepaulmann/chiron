@@ -15,6 +15,7 @@
 // text variables either.
 #include <stdio.h>
 
+#include "diplomacy.h"
 #include "game.h"
 #include "shadow.h"
 
@@ -88,6 +89,56 @@ static void shadow_communicate(int faction, int other, int unk) {
     }
     stats_communicate.calls++;
 }
+
+// The diplomacy window's dialogs (X_pops_11), in a sweep's copies of the
+// game: the player's answers to the talks (diplomacy.c) the sweep makes
+// up, held and answered from quiet_talk_answers in turn (0 once they run
+// out), so that both runs of a check get the same ones; the check resets
+// quiet_talk_next for each run. The Datalinks a player may open from one
+// (help_topic) and the phrases read from a faction's file
+// (get_noun_phrase, get_phrase, which open it, allocating) are held too,
+// a phrase answered with its arguments. Outside a sweep they run as they
+// are: a check of a game call that reached them would be reported by the
+// heap guard.
+int quiet_talk_answers[QUIET_TALK_ANSWERS], quiet_talk_next;
+static int talk_held(void) { return hooks_sweeping && hooks_protecting(); }
+static int (*orig_x_pops_11)(char *label, int flags, void *sprite, void *fn);
+static struct hook_stats stats_x_pops_11 = {"(swept x_pops_11)"};
+// Held only in a sweep, whose held calls are dropped, never made.
+static void replay_dropped(const struct hook_ui_call *c) {}
+static int shadow_x_pops_11(char *label, int flags, void *sprite, void *fn) {
+    if (!talk_held()) return orig_x_pops_11(label, flags, sprite, fn);
+    stats_x_pops_11.calls++;
+    struct hook_ui_call c = {.name = "x_pops_11", .replay = replay_dropped, .arg = {flags, (int)(intptr_t)sprite}};
+    hooks_ui_text(&c, 0, label);
+    hooks_ui_hold(&c);
+    return quiet_talk_next < QUIET_TALK_ANSWERS ? quiet_talk_answers[quiet_talk_next++] : 0;
+}
+static void (*orig_help_topic)(int kind, int id);
+static struct hook_stats stats_help_topic = {"(swept help_topic)"};
+static void shadow_help_topic(int kind, int id) {
+    if (!talk_held()) {
+        orig_help_topic(kind, id);
+        return;
+    }
+    stats_help_topic.calls++;
+    struct hook_ui_call c = {.name = "help_topic", .replay = replay_dropped, .arg = {kind, id}};
+    hooks_ui_hold(&c);
+}
+#define TALK_PHRASE(fn)                                                                        \
+    static char *(*orig_##fn)(int faction, int unk);                                           \
+    static struct hook_stats stats_##fn = {"(swept " #fn ")"};                                 \
+    static char *shadow_##fn(int faction, int unk) {                                           \
+        static char phrase[32];                                                                \
+        if (!talk_held()) return orig_##fn(faction, unk);                                     \
+        stats_##fn.calls++;                                                                    \
+        struct hook_ui_call c = {.name = #fn, .replay = replay_dropped, .arg = {faction, unk}}; \
+        hooks_ui_hold(&c);                                                                     \
+        snprintf(phrase, sizeof(phrase), "(" #fn " %d %d)", faction, unk);                     \
+        return phrase;                                                                         \
+    }
+TALK_PHRASE(get_noun_phrase)
+TALK_PHRASE(get_phrase)
 
 // The held copy of string argument i, or NULL.
 #define TEXT(i) (c->has_text >> (i) & 1 ? (char *)c->text[i] : NULL)
@@ -449,6 +500,10 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x5bf310, x_pop, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x0c),   // mov eax, [ebp+12]
     QUIET_HOOK(0x5bf5d0, x_pops, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x10),  // mov eax, [ebp+16]
     QUIET_HOOK(0x54ffd0, communicate, SEH_PROLOGUE),
+    QUIET_HOOK(0x5bf7d0, x_pops_11, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x14),  // mov eax, [ebp+20]
+    QUIET_HOOK(0x44cb60, help_topic, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x0c),  // mov eax, [ebp+12]
+    QUIET_HOOK(0x58f8b0, get_noun_phrase, PUSH_EBP_MOV_EBP_ESP, 0x81, 0xec, 0x00, 0x01, 0x00, 0x00),  // sub esp, 0x100
+    QUIET_HOOK(0x58f810, get_phrase, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x4d, 0x08),  // mov ecx, [ebp+8]
     QUIET_HOOK(0x4acbd0, report_intel, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x0d, 0x2c, 0x39, 0x7d, 0x00),  // mov ecx, [0x7d392c]
     QUIET_HOOK(0x625e30, parse_num, 0x8b, 0x44, 0x24, 0x04, 0x83, 0xf8, 0x09),   // mov eax, [esp+4]; cmp eax, 9
     QUIET_HOOK(0x625e50, parse_say, 0x8b, 0x44, 0x24, 0x04, 0x83, 0xf8, 0x09),

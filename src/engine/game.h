@@ -1392,6 +1392,30 @@ extern void (*game_introduce)(int faction, int other);
 extern void (*game_report_intel)(int faction);
 extern void(__attribute__((thiscall)) * game_info_win_set_state)(void *win, int a, int b);
 extern void(__attribute__((thiscall)) * game_sprite_box_sprite)(void *box, void *sprite, int a, int b);
+// The player's proposal in talks and what it offers in return (Thinker's
+// DiploCurrentProposal and DiploCounterProposal; see diplomacy.c), the
+// faction a joint attack or a commlink is about, the AI's base asked for
+// and the player's base offered.
+extern int32_t *game_diplo_proposal, *game_diplo_counter, *game_diplo_proposal_faction, *game_diplo_ask_base,
+    *game_diplo_bid_base;
+// A faction whose fight the player agreed to join, and a measure of the
+// AI's defiance that propose_pact() reads (Thinker's DiploAlterFear).
+extern int32_t *game_diplo_accepted_faction, *game_diplo_alter_fear;
+// Phrases from a faction's file (get_noun_phrase and get_phrase open it),
+// and the words for its pact.
+extern char *(*game_get_noun_phrase)(int faction, int unk);
+extern char *(*game_get_phrase)(int faction, int unk);
+extern char *(*game_get_pact)(int faction);
+extern char *(*game_get_pacts)(int faction);
+extern char *(*game_get_pacts_2)(int faction, int other);
+extern void (*game_give_a_base)(int base, int faction);  // a base ceded in talks
+extern void (*game_pact_of_brotherhood)(int faction, int other);
+extern void (*game_make_treaty)(int faction, int other);
+// A network game's talks held in step (diplo_lock()'s parts), no-ops in
+// one played alone.
+extern int(__attribute__((thiscall)) * game_net_daemon_add_global)(void *daemon);
+extern void(__attribute__((thiscall)) * game_net_daemon_unlock)(void *daemon);
+extern void (*game_net_pump)(void);
 // Planetary Council proposals.
 struct proposal {
     char *name, *description;
