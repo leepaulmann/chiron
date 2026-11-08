@@ -2120,7 +2120,9 @@ void faction_upkeep(int faction) {
             *game_state |= GAME_STATE_COUNCIL_SHOWN;
             game_popp(*game_script_file, text(0x68ba58), 0, text(0x68ba48), 0);
         }
-        if (!is_human(faction)) game_call_council(faction);
+        // The original calls it with the human factions in ECX, which
+        // call_council() reads (see council.c).
+        if (!is_human(faction)) call_council_ecx(faction, *game_human_factions);
     }
     if (!*game_net_multiplayer && (*game_preferences & PREF_AUTOSAVE) && faction == *game_current_faction)
         game_auto_save();

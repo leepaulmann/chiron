@@ -17,7 +17,12 @@
 
 #include "diplomacy.h"
 #include "game.h"
+#include "quiet.h"
 #include "shadow.h"
+
+// What a held question answers (0 unless a sweep says otherwise), and
+// whether a sweep's menu reads script.txt (see quiet.h).
+int quiet_answer, quiet_text;
 
 #define QUIET(name, label, params, args)                   \
     static void (*orig_##name) params;                     \
@@ -150,7 +155,7 @@ HELD(int, popb, 0, (char *label, int flags, int sound, char *picture, void *spri
      (hooks_ui_text(&c_, 0, label), hooks_ui_text(&c_, 1, picture), c_.arg[0] = flags, c_.arg[1] = sound,
       c_.arg[2] = (int)(intptr_t)sprite),
      orig_popb(TEXT(0), a_[0], a_[1], TEXT(1), PTR(2)))
-HELD(int, popp, 0, (char *file, char *label, int flags, char *picture, void *fn), (file, label, flags, picture, fn),
+HELD(int, popp, quiet_answer, (char *file, char *label, int flags, char *picture, void *fn), (file, label, flags, picture, fn),
      (hooks_ui_text(&c_, 0, label), hooks_ui_text(&c_, 1, file), hooks_ui_text(&c_, 2, picture), c_.arg[0] = flags,
       c_.arg[1] = (int)(intptr_t)fn),
      orig_popp(TEXT(1), TEXT(0), a_[0], TEXT(2), PTR(1)))
@@ -166,6 +171,10 @@ HELD(int, x_pop, 0, (char *label, int unk), (label, unk), (hooks_ui_text(&c_, 0,
 HELD(int, x_pops, 0, (char *label, void *sprite, void *fn), (label, sprite, fn),
      (hooks_ui_text(&c_, 0, label), c_.arg[0] = (int)(intptr_t)sprite, c_.arg[1] = (int)(intptr_t)fn),
      orig_x_pops(TEXT(0), PTR(0), PTR(1)))
+// The same with a flag word, as a leader's answer in the talks.
+HELD(int, x_pops_11, 0, (char *label, int flags, void *sprite, void *fn), (label, flags, sprite, fn),
+     (hooks_ui_text(&c_, 0, label), c_.arg[0] = flags, c_.arg[1] = (int)(intptr_t)sprite, c_.arg[2] = (int)(intptr_t)fn),
+     orig_x_pops_11(TEXT(0), a_[0], PTR(1), PTR(2)))
 HELD(void, report_intel, (void)0, (int faction), (faction), (c_.arg[0] = faction), orig_report_intel(a_[0]))
 // The text variables a message fills in: a number, a string from the
 // string table, or a string.
@@ -257,7 +266,12 @@ QUIET_THIS(int, popup_start, 0, (void *pop, char *file, char *label, int a, int 
 QUIET_THIS(void, base_pop_init, (void)0, (void *pop, int a, int b), (pop, a, b))
 QUIET_THIS(void, base_pop_set_width, (void)0, (void *pop, int w), (pop, w))
 QUIET_THIS(void, base_pop_string, (void)0, (void *pop, char *s), (pop, s))
-QUIET_THIS(int, base_pop_exec_3, 0, (void *pop, int a, int b), (pop, a, b))
+// An item added to a dialog's list (call_council() lists its proposals
+// even for the AI), and a leader's portrait put in such a dialog
+// (buy_council_vote()): they allocate.
+QUIET_THIS(int, dialogs_item, 0, (void *dialogs, char *text, int id), (dialogs, text, id))
+QUIET_THIS(void, sprite_box_sprite, (void)0, (void *box, void *sprite, int a, int b), (box, sprite, a, b))
+QUIET_THIS(int, base_pop_exec_3, quiet_answer, (void *pop, int a, int b), (pop, a, b))
 // A list box shown again after its list changed (base_kill's messages),
 // and the base window told a base is gone.
 QUIET_THIS(int, listbox_update_changes, 7, (void *box), (box))
@@ -351,6 +365,8 @@ HELD_THIS(fx_stop, (void *self, int id), (self, id), c_.arg[0] = id, orig_fx_sto
 // quickly, and the engine's pitch for a slow one.
 HELD_THIS(console_cursor_next, (void *self, int x, int y), (self, x, y), (c_.arg[0] = x, c_.arg[1] = y),
           orig_console_cursor_next(SELF, a_[0], a_[1]))
+HELD_THIS(council_win_set_vote, (void *self, int faction, int vote), (self, faction, vote),
+          (c_.arg[0] = faction, c_.arg[1] = vote), orig_council_win_set_vote(SELF, a_[0], a_[1]))
 HELD_THIS(fx_engine_pitch, (void *self, int pitch), (self, pitch), c_.arg[0] = pitch, orig_fx_engine_pitch(SELF, a_[0]))
 // Movies and help for secret projects.
 HELD(void, amovie_project, (void)0, (int project), (project), (c_.arg[0] = project), orig_amovie_project(a_[0]))
@@ -415,10 +431,31 @@ HELD(void, tech_achieved, (void)0, (int faction, int tech, int from, int steal),
 HELD(void, tech_research, (void)0, (int faction, int labs), (faction, labs), (c_.arg[0] = faction, c_.arg[1] = labs),
      orig_tech_research(a_[0], a_[1]))
 
-// The AI calling the Planetary Council, whose window allocates. The game
-// calls it last in a faction's turn but for the autosave, which a check of
-// faction_upkeep() leaves out, so made after the check it comes in order.
-HELD(void, call_council, (void)0, (int faction), (faction), (c_.arg[0] = faction), orig_call_council(a_[0]))
+// The Planetary Council's session, whose window allocates (call_council()
+// opens it). The game calls it last in a faction's turn but for the
+// autosave, which a check of faction_upkeep() leaves out, so made after the
+// check it comes in order. A vote cast while the window is open (bought in
+// buy_council_vote()) is told to it, which may end the session.
+HELD(void, council, (void)0, (int faction, int prop, int target), (faction, prop, target),
+     (c_.arg[0] = faction, c_.arg[1] = prop, c_.arg[2] = target), orig_council(a_[0], a_[1], a_[2]))
+
+// A menu read from script.txt, while a sweep sets quiet_text: not opened,
+// and no line read (each item is the line last read), so that the menu's
+// answer (quiet_answer) can be checked.
+static int (*orig_x_text_open)(char *file, char *label);
+static struct hook_stats stats_x_text_open = {"(quiet x_text_open)"};
+static int shadow_x_text_open(char *file, char *label) {
+    if (!quiet_text || !hooks_protecting()) return orig_x_text_open(file, label);
+    stats_x_text_open.calls++;
+    return 0;
+}
+static char *(*orig_text_get)(void);
+static struct hook_stats stats_text_get = {"(quiet text_get)"};
+static char *shadow_text_get(void) {
+    if (!quiet_text || !hooks_protecting()) return orig_text_get();
+    stats_text_get.calls++;
+    return *game_text_line;
+}
 
 // The battle (battle_fight_2): the status and battle windows drawn, the
 // map squares around the fight redrawn, and input put aside. The battle
@@ -540,7 +577,13 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x477840, mon_built_preserve, MON_PROLOGUE),
     QUIET_HOOK(0x477100, mon_secret_project, MON_PROLOGUE),
     QUIET_HOOK(0x4779d0, mon_winning_trans, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0xd4, 0x64, 0x9a, 0x00),
-    QUIET_HOOK(0x52c880, call_council, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),  // mov eax, fs:[0]
+    QUIET_HOOK(0x428350, council, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),  // sub esp, 8
+    QUIET_HOOK(0x5bf7d0, x_pops_11, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x14),  // mov eax, [ebp+20]
+    QUIET_HOOK(0x424720, council_win_set_vote, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x8b, 0xd9),  // push ebx; mov ebx, ecx
+    QUIET_HOOK(0x612a70, dialogs_item, 0x8b, 0xc1, 0x8b, 0x88, 0x80, 0x01, 0x00, 0x00),  // mov eax, ecx; mov ecx, [eax+0x180]
+    QUIET_HOOK(0x6108e0, sprite_box_sprite, 0x8b, 0x44, 0x24, 0x04, 0x53),  // mov eax, [esp+4]; push ebx
+    QUIET_HOOK(0x5beca0, x_text_open, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0x0c, 0x1b, 0x69, 0x00),  // mov eax, [0x691b0c]
+    QUIET_HOOK(0x5fd570, text_get, 0xa1, 0xf4, 0x7c, 0x9b, 0x00),                         // mov eax, [0x9b7cf4]
     QUIET_HOOK(0x46b140, draw_tiles, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x8b, 0x5d, 0x0c),            // push ebx; mov ebx, [ebp+12]
     QUIET_HOOK(0x4b9ea0, status_win_redraw, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10),           // sub esp, 16
     QUIET_HOOK(0x514880, console_update_data, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),         // mov eax, [ebp+8]

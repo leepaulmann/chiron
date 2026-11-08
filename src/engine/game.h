@@ -669,7 +669,7 @@ struct rules_basic {
     // from lower ground.
     int32_t combat_base_def, combat_atk_road, combat_atk_higher, combat_pen_atk_lower;
     int32_t tech_orbital_insert;  // lets air drops reach anywhere without the Space Elevator
-    GAME_PAD(0x94, 0x98);
+    int32_t min_turns_councils;  // between a faction's calls of the Council, and between putting a proposal (or its passing) and its return
     int32_t minerals_harvesting_forest;  // a base's minerals from a forest its faction clears
     int32_t territory_max_dist;  // how far a base's territory reaches over land; half that at sea
     int32_t turns_corner_market;  // from cornering the energy market to the win
@@ -699,6 +699,7 @@ struct rules_basic {
 };
 GAME_AT(struct rules_basic, warming_num, 0x114);
 GAME_AT(struct rules_basic, minerals_harvesting_forest, 0x98);
+GAME_AT(struct rules_basic, min_turns_councils, 0x94);
 GAME_AT(struct rules_basic, oblit_atrocity, 0x128);
 GAME_AT(struct rules_basic, retool_strictness, 0xf0);
 GAME_AT(struct rules_basic, mine_road_limit, 0x24);
@@ -1429,6 +1430,21 @@ enum { MORE_RULES_NO_COUNCIL = 0x4 };  // game_more_rules bits
 extern uint32_t *game_more_rules;
 extern int32_t *game_council_candidate;  // [FACTION_COUNT] the governor each faction voted for in the council being held, or 0
 extern int32_t *game_council_pending;    // non-zero while a hotseat or e-mail game's council waits on its players
+extern int32_t *game_proposal_turn;      // [11] the turn each proposal was last put (council()) or passed, or -9999
+extern int32_t *game_council_session;   // non-zero while the Council's window is open
+extern int32_t *game_council_net_call;  // [3] an AI's call in a network game: faction, proposal and candidate
+// The Council's session (its window, the votes and the result), and its
+// window told of a faction's vote.
+extern void (*game_council)(int faction, int prop, int target);
+extern void *game_council_win;
+extern void(__attribute__((thiscall)) * game_council_win_set_vote)(void *win, int faction, int vote);
+// Network games: the diplomacy lock, the wait for other players, a
+// faction's leader state sent, and the message bar cleared.
+extern int (*game_diplo_lock)(int unk);
+extern void (*game_diplo_unlock)(void);
+extern void (*game_wait_loop)(void);
+extern void (*game_synch_leader)(int faction);
+extern void(__attribute__((thiscall)) * game_netmsg_close)(void *netmsg);
 extern void (*game_auto_save)(void);
 
 // Ecological damage: fungus, native life, warming and volcanoes.

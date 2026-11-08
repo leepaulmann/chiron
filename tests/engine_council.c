@@ -37,6 +37,33 @@ static int wants_to_attack_stub(int faction, int other, int odds) { return attac
 static int great_satan_stub(int faction, int aggressive) { return satan; }
 static void __attribute__((thiscall)) netmsg_stub(void *self, char *label, int delay, int unk, char *sound) { notices++; }
 
+// The acts: messages, the popup on the stack, and the session.
+static int32_t passes[PROP_COUNT], passed_turn[PROP_COUNT], climate_change, climate_shown[3], victory, control_turn;
+static int32_t session, net_call[3];
+static struct proposal proposals[PROP_COUNT];
+static struct rules_basic rules_basic;
+static char battle_text[1024], *script_file = "script";
+static int32_t gender, plural;
+static int popps, answer, credits_shown, sessions, session_args[3], listed;
+static uint32_t agenda_set;
+static int popp_stub(char *file, char *label, int flags, char *picture, int unk) { return popps++, answer; }
+static int parse_num_stub(int slot, int value) { return 0; }
+static int parse_says_stub(int slot, char *text, int gender_, int plural_) { return 0; }
+static void __attribute__((thiscall)) console_update_stub(void *console, int unk) { credits_shown++; }
+static void set_agenda_stub(int faction, int other, uint32_t agenda, int on) {
+    if (on) factions[faction].diplo_agenda[other] |= agenda, agenda_set |= agenda;
+}
+static void __attribute__((thiscall)) pop_stub(void *pop) {}
+static int __attribute__((thiscall)) popup_start_stub(void *pop, char *file, char *label, int a, int b, int c, int d) { return 0; }
+static int pcx_stub(char *file, int *w, int *h) { return 1; }
+static char *__attribute__((thiscall)) strings_get_stub(void *table, char *s) { return "proposal"; }
+static void __attribute__((thiscall)) dialogs_item_stub(void *dialogs, char *text, int id) { listed |= 1 << id; }
+static int __attribute__((thiscall)) exec_stub(void *pop, int a, int b) { return answer; }
+static int ambience_stub(int sound) { return 0; }
+static void council_stub(int faction, int prop, int target) {
+    sessions++, session_args[0] = faction, session_args[1] = prop, session_args[2] = target;
+}
+
 int main(void) {
     game_map = &tiles_ptr, game_map_half_width = &half_width, game_bases = bases, game_base_count = &base_count;
     game_factions = factions, game_faction_defs = defs, game_turn = &turn, game_expansion = &expansion;
@@ -260,6 +287,141 @@ int main(void) {
     EXPECT(can_call_council(1, 0), 1);
     defs[1].rule_flags = RULE_FLAG_ALIEN;
     EXPECT(can_call_council(1, 0), 0);
+
+    defs[1].rule_flags = 0, projects[SP_EMPATH_GUILD] = -1, humans = 0;
+
+    // ---- The acts -------------------------------------------------------
+    static uint8_t image[0x300000];  // the game's text, from 0x400000: all empty
+    game_test_image = image;
+    game_proposal_passes = passes, game_proposal_turn = passed_turn, game_climate_change = &climate_change;
+    game_climate_shown = climate_shown, game_victory_type = &victory, game_popp = popp_stub;
+    game_parse_num = parse_num_stub, game_parse_says = parse_says_stub, game_console_update_data = console_update_stub;
+    game_set_agenda = set_agenda_stub, game_script_file = &script_file, game_parse_gender = &gender;
+    game_parse_plural = &plural, game_proposals = proposals, game_rules_basic = &rules_basic;
+    game_battle_text = battle_text, game_control_turn = &control_turn, game_council_session = &session;
+    game_council_net_call = net_call, game_council = council_stub;
+    game_popup_ctor = game_popup_close = game_scroll_close = game_flat_button_dtor = pop_stub;
+    game_graphic_win_dtor = game_base_pop_dtor = pop_stub, game_popup_start = popup_start_stub;
+    game_pcx_dimensions = pcx_stub, game_strings_get = strings_get_stub, game_dialogs_item = dialogs_item_stub;
+    game_base_pop_exec_3 = exec_stub, game_call_council = call_council;
+    int32_t ambience = 0, multi_visible = 0, start_year = 2100;
+    game_start_year = &start_year;
+    game_ambience_flags = &ambience, game_ambience = ambience_stub, game_multi_win_visible = &multi_visible;
+    for (int p = 0; p < PROP_COUNT; p++) passed_turn[p] = -9999;
+
+    // A proposal passed is counted with its turn. The Unity core: 500
+    // credits to every faction but the aliens.
+    for (int f = 1; f < FACTION_COUNT; f++) factions[f].energy_credits = 10;
+    defs[3].rule_flags = RULE_FLAG_ALIEN;
+    council_action(PROP_UNITY_CORE, 1);
+    EXPECT(passes[PROP_UNITY_CORE], 1);
+    EXPECT(passed_turn[PROP_UNITY_CORE], turn);
+    EXPECT(factions[2].energy_credits, 510);
+    EXPECT(factions[3].energy_credits, 10);
+    EXPECT(credits_shown, 1);
+    defs[3].rule_flags = 0;
+    // The solar shade lowers the sea by 3 and the coming change by a step.
+    climate_change = 2;
+    council_action(PROP_SOLAR_SHADE, 1);
+    EXPECT(sea_council, -3);
+    EXPECT(climate_change, -2);
+    EXPECT(climate_shown[0], 2);
+    EXPECT(popps, 1);
+    council_action(PROP_MELT_CAPS, 1);
+    EXPECT(sea_council, 0);
+    sea_council = 0, climate_change = 0;
+
+    // Supreme Leader, the faction playing its turn: it wins unless those
+    // it wronged object (under rule 0x2), who declare vendetta while the
+    // rest surrender to it.
+    current = 2, popps = 0;
+    council_action(PROP_SUPREME_LEADER, 2);
+    EXPECT(victory, 6);
+    EXPECT(state & 1, 1);
+    EXPECT((factions[2].flags & 0x20000) != 0, 1);
+    state = 0, victory = 0, factions[2].flags = 0;
+    rules = 0x2, factions[3].diplo_status[2] = TREATY_ATROCITY_VICTIM;
+    council_action(PROP_SUPREME_LEADER, 2);
+    EXPECT(victory, 0);
+    EXPECT(popps, 1);
+    EXPECT((factions[3].diplo_status[2] & TREATY_VENDETTA) != 0, 1);
+    EXPECT((factions[1].diplo_status[2] & 0x2000000) != 0, 1);
+    EXPECT((factions[3].diplo_status[2] & 0x2000000) != 0, 0);
+    for (int f = 1; f < FACTION_COUNT; f++)
+        for (int g = 1; g < FACTION_COUNT; g++) factions[f].diplo_status[g] = factions[f].diplo_agenda[g] = 0;
+    rules = 0, state = 0;
+    // Another's: accepted, the game is lost; refused, the others turn on
+    // the player.
+    current = 1;
+    council_action(PROP_SUPREME_LEADER, 2);
+    EXPECT(victory, 0xb);
+    state = 0, victory = 0, factions[2].flags = 0, answer = 1;
+    council_action(PROP_SUPREME_LEADER, 2);
+    EXPECT(victory, 0);
+    EXPECT((factions[3].diplo_status[1] & TREATY_VENDETTA) != 0, 1);
+    EXPECT((factions[3].diplo_status[2] & TREATY_PACT) != 0, 1);
+    EXPECT((factions[2].diplo_status[1] & TREATY_VENDETTA) != 0, 1);
+    for (int f = 1; f < FACTION_COUNT; f++)
+        for (int g = 1; g < FACTION_COUNT; g++) factions[f].diplo_status[g] = factions[f].diplo_agenda[g] = 0;
+    answer = 0, state = 0;
+    memset(passes, 0, sizeof passes);
+
+    // Calling the Council. Faction 2 has a commlink with all; no governor.
+    rules_basic.min_turns_councils = 20;
+    for (int p = 0; p < PROP_COUNT; p++) passed_turn[p] = -9999;
+    for (int p = 0; p < PROP_COUNT; p++) proposals[p].preq_tech = p == 10 ? -2 : TECH_NONE;
+    for (int f = 1; f < 5; f++)
+        if (f != 2) factions[2].diplo_status[f] = TREATY_COMMLINK;
+    for (int f = 1; f < FACTION_COUNT; f++) factions[f].council_call_turn = -9999, factions[f].ai_power = 0;
+    // The AI wants itself for governor most.
+    call_council_ecx(2, 0);
+    EXPECT(sessions, 1);
+    EXPECT(session_args[1], PROP_GOVERNOR);
+    EXPECT(session_args[2], 2);
+    // Not the Supreme Leader (no diplomatic victory rule), what needs an
+    // earlier proposal passed (repeals, the shade's increase), nor 10.
+    EXPECT(listed, 0x1ad);
+    // Promised its vote for governor, the AI puts what it wants most
+    // otherwise; but with ECX non-zero (the human factions, from
+    // faction_upkeep()), nothing but the governor.
+    factions[2].council_pledge[0] = 1, factions[2].council_pledge_to[0] = 1;
+    factions[2].ai_power = 1, factions[2].energy_credits = 50, sessions = 0;
+    call_council_ecx(2, 0);
+    EXPECT(sessions, 1);
+    EXPECT(session_args[1], PROP_UNITY_CORE);
+    sessions = 0;
+    call_council_ecx(2, 2);
+    EXPECT(sessions, 0);
+    factions[2].council_pledge[0] = 0, factions[2].ai_power = 0, sessions = 0;
+    // A governor keeps it to one turn in 16, and an AI governor from the
+    // election unless it would win half the votes (ECX non-zero: the
+    // governor only).
+    governor = 1, turn = 101, sessions = 0;
+    call_council_ecx(2, 1);
+    EXPECT(sessions, 0);
+    turn = 92;  // (92 + 4) is a multiple of 16
+    call_council_ecx(2, 1);
+    EXPECT(sessions, 0);
+    humans = 1 << 1;
+    call_council_ecx(2, humans);
+    EXPECT(sessions, 1);
+    EXPECT(session_args[1], PROP_GOVERNOR);
+    // A proposal that passed lately can't be put again for 20 turns, nor
+    // can the faction call again so soon.
+    governor = -1, sessions = 0, passed_turn[PROP_GOVERNOR] = 85;
+    call_council_ecx(2, 2);
+    EXPECT(sessions, 0);
+    // A human chooses; it may call a proposal again after 20 turns.
+    humans = 1 << 2, current = 2, answer = PROP_UNITY_CORE, factions[2].council_call_turn = 80;
+    call_council_ecx(2, 0);
+    EXPECT(sessions, 0);
+    EXPECT(notices > 3, 1);
+    factions[2].council_call_turn = 72;
+    call_council_ecx(2, 0);
+    EXPECT(sessions, 1);
+    EXPECT(session_args[1], PROP_UNITY_CORE);
+    EXPECT(session_args[2], 2);
+    humans = 0, answer = 0, turn = 100, governor = -1, current = 1;
 
     if (failures) return 1;
     printf("ok\n");
