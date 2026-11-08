@@ -957,7 +957,12 @@ static int shadow_setup_player(int faction, int setup_id, int probe) {
     if (shadow_bypass()) return setup_player(faction, setup_id, probe);
     stats_setup_player.calls++;
     shadow_tick(SETUP);
-    if (*game_net_multiplayer || base_listed_of(faction)) return orig_setup_player(faction, setup_id, probe);
+    // A landing during the game (an escape after a defeat) can meet other
+    // factions, and first contact opens talks (communicate, then
+    // wants_to_speak's window, which allocates even between AIs); the
+    // sweep checks those landings on protected copies.
+    if (*game_net_multiplayer || base_listed_of(faction) || !initial(setup_id))
+        return orig_setup_player(faction, setup_id, probe);
     hold_base_name(faction, setup_id);
     int r = check_setup_player(faction, setup_id, probe);
     name_base_release();

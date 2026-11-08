@@ -1499,9 +1499,17 @@ __asm__(".text\n"
 extern struct hook_module probe_module;
 #define PROBE (&probe_module)
 
+// Freeing a captive leader lands the faction again (setup_player()),
+// whose units may meet others and open talks, which allocate: a mission
+// against a faction holding captives runs the original unchecked.
+static int holds_captives(int faction) {
+    for (int i = 0; i < 7; i++)
+        if (*captive(faction, i, CAPTIVE_HELD)) return 1;
+    return 0;
+}
 static int probe_checkable(int base) {
     if (*game_net_multiplayer || *game_pbem || *game_human_factions) return 0;
-    return base < 0 || !base_listed(base);
+    return base < 0 || (!base_listed(base) && !holds_captives(game_bases[base].faction));
 }
 
 // Mind control of a base ends in the game's capture_base(), which takes
