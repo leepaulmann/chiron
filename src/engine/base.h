@@ -104,6 +104,13 @@ int base_at(int x, int y);
 int base_find(int x, int y);
 int base_find_2(int x, int y, int faction);
 int base_find_3(int x, int y, int faction, int region, int other, int seen_by);
+// The base searches counted (ours, and the original's while it runs inside
+// a check), and the last one: kind 1 base_find, 2 base_find_2, 3
+// base_find_3; its square, faction and the distance it left.
+struct base_find_log {
+    int count, kind, x, y, faction, dist;
+};
+extern struct base_find_log base_find_log;
 void base_mark(int base);
 int base_lose_minerals(int base);
 void set_fac(int fac, int base, int on);
