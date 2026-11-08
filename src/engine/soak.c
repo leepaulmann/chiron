@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include "../loader/modules.h"
+#include "hooks.h"
 
 // terranx.exe 2.0 globals (names from Thinker).
 #define CURRENT_TURN 0x9a64d4
@@ -79,7 +80,9 @@ void soak_report(void) {
     }
     if (!mode) return;
     volatile uint8_t *humans = game_addr(FACTION_STATUS);
-    if (mode == 2 && humans && *humans && *(volatile int *)game_addr(VEH_COUNT) > 0) {
+    // Not while shadow mode has state protected: a sweep makes factions
+    // human in its copies of the game, which are put back afterwards.
+    if (mode == 2 && humans && *humans && *(volatile int *)game_addr(VEH_COUNT) > 0 && !hooks_protecting()) {
         fprintf(stderr, "[soak] handing human factions 0x%02x to the AI\n", *humans);
         *humans = 0;
     }

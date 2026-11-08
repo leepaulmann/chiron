@@ -404,6 +404,12 @@ int (*game_can_terraform)(int faction, int x, int y, int unk, int base);
 int (*game_terrain_avail)(int terraform, int sea, int faction);
 
 int32_t *game_probe_algo, *game_probe_target, *game_probe_target_hsa;
+uint8_t *game_monuments;
+void (*game_net_tech)(int faction, int tech, int from, int unk);
+void (*game_net_treaty_on)(int faction, int other, uint32_t status, int unk);
+void (*game_net_treaty_off)(int faction, int other, uint32_t status, int unk);
+void (*game_net_set_treaty)(int faction, int other, uint32_t status, int on, int unk);
+int (*game_parse_it)(char *file, char *label);
 int32_t *game_pb_reactor;
 void(__attribute__((thiscall)) * game_fx_play)(void *fx, int id);
 int (*game_do_task)(void);
@@ -1041,4 +1047,10 @@ void game_bind(struct pe_image *exe) {
     game_net_daemon_hang_up = (void *)code_at(exe, 0x52e050);
     game_lock_clear = (void *)code_at(exe, 0x5900d0);
     game_alpha_net_close = (void *)code_at(exe, 0x4e25b0);
+    game_monuments = code_at(exe, 0x94ca08);
+    game_net_tech = (void *)code_at(exe, 0x5395f0);
+    game_net_treaty_on = (void *)code_at(exe, 0x5391c0);
+    game_net_treaty_off = (void *)code_at(exe, 0x539230);
+    game_net_set_treaty = (void *)code_at(exe, 0x5392a0);
+    game_parse_it = (void *)code_at(exe, 0x48c060);
 }

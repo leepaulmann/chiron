@@ -1471,6 +1471,21 @@ enum { VEH_STATE_UNK_800000 = 0x800000 };  // the Assistant Worm
 // Algorithm.
 extern int32_t *game_probe_algo, *game_probe_target, *game_probe_target_hsa;
 extern int32_t *game_pb_reactor;  // a planet buster's reactor, for its explosion
+// The records the Monuments window shows, 0x4f4 bytes a faction: 21
+// events of 0x38 bytes (the year, two words of detail, the faction, and
+// whether it happened), then the latest event and names. Events 15 to 20
+// are the leaders of eliminated factions it holds captive (the second
+// detail word names the faction).
+enum { MONUMENT_SIZE = 0x4f4, MONUMENT_EVENT_SIZE = 0x38, MONUMENT_CAPTIVES = 15 };
+extern uint8_t *game_monuments;
+// Treaties and techs changed on every machine of a network game (the
+// change itself otherwise).
+extern void (*game_net_tech)(int faction, int tech, int from, int unk);
+extern void (*game_net_treaty_on)(int faction, int other, uint32_t status, int unk);
+extern void (*game_net_treaty_off)(int faction, int other, uint32_t status, int unk);
+extern void (*game_net_set_treaty)(int faction, int other, uint32_t status, int on, int unk);
+// A label's text from a script file, put together in game_battle_text.
+extern int (*game_parse_it)(char *file, char *label);
 // The sound effects: each a 0x6c-byte object, whose method at 0x5c says
 // whether it is playing.
 enum { FX_SIZE = 0x6c, FX_PB_BLAST = 59, FX_PB_AFTER = 60 };

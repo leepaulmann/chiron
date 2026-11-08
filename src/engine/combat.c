@@ -2247,4 +2247,7 @@ static const struct hook combat_hooks[] = {
     HOOK(0x506a60, battle_fight, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x8b, 0x5d, 0x10),                    // push ebx; mov ebx, [ebp+16]
     HOOK(0x506af0, battle_fight_2, PUSH_EBP_MOV_EBP_ESP, 0x81, 0xec, 0x38, 0x01, 0x00, 0x00),       // sub esp, 0x138
 };
-struct hook_module combat_module = {"combat", combat_hooks, HOOK_COUNT(combat_hooks), combat_sweep, NULL, -1};
+// The game seldom calls probe() (only for probe teams' missions), so its
+// sweep comes with this one.
+extern struct hook_module probe_module;
+struct hook_module combat_module = {"combat", combat_hooks, HOOK_COUNT(combat_hooks), combat_sweep, &probe_module, -1};

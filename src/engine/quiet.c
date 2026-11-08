@@ -93,6 +93,13 @@ HELD(int, x_pop2, 0, (char *label, char *picture, int unk), (label, picture, unk
 // A message without a picture, as for a tech that wins a free one.
 HELD(int, x_pop, 0, (char *label, int unk), (label, unk), (hooks_ui_text(&c_, 0, label), c_.arg[0] = unk),
      orig_x_pop(TEXT(0), a_[0]))
+// A message with a faction leader's portrait, as when a probe team's
+// victim lets it go, and the intelligence report a probe team's
+// infiltration opens (a window, which allocates from the game's heap).
+HELD(int, x_pops, 0, (char *label, void *sprite, void *fn), (label, sprite, fn),
+     (hooks_ui_text(&c_, 0, label), c_.arg[0] = (int)(intptr_t)sprite, c_.arg[1] = (int)(intptr_t)fn),
+     orig_x_pops(TEXT(0), PTR(0), PTR(1)))
+HELD(void, report_intel, (void)0, (int faction), (faction), (c_.arg[0] = faction), orig_report_intel(a_[0]))
 // The text variables a message fills in: a number, a string from the
 // string table, or a string.
 HELD(int, parse_num, slot > 9 ? 3 : 0, (int slot, int value), (slot, value), (c_.arg[0] = slot, c_.arg[1] = value),
@@ -402,6 +409,8 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x48c0a0, popp, SEH_PROLOGUE),
     QUIET_HOOK(0x5bf330, x_pop2, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x10),  // mov eax, [ebp+16]
     QUIET_HOOK(0x5bf310, x_pop, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x0c),   // mov eax, [ebp+12]
+    QUIET_HOOK(0x5bf5d0, x_pops, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x10),  // mov eax, [ebp+16]
+    QUIET_HOOK(0x4acbd0, report_intel, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x0d, 0x2c, 0x39, 0x7d, 0x00),  // mov ecx, [0x7d392c]
     QUIET_HOOK(0x625e30, parse_num, 0x8b, 0x44, 0x24, 0x04, 0x83, 0xf8, 0x09),   // mov eax, [esp+4]; cmp eax, 9
     QUIET_HOOK(0x625e50, parse_say, 0x8b, 0x44, 0x24, 0x04, 0x83, 0xf8, 0x09),
     QUIET_HOOK(0x625ec0, parse_says, 0x8b, 0x54, 0x24, 0x08, 0x85, 0xd2),         // mov edx, [esp+8]; test edx, edx
