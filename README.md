@@ -115,7 +115,7 @@ module at a time. So far:
   shorelines, temperature, rivers, rainfall, fungus, rockiness and all 16
   landmarks), the climate pass that reworks the map when the sea level
   changes, and the altitude setter, with the floods it brings to bases and
-  units. Loading and saving maps are still the game's own;
+  units;
 - bases: what each square yields in nutrients, minerals and energy,
   facilities, and a base's nutrient and mineral totals with growth and
   ecological damage; which squares its citizens work and which become
@@ -254,6 +254,13 @@ module at a time. So far:
 - a new game: setting up each faction (its landing site, first units and
   free techs, a late arrival or an escape pod, or its end), the whole new
   game's state with the rivals' agendas, and the landing message;
+- saved games: writing and reading the whole game state (ironman, e-mail
+  and network games' encryption and records included), map files, and the
+  data side of the Save and Load dialogs. Shadow mode can't run these
+  twice, so `CHIRON_SAVE_CHECK=N` (with `CHIRON_USER_DIR` set) saves with
+  both the original and Chiron every N turns and compares the files byte
+  for byte, and `CHIRON_SAVE_CHECK_LOAD=1` also loads each one's file with
+  the other and compares game memory;
 - the Planetary Council: votes, who may stand for governor, whether a
   faction may call the Council, and the AI's stand and vote on each
   proposal.
