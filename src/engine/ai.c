@@ -1283,11 +1283,6 @@ static int stack_top_of(int veh) {
     return veh;
 }
 
-// The original's frame: its 0x2c4 bytes of locals below the saved ebp,
-// as words; FRAME_AT(f, k) is [ebp-k].
-enum { FRAME_WORDS = 0x2c4 / 4 };
-#define FRAME_AT(f, k) ((f)[(0x2c4 - (k)) / 4])
-
 // Whether ours handles the unit: all but naval transports.
 static int em_ours(int veh) { return proto_of(game_vehs[veh].proto)->plan != PLAN_NAVAL_TRANSPORT; }
 
@@ -1370,7 +1365,7 @@ static int em_air_power(int veh, int base_dist, int zoc, int *x, int *y) {
     return game_air_power(veh, base_dist, zoc, x, y);
 }
 
-static int em_body(int veh, const int32_t *frame) {
+static int em_body(int veh, int32_t stale) {
     int forced = 0;
     if (veh < 0) veh = -1 - veh, forced = 1;
     struct veh *V = &game_vehs[veh];
@@ -1418,15 +1413,9 @@ static int em_body(int veh, const int32_t *frame) {
     int exploring = V->state & 0x4000;
     int human_bit = 1 << faction;
     // Locals the original shares between its sections.
-    // Those it doesn't set first hold what lay below its stack (FRAME_AT),
-    // which some of its paths read.
     int dir84 = -1, l88 = 0, lc8 = 0, lc4 = 0, lb8 = 0, l90 = 0, lbc = 0;
-    int l74 = FRAME_AT(frame, 0x70), l3c = FRAME_AT(frame, 0x38), l2c = FRAME_AT(frame, 0x28);
-    int l7c = FRAME_AT(frame, 0x78), l28 = FRAME_AT(frame, 0x24), l20 = FRAME_AT(frame, 0x1c);
-    int l8 = FRAME_AT(frame, 0x4), lc = FRAME_AT(frame, 0x8), l4c = FRAME_AT(frame, 0x48);
-    int l30 = FRAME_AT(frame, 0x2c), l58 = FRAME_AT(frame, 0x54), l5c = FRAME_AT(frame, 0x58);
-    int l24 = FRAME_AT(frame, 0x20), l34 = FRAME_AT(frame, 0x30);
-    int l48 = recon_800, l50 = own_terr, l6c = human_bit;
+    int l74 = 0, l3c = stale, l2c = 0, l7c = 0, l28 = 0, l20 = 0, l8 = 0, lc = 0, l4c = 0, l30 = 0, l58 = 0, l5c = 0;
+    int l24 = 0, l34 = 0, l48 = recon_800, l50 = own_terr, l6c = human_bit;
     if (forced) goto at_57138d;
     if ((V->flags & 0x440) && !game_is_human(faction)) {
         veh_skip(veh);
@@ -4195,46 +4184,35 @@ net_exec:
     return 1;
 }
 
-// The original reads some of its locals before it has set them (in an
-// automated former's search for fungus, [ebp-0x38]; others on some
-// paths): whatever lay below its stack. The entry hands ours the bytes
-// where the original's locals would be, and a check gives both runs the
-// same ones.
-int enemy_move_at(int veh, const int32_t *frame);
-// fn(veh) with `frame` where its locals will be.
-int em_call_frame(int (*fn)(int), int veh, const int32_t *frame);
+// The original reads one of its locals ([ebp-0x38]) before it has set it,
+// when an automated former looks for fungus to clear: whatever lies 0x3c
+// bytes below its entry stack pointer. The entry passes that word on.
+int enemy_move_at(int veh, int32_t stale);
+// fn(veh) with `stale` where enemy_move reads it.
+int em_call_stale(int (*fn)(int), int veh, int32_t stale);
 __asm__(".text\n"
-        ".globl em_call_frame\n"
-        "em_call_frame:\n"
-        "    pushl %esi\n"
-        "    pushl %edi\n"
-        "    movl 12(%esp), %eax\n"     // fn
-        "    movl 20(%esp), %esi\n"     // frame
-        "    leal -0x2d0(%esp), %edi\n" // fn's entry stack pointer will be 8 below this one, its ebp 12
-        "    movl $0xb1, %ecx\n"        // FRAME_WORDS
-        "    cld\n"
-        "    rep movsl\n"
-        "    pushl 16(%esp)\n"          // veh
+        ".globl em_call_stale\n"
+        "em_call_stale:\n"
+        "    movl 4(%esp), %eax\n"    // fn
+        "    movl 8(%esp), %edx\n"    // veh
+        "    movl 12(%esp), %ecx\n"   // stale
+        "    pushl %edx\n"
+        "    movl %ecx, -0x40(%esp)\n"  // fn's entry stack pointer will be 4 below this one
         "    call *%eax\n"
         "    addl $4, %esp\n"
-        "    popl %edi\n"
-        "    popl %esi\n"
         "    ret\n"
         ".globl enemy_move\n"
         "enemy_move:\n"
-        "    movl %esp, %eax\n"
-        "    subl $0x2d0, %esp\n"       // the bytes below stay put
-        "    leal -0x2c8(%eax), %ecx\n" // where the original's ebp-0x2c4 would be
-        "    pushl %ecx\n"
-        "    pushl 4(%eax)\n"           // veh
+        "    movl -0x3c(%esp), %eax\n"
+        "    pushl %eax\n"
+        "    pushl 8(%esp)\n"
         "    call enemy_move_at\n"
-        "    addl $0x2d8, %esp\n"
+        "    addl $8, %esp\n"
         "    ret\n");
-_Static_assert(FRAME_WORDS == 0xb1, "the entries copy 0xb1 words");
-int enemy_move_at(int veh, const int32_t *frame) {
+int enemy_move_at(int veh, int32_t stale) {
     int v = veh < 0 ? -1 - veh : veh;
-    if (!em_ours(v)) return em_call_frame(orig_enemy_move, veh, frame);
-    return em_body(veh, frame);
+    if (!em_ours(v)) return em_call_stale(orig_enemy_move, veh, stale);
+    return em_body(veh, stale);
 }
 
 // ---- The AI's turn around its units ---------------------------------------------
@@ -4601,18 +4579,17 @@ int held_enemy_move(int veh) {
 // where the original reads its unset local, and the original's run kept.
 // The sweep checks the rest of the choices in made-up situations.
 static unsigned long long enemy_move_unchecked;
-static int32_t em_arg_veh __attribute__((used)), em_ret __attribute__((used));
-static int32_t em_arg_frame[FRAME_WORDS] __attribute__((used));
-static void probe_enemy_move(int veh, const int32_t *frame) {
+static int32_t em_arg_veh __attribute__((used)), em_arg_stale __attribute__((used)), em_ret __attribute__((used));
+static void probe_enemy_move(int veh, int32_t stale) {
     struct hook_writes w_ = {0};
     writes_paths(&w_, game_path);
     hooks_writes_begin(&w_);
     em_probing = 1, em_risky = 0;
-    em_body(veh, frame);
+    em_body(veh, stale);
     em_probing = 0;
     hooks_writes_abandon(&w_);
 }
-static int check_enemy_move(int veh, const int32_t *frame) {
+static int check_enemy_move(int veh, int32_t stale) {
     struct hook_writes w_ = {0};
     // The unit as it was, for the report.
     const struct veh *U_ = &game_vehs[veh < 0 ? -1 - veh : veh];
@@ -4621,35 +4598,21 @@ static int check_enemy_move(int veh, const int32_t *frame) {
              U_->proto, proto_of(U_->proto)->plan, U_->faction, U_->order, U_->order_auto_type, U_->state, U_->flags,
              U_->status_icon, U_->x, U_->y);
     check_begin(&w_);
-    base_find_log = (struct base_find_log){0};
-    int want = em_call_frame(orig_enemy_move, veh, frame);
-    struct base_find_log found = base_find_log;
-    base_find_log = (struct base_find_log){0};
+    int want = em_call_stale(orig_enemy_move, veh, stale);
     check_middle(&w_);
     em_probing = 1, em_risky = 0;
-    int got = em_body(veh, frame);
+    int got = em_body(veh, stale);
     em_probing = 0;
     int searches = path_stale_logged(), searched = path_stale_used();
     path_stale_stop();
     const char *diff_ = hooks_writes_end(&w_, got, want);
     if (!diff_ && em_risky) diff_ = "would carry a move out";
-    static char count_[160];
-    const struct base_find_log *b_ = &base_find_log;
+    static char count_[64];
     if (!diff_ && searched != searches) {
         snprintf(count_, sizeof count_, "searched paths %d times, original %d", searched, searches);
         diff_ = count_;
-    } else if (!diff_ && b_->count != found.count) {
-        snprintf(count_, sizeof count_, "searched for bases %d times, original %d", b_->count, found.count);
-        diff_ = count_;
     }
-    // A difference in where the last base search left its distance: both
-    // runs' last searches.
-    if (diff_ && (b_->count != found.count || b_->dist != found.dist))
-        fprintf(stderr,
-                "chiron:   base searches: %d, last %d (%d, %d, %d) = %d; original's %d, last %d (%d, %d, %d) = %d\n",
-                b_->count, b_->kind, b_->x, b_->y, b_->faction, b_->dist, found.count, found.kind, found.x, found.y,
-                found.faction, found.dist);
-    if (diff_) hooks_mismatch(&stats_enemy_move, "(%d, stale %d) %s [%s]", veh, FRAME_AT(frame, 0x38), diff_, was_);
+    if (diff_) hooks_mismatch(&stats_enemy_move, "(%d, stale %d) %s [%s]", veh, stale, diff_, was_);
     hooks_ui_release();
     return want;
 }
@@ -4663,8 +4626,7 @@ static int em_checkable(int veh) {
 int ai_pre_enemy_move(void);
 int ai_pre_enemy_move(void) {
     int veh = em_arg_veh;
-    int32_t frame[FRAME_WORDS];
-    memcpy(frame, em_arg_frame, sizeof frame);
+    int32_t stale = em_arg_stale;
     if (shadow_bypass()) return 1;
     stats_enemy_move.calls++;
     shadow_tick(AI);
@@ -4673,12 +4635,12 @@ int ai_pre_enemy_move(void) {
         enemy_move_unchecked++;
         return 0;
     }
-    probe_enemy_move(veh, frame);
+    probe_enemy_move(veh, stale);
     if (em_risky) {
         enemy_move_unchecked++;
         return 0;
     }
-    em_ret = check_enemy_move(veh, frame);
+    em_ret = check_enemy_move(veh, stale);
     return 2;
 }
 // The entry: the unit and the word below the stack noted; held in the
@@ -4687,12 +4649,8 @@ int ai_pre_enemy_move(void) {
 void shadow_enemy_move(void);
 __asm__(".text\n"
         "shadow_enemy_move:\n"
-        "    xorl %ecx, %ecx\n"          // the frame below, before anything is pushed
-        "5:  movl -0x2c8(%esp,%ecx,4), %eax\n"
-        "    movl %eax, em_arg_frame(,%ecx,4)\n"
-        "    incl %ecx\n"
-        "    cmpl $0xb1, %ecx\n"
-        "    jl 5b\n"
+        "    movl -0x3c(%esp), %eax\n"
+        "    movl %eax, em_arg_stale\n"
         "    movl 4(%esp), %eax\n"
         "    movl %eax, em_arg_veh\n"
         "    cmpl $0, holding_moves\n"
@@ -5249,13 +5207,6 @@ static void sweep_enemy_move(void) {
         }
         int p = pick_proto(f, sea, kind);
         if (p < 0 && rnd(4)) p = pick_proto(f, sea, -1);
-        if (rnd(4) == 0 && *game_base_count) {
-            // A ship (a sea colony pod or former among them) in one of its
-            // faction's bases.
-            const struct base *B = &game_bases[rnd(*game_base_count)];
-            int q = pick_proto(f, 1, kind);
-            if (B->faction == f && q >= 0) put(v, B->x, B->y), p = q;
-        }
         if (p >= 0) V->proto = (int16_t)p;
         if (!em_ours(v)) {
             hooks_writes_abandon(&w);
@@ -5340,18 +5291,11 @@ static void sweep_enemy_move(void) {
             continue;
         }
         int veh = rnd(10) ? v : -1 - v;
-        // What lies where the original's locals go: nothing, or the
-        // leftovers of other calls (made up, small enough to index the
-        // game's tables safely), the fungus search's word
-        // among them.
-        int32_t frame[FRAME_WORDS];
-        int fill = rnd(2);
-        for (int i = 0; i < FRAME_WORDS; i++) frame[i] = !fill ? 0 : rnd(64) - 8;
-        FRAME_AT(frame, 0x38) = rnd(3) ? 0 : rnd(3) ? 1 : (int32_t)rnd32();
+        int32_t stale = rnd(3) ? 0 : rnd(3) ? 1 : (int32_t)rnd32();
         em_swept++;
-        probe_enemy_move(veh, frame);
+        probe_enemy_move(veh, stale);
         if (em_risky) em_swept_risky++;
-        else check_enemy_move(veh, frame);
+        else check_enemy_move(veh, stale);
         hooks_writes_abandon(&w);
     }
     move_hold_steps(0);

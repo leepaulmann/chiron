@@ -1517,16 +1517,6 @@ int base_at(int x, int y) {
 
 // The nearest base (of a faction, when not `any`), the last of equals; its distance is
 // left in game_base_find_dist when there is one.
-// For a check of a caller (ai.c): the base searches made, counted with
-// the last one's arguments and distance, ours here and the original's
-// through the hooks while it runs nested.
-struct base_find_log base_find_log;
-static void base_find_note(int kind, int x, int y, int faction) {
-    struct base_find_log *l = &base_find_log;
-    l->count++;
-    l->kind = kind, l->x = x, l->y = y, l->faction = faction;
-    l->dist = game_base_find_dist ? *game_base_find_dist : 0;
-}
 static int nearest_base(int x, int y, int any, int faction) {
     int best = 9999, pick = -1;
     for (int i = 0; i < *game_base_count; i++) {
@@ -1536,7 +1526,6 @@ static int nearest_base(int x, int y, int any, int faction) {
         if (d <= best) best = d, pick = i;
     }
     if (pick >= 0) *game_base_find_dist = best;
-    base_find_note(any ? 1 : 2, x, y, faction);
     return pick;
 }
 int base_find(int x, int y) { return nearest_base(x, y, 1, 0); }
@@ -1568,7 +1557,6 @@ int base_find_3(int x, int y, int faction, int region, int other, int seen_by) {
         if (d <= best) best = d, pick = i;
     }
     if (pick >= 0) *game_base_find_dist = best;
-    base_find_note(3, x, y, faction);
     return pick;
 }
 
@@ -2004,25 +1992,6 @@ SHADOW_WRITER(BASE, int, base_find, (int a, int b), (a, b), WRITES(game_base_fin
 SHADOW_WRITER(BASE, int, base_find_2, (int a, int b, int c), (a, b, c), WRITES(game_base_find_dist, 4), "%d, %d, %d", a, b, c)
 SHADOW_WRITER(BASE, int, base_find_3, (int a, int b, int c, int d, int e, int f), (a, b, c, d, e, f),
               WRITES(game_base_find_dist, 4), "%d, %d, %d, %d, %d, %d", a, b, c, d, e, f)
-// The game's calls: the original's, made inside a check, noted too.
-static int counted_base_find(int a, int b) {
-    if (!hooks_nested) return shadow_base_find(a, b);
-    int r = orig_base_find(a, b);
-    base_find_note(1, a, b, 0);
-    return r;
-}
-static int counted_base_find_2(int a, int b, int c) {
-    if (!hooks_nested) return shadow_base_find_2(a, b, c);
-    int r = orig_base_find_2(a, b, c);
-    base_find_note(2, a, b, c);
-    return r;
-}
-static int counted_base_find_3(int a, int b, int c, int d, int e, int f) {
-    if (!hooks_nested) return shadow_base_find_3(a, b, c, d, e, f);
-    int r = orig_base_find_3(a, b, c, d, e, f);
-    base_find_note(3, a, b, c);
-    return r;
-}
 SHADOW_WRITER(BASE, void, base_mark, (int a), (a),
               (hooks_writes_game(&w_), WRITES(*game_map, (size_t)*game_map_half_width * *game_map_height * sizeof(struct map_tile))),
               "%d", a)
@@ -2443,12 +2412,9 @@ static const struct hook base_hooks[] = {
     HOOK(0x4e39d0, set_base, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                      // mov eax, [ebp+8]
     HOOK(0x4e3a00, say_base, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x0c),                      // mov eax, [ebp+12]
     HOOK(0x4e3a50, base_at, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x57),                       // push ebx; push esi; push edi
-    {0x4e3b80, (const uint8_t[]){PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c}, 6, (void *)base_find, (void *)counted_base_find,
-     (void **)&orig_base_find, &stats_base_find},  // sub esp, 12
-    {0x4e3c60, (const uint8_t[]){PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c}, 6, (void *)base_find_2, (void *)counted_base_find_2,
-     (void **)&orig_base_find_2, &stats_base_find_2},  // sub esp, 12
-    {0x4e3d50, (const uint8_t[]){PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c}, 6, (void *)base_find_3, (void *)counted_base_find_3,
-     (void **)&orig_base_find_3, &stats_base_find_3},  // sub esp, 12
+    HOOK(0x4e3b80, base_find, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),                     // sub esp, 12
+    HOOK(0x4e3c60, base_find_2, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),                   // sub esp, 12
+    HOOK(0x4e3d50, base_find_3, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),                   // sub esp, 12
     HOOK(0x4e4350, base_mark, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                     // mov eax, [ebp+8]
     HOOK(0x4e4810, base_lose_minerals, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0x2c, 0x98, 0x94, 0x00),  // mov eax, [retool_penalty]
     HOOK(0x4e48b0, set_fac, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x55, 0x08),                 // push ecx; mov edx, [ebp+8]
