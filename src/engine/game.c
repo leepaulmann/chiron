@@ -336,7 +336,7 @@ void(__attribute__((thiscall)) * game_console_cursor_next)(void *console, int x,
 void(__attribute__((thiscall)) * game_fx_engine_pitch)(void *fx, int pitch);
 int32_t *game_moved_quickly, *game_console_23be4;
 int32_t *game_zoc_tutorial_count, *game_fungus_tutorial_count, *game_tutorial_moves_seen;
-void (*game_x_pop)(char *label, int unk);
+int (*game_x_pop)(char *label, int unk);
 int (*game_enemy_move)(int veh);
 int(__attribute__((thiscall)) * game_net_daemon_action)(void *daemon, int veh, int unk);
 int32_t *game_base_bits_reporting, *game_base_bits_popup, *game_base_bits_quiet;
@@ -467,6 +467,27 @@ void (*game_time_warp)(void), (*game_balance)(void);
 void(__attribute__((thiscall)) * game_net_daemon_hang_up)(void *daemon);
 void(__attribute__((thiscall)) * game_lock_clear)(void *lock);
 void(__attribute__((thiscall)) * game_alpha_net_close)(void *daemon);
+int(__attribute__((thiscall)) * game_console_ready_search)(void *console, int unk);
+void (*game_mon_conquer_base)(int faction, char *base_name);
+int32_t *game_mission_year, *game_ending_year, *game_control_turn_a, *game_control_turn_b;
+void (*game_show_credits)(void), (*game_show_replay)(void);
+void (*game_report_score)(int final), (*game_quayle)(int faction), (*game_hall_of_fame)(int final);
+void (*game_mon_winning_unify)(int faction, int other);
+#define GAME_THIS __attribute__((thiscall))
+void(GAME_THIS *game_buffer_ctor)(void *b), (GAME_THIS *game_buffer_dtor)(void *b), (GAME_THIS *game_buffer_close)(void *b);
+void(GAME_THIS *game_buffer_init)(void *b, int w, int h, int a, int c);
+void(GAME_THIS *game_buffer_copy)(void *b, void *to, int x, int y, int w, int h);
+void(GAME_THIS *game_buffer_copy_2)(void *b, void *from, int *rect);
+void(GAME_THIS *game_buffer_draw_2)(void *b, void *to, int mode, int x, int y, int a, int c);
+void(GAME_THIS *game_buffer_draw_multi)(void *b, void *to, int color, int x, int y, int a, int c, void *table);
+void(GAME_THIS *game_flic_ctor)(void *f), (GAME_THIS *game_flic_dtor)(void *f), (GAME_THIS *game_palette_dtor)(void *p);
+int(GAME_THIS *game_flic_load)(void *f, void *buffer, char *file, int a, int b, int c);
+int(GAME_THIS *game_flic_frame)(void *f, int a, int b);
+void(GAME_THIS *game_wave_init)(void *wave, char *file, int unk);
+void(GAME_THIS *game_map_win_tile_to_pixel)(void *win, int x, int y, int *px, int *py);
+void(GAME_THIS *game_graphic_win_update_2)(void *win, int *rect, int unk);
+#undef GAME_THIS
+int(__attribute__((stdcall)) * game_union_rect)(int *to, const int *a, const int *b);
 
 void game_bind(struct pe_image *exe) {
     game_tech = (struct rules_tech *)code_at(exe, 0x94f358);
@@ -1060,6 +1081,35 @@ void game_bind(struct pe_image *exe) {
     game_net_daemon_hang_up = (void *)code_at(exe, 0x52e050);
     game_lock_clear = (void *)code_at(exe, 0x5900d0);
     game_alpha_net_close = (void *)code_at(exe, 0x4e25b0);
+    game_console_ready_search = (void *)code_at(exe, 0x510ce0);
+    game_mon_conquer_base = (void *)code_at(exe, 0x477320);
+    game_mission_year = (int32_t *)code_at(exe, 0x9a64d8);
+    game_ending_year = (int32_t *)code_at(exe, 0x94b4d4);
+    game_control_turn_a = (int32_t *)code_at(exe, 0x9b2068);
+    game_control_turn_b = (int32_t *)code_at(exe, 0x93a948);
+    game_show_credits = (void *)code_at(exe, 0x428df0);
+    game_show_replay = (void *)code_at(exe, 0x5adbf0);
+    game_report_score = (void *)code_at(exe, 0x4acb80);
+    game_quayle = (void *)code_at(exe, 0x496670);
+    game_hall_of_fame = (void *)code_at(exe, 0x44ae50);
+    game_mon_winning_unify = (void *)code_at(exe, 0x477940);
+    game_buffer_ctor = (void *)code_at(exe, 0x5d7210);
+    game_buffer_dtor = (void *)code_at(exe, 0x5d7410);
+    game_buffer_close = (void *)code_at(exe, 0x5d7470);
+    game_buffer_init = (void *)code_at(exe, 0x5d7670);
+    game_buffer_copy = (void *)code_at(exe, 0x5d95b0);
+    game_buffer_copy_2 = (void *)code_at(exe, 0x5d95e0);
+    game_buffer_draw_2 = (void *)code_at(exe, 0x5d84c0);
+    game_buffer_draw_multi = (void *)code_at(exe, 0x5d94b0);
+    game_flic_ctor = (void *)code_at(exe, 0x629d60);
+    game_flic_dtor = (void *)code_at(exe, 0x629df0);
+    game_palette_dtor = (void *)code_at(exe, 0x5fe2e0);
+    game_flic_load = (void *)code_at(exe, 0x629e50);
+    game_flic_frame = (void *)code_at(exe, 0x62a070);
+    game_wave_init = (void *)code_at(exe, 0x4c69b0);
+    game_map_win_tile_to_pixel = (void *)code_at(exe, 0x462f00);
+    game_graphic_win_update_2 = (void *)code_at(exe, 0x5d5630);
+    game_union_rect = *(void **)code_at(exe, 0x669328);  // filled in when imports were bound
     game_monuments = code_at(exe, 0x94ca08);
     game_net_tech = (void *)code_at(exe, 0x5395f0);
     game_net_treaty_on = (void *)code_at(exe, 0x5391c0);

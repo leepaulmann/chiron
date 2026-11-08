@@ -59,10 +59,11 @@ static int parse_num_(int slot, int value) {
     (void)slot, (void)value;
     return nums++;
 }
-static void x_pop_(char *label, int unk) {
+static int x_pop_(char *label, int unk) {
     (void)unk;
     xpops++;
     snprintf(last_label, sizeof last_label, "%s", label);
+    return 0;
 }
 static int popp_(char *file, char *label, int flags, char *picture, int fn) {
     (void)file, (void)label, (void)flags, (void)picture, (void)fn;

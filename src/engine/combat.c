@@ -7,10 +7,12 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "base.h"
 #include "build.h"
+#include "events.h"
 #include "faction.h"
 #include "game.h"
 #include "map.h"
@@ -76,6 +78,19 @@ static void say_noun(int slot, int faction) {
     say(slot, (char *)d->noun);
 }
 static void pop(uint32_t label, uint32_t picture) { game_popp(*game_script_file, at_text(label), 0, at_text(picture), 0); }
+static void say_title(int slot, int faction) {
+    const struct faction_def *d = &game_faction_defs[faction];
+    *game_default_plural = 0;
+    *game_default_gender = d->leader_female;
+    say(slot, (char *)d->leader_title);
+}
+static void say_leader(int slot, int faction) {
+    const struct faction_def *d = &game_faction_defs[faction];
+    *game_default_gender = d->leader_female;
+    *game_default_plural = 0;
+    say(slot, (char *)d->leader_name);
+}
+static void notify(char *label) { game_netmsg_pop(game_netmsg, label, 5000, 0, NULL); }
 
 // A unit's hit points: one for an artifact, else ten for each level of
 // reactor (1 to 100).
@@ -229,6 +244,409 @@ int vulnerable(int faction, int x, int y) {
         if (game_bases[b].faction == faction && has_facility(b, FAC_HEADQUARTERS_))
             return vector_dist(x, y, game_bases[b].x, game_bases[b].y);
     return 12;
+}
+
+// ---- A base changing hands ------------------------------------------------------
+
+enum {
+    F_TECH_ACCUMULATED = 0x3c8,  // faction_data: research put into the current tech
+    RULES_SPOILS_OF_WAR = 0x4000, RULE_FLAG_TECHSTEAL = 0x10,
+    BASE_STATE_ASSISTANT_HOME = 0x40000,  // the Assistant Worm was killed by a unit of its
+    BASE_STATE_KEEP_NAME = 0x80, BASE_STATE_RENAME = 0x10000,
+    BASE_STATE_CAPTURE_CLEARS = 0x0021084e,  // forgotten when the base changes hands
+    VEH_STATE_UNK_40000 = 0x40000,
+    FAC_LAST_FACILITY = 69,
+    SP_UNIVERSAL_TRANSLATOR_ = 20,
+    PROTO_COLONY_POD = 0, PROTO_SEA_ESCAPE_POD = 21,
+    INTERLUDE_ALIENS_TAKE = 0x25, INTERLUDE_ALIENS_TOOK = 0x18, INTERLUDE_HUMANS_TAKE = 0x19, INTERLUDE_ASSISTANT = 7,
+    LABEL_NORTH = 403, LABEL_EAST = 404, LABEL_SOUTH = 405, LABEL_WEST = 406,
+    HQ_MOVE_COST = 1000, ENERGY_MAX = 9999999,
+    STATE_NONE_READY = 0x4,  // game_state: none of the player's units waits for orders
+};
+static int32_t *faction_word(int faction, int offset) { return (int32_t *)((uint8_t *)&game_factions[faction] + offset); }
+
+// Whether a base the faction takes yields a tech: under the spoils of war
+// rule, or for a faction whose file says so.
+int capture_steals_tech(int faction) {
+    return (*game_rules & RULES_SPOILS_OF_WAR) || (game_faction_defs[faction].rule_flags & RULE_FLAG_TECHSTEAL);
+}
+
+// The defender's secret project being built at the base the player takes:
+// if another of its bases builds the same, it survives there; otherwise the
+// race for it is halted, and the defender forgets what it knew of others'.
+// The first message names the project from the facility table at the
+// queue's (negative) item, as the original does; OpenSMACX and Thinker fix
+// that index.
+static void capture_project_news(int base, int defender) {
+    const struct base *B = &game_bases[base];
+    int item = B->queue[0];
+    if (item > -FAC_FIRST_PROJECT || game_secret_projects[abs(item) - FAC_FIRST_PROJECT] != -1) return;
+    for (int i = 0; i < *game_base_count; i++) {
+        if (i == base || game_bases[i].faction != defender || game_bases[i].queue[0] != item) continue;
+        int same = game_bases[i].queue[0];
+        say_adjective(0, defender);
+        game_parse_say(1, *(int32_t *)((uint8_t *)game_facilities + (intptr_t)same * (intptr_t)sizeof(struct rules_facility)),
+                       -1, -1);
+        pop(0x68a378, 0x68a368);
+        return;
+    }
+    say_title(0, defender);
+    say_leader(1, defender);
+    say_noun(2, defender);
+    game_parse_say(3, (int)(intptr_t)game_facilities[abs(B->queue[0])].name, -1, -1);
+    pop(0x68a398, 0x68a388);
+    int offset;
+    uint32_t mask;
+    bitmask(abs(B->queue[0]) - FAC_FIRST_PROJECT, &offset, &mask);
+    game_factions[defender].project_intel[offset] &= ~mask;
+}
+
+// The headquarters moves, for 1000 credits, to the defender's base that
+// is most central to the others (the distances, doubled to bases in other
+// regions, over the region's bases and twice the base's citizens). The
+// first base can't be chosen (the original tests for a base above 0, as
+// Thinker does). The player may decline, when not in a network game.
+static void capture_move_hq(int base, int defender, const char *old_name) {
+    struct faction_data *D = &game_factions[defender];
+    int best = -1, best_score = 9999;
+    for (int i = 0; i < *game_base_count; i++) {
+        const struct base *C = &game_bases[i];
+        if (i == base || C->faction != defender) continue;
+        int region = tile_at(C->x, C->y)->region, score = 1;
+        for (int j = 0; j < *game_base_count; j++) {
+            const struct base *O = &game_bases[j];
+            if (j == i || j == base || O->faction != defender) continue;
+            int d = vector_dist(C->x, C->y, O->x, O->y);
+            score += tile_at(O->x, O->y)->region == region ? d : 2 * d;
+        }
+        int weighed = (score << 8) / (D->region_total_bases[region] + 2 * C->pop_size);
+        if (weighed < best_score) best_score = weighed, best = i;
+    }
+    if (best <= 0) return;
+    say(0, (char *)old_name);
+    say(1, game_bases[best].name);
+    if (!*game_net_multiplayer && defender == *game_current_faction && !game_x_pop(at_text(0x68a3e0), 0)) return;
+    D->energy_credits -= HQ_MOVE_COST;
+    set_fac(FAC_HEADQUARTERS_, best, 1);
+    set_fac(FAC_HEADQUARTERS_, base, 0);
+    if (defender != *game_current_faction) {
+        say_noun(2, defender);
+        notify(at_text(0x68a3e8));
+    } else if (*game_net_multiplayer) {
+        notify(at_text(0x68a3f0));
+    }
+    if (!game_is_human(defender)) base_reset(best, 0);
+}
+
+// The base keeps going under its new owner.
+static void capture_keep(int base, int attacker, int defender, int probe, int recapture) {
+    struct base *B = &game_bases[base];
+    struct faction_data *A = &game_factions[attacker], *D = &game_factions[defender];
+    int x = B->x, y = B->y;
+    B->faction = (uint8_t)attacker;
+    for (int f = 1; f < FACTION_COUNT; f++)
+        if (game_factions[f].attack_target_base == base) game_factions[f].attack_target_base = -1;
+    B->nerve_staple_turns = 0;
+    if (B->faction_former != attacker) {
+        B->faction_former = (uint8_t)defender;
+        B->assimilation_turns = 50;
+    } else {
+        B->assimilation_turns = 0;
+    }
+    A->last_base_turn = *game_turn;
+    D->base_count--;
+    A->base_count++;
+    game_replay_base(1, x, y, attacker);
+    B->minerals = 0;
+    B->minerals_2 = 0;
+    for (int i = 0; i <= B->queue_size; i++)
+        if (B->queue[i] >= 0) D->units_queue[B->queue[i]]--;
+    B->queue_size = 0;
+    B->production_last = -FAC_STOCKPILE_ENERGY;
+    B->queue[0] = -FAC_STOCKPILE_ENERGY;
+    // The governor settings of the new owner's biggest base (headquarters
+    // counting double).
+    int best = 0, best_base = -1;
+    for (int i = 0; i < *game_base_count; i++) {
+        if (i == base || game_bases[i].faction != attacker) continue;
+        int score = game_bases[i].pop_size;
+        if (has_facility(i, FAC_HEADQUARTERS_)) score += score;
+        if (score > best) best = score, best_base = i;
+    }
+    if (best_base >= 0) B->governor = game_bases[best_base].governor;
+    B->state &= ~(uint32_t)BASE_STATE_CAPTURE_CLEARS;
+    // Taken by force, a third of its facilities are lost (never a pressure
+    // dome); the headquarters always, and the recreation commons and
+    // recycling tanks unless it was the attacker's.
+    if (!probe && !recapture)
+        for (int fac = 1; fac <= FAC_LAST_FACILITY; fac++)
+            if (fac != FAC_PRESSURE_DOME && game_rand() % 3 == 0) set_fac(fac, base, 0);
+    set_fac(FAC_HEADQUARTERS_, base, 0);
+    if (!recapture) {
+        set_fac(FAC_RECREATION_COMMONS, base, 0);
+        set_fac(FAC_RECYCLING_TANKS, base, 0);
+    }
+    // The new owner works and sees the base's radius; its units there
+    // forget a state bit.
+    for (int i = 0; i < 21; i++) {
+        int tx = wrap_x(x + game_radius_x[i]), ty = y + game_radius_y[i];
+        if (!on_the_map(tx, ty)) continue;
+        using_set(tx, ty, attacker);
+        tile_at(tx, ty)->visibility |= (uint8_t)(1u << attacker);
+        synch_bit(tx, ty, attacker);
+        int v = veh_at(tx, ty);
+        if (v >= 0 && game_vehs[v].faction == attacker)
+            for (; v >= 0; v = game_vehs[v].next_in_stack) game_vehs[v].state &= ~(uint32_t)VEH_STATE_UNK_40000;
+    }
+    spot_base(base, defender);
+    reset_territory();
+    // The defender's units homed here move to its nearest base, or are
+    // lost if there is none or they stand on or beside the base.
+    for (int v = *game_veh_count - 1; v >= 0; v--) {
+        if (v >= *game_veh_count) continue;
+        struct veh *V = &game_vehs[v];
+        if (V->faction != defender || V->home_base != base) continue;
+        B->faction = 0xff;
+        int home = base_find_2(x, y, defender);
+        B->faction = (uint8_t)attacker;
+        if (home >= 0 && ((x_dist(x, V->x) + iabs_(y - V->y)) & ~1)) {
+            V->home_base = (int16_t)home;
+            continue;
+        }
+        kill(v);
+    }
+    // Both factions' free facilities (a tech's once the new owner has it),
+    // set at the game's current base rather than this one, as Thinker notes.
+    int factions[2] = {attacker, defender};
+    for (int k = 0; k < 2; k++) {
+        const struct faction_def *d = &game_faction_defs[factions[k]];
+        for (int i = 0; i < d->bonus_count; i++) {
+            int id = d->bonus_id[i], fac = d->bonus_val1[i];
+            if (id != BONUS_FACILITY && (id != BONUS_FREEFAC || !has_tech(game_facilities[fac].preq_tech, attacker))) continue;
+            set_fac(fac < 1 ? 1 : fac > FAC_LAST_FACILITY ? FAC_LAST_FACILITY : fac, *game_current_base_id, 1);
+        }
+    }
+    base_first(base);
+}
+
+// Population lost when aliens and humans take each other's bases: half
+// the citizens (the base keeps one) flee as colony pods or sea escape pods
+// onto free squares nearby, first eight tries among the adjacent squares
+// at random, then the rest of the radius in order.
+static void capture_refugees(int base, int attacker, int defender, const char *old_name) {
+    struct base *B = &game_bases[base];
+    int left = B->pop_size / 2, current = *game_current_faction;
+    int aliens = (game_faction_defs[attacker].rule_flags & RULE_FLAG_ALIEN) != 0;
+    say_noun(0, attacker);
+    say(1, (char *)old_name);
+    game_parse_num(0, left);
+    B->pop_size = 1;
+    game_draw_tile(B->x, B->y, 2);
+    static const uint32_t labels[2][2][2] = {
+        {{0x68a540, 0x68a530}, {0x68a55c, 0x68a54c}},  // humans took it: aliens flee
+        {{0x68a4d0, 0x68a4c0}, {0x68a4ec, 0x68a4dc}},  // aliens took it: humans flee
+    };
+    static const uint32_t told[2][2][2] = {
+        {{0x68a578, 0x68a568}, {0x68a594, 0x68a584}},
+        {{0x68a508, 0x68a4f8}, {0x68a524, 0x68a514}},
+    };
+    if (attacker == current) {
+        if (left == 1) pop(labels[aliens][0][0], labels[aliens][0][1]);
+        else if (left) pop(labels[aliens][1][0], labels[aliens][1][1]);
+        game_interlude(aliens ? INTERLUDE_ALIENS_TAKE : INTERLUDE_HUMANS_TAKE, B->name, 1, 0);
+    }
+    if (defender == *game_current_faction) {
+        if (left == 1) pop(told[aliens][0][0], told[aliens][0][1]);
+        else if (left) pop(told[aliens][1][0], told[aliens][1][1]);
+        if (aliens) game_interlude(INTERLUDE_ALIENS_TOOK, B->name, 1, 0);
+    }
+    for (int i = 1; i < 21; i++) {
+        int dir = i < 9 ? game_rand() % 8 + 1 : i;
+        int tx = wrap_x(B->x + game_radius_x[dir]), ty = B->y + game_radius_y[dir];
+        if (!on_the_map(tx, ty)) continue;
+        int who = anything_at(tx, ty);
+        if (who >= 0 && who != defender) continue;
+        veh_init((tile_at(tx, ty)->climate & 0xe0) < ALT_SHORE_LINE << 5 ? PROTO_SEA_ESCAPE_POD : PROTO_COLONY_POD, defender, tx, ty);
+        game_draw_tile(tx, ty, 2);
+        if (--left == 0) break;
+    }
+}
+
+// The player took the base the Assistant Worm was killed from: it is
+// renamed after the faction's assistant city, with the bearing from the
+// defender's nearest base, and the player's headquarters (or biggest
+// base) named in the interlude.
+static void capture_assistant(int base, int attacker, int defender) {
+    struct base *B = &game_bases[base];
+    int x = B->x, y = B->y;
+    const struct faction_def *P = &game_faction_defs[*game_current_faction];
+    say(6, (char *)P->assistant_city);
+    say(5, B->name);
+    say_adjective(7, defender);
+    int best = 0;
+    for (int i = 0; i < *game_base_count; i++) {
+        const struct base *O = &game_bases[i];
+        if (O->faction != attacker || i == base) continue;
+        if (has_facility(i, FAC_HEADQUARTERS_)) {
+            say(2, (char *)O->name);
+            break;
+        }
+        if (O->pop_size > best) {
+            best = O->pop_size;
+            say(2, (char *)O->name);
+        }
+    }
+    int label = LABEL_NORTH, near = base_find_2(x, y, defender);
+    if (near >= 0) {
+        int nx = game_bases[near].x, ny = game_bases[near].y;
+        if (3 * iabs_(nx - x) / 2 < iabs_(ny - y)) {
+            label = y > ny ? LABEL_NORTH : LABEL_SOUTH;
+        } else {
+            int dx = x - nx, w = *game_map_width;
+            if (dx > w / 2) dx -= w;
+            if (dx < -(w / 2)) dx += w;
+            label = dx > 0 ? LABEL_WEST : LABEL_EAST;
+        }
+    }
+    say(4, game_label(label));
+    strcpy(B->name, (const char *)P->assistant_city);
+    make_base_unique(base);
+    game_interlude(INTERLUDE_ASSISTANT, NULL, 1, 1);
+    game_draw_map(1);
+    game_text_close();
+}
+
+// The base goes to the attacker, by force or (probe) mind control. The
+// attacker's war score with the defender rises by two a citizen; the
+// defender's pact partners not at war with the attacker want to talk, as
+// do both when a human is involved. Projects held or being built there are
+// announced, the attacker takes a share of the defender's reserves (and a
+// cornered market's cost, refunded, while the headquarters stays), and the
+// headquarters may escape. Taken by force (not a recapture, objective or
+// the Assistant Worm's killer's home) the base loses a citizen, and with it
+// the last unless it is small and unseen by humans outside network games.
+// Messages, refugees between aliens and humans, a stolen tech or research,
+// and the defender's end may follow. Differs from Thinker in the clamp of
+// the defender's reserves (9999999), in the order of the bearing's text
+// slots, and in the rest of Thinker's own fixes (noted above).
+void capture_base(int base, int attacker, int probe) {
+    struct base *B = &game_bases[base];
+    game_log_say5(at_text(0x68a358), B->name, base, attacker, 0);
+    int defender = B->faction, recapture = B->faction_former == attacker;
+    int x = B->x, y = B->y, region = tile_at(x, y)->region, current = *game_current_faction;
+    struct faction_data *A = &game_factions[attacker], *D = &game_factions[defender];
+    A->diplo_combat_count[defender] += 2 * B->pop_size;
+    A->diplo_combat_total[defender] += 2 * B->pop_size;
+    char old_name[sizeof B->name];
+    strcpy(old_name, B->name);
+    treaty_off(attacker, defender, TREATY_UNK_40);
+    if (game_is_human(attacker) || game_is_human(defender)) treaty_on(attacker, defender, TREATY_WANT_TO_TALK);
+    for (int f = 1; f < FACTION_COUNT; f++)
+        if (f != attacker && f != defender && (D->diplo_status[f] & TREATY_PACT) &&
+            !(game_factions[f].diplo_status[attacker] & TREATY_VENDETTA))
+            treaty_on(defender, f, TREATY_WANT_TO_TALK);
+    if (attacker == *game_current_faction) capture_project_news(base, defender);
+    if (attacker == *game_current_faction || defender == *game_current_faction)
+        for (int sp = 0; sp < SP_COUNT; sp++) {
+            if (game_secret_projects[sp] != base) continue;
+            game_parse_say(0, (int)(intptr_t)game_facilities[FAC_FIRST_PROJECT + sp].name, -1, -1);
+            if (attacker == *game_current_faction) pop(0x68a3b4, 0x68a3a4);
+            else pop(0x68a3d4, 0x68a3c4);
+        }
+    int energy = steal_energy(base);
+    if (has_facility(base, FAC_HEADQUARTERS_) && D->energy_credits >= HQ_MOVE_COST) capture_move_hq(base, defender, old_name);
+    if (has_facility(base, FAC_HEADQUARTERS_) && D->corner_market_turn > *game_turn && D->corner_market_cost > 0) {
+        D->energy_credits += D->corner_market_cost;
+        energy += D->corner_market_cost / 2;
+        D->corner_market_cost = 0;
+        D->corner_market_turn = 0;
+        if (defender == *game_current_faction) {
+            pop(0x68a40c, 0x68a3fc);
+        } else {
+            say_adjective(0, defender);
+            pop(0x68a42c, 0x68a41c);
+        }
+    }
+    A->energy_credits += energy;
+    int left = D->energy_credits - energy;
+    D->energy_credits = left < 0 ? 0 : left > ENERGY_MAX ? ENERGY_MAX : left;
+
+    if (!probe && !recapture && !(B->state & BASE_STATE_ASSISTANT_HOME) && !is_objective(base) &&
+        (B->pop_size > 1 || (*game_human_factions & B->visibility) || *game_net_multiplayer) && --B->pop_size == 0) {
+        base_kill(base);
+        game_draw_map(1);
+        base = -1;
+    } else {
+        capture_keep(base, attacker, defender, probe, recapture);
+    }
+    owner_set(x, y, attacker);
+    game_draw_map(1);
+    *game_draw_state |= 2;
+    game_graphic_win_redraw(game_world_win);
+    say_noun(0, attacker);
+    say(1, old_name);
+    say_noun(2, defender);
+    game_parse_num(0, energy);
+    char label[256];
+    strcpy(label, at_text(recapture ? 0x68a448 : 0x68a454));
+    strcat(label, at_text(0x68a45c));
+    if (game_is_human(defender) && !game_is_human(attacker) && base >= 0 && !(B->state & BASE_STATE_KEEP_NAME) &&
+        !recapture)
+        B->state |= BASE_STATE_RENAME;
+    current = *game_current_faction;
+    if (attacker == current || defender == current) {
+        if (!game_console_focus(game_console, x, y, current)) game_draw_tile_fixup(x, y, 1, 2);
+        game_console_update_data(game_console, 0);
+        game_popp(*game_script_file, label, 0, at_text(attacker == *game_current_faction ? 0x68a464 : 0x68a474), 0);
+        game_ambience(0xd5);
+    } else {
+        game_draw_tile_fixup(x, y, 1, 2);
+        const struct faction_data *C = &game_factions[current];
+        uint32_t suffix = 0, picture = 0;
+        if ((C->diplo_status[attacker] & TREATY_PACT) ||
+            ((A->diplo_status[current] & TREATY_UNK_80) && (A->diplo_status[defender] & TREATY_UNK_40)))
+            suffix = 0x68a484, picture = 0x68a488;
+        else if ((C->diplo_status[defender] & TREATY_PACT) ||
+                 ((D->diplo_status[current] & TREATY_UNK_80) && (D->diplo_status[attacker] & TREATY_UNK_40)))
+            suffix = 0x68a498, picture = 0x68a49c;
+        else if (game_spying(attacker) || game_spying(defender))
+            suffix = 0x68a4ac, picture = 0x68a4b0;
+        if (suffix) {
+            strcat(label, at_text(suffix));
+            game_popp(*game_script_file, label, 0, at_text(picture), 0);
+        }
+    }
+    if (((game_faction_defs[defender].rule_flags ^ game_faction_defs[attacker].rule_flags) & RULE_FLAG_ALIEN) && base >= 0 &&
+        B->pop_size > 1)
+        capture_refugees(base, attacker, defender, old_name);
+    if (!capture_steals_tech(attacker)) {
+        // The attacker's research gains by the techs it lacks.
+        int techs = 0;
+        for (int t = 0; t < TECH_COUNT; t++)
+            if (has_tech(t, defender) && !has_tech(t, attacker)) techs++;
+        int citizens = base >= 0 ? B->pop_size + 1 : 1;
+        *faction_word(attacker, F_TECH_ACCUMULATED) += (A->tech_ranking + 3) * techs * citizens / 8;
+    } else {
+        steal_tech(attacker, defender, 1);
+        if (base >= 0 && game_secret_projects[SP_UNIVERSAL_TRANSLATOR_] == base) steal_tech(attacker, defender, 1);
+    }
+    // The original passes the faction as the region and the region as the
+    // faction (Thinker notes the same).
+    if (!game_is_human(defender)) bases_reset(defender, region, 0);
+    game_mon_conquer_base(attacker, old_name);
+    if (attacker == *game_current_faction && base >= 0 && (B->state & BASE_STATE_ASSISTANT_HOME) &&
+        !(*game_preferences & PREF_NO_INTERLUDES) && !*game_net_multiplayer)
+        capture_assistant(base, attacker, defender);
+    eliminate_player(defender, attacker);
+    if (base < 0) return;
+    set_base(base);
+    base_compute(1);
+    if (attacker != *game_current_faction) return;
+    if (game_console_ready_search(game_console, -1) < 0) {
+        *game_state |= STATE_NONE_READY;
+        return;
+    }
+    game_base_win_zoom(game_base_win, base, 0);
 }
 
 // The target's PROBE, with 2 for a Covert Ops Center at the base, kept
@@ -604,19 +1022,6 @@ static int top_of(int v) {
     return v;
 }
 static int shift_down(void) { return (game_get_async_key_state(0x10) & 0xff00) != 0; }
-static void say_title(int slot, int faction) {
-    const struct faction_def *d = &game_faction_defs[faction];
-    *game_default_plural = 0;
-    *game_default_gender = d->leader_female;
-    say(slot, (char *)d->leader_title);
-}
-static void say_leader(int slot, int faction) {
-    const struct faction_def *d = &game_faction_defs[faction];
-    *game_default_gender = d->leader_female;
-    *game_default_plural = 0;
-    say(slot, (char *)d->leader_name);
-}
-static void notify(char *label) { game_netmsg_pop(game_netmsg, label, 5000, 0, NULL); }
 static void status_draw(struct battle *b, int combat) {
     game_status_win_draw(game_status_win, b->veh_att, b->veh_def, b->off, b->def, combat);
 }
@@ -1693,6 +2098,85 @@ static int shadow_steal_tech(int a, int b, int c) {
     return r;
 }
 
+// A base changing hands. While probe.c checks a mission the game's calls
+// are held, and the original's made after the check (see probe.c). On its
+// own, a capture is checked on all of the game but where it would ask the
+// player or open a file: in network and hotseat games, with a human on
+// either side (the defender's end may be the game's, and the new owner
+// seeing the defender's units may open diplomacy) or refugees fleeing
+// while a human plays (meeting its units opens diplomacy too), from a base
+// with messages listed (see battle_checkable), and from the player's
+// headquarters with the credits to move it (the player is asked). A tech the attacker steals is
+// chosen first, for real, and both runs take it, as for steal_tech();
+// with the Universal Translator at the base it would steal two, the
+// second chosen after the first is learnt, so that runs unchecked. A
+// defender left without bases may escape and found a base, which is named
+// first, as eliminate_player's check does.
+int capture_holding;
+static int capture_checkable(int base, int attacker) {
+    if (*game_net_multiplayer || *game_pbem || base < 0 || base >= *game_base_count) return 0;
+    const struct base *B = &game_bases[base];
+    int defender = B->faction;
+    if (game_is_human(defender) || game_is_human(attacker) || base_listed(base)) return 0;
+    // Refugees landing next to a human's units meet them, and the AI asks to talk.
+    if (*game_human_factions && B->pop_size > 1 &&
+        ((game_faction_defs[defender].rule_flags ^ game_faction_defs[attacker].rule_flags) & RULE_FLAG_ALIEN))
+        return 0;
+    if (defender == *game_current_faction && has_facility(base, FAC_HEADQUARTERS_) &&
+        game_factions[defender].energy_credits >= HQ_MOVE_COST)
+        return 0;
+    return !(capture_steals_tech(attacker) && game_secret_projects[SP_UNIVERSAL_TRANSLATOR_] == base);
+}
+static int capture_picks(int attacker, int defender) {
+    return capture_steals_tech(attacker) && attacker && defender &&
+           !(*game_net_multiplayer && game_is_human(attacker) && attacker != *game_current_faction);
+}
+// The name a defender put out of the game would give the base it escapes
+// to, found before the check (see events.c).
+static int capture_hold_name(int base, int defender) {
+    for (int b = 0; b < *game_base_count; b++)
+        if (b != base && game_bases[b].faction == defender) return 0;
+    if (*game_base_count >= BASE_COUNT) return 0;
+    char name[sizeof game_bases[0].name];
+    memcpy(name, game_bases[*game_base_count].name, sizeof name);
+    name[0] = 0;
+    name_base_hold(defender, name, (game_faction_defs[defender].rule_flags & RULE_FLAG_AQUATIC) != 0);
+    return 1;
+}
+SHADOW_WRITER_CHECK(void, capture_base, (int a, int b, int c), (a, b, c), orig_capture_base(a, b, c),
+                    hooks_writes_game(&w_), "%d, %d, %d", a, b, c)
+static void replay_capture_base(const struct hook_ui_call *c) { orig_capture_base(c->arg[0], c->arg[1], c->arg[2]); }
+static void shadow_capture_base(int base, int attacker, int probe) {
+    if (capture_holding && hooks_protecting()) {
+        struct hook_ui_call c = {.name = "capture_base", .replay = replay_capture_base, .arg = {base, attacker, probe}};
+        hooks_ui_hold(&c);
+        return;
+    }
+    if (hooks_nested) {
+        orig_capture_base(base, attacker, probe);
+        return;
+    }
+    if (shadow_bypass()) {
+        capture_base(base, attacker, probe);
+        return;
+    }
+    stats_capture_base.calls++;
+    shadow_tick(COMBAT);
+    if (!capture_checkable(base, attacker)) {
+        orig_capture_base(base, attacker, probe);
+        return;
+    }
+    int defender = game_bases[base].faction;
+    if (capture_picks(attacker, defender)) {
+        pick_answer = game_tech_pick(attacker, 0, defender, at_text(0x68a334));
+        pick_fixed = 1;
+    }
+    int named = capture_hold_name(base, defender);
+    check_capture_base(base, attacker, probe);
+    if (named) name_base_release();
+    pick_fixed = 0;
+}
+
 // A human defender playing here is asked whether to give up a pod: the
 // original runs unchecked.
 static int asks_player(int faction_def) {
@@ -2209,6 +2693,89 @@ static void sweep_battles(void) {
     *game_preferences = prefs, *game_more_preferences = more, *game_state = gstate;
 }
 
+// Bases taken, each on a copy of the game put back after: by another
+// faction, by force or by a probe team, a recapture, the Assistant Worm's
+// killer's home, small bases seen or unseen by a human, the headquarters
+// with credits to move and a cornered market, projects held or being
+// built, aliens and humans, free facilities in the faction files, the
+// player on either side (its questions answered no; neither side is
+// human, so a base renamed for a human defender is left to the unit
+// test), a human bystander seeing a small base,
+// spoils of war or a faction that steals techs
+// (the tech made up) or research gained, and rand() seeded anew. The
+// defender keeps other bases: its end is eliminate_player's, checked in
+// the events sweep (naming an escaped faction's base opens a file).
+static void sweep_captures(void) {
+    int n = *game_base_count;
+    for (int k = 0; k < 6; k++) {
+        int b = rnd(n), def = game_bases[b].faction, others = 0;
+        for (int i = 0; i < n; i++) others += i != b && game_bases[i].faction == def;
+        int att = some_faction(def);
+        if (!alive(def) || !others || att < 0 || base_listed(b)) continue;
+        struct hook_writes w = {.protect_only = 1};
+        hooks_writes_game(&w);
+        hooks_writes_begin(&w);
+        struct base *B = &game_bases[b];
+        struct faction_data *D = &game_factions[def];
+        uint32_t h = (uint32_t)rnd(1 << 15) << 15 | (uint32_t)rnd(1 << 15);
+        int probe = (h & 3) == 0;
+        if ((h >> 2 & 3) == 0) B->faction_former = (uint8_t)att;
+        if ((h >> 4 & 7) == 0) B->state ^= BASE_STATE_ASSISTANT_HOME;
+        static const int8_t pops[] = {1, 1, 2, 3, 6};
+        if (h >> 7 & 1) B->pop_size = pops[rnd(5)];
+        // The player: the attacker, the defender or someone else. Neither
+        // side is made human: with a human on either side the AI asks to
+        // talk, in a dialog that allocates, whoever the player is. A human
+        // bystander may see the base (a small one seen is lost).
+        int who = (int)(h >> 8 & 7), other = some_faction(def);
+        *game_current_faction = who < 3 ? att : who < 5 ? def : other > 0 ? other : att;
+        int bystander = some_faction(def);
+        *game_human_factions = 0;
+        if (h >> 11 & 1 && bystander > 0 && bystander != att && bystander != *game_current_faction) {
+            *game_human_factions = (uint8_t)bit(bystander);
+            B->visibility |= *game_human_factions;
+        }
+        if (h >> 12 & 1) {
+            int offset;
+            uint32_t mask;
+            bitmask(FAC_HEADQUARTERS_, &offset, &mask);
+            B->facilities_built[offset] |= (uint8_t)mask;
+            D->energy_credits = rnd(3000);
+            D->corner_market_turn = *game_turn + rnd(3);
+            D->corner_market_cost = rnd(400) - 50;
+        }
+        if (h >> 13 & 1) game_secret_projects[rnd(SP_COUNT)] = b;
+        if ((h >> 14 & 3) == 0) game_secret_projects[SP_UNIVERSAL_TRANSLATOR_] = b;
+        if (h >> 16 & 1) {
+            int sp = rnd(SP_COUNT);
+            B->queue[0] = -(FAC_FIRST_PROJECT + sp);
+            game_secret_projects[sp] = -1;
+            if (h >> 17 & 1) game_bases[rnd(n)].queue[0] = B->queue[0];
+        }
+        if (h >> 18 & 1) game_faction_defs[att].rule_flags ^= RULE_FLAG_ALIEN;
+        if ((game_faction_defs[def].rule_flags ^ game_faction_defs[att].rule_flags) & RULE_FLAG_ALIEN)
+            *game_human_factions = 0;  // refugees would meet the bystander (see capture_checkable)
+        if (h >> 19 & 1) game_faction_defs[att].rule_flags ^= RULE_FLAG_TECHSTEAL;
+        if (h >> 20 & 1) *game_rules ^= RULES_SPOILS_OF_WAR;
+        if (h >> 21 & 1) *game_preferences ^= PREF_NO_INTERLUDES;
+        if (h >> 22 & 1) {
+            struct faction_def *d = &game_faction_defs[h >> 23 & 1 ? att : def];
+            if (d->bonus_count < 8) {
+                d->bonus_id[d->bonus_count] = h >> 24 & 1 ? BONUS_FACILITY : BONUS_FREEFAC;
+                d->bonus_val1[d->bonus_count++] = rnd(75) - 2;
+            }
+        }
+        if (h >> 25 & 1 && other > 0) D->diplo_status[other] |= TREATY_PACT;
+        *game_current_base_id = rnd(n);
+        pick_fixed = 1;
+        pick_answer = rnd(3) ? rnd(TECH_COUNT) : -1;
+        *game_rand_state() = (uint32_t)rnd(1 << 15) << 15 | (uint32_t)rnd(1 << 15);
+        check_capture_base(b, att, probe);
+        pick_fixed = 0;
+        hooks_writes_abandon(&w);
+    }
+}
+
 // On a protected copy of the game, put back after.
 static void combat_sweep(void) {
     if (!*game_map || *game_veh_count <= 0 || *game_base_count <= 0) return;
@@ -2220,6 +2787,7 @@ static void combat_sweep(void) {
     sweep_seed = (uint32_t)*game_turn * 7919u + 17u;
     sweep_probes();
     sweep_diplomacy();
+    sweep_captures();
     sweep_kills();
     sweep_interceptors();
     sweep_shoot();
@@ -2236,6 +2804,7 @@ static const struct hook combat_hooks[] = {
     HOOK(0x5061b0, battle_kill_chaff, PUSH_EBP_MOV_EBP_ESP, 0x56, 0x8b, 0x75, 0x08),
     HOOK(0x50c2e0, act_of_aggression, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x8b, 0x75, 0x0c),  // push ebx; push esi; mov esi, [ebp+12]
     HOOK(0x50c340, steal_tech, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x8b, 0x75, 0x08),
+    HOOK(0x50c510, capture_base, PUSH_EBP_MOV_EBP_ESP, 0x81, 0xec, 0x70, 0x01, 0x00, 0x00),  // sub esp, 0x170
     HOOK(0x50c4b0, steal_energy, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                  // mov eax, [ebp+8]
     HOOK(0x59e980, vulnerable, PUSH_EBP_MOV_EBP_ESP, 0x51, 0xa1, 0xcc, 0x64, 0x9a, 0x00),  // push ecx; mov eax, [0x9a64cc]
     HOOK(0x59eee0, success_rates, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x50),                 // sub esp, 0x50

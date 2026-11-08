@@ -24,3 +24,9 @@ void rankings(int full);
 // A faction's score and its parts (into the faction's own fields if NULL);
 // with `partial`, without the comparison with others or saving it.
 void compute_score(int faction, int *score, int *parts, int partial);
+// At the start of a turn (`detect`, finding any win) and as it ends:
+// whether the game is over, with its end shown once. Returns 1 to leave
+// the game.
+int end_of_game(int detect);
+// Whether end_of_game(detect) would show the end now (nothing changed).
+int end_of_game_due(int detect);

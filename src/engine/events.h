@@ -26,3 +26,6 @@ void compute_faction_modifiers(int faction);
 void social_set(int faction);
 // The social engineering screen for the faction, then its choices.
 void social_select(int faction);
+// The player's landing at the start of the game: the pod's fall onto the
+// faction's first base (or unit), and the base's naming.
+void crash_landing(int faction);

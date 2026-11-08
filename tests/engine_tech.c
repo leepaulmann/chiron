@@ -43,7 +43,7 @@ static int parse_says_stub(int slot, char *text, int gender, int plural) {
     snprintf(said_s, sizeof(said_s), "%s", text);
     return 0;
 }
-static void x_pop_stub(char *label, int unk) { snprintf(popped, sizeof(popped), "%s", label); }
+static int x_pop_stub(char *label, int unk) { return snprintf(popped, sizeof(popped), "%s", label), 0; }
 static int rand_zero(void) { return 0; }
 static int random_top(int min, int max) { return max - 1; }
 

@@ -1,18 +1,17 @@
 // What units find on the map: supply and unity pods (goody_box), monoliths,
 // and the alien artifacts they bring home (study_artifact); the turn's
 // random events (random_events); a faction's end (eliminate_player) and
-// its social choices taking effect (social_set, social_select). Reimplemented
+// its social choices taking effect (social_set, social_select); the
+// player's landing (crash_landing). Reimplemented
 // from terranx.exe 2.0's disassembly; names follow Thinker (MIT) and
 // OpenSMACX (Brendan Casey, GPL-3.0-or-later). Thinker's goody_box and
 // monolith served as a map of the outcomes; where its versions differ from
 // the original (options of its own, a fix or two) the original is followed,
 // and the differences are noted below.
-//
-// The game's crash_landing() (the opening animation of the colony pod
-// coming down, and the naming of the first base) is not here: it is all
-// drawing, sound, frames timed on the clock and keyboard input, with
-// buffers it allocates from the game's heap, and asks the player a
-// question, so shadow mode could not check it.
+// The player's landing at the start (crash_landing): the colony pod's
+// fall, drawn frame by frame, and the naming of the first base. It is all
+// drawing, sound, frames timed on the clock and the player's typing, with
+// buffers from the game's heap, so shadow mode runs the original.
 #include "events.h"
 
 #include <stdio.h>
@@ -1699,6 +1698,188 @@ void social_select(int faction) {
     if (!*game_net_multiplayer) social_set(faction);
 }
 
+// ---- The landing ------------------------------------------------------------------
+
+// The objects crash_landing() keeps on its stack, where the original's
+// frame has them (offsets below its frame pointer).
+enum {
+    CL_FRAME = 0x7b38,
+    CL_POPUP = 0x6ac8, CL_FLIC_SMOKE = 0x7b34, CL_SMOKE = 0x6e0, CL_POD = 0x7050, CL_FLIC_POD = 0x11c4,
+    CL_BACKGROUND = 0x174c,
+    FLIC_BUFFER = 4, FLIC_PALETTE = 0x5bc, FLIC_NEXT = 0x5ac,  // within an FLC player: its frame's two words at FLIC_NEXT
+    CL_W = 0x15f, CL_H = 0x197,                                // the animation's size
+    CL_FRAMES = 30,
+    MAP_WIN_BUFFER = 0x444, MAP_WIN_W = 0x4c4, MAP_WIN_H = 0x4c8,  // within the map window's graphic window
+    MAP_WIN_FLAGS = 0x1dd70, MAP_WIN_VIEW_W = 0x1ddb4, MAP_WIN_VIEW_H = 0x1ddb8,
+    MAP_WIN_LANDING_HIDES = 0x8c0,  // what the map window doesn't draw during the landing
+    PREF_SOUND_EFFECTS = 0x400,
+    VK_SHIFT_ = 0x10,
+};
+static uint8_t *cl_at(uint8_t *frame, int off) { return frame + CL_FRAME - off; }
+// The map window's graphic window (its virtual base).
+static uint8_t *map_win_graphic(uint8_t *win) { return win + *(int32_t *)(*(uint8_t **)win + 4); }
+static void flic_end(uint8_t *f) {
+    game_flic_dtor(f);
+    game_palette_dtor(f + FLIC_PALETTE);
+    game_buffer_dtor(f + FLIC_BUFFER);
+}
+// The popup's destruction, as the original inlines it.
+static void cl_popup_end(uint8_t *pop) {
+    *(uint32_t *)pop = game_va(0x6695c8);
+    *(uint32_t *)(pop + 0x444) = game_va(0x6695c0);
+    game_popup_close(pop);
+    *(uint32_t *)(pop + 0x3230) = game_va(0x669d58);
+    *(uint32_t *)(pop + 0x3674) = game_va(0x669d50);
+    game_scroll_close(pop + 0x3230);
+    game_flat_button_dtor(pop + 0x4828);
+    game_flat_button_dtor(pop + 0x3cdc);
+    game_graphic_win_dtor(pop + 0x3230);
+    game_base_pop_dtor(pop);
+}
+static void cl_end(uint8_t *frame) {
+    game_buffer_dtor(cl_at(frame, CL_SMOKE));
+    game_buffer_dtor(cl_at(frame, CL_POD));
+    flic_end(cl_at(frame, CL_FLIC_SMOKE));
+    flic_end(cl_at(frame, CL_FLIC_POD));
+    game_buffer_dtor(cl_at(frame, CL_BACKGROUND));
+    cl_popup_end(cl_at(frame, CL_POPUP));
+}
+
+// The pod's fall: 30 frames, 71 ms apart (1 with shift held), from the top
+// right of the map window (an alien pod from the top left) down to the
+// landing square, each drawn over the background put back where the last
+// one was, with smoke behind a human pod. The steps are the original's
+// x87 arithmetic (single precision stored between frames).
+static void cl_fall(uint8_t *frame, int x, int y, int alien) {
+    const float k = *(float *)game_at(0x66fa60), drop = *(float *)game_at(0x66fa5c), drift = *(float *)game_at(0x66fa58);
+    uint8_t *win = game_map_wins[0], *g = map_win_graphic(win);
+    int w = *(int32_t *)(g + MAP_WIN_W), h = *(int32_t *)(g + MAP_WIN_H);
+    game_buffer_init(cl_at(frame, CL_BACKGROUND), w, -h, 0, 0);
+    game_buffer_copy(g + MAP_WIN_BUFFER, cl_at(frame, CL_BACKGROUND), 0, 0, w, -h);
+    int px, py;
+    game_map_win_tile_to_pixel(win, x, y, &px, &py);
+    g = map_win_graphic(game_map_wins[0]);
+    w = *(int32_t *)(g + MAP_WIN_W), h = *(int32_t *)(g + MAP_WIN_H);
+    volatile float fx = alien ? 0.0f : (float)(w - CL_W);
+    long double y0 = (long double)(-CL_H - h);
+    win = game_map_wins[0];
+    int tx = *(int32_t *)(win + MAP_WIN_VIEW_W) / 2 + px - 0xa8, ty_i = *(int32_t *)(win + MAP_WIN_VIEW_H) / 2 + py - 0xc0;
+    volatile float ty = (float)ty_i;
+    volatile float dx = (float)(((long double)tx - fx) * k);
+    volatile float dy = (float)(((long double)ty - y0) * k);
+    long double fy0 = y0 + drop;
+    volatile float fy = (float)fy0;
+    int rect[4], next[4];
+    rect[1] = (int)fy0;
+    rect[0] = (int)fx;
+    rect[2] = rect[0] + CL_W, rect[3] = rect[1] + CL_H;
+    volatile int32_t *stop = game_at(0x93a944);
+    uint32_t last = game_time_get_time();
+    for (int i = 0; i < CL_FRAMES; i++) {
+        if (game_map_wins[0]) game_buffer_copy_2(cl_at(frame, CL_BACKGROUND), map_win_graphic(game_map_wins[0]) + MAP_WIN_BUFFER, rect);
+        if (alien) fx = (float)((((long double)dx - i / 2) + fx) + drift);
+        else fx = (float)(((long double)(i / 2) + dx - drift) + fx);
+        fy = (float)((((long double)i + dy) - drop) + fy);
+        uint8_t *f = cl_at(frame, CL_FLIC_POD);
+        game_flic_frame(f, *(int32_t *)(f + FLIC_NEXT), *(int32_t *)(f + FLIC_NEXT + 4));
+        f = cl_at(frame, CL_FLIC_SMOKE);
+        game_flic_frame(f, *(int32_t *)(f + FLIC_NEXT), *(int32_t *)(f + FLIC_NEXT + 4));
+        void *to = game_map_wins[0] ? map_win_graphic(game_map_wins[0]) + MAP_WIN_BUFFER : NULL;
+        int sy = (int)fy, sx = (int)fx;
+        game_buffer_draw_2(cl_at(frame, CL_POD), to, 9, sx, sy, 1, 1);
+        if (!alien)
+            game_buffer_draw_multi(cl_at(frame, CL_SMOKE),
+                                   game_map_wins[0] ? map_win_graphic(game_map_wins[0]) + MAP_WIN_BUFFER : NULL, 0xff, sx,
+                                   sy, 1, 1, game_at(0x6fdb7c));
+        next[0] = sx, next[1] = sy, next[2] = sx + CL_W, next[3] = sy + CL_H;
+        game_union_rect(rect, next, rect);
+        game_graphic_win_update_2(map_win_graphic(game_map_wins[0]), rect, 0);
+        memcpy(rect, next, sizeof rect);
+        int delay = (game_get_async_key_state(VK_SHIFT_) & 0xff00) ? 1 : 0x47;
+        uint32_t now;
+        do now = game_time_get_time();
+        while ((int)(now - last) < delay && !*stop);
+        last = now;
+    }
+}
+
+// The player's first landing, at the start of the game: the pod falls onto
+// the faction's first base (or unit), with its sound, and the player names
+// the base. An alien faction lands on turn 5, as does the Cult of Planet
+// (FUNGBOY), which has no pod to show. Shadow mode can't check it (it is
+// drawing, sound, timing and the player's typing, with buffers from the
+// game's heap): it runs the original.
+void crash_landing(int faction) {
+    uint8_t frame[CL_FRAME];
+    uint8_t *pop = cl_at(frame, CL_POPUP);
+    int no_base = 0;
+    game_popup_ctor(pop);
+    game_buffer_ctor(cl_at(frame, CL_BACKGROUND));
+    game_flic_ctor(cl_at(frame, CL_FLIC_POD));
+    game_flic_ctor(cl_at(frame, CL_FLIC_SMOKE));
+    game_buffer_ctor(cl_at(frame, CL_POD));
+    game_buffer_ctor(cl_at(frame, CL_SMOKE));
+    int base = 0, x, y;
+    while (base < *game_base_count && game_bases[base].faction != faction) base++;
+    if (base < *game_base_count) {
+        x = game_bases[base].x, y = game_bases[base].y;
+    } else {
+        no_base = 1;
+        int v = 0;
+        while (v < *game_veh_count && game_vehs[v].faction != faction) v++;
+        if (v >= *game_veh_count) {
+            cl_end(frame);
+            return;
+        }
+        x = game_vehs[v].x, y = game_vehs[v].y;
+    }
+    const struct faction_def *d = &game_faction_defs[*game_current_faction];
+    int alien = (d->rule_flags & RULE_FLAG_ALIEN) != 0;
+    game_battle_text[0] = 0;
+    strcat(game_battle_text, d->filename);
+    (*game_char_upper)(game_battle_text);
+    if (!*game_net_multiplayer) {
+        if (alien) *game_turn = 5;
+        if (!strcmp(game_battle_text, text(0x691464))) {
+            game_console_update_data(game_console, 0);
+            *game_turn = 5;
+            goto landed;
+        }
+    }
+    game_console_update_data(game_console, 0);
+    if (*game_preferences & PREF_SOUND_EFFECTS) {
+        game_wave_init(game_at(0x945e08), text(0x69146c), 4);
+        game_wave_play(game_at(0x945e08));
+    }
+    game_buffer_init(cl_at(frame, CL_POD), CL_W, CL_H, 0, 0);
+    game_buffer_init(cl_at(frame, CL_SMOKE), CL_W, CL_H, 0, 0);
+    game_flic_load(cl_at(frame, CL_FLIC_POD), cl_at(frame, CL_POD), text(alien ? 0x691480 : 0x691490), 0, 0, 0);
+    game_flic_load(cl_at(frame, CL_FLIC_SMOKE), cl_at(frame, CL_SMOKE), text(0x6914a0), 0, 0, 0);
+    *(uint32_t *)((uint8_t *)game_map_wins[0] + MAP_WIN_FLAGS) &= ~(uint32_t)MAP_WIN_LANDING_HIDES;
+    game_map_win_set_center(game_map_wins[0], x, y, 1);
+    game_draw_map(1);
+    game_do_all_draws();
+    cl_fall(frame, x, y, alien);
+landed:
+    game_flush_input();
+    *(int32_t *)game_at(0x696d18) = 1;
+    *(int32_t *)game_at(0x696d1c) = 1;
+    if (!no_base) {
+        char name[sizeof game_bases[0].name + 256];
+        strcpy(name, game_bases[base].name);
+        game_popup_start(pop, game_pop_file, text(0x6914b0), 0x17, (int)(intptr_t)name, 4, 0);
+        game_base_pop_exec_3(pop, 0, 0);
+        strcpy(game_bases[base].name, game_parse_text);
+        make_base_unique(base);
+    }
+    *(uint32_t *)((uint8_t *)game_map_wins[0] + MAP_WIN_FLAGS) |= MAP_WIN_LANDING_HIDES;
+    game_draw_map(1);
+    game_flush_input();
+    game_buffer_close(cl_at(frame, CL_BACKGROUND));
+    if (*game_preferences & PREF_SOUND_EFFECTS) game_sound_fade(game_at(0x945e08), 1000);
+    cl_end(frame);
+}
+
 // ---- Hooks and shadow checks ------------------------------------------------------
 
 extern struct hook_module events_module;
@@ -1786,6 +1967,14 @@ static void shadow_social_select(int faction) {
     shadow_tick(EVENTS);
     if (social_screen()) orig_social_select(faction);
     else check_social_select(faction);
+}
+
+// The landing runs the original in shadow mode (see crash_landing).
+static void (*orig_crash_landing)(int faction);
+static struct hook_stats stats_crash_landing = {"crash_landing (unchecked)"};
+static void shadow_crash_landing(int faction) {
+    if (!hooks_nested) stats_crash_landing.calls++;
+    orig_crash_landing(faction);
 }
 
 // ---- Sweep -------------------------------------------------------------------------
@@ -2271,6 +2460,7 @@ static const struct hook events_hooks[] = {
     HOOK(0x585fe0, clear_faction, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),   // mov eax, [ebp+8]
     HOOK(0x5b0d70, compute_faction_modifiers, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x55, 0x08),  // mov edx, [ebp+8]
     HOOK(0x5b4600, social_set, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10),      // sub esp, 0x10
+    HOOK(0x5ae120, crash_landing, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),  // mov eax, fs:[0]
     HOOK(0x5b5620, social_select, PUSH_EBP_MOV_EBP_ESP, 0xa0, 0xc0, 0x64, 0x9a, 0x00),  // mov al, [0x9a64c0]
 };
 // The game calls setup.c's functions mostly as a game starts and as a faction

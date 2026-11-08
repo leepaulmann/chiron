@@ -60,7 +60,7 @@ enum {  // social effects, in the game's order
 
 enum {  // diplo_status bits
     TREATY_PACT = 0x1, TREATY_TREATY = 0x2, TREATY_COMMLINK = 0x8,
-    TREATY_VENDETTA = 0x10, TREATY_WANT_REVENGE = 0x20, TREATY_UNK_40 = 0x40,
+    TREATY_VENDETTA = 0x10, TREATY_WANT_REVENGE = 0x20, TREATY_UNK_40 = 0x40, TREATY_UNK_80 = 0x80,
     TREATY_UNK_100 = 0x100, TREATY_UNK_200 = 0x200, TREATY_SHALL_BETRAY = 0x400, TREATY_UNK_800 = 0x800,
     TREATY_WANT_TO_TALK = 0x2000, TREATY_UNK_8000 = 0x8000, TREATY_UNK_20000 = 0x20000,
     TREATY_ATROCITY_VICTIM = 0x40000, TREATY_UNK_1000000 = 0x1000000, TREATY_UNK_4000000 = 0x4000000,
@@ -334,7 +334,10 @@ struct faction_def {
     int32_t noun_gender;
     int32_t noun_plural;
     char adjective[128];  // the name as an adjective, such as "Gaian"
-    GAME_PAD(0x384, 0x4d4);
+    GAME_PAD(0x384, 0x3dc);
+    char assistant_name[24], scientist_name[24];
+    char assistant_city[24];  // the name the Assistant Worm's killer's home takes, captured by the player
+    GAME_PAD(0x424, 0x4d4);
     int32_t rule_tech_selected;  // free techs at the start
     int32_t rule_morale;
     int32_t rule_research, rule_drone, rule_talent, rule_energy, rule_interest;
@@ -352,6 +355,7 @@ struct faction_def {
 _Static_assert(sizeof(struct faction_def) == 0x59c, "faction_def size");
 GAME_AT(struct faction_def, noun, 0x2e4);
 GAME_AT(struct faction_def, adjective, 0x304);
+GAME_AT(struct faction_def, assistant_city, 0x40c);
 GAME_AT(struct faction_def, rule_flags, 0x508);
 GAME_AT(struct faction_def, rule_tech_selected, 0x4d4);
 GAME_AT(struct faction_def, rule_interest, 0x4ec);
@@ -1306,7 +1310,7 @@ extern int32_t *game_veh_attack_flags, *game_terraform_sound_played;
 extern int(__attribute__((thiscall)) * game_net_lock_veh)(void *daemon, int *veh, int type, int x, int y, int unk);
 extern int(__attribute__((thiscall)) * game_net_maybe_lock)(void *daemon, int *veh, int a, int b, int x, int y, int type);
 extern void (*game_message_veh)(int type, int veh, int dir, int unk);
-extern void (*game_x_pop)(char *label, int unk);  // a popup from script.txt
+extern int (*game_x_pop)(char *label, int unk);  // a popup from script.txt: the player's answer
 // The AI's turn around its units (ai.c): the AI's choice of a unit's move,
 // and a network game's unit handed to the daemon.
 extern int (*game_enemy_move)(int veh);
@@ -1548,6 +1552,38 @@ extern void (*game_time_warp)(void), (*game_balance)(void);
 extern void(__attribute__((thiscall)) * game_net_daemon_hang_up)(void *daemon);
 extern void(__attribute__((thiscall)) * game_lock_clear)(void *lock);
 extern void(__attribute__((thiscall)) * game_alpha_net_close)(void *daemon);
+// A base changing hands (capture_base): the console's search for a unit
+// of the player's waiting for orders (-1 for none), and the Monuments
+// window's record of the conquest.
+extern int(__attribute__((thiscall)) * game_console_ready_search)(void *console, int unk);
+extern void (*game_mon_conquer_base)(int faction, char *base_name);
+// The game's end (end_of_game): the mission year and the year it ends, the
+// turn loop's flags to stop (Thinker's ControlTurnA and B), and the end's
+// screens: the credits, the score, the faction's epitaph, the hall of fame
+// and the replay, and the Monuments window's record of the win.
+extern int32_t *game_mission_year, *game_ending_year, *game_control_turn_a, *game_control_turn_b;
+extern void (*game_show_credits)(void), (*game_show_replay)(void);
+extern void (*game_report_score)(int final), (*game_quayle)(int faction), (*game_hall_of_fame)(int final);
+extern void (*game_mon_winning_unify)(int faction, int other);
+// The colony pod's landing (crash_landing): image buffers, FLC players
+// (an image buffer at +4, its palette at +0x5bc), a sound, the map
+// window's square to screen position and its partial redraw, and Win32's
+// UnionRect as imported.
+#define GAME_THIS __attribute__((thiscall))
+extern void(GAME_THIS *game_buffer_ctor)(void *b), (GAME_THIS *game_buffer_dtor)(void *b), (GAME_THIS *game_buffer_close)(void *b);
+extern void(GAME_THIS *game_buffer_init)(void *b, int w, int h, int a, int c);
+extern void(GAME_THIS *game_buffer_copy)(void *b, void *to, int x, int y, int w, int h);
+extern void(GAME_THIS *game_buffer_copy_2)(void *b, void *from, int *rect);
+extern void(GAME_THIS *game_buffer_draw_2)(void *b, void *to, int mode, int x, int y, int a, int c);
+extern void(GAME_THIS *game_buffer_draw_multi)(void *b, void *to, int color, int x, int y, int a, int c, void *table);
+extern void(GAME_THIS *game_flic_ctor)(void *f), (GAME_THIS *game_flic_dtor)(void *f), (GAME_THIS *game_palette_dtor)(void *p);
+extern int(GAME_THIS *game_flic_load)(void *f, void *buffer, char *file, int a, int b, int c);
+extern int(GAME_THIS *game_flic_frame)(void *f, int a, int b);
+extern void(GAME_THIS *game_wave_init)(void *wave, char *file, int unk);
+extern void(GAME_THIS *game_map_win_tile_to_pixel)(void *win, int x, int y, int *px, int *py);
+extern void(GAME_THIS *game_graphic_win_update_2)(void *win, int *rect, int unk);
+extern int(__attribute__((stdcall)) * game_union_rect)(int *to, const int *a, const int *b);
+#undef GAME_THIS
 
 // Saved games (save.c): the game's C runtime file functions, which take
 // its own FILE (passed as void *), its allocator, and what loading calls.

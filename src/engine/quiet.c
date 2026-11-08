@@ -332,6 +332,26 @@ HELD(void, mon_conquer_base, (void)0, (int faction, char *name), (faction, name)
      (c_.arg[0] = faction, hooks_ui_text(&c_, 0, name)), orig_mon_conquer_base(a_[0], TEXT(0)))
 HELD(void, mon_killed_faction, (void)0, (int faction, int other), (faction, other),
      (c_.arg[0] = faction, c_.arg[1] = other), orig_mon_killed_faction(a_[0], a_[1]))
+// The debugging log (a line appended to its file, opened each time,
+// which allocates): capture_base() and setup_player() write to it.
+HELD(void, log_say, (void)0, (char *text, int a, int b, int c), (text, a, b, c),
+     (hooks_ui_text(&c_, 0, text), c_.arg[0] = a, c_.arg[1] = b, c_.arg[2] = c), orig_log_say(TEXT(0), a_[0], a_[1], a_[2]))
+HELD(void, log_say5, (void)0, (char *text, char *text2, int a, int b, int c), (text, text2, a, b, c),
+     (hooks_ui_text(&c_, 0, text), hooks_ui_text(&c_, 1, text2), c_.arg[0] = a, c_.arg[1] = b, c_.arg[2] = c),
+     orig_log_say5(TEXT(0), TEXT(1), a_[0], a_[1], a_[2]))
+// The game's end (end_of_game, checked so in the score sweep only): the
+// credits, the score screen, the faction's epitaph, the hall of fame, the
+// replay, and the monument to the win. All are windows, which allocate.
+HELD(void, show_credits, (void)0, (void), (), (void)0, orig_show_credits())
+HELD(void, show_replay, (void)0, (void), (), (void)0, orig_show_replay())
+HELD(void, report_score, (void)0, (int final), (final), (c_.arg[0] = final), orig_report_score(a_[0]))
+HELD(void, quayle, (void)0, (int faction), (faction), (c_.arg[0] = faction), orig_quayle(a_[0]))
+HELD(void, hall_of_fame, (void)0, (int final), (final), (c_.arg[0] = final), orig_hall_of_fame(a_[0]))
+HELD(void, mon_winning_unify, (void)0, (int faction, int other), (faction, other),
+     (c_.arg[0] = faction, c_.arg[1] = other), orig_mon_winning_unify(a_[0], a_[1]))
+// The text a capture's interlude read, freed (a base renamed for the
+// Assistant Worm's killer, in capture_base()).
+HELD(void, text_close, (void)0, (void), (), (void)0, orig_text_close())
 
 // A tech given away (by a secret project), with its announcement and the
 // window that shows it, which allocates as the monuments do.
@@ -507,6 +527,15 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x446b10, fx_engine_pitch, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x81, 0xec, 0x28, 0x00, 0x00),  // mov eax, [ecx+0x28ec]
     QUIET_HOOK(0x477320, mon_conquer_base, MON_PROLOGUE),
     QUIET_HOOK(0x477a60, mon_killed_faction, MON_PROLOGUE),
+    QUIET_HOOK(0x6262f0, log_say, 0xa1, 0xf8, 0xbf, 0x9b, 0x00),   // mov eax, [0x9bbff8]
+    QUIET_HOOK(0x626250, log_say5, 0xa1, 0xf8, 0xbf, 0x9b, 0x00),
+    QUIET_HOOK(0x428df0, show_credits, PUSH_EBP_MOV_EBP_ESP, 0x6a, 0xff),                    // push -1
+    QUIET_HOOK(0x5adbf0, show_replay, SEH_PROLOGUE),
+    QUIET_HOOK(0x4acb80, report_score, 0xa1, 0x2c, 0x39, 0x7d, 0x00),                      // mov eax, [0x7d392c]
+    QUIET_HOOK(0x496670, quayle, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                    // mov eax, [ebp+8]
+    QUIET_HOOK(0x44ae50, hall_of_fame, PUSH_EBP_MOV_EBP_ESP, 0x56, 0x68, 0x20, 0x46, 0x68, 0x00),  // push esi; push 0x684620
+    QUIET_HOOK(0x477940, mon_winning_unify, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0xd4, 0x64, 0x9a, 0x00),  // mov eax, [0x9a64d4]
+    QUIET_HOOK(0x5fd530, text_close, 0xa1, 0xf4, 0x7c, 0x9b, 0x00, 0x85, 0xc0),  // mov eax, [0x9b7cf4]; test eax, eax
     QUIET_HOOK(0x59e510, prefs_put, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0xcc, 0x00, 0x69, 0x00),  // mov eax, [0x6900cc]
     QUIET_HOOK(0x59e530, prefs_put_2, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x50),              // sub esp, 0x50
     QUIET_HOOK(0x5abec0, wipe_undo, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x50),

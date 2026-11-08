@@ -468,7 +468,7 @@ static int parse_num_(int slot, int value) { return (void)slot, (void)value, 0; 
 static int tut_check_(int bit) { return (void)bit, 0; }
 static int random_(int min, int max) { return (void)min, max - 1; }  // the worst roll
 static void __attribute__((thiscall)) win_base_(void *win, int base) { (void)win, (void)base; }
-static void x_pop_(char *label, int unk) { (void)label, (void)unk; }
+static int x_pop_(char *label, int unk) { return (void)label, (void)unk, 0; }
 static void interlude_(int a, char *b, int c, int d) { (void)a, (void)b, (void)c, (void)d; }
 
 // A land unit (design 0, speed 1, three road moves) of faction 1 and

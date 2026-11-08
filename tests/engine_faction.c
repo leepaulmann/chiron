@@ -46,7 +46,7 @@ static int ambience_stub(int sound) { return ambience_calls++, sound; }
 static void __attribute__((thiscall)) redraw_stub(void *win) {}
 static int climactic_stub(void) { return climactic; }
 static int says_stub(int slot, char *text, int gender, int plural) { return 0; }
-static void x_pop_stub(char *label, int unk) { pops++; }
+static int x_pop_stub(char *label, int unk) { return pops++, 0; }
 static void check_stub(int f, int i, int u) { checks++; }
 static void communicate_stub(int f, int i, int u) { calls++; }
 static void trade_stub(int f, int i) { trades++; }

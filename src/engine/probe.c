@@ -1512,33 +1512,21 @@ static int probe_checkable(int base) {
     return base < 0 || (!base_listed(base) && !holds_captives(game_bases[base].faction));
 }
 
-// Mind control of a base ends in the game's capture_base(), which takes
+// Mind control of a base ends in capture_base() (combat.c), which takes
 // techs from it (steal_tech(): tech_pick() builds its list on the game's
 // heap even for the AI) and may put the target out of the game. While a
-// check of probe() runs it is held: both runs see the base as it was,
-// and the original's call is made after the check (in a sweep, dropped).
-// Nothing probe() does after it reads what it changes but the treaties
-// the aftermath looks at, which act_of_aggression() has broken by then.
-static int holding_capture;
-static void (*orig_capture_base)(int base, int faction, int probe);
-static struct hook_stats stats_capture_base = {"(held capture_base)"};
-static void replay_capture_base(const struct hook_ui_call *c) { orig_capture_base(c->arg[0], c->arg[1], c->arg[2]); }
-static void shadow_capture_base(int base, int faction, int probe) {
-    if (!holding_capture || !hooks_protecting()) {
-        orig_capture_base(base, faction, probe);
-        return;
-    }
-    stats_capture_base.calls++;
-    struct hook_ui_call c = {.name = "capture_base", .replay = replay_capture_base, .arg = {base, faction, probe}};
-    hooks_ui_hold(&c);
-}
+// check of probe() runs it is held (capture_holding): both runs see the
+// base as it was, and the original's call is made after the check (in a
+// sweep, dropped); capture_base() is checked on its own there. Nothing
+// probe() does after it reads what it changes but the treaties the
+// aftermath looks at, which act_of_aggression() has broken by then.
 
 SHADOW_WRITER_CHECK(int, probe, (int a, int b, int c, int d), (a, b, c, d), orig_probe(a, b, c, d),
                     hooks_writes_game(&w_), "%d, %d, %d, %d", a, b, c, d)
 static int checked_probe(int veh, int base, int tveh, int toggle) {
-    holding_capture++;
+    capture_holding++;
     int r = check_probe(veh, base, tveh, toggle);
-    holding_capture--;
+    capture_holding--;
     return r;
 }
 static int shadow_probe(int veh, int base, int tveh, int toggle) {
@@ -1755,7 +1743,5 @@ static void probe_sweep(void) {
 
 static const struct hook probe_hooks[] = {
     HOOK(0x59f120, probe, 0x55, 0x8b, 0xec, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),  // push ebp; mov ebp, esp; mov eax, fs:[0]
-    {0x50c510, (const uint8_t[]){0x55, 0x8b, 0xec, 0x81, 0xec, 0x70, 0x01, 0x00, 0x00}, 9, NULL, (void *)shadow_capture_base,
-     (void **)&orig_capture_base, &stats_capture_base, 1},  // push ebp; mov ebp, esp; sub esp, 0x170
 };
 struct hook_module probe_module = {"probe", probe_hooks, HOOK_COUNT(probe_hooks), probe_sweep, NULL, -1};

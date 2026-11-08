@@ -344,12 +344,119 @@ static void score(void) {
     state = 0, base_count = 3;
 }
 
+// ---- The game's end ---------------------------------------------------------------
+
+static char shown[16][32];  // the end's messages and screens, in order
+static int shown_n, popp_answer;
+static int32_t mission_year, ending_year = 2400, turn_a, turn_b, net, prefs, language, current = 1, victory_type;
+static int32_t gender, plural, ascent[2] = {4, 3};
+static uint32_t more_rules;
+static char battle_text[256], *script = "script";
+static void show(const char *what) {
+    if (shown_n < 16) snprintf(shown[shown_n++], sizeof shown[0], "%s", what);
+}
+static int says_stub(int slot, char *text, int g, int p) { return 0; }
+static int num_stub(int slot, int value) { return 0; }
+static int x_pop_stub(char *label, int unk) { return show(label), 0; }
+static int x_pop2_stub(char *file, char *label, int unk) { return show(label), 0; }
+static int popp_stub(char *file, char *label, int flags, char *pic, void *fn) { return show(label), popp_answer; }
+static void interlude_stub(int id, char *text, int a, int b) { show("interlude"); }
+static void movie_stub(char *name) { show(name); }
+static void unify_stub(int f, int other) { show("unify"); }
+static void credits_stub(void) { show("credits"); }
+static void replay_stub(void) { show("replay"); }
+static void report_stub(int final) { show("score"); }
+static void quayle_stub(int f) { show("quayle"); }
+static void fame_stub(int final) { show("fame"); }
+static uint32_t __attribute__((stdcall)) upper_stub(char *s) { return 0; }
+static uint32_t(__attribute__((stdcall)) * upper_ptr)(char *) = upper_stub;
+static int was_shown(const char *what) {
+    for (int i = 0; i < shown_n; i++)
+        if (!strcmp(shown[i], what)) return 1;
+    return 0;
+}
+
+static void game_end(void) {
+    // Labels and pictures are read from the game's image: the test points
+    // game_at() at a made-up, empty one.
+    static uint8_t image[0x300000];
+    game_test_image = image;
+    game_parse_says = says_stub, game_parse_num = num_stub, game_x_pop = x_pop_stub, game_x_pop2 = (void *)x_pop2_stub;
+    game_popp = (void *)popp_stub, game_interlude = interlude_stub, game_amovie_project_2 = movie_stub;
+    game_mon_winning_unify = unify_stub, game_show_credits = credits_stub, game_show_replay = replay_stub;
+    game_report_score = report_stub, game_quayle = quayle_stub, game_hall_of_fame = fame_stub;
+    game_char_upper = &upper_ptr, game_script_file = &script, game_battle_text = battle_text;
+    game_mission_year = &mission_year, game_ending_year = &ending_year, game_control_turn_a = &turn_a;
+    game_control_turn_b = &turn_b, game_net_multiplayer = &net, game_preferences = &prefs, game_language = &language;
+    game_current_faction = &current, game_victory_type = &victory_type, game_more_rules = &more_rules;
+    game_parse_gender = &gender, game_parse_plural = &plural, game_ascent_numbers = ascent;
+    state = 0, rules = 0, sudden = 9000, alive = 0x0f, humans = 0;
+    for (int f = 0; f < FACTION_COUNT; f++) factions[f].flags = 0, factions[f].corner_market_turn = 0;
+
+    // Twenty years before the end, the player is warned; the game goes on.
+    mission_year = ending_year - 20, shown_n = 0;
+    EXPECT(end_of_game(1), 0);
+    EXPECT(shown_n, 1);
+    EXPECT(strcmp(battle_text, "2400"), 0);
+    EXPECT(end_of_game(0), 0);
+    EXPECT(shown_n, 1);
+    EXPECT((int)state, 0);
+
+    // The time limit: the end is due, and shown with the score, hall of
+    // fame and replay; the player leaves.
+    mission_year = ending_year, shown_n = 0;
+    EXPECT(end_of_game_due(1), 1);
+    EXPECT((int)state, 0);
+    EXPECT(end_of_game_due(0), 0);
+    EXPECT(end_of_game(1), 1);
+    EXPECT(victory_type, 8);
+    EXPECT((int)state, GAME_STATE_DONE | GAME_STATE_FINAL_SCORE_DONE);
+    EXPECT(was_shown("score") && was_shown("quayle") && was_shown("fame") && was_shown("replay"), 1);
+    EXPECT(was_shown("credits"), 0);
+    EXPECT(turn_a, 1);
+    EXPECT(turn_b, 1);
+    EXPECT(end_of_game(1), 0);  // shown once
+
+    // The energy market cornered by a pact partner in a cooperative game:
+    // its win shared, with the monuments to both; the player plays on.
+    state = 0, mission_year = 2200, victory_type = 0, turn_a = turn_b = 0, shown_n = 0, popp_answer = 1;
+    rules = RULES_VICTORY_COOPERATIVE;
+    factions[2].corner_market_turn = turn, factions[2].corner_market_cost = 500;
+    factions[2].diplo_status[1] |= TREATY_PACT;
+    EXPECT(end_of_game(1), 0);
+    EXPECT(victory_type, 13);
+    EXPECT((int)(factions[2].flags & 0x40000), 0x40000);
+    EXPECT((int)(state & 0x400009), 0x400009);
+    EXPECT(was_shown("unify") && was_shown("interlude") && was_shown("credits"), 1);
+    EXPECT(turn_a, 0);
+    factions[2].corner_market_turn = 0, factions[2].diplo_status[1] = 0, popp_answer = 0;
+
+    // An alien faction's subspace generators: three of them, at bases of
+    // size 4 or more, end the game as a loss for the player.
+    state = 0, victory_type = 0, rules = 0, shown_n = 0;
+    defs[3].rule_flags |= RULE_FLAG_ALIEN;
+    int base2_pop = bases[2].pop_size;
+    bases[2].pop_size = 5;
+    ascent[1] = 1;
+    bases[2].facilities_built[40 / 8] |= 1 << (40 % 8);
+    EXPECT(end_of_game_due(1), 1);
+    EXPECT(end_of_game(1), 1);
+    EXPECT(victory_type, 18);
+    EXPECT((int)(factions[3].flags & 0x100000), 0x100000);
+    EXPECT((int)(more_rules & 0x80), 0x80);
+    EXPECT(was_shown("interlude"), 1);
+    bases[2].facilities_built[40 / 8] = 0, bases[2].pop_size = (int8_t)base2_pop, defs[3].rule_flags = 0;
+    ascent[1] = 3, state = 0, victory_type = 0, more_rules = 0;
+    for (int f = 0; f < FACTION_COUNT; f++) factions[f].flags = 0;
+}
+
 int main(void) {
     setup();
     year_and_rating();
     objectives();
     ranking();
     score();
+    game_end();
     if (failures) return 1;
     printf("engine_score: all passed\n");
     return 0;

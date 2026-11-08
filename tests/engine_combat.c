@@ -214,6 +214,123 @@ static void test_battles(void) {
     humans = 0, current = 7;
 }
 
+// ---- A base changing hands ----------------------------------------------------
+
+static int conquests, replays, x_pops;
+static void conquer_stub(int f, char *name) { conquests++; }
+static void replay_stub(int e, int x, int y, int f) { replays++; }
+static void log5_stub(char *a, char *b, int n1, int n2, int n3) {}
+static int spying_stub(int f) { return 0; }
+static int x_pop_stub(char *label, int unk) { return x_pops++, 0; }
+static int __attribute__((thiscall)) ready_stub(void *c, int unk) { return -1; }
+static void __attribute__((thiscall)) zoom_stub(void *w, int b, int u) {}
+static void map_stub(int u) {}
+static struct continent continents[REGION_COUNT];
+static int site_stub(int x, int y, int u) { return 0; }
+static int32_t goody_mult[2] = {1, 1}, map_seed;
+// base_compute()'s tables and scratch: zeroed.
+static struct res_info res;
+static struct citizen citizens[16];
+static struct rules_facility facility_rules[FACILITY_COUNT];
+static struct rules_worldbuilder worldbuilder;
+static int32_t zeros[64][32];
+static int best_specialist_stub(void) { return 0; }
+static int stack_fix_stub(int v) { return v; }
+static int has_abil_stub(int p, uint32_t a) { return 0; }
+static void add_goal_stub(int f, int t, int p, int x, int y, int b) {}
+static int satan_stub(int f, int a) { return 0; }
+static int veh_at_stub(int x, int y) { return -1; }
+static int stack_check_stub(int v, int t, int a, int b, int c) { return 0; }
+static void encounter_stub(int f, int g, int x, int y, int t, int n) {}
+static void radius_stub(int x, int y, int r, int u) {}
+
+static void test_capture(void) {
+    game_mon_conquer_base = conquer_stub, game_replay_base = replay_stub, game_log_say5 = log5_stub;
+    game_spying = spying_stub, game_x_pop = x_pop_stub, game_console_ready_search = ready_stub;
+    game_base_win_zoom = zoom_stub, game_draw_map = map_stub, game_continents = continents;
+    game_world_site = site_stub, game_goody_mult = goody_mult, game_map_seed = &map_seed;
+    game_res_info = &res, game_citizens = citizens, game_facilities = facility_rules, game_worldbuilder = &worldbuilder;
+    int32_t **ints[] = {&game_governor_faction, &game_dust_cloud, &game_solar_flares, &game_control_upkeep_a,
+                        &game_terraform_reduce, &game_terraform_energy, &game_base_growth, &game_base_convoy_from,
+                        &game_base_convoy_to, &game_base_forces_upkeep, &game_base_upkeep_state,
+                        &game_tectonic_detonations, &game_sea_level, &game_native_life, &game_difficulty,
+                        &game_base_commerce_import, &game_base_commerce_export, &game_tech_commerce_count,
+                        &game_proposal_passes, &game_map_area_sqrt, &game_psych_talents, &game_psych_drones,
+                        &game_psych_superdrones, &game_base_pacifism, &game_base_forces_supported,
+                        &game_base_forces_paid, &game_base_workers, &game_base_reserved, &game_base_food_ok,
+                        &game_current_turn, &game_base_square_flags, &game_cost_base, &game_faction_rankings,
+                        &game_map_settings};
+    for (unsigned i = 0; i < sizeof ints / sizeof ints[0]; i++) *ints[i] = zeros[i];
+    game_best_specialist = best_specialist_stub, game_stack_fix = stack_fix_stub, game_has_abil = has_abil_stub;
+    game_add_goal = add_goal_stub, game_great_satan = satan_stub, game_veh_at = veh_at_stub;
+    game_stack_check = stack_check_stub, game_encounter = encounter_stub, game_draw_radius = radius_stub;
+    rules_basic.nutrient_intake_citizen = 2, rules_basic.nutrient_cost_multi = rules_basic.mineral_cost_multi = 10;
+    static int32_t current_base_id = 0, computed_base_id = -1;
+    static struct base *current_base;
+    game_current_base_id = &current_base_id, game_current_base = &current_base, game_computed_base_id = &computed_base_id;
+    veh_count = 0, base_count = 3, humans = 1 << 1, current = 7, net = 0, rules = 0;
+    for (int y = 0; y < H; y++)
+        for (int x = y & 1; x < W; x += 2) at(x, y)->bits &= ~(uint32_t)MAP_UNIT;
+    bases[0] = (struct base){.x = 2, .y = 2, .faction = 1, .faction_former = 1, .pop_size = 4, .queue_size = 0, .queue = {5}};
+    bases[1] = (struct base){.x = 10, .y = 4, .faction = 2, .faction_former = 2, .pop_size = 6};
+    bases[2] = (struct base){.x = 6, .y = 8, .faction = 1, .faction_former = 1, .pop_size = 2};
+    strcpy(bases[0].name, "Alpha"), strcpy(bases[1].name, "Beta"), strcpy(bases[2].name, "Gamma");
+    factions[1].energy_credits = 100, factions[1].pop_total = 9, factions[1].base_count = 2;
+    factions[2].energy_credits = 0, factions[2].base_count = 1, factions[1].units_queue[5] = 1;
+    factions[2].tech_ranking = 5;
+    achieved[3] = achieved[4] = 1 << 1;  // two techs faction 2 lacks
+    *(int32_t *)((uint8_t *)&factions[2] + 0x3c8) = 0;
+    factions[2].diplo_combat_count[1] = 0;
+
+    // Faction 2's probe team takes Alpha: no citizen lost, a share of the
+    // energy taken, the queue cleared, the base renamed (from a human), and
+    // research gained from the techs the defender knew.
+    capture_base(0, 2, 1);
+    EXPECT(bases[0].faction, 2);
+    EXPECT(bases[0].faction_former, 1);
+    EXPECT(bases[0].assimilation_turns, 50);
+    EXPECT(bases[0].pop_size, 4);
+    EXPECT(factions[2].energy_credits, 40);  // 4 * 100 / 10
+    EXPECT(factions[1].energy_credits, 60);
+    EXPECT(factions[1].base_count, 1);
+    EXPECT(factions[2].base_count, 2);
+    EXPECT(factions[1].units_queue[5], 0);
+    EXPECT(bases[0].queue_size, 0);
+    EXPECT((int)(bases[0].state & 0x10000), 0x10000);
+    EXPECT(*(int32_t *)((uint8_t *)&factions[2] + 0x3c8), (5 + 3) * 2 * 5 / 8);
+    EXPECT(factions[2].diplo_combat_count[1], 8);
+    EXPECT(conquests, 1);
+    EXPECT(replays, 1);
+    EXPECT(factions[1].diplo_status[2] & TREATY_WANT_TO_TALK, TREATY_WANT_TO_TALK);
+
+    // Faction 1 takes it back by force: a recapture, so no citizen lost and
+    // no rename, and the assimilation is over.
+    capture_base(0, 1, 0);
+    EXPECT(bases[0].faction, 1);
+    EXPECT(bases[0].assimilation_turns, 0);
+    EXPECT(bases[0].pop_size, 4);
+
+    // Faction 2 takes Gamma (size 2) by force: a citizen lost, and a third
+    // of the facilities (rand() % 3 == 0 for each).
+    bases[2].facilities_built[0] = 0xfe, rand_value = 3;
+    capture_base(2, 2, 0);
+    EXPECT(bases[2].faction, 2);
+    EXPECT(bases[2].pop_size, 1);
+    EXPECT(bases[2].facilities_built[0], 0);
+
+    // Aliens take a human base (by probe): half its citizens flee as colony
+    // pods onto free squares around it, the base keeping one.
+    defs[2].rule_flags |= RULE_FLAG_ALIEN;
+    humans = 0, rand_value = 1, veh_count = 0;
+    bases[2].faction = 1, bases[2].faction_former = 1, bases[2].pop_size = 6;
+    capture_base(2, 2, 1);
+    EXPECT(bases[2].pop_size, 1);
+    EXPECT(veh_count, 3);
+    EXPECT(vehs[0].faction, 1);
+    EXPECT(vehs[0].proto, 0);
+    defs[2].rule_flags = 0, rand_value = 0, veh_count = 0;
+}
+
 int main(void) {
     static uint8_t image[0x300000];  // strings, from 0x400000; empty but for those set below
     game_test_image = image;
@@ -362,6 +479,7 @@ int main(void) {
     EXPECT(killed, 4);
 
     test_battles();
+    test_capture();
 
     if (failures) return 1;
     printf("engine_combat: ok\n");

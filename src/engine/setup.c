@@ -390,6 +390,22 @@ static void refine_landing(int faction, struct landing *L) {
     L->x = wrap_x(L->x + game_radius_x[pick]), L->y += game_radius_y[pick];
 }
 
+// A network game closed: the connection hung up and its state cleared.
+void net_game_close(void) {
+    static const uint32_t cleared[] = {0x93e8c0, 0x93e8c4, 0x93e8c8, 0x93e8cc, 0x93e8f0, 0x93e8ec, 0x93e8fc,
+                                       0x93e8f8, 0x93e90c, 0x93e938, 0x93e930, 0x93e934, 0x93e95c, 0x93e958,
+                                       0x93e8e0, 0x93e8e4, 0x93e8e8, 0x93e954, 0x93e950, 0x93e940, 0x93e93c,
+                                       0x93e944, 0x93e8d0, 0x93e8d4, 0x93e968, 0x93e964, 0x93e8d8, 0x93e8dc};
+    game_net_daemon_hang_up(game_net_daemon);
+    for (size_t i = 0; i < sizeof cleared / sizeof cleared[0]; i++) *(int32_t *)game_at(cleared[i]) = 0;
+    *(int32_t *)game_at(0x93e960) = 0xff;
+    *game_net_veh_ref = NULL;
+    memset(game_at(0x93e910), 0, 8 * 4);
+    game_lock_clear(game_at(0x93e230));
+    game_alpha_net_close(game_net_daemon);
+    *game_net_multiplayer = 0;
+}
+
 // A faction with nowhere to land is out of the game. The player has lost;
 // for an AI faction the game may be won by conquest, by the player alone
 // or with allies.
@@ -423,19 +439,8 @@ static void eliminated(int faction, int setup_id) {
         *game_parse_gender = k->noun_gender, *game_parse_plural = k->noun_plural;
         game_parse_says(0, (char *)k->noun, -1, -1);
         if (*game_net_multiplayer) {
-            static const uint32_t cleared[] = {0x93e8c0, 0x93e8c4, 0x93e8c8, 0x93e8cc, 0x93e8f0, 0x93e8ec, 0x93e8fc,
-                                               0x93e8f8, 0x93e90c, 0x93e938, 0x93e930, 0x93e934, 0x93e95c, 0x93e958,
-                                               0x93e8e0, 0x93e8e4, 0x93e8e8, 0x93e954, 0x93e950, 0x93e940, 0x93e93c,
-                                               0x93e944, 0x93e8d0, 0x93e8d4, 0x93e968, 0x93e964, 0x93e8d8, 0x93e8dc};
-            game_net_daemon_hang_up(game_net_daemon);
-            for (size_t i = 0; i < sizeof cleared / sizeof cleared[0]; i++) *(int32_t *)game_at(cleared[i]) = 0;
-            *(int32_t *)game_at(0x93e960) = 0xff;
-            *game_net_veh_ref = NULL;
-            memset(game_at(0x93e910), 0, 8 * 4);
-            game_lock_clear(game_at(0x93e230));
-            game_alpha_net_close(game_net_daemon);
-            *game_net_multiplayer = 0;
-            *(int32_t *)game_at(0x9b2068) = 1;
+            net_game_close();
+            *game_control_turn_a = 1;
         }
         game_x_pop(text(!setup_id && !*game_language ? 0x69152c : 0x691524), 0);
         *game_state |= GAME_STATE_DONE;

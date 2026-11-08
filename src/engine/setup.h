@@ -17,3 +17,6 @@ int setup_player(int faction, int setup_id, int probe);
 void setup_game(int editor);
 // The landing message for the faction.
 void planetfall(int faction);
+// A network game closed when the player is out of it, or at its end: the
+// connection hung up and the network state cleared.
+void net_game_close(void);

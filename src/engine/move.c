@@ -3022,10 +3022,11 @@ static int step_target(int veh, int dir, int *x, int *y) {
 // asks the player, of the attack, treaties, pods, haste, probe teams and
 // more) and a step onto human units or bases, or that could take or wipe
 // out a base with messages listed (see battle_checkable); a probe team's
-// mission (stolen techs are chosen in a window, which allocates from the
-// game's heap even for the AI); and the menus of an artifact at its
-// faction's base and of a transport's passengers (they open script.txt
-// and build their lists on the heap).
+// mission, and a base taken by a faction that steals a tech with it
+// (stolen techs are chosen in a window, which allocates from the game's
+// heap even for the AI); and the menus of an artifact at its faction's
+// base and of a transport's passengers (they open script.txt and build
+// their lists on the heap).
 static int order_checkable(int veh, int dir, int type) {
     if (*game_net_multiplayer || *game_pbem) return 0;
     const struct veh *V = &game_vehs[veh];
@@ -3037,6 +3038,7 @@ static int order_checkable(int veh, int dir, int type) {
     int b = base_at(x, y), s = stack_fix(veh_at(x, y));
     int tf = b >= 0 ? game_bases[b].faction : s >= 0 ? game_vehs[s].faction : -1;
     if (veh_plan(veh) == OV_PLAN_PROBE && tf >= 0 && tf != f) return 0;
+    if (b >= 0 && tf != f && capture_steals_tech(f)) return 0;  // tech_pick() in capture_base() allocates
     if (veh_plan(veh) == OV_PLAN_ARTIFACT && !(V->flags & OV_FLAG_OBJECTIVE) && (type & 1) && b >= 0 &&
         game_bases[b].faction == f)
         return 0;
@@ -4062,4 +4064,8 @@ static const struct hook move_hooks[] = {
     HOOK(0x4cf740, action, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x4d, 0x08),               // mov ecx, [ebp+8]
     HOOK(0x5947c0, order_veh, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),  // mov eax, fs:[0]
 };
-struct hook_module move_module = {"move", move_hooks, HOOK_COUNT(move_hooks), move_sweep, NULL, -1};
+// A unit's step takes bases (capture_base) and fights (combat.c) inside
+// its checks, where the game seldom calls them otherwise: their sweep runs
+// with this one.
+extern struct hook_module combat_module;
+struct hook_module move_module = {"move", move_hooks, HOOK_COUNT(move_hooks), move_sweep, &combat_module, -1};

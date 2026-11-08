@@ -488,6 +488,111 @@ static void test_faction_file(void) {
     more_rules_ = 0;
 }
 
+// ---- The landing ---------------------------------------------------------------
+
+static int flics_loaded, frames_drawn, popups_run, waves;
+static uint8_t map_win[0x1de00];
+static int32_t map_win_base[2];  // the window's virtual base table: offset 0
+static void *map_wins[1] = {map_win};
+#define THIS __attribute__((thiscall))
+static void THIS obj_(void *o) { (void)o; }
+static void THIS buffer_init_(void *b, int w, int h, int a, int c) { (void)b, (void)w, (void)h, (void)a, (void)c; }
+static void THIS buffer_copy_(void *b, void *to, int x, int y, int w, int h) { (void)b, (void)to, (void)x, (void)y, (void)w, (void)h; }
+static void THIS buffer_copy_2_(void *b, void *from, int *r) { (void)b, (void)from, (void)r; }
+static void THIS draw_2_(void *b, void *to, int m, int x, int y, int a, int c) {
+    (void)b, (void)to, (void)m, (void)x, (void)y, (void)a, (void)c;
+    frames_drawn++;
+}
+static void THIS draw_multi_(void *b, void *to, int col, int x, int y, int a, int c, void *t) {
+    (void)b, (void)to, (void)col, (void)x, (void)y, (void)a, (void)c, (void)t;
+}
+static int THIS flic_load_(void *f, void *b, char *file, int a, int c, int d) {
+    (void)f, (void)b, (void)file, (void)a, (void)c, (void)d;
+    return flics_loaded++, 0;
+}
+static int THIS flic_frame_(void *f, int a, int b) { return (void)f, (void)a, (void)b, 0; }
+static void THIS wave_init_(void *w, char *file, int u) { (void)w, (void)file, (void)u, waves++; }
+static void THIS wave_(void *w) { (void)w; }
+static void THIS fade_(void *w, int ms) { (void)w, (void)ms; }
+static void THIS centre_(void *w, int x, int y, int u) { (void)w, (void)x, (void)y, (void)u; }
+static void THIS tile_to_pixel_(void *w, int x, int y, int *px, int *py) { (void)w, *px = 8 * x, *py = 4 * y; }
+static void THIS update_2_(void *w, int *r, int u) { (void)w, (void)r, (void)u; }
+static int __attribute__((stdcall)) union_(int *to, const int *a, const int *b) { return (void)to, (void)a, (void)b, 1; }
+static uint32_t now_ms;
+static uint32_t __attribute__((stdcall)) time_(void) { return now_ms += 50; }
+static void void_(void) {}
+static int THIS pop_start_(void *p, char *f, char *l, int a, int b, int c, int d) {
+    return (void)p, (void)f, (void)l, (void)a, (void)b, (void)c, (void)d, 0;
+}
+static int THIS pop_exec_(void *p, int a, int b) {
+    (void)p, (void)a, (void)b;
+    strcpy(game_parse_text, "Landing");
+    return popups_run++, 0;
+}
+static uint32_t __attribute__((stdcall)) upper_(char *s) {
+    for (; *s; s++)
+        if (*s >= 'a' && *s <= 'z') *s = (char)(*s - 32);
+    return 0;
+}
+static uint32_t(__attribute__((stdcall)) * upper_ptr)(char *) = upper_;
+#undef THIS
+
+static void test_landing(void) {
+    game_buffer_ctor = game_buffer_dtor = game_buffer_close = obj_, game_buffer_init = buffer_init_;
+    game_buffer_copy = buffer_copy_, game_buffer_copy_2 = buffer_copy_2_, game_buffer_draw_2 = draw_2_;
+    game_buffer_draw_multi = draw_multi_, game_flic_ctor = game_flic_dtor = game_palette_dtor = obj_;
+    game_flic_load = flic_load_, game_flic_frame = flic_frame_, game_wave_init = wave_init_, game_wave_play = wave_;
+    game_sound_fade = fade_, game_map_win_set_center = centre_, game_map_win_tile_to_pixel = tile_to_pixel_;
+    game_graphic_win_update_2 = update_2_, game_union_rect = union_, game_time_get_time = time_;
+    game_popup_ctor = game_popup_close = game_scroll_close = game_flat_button_dtor = obj_;
+    game_graphic_win_dtor = game_base_pop_dtor = obj_, game_popup_start = pop_start_, game_base_pop_exec_3 = pop_exec_;
+    game_do_all_draws = game_flush_input = void_, game_char_upper = &upper_ptr, game_map_wins = map_wins;
+    static char pop_file[16];
+    game_pop_file = pop_file;
+    *(int32_t **)map_win = map_win_base;
+    *(int32_t *)(map_win + 0x4c4) = 640, *(int32_t *)(map_win + 0x4c8) = 480;
+    strcpy((char *)game_at(0x691464), "FUNGBOY");
+    for (int f = 0; f < FACTION_COUNT; f++) faction_defs[f].rule_flags = 0;
+    strcpy(faction_defs[1].filename, "gaians");
+    strcpy(faction_defs[2].filename, "fungboy");
+
+    // No base or unit: nothing happens.
+    base_count = 0, veh_count = 0, turn = 0, current_faction = 1;
+    crash_landing(1);
+    EXPECT(flics_loaded, 0);
+    EXPECT(popups_run, 0);
+    // A unit, no base: the pod falls (30 frames), and no base is named.
+    put_unit(0, 4, 4, 1, 0);
+    veh_count = 1;
+    crash_landing(1);
+    EXPECT(flics_loaded, 2);
+    EXPECT(frames_drawn, 30);
+    EXPECT(popups_run, 0);
+    EXPECT(turn, 0);
+    EXPECT(*(uint32_t *)(map_win + 0x1dd70) & 0x8c0, 0x8c0);
+    // A base: it is named by the player, and made unique.
+    base_count = 2;
+    put_base(0, 6, 6, 1);
+    put_base(1, 8, 8, 3);
+    strcpy(bases[1].name, "Landing");
+    crash_landing(1);
+    EXPECT(popups_run, 1);
+    EXPECT(strcmp(bases[0].name, "Landing-2"), 0);
+    // An alien faction lands on turn 5; the Cult of Planet too, unseen.
+    faction_defs[1].rule_flags = RULE_FLAG_ALIEN;
+    crash_landing(1);
+    EXPECT(turn, 5);
+    EXPECT(flics_loaded, 6);
+    turn = 0, current_faction = 2, frames_drawn = 0;
+    bases[0].faction = 2;
+    crash_landing(2);
+    EXPECT(turn, 5);
+    EXPECT(flics_loaded, 6);
+    EXPECT(frames_drawn, 0);
+    EXPECT(popups_run, 3);
+    faction_defs[1].rule_flags = 0, current_faction = 1, base_count = veh_count = 0, turn = 0;
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     static uint8_t image[0x300000];  // the game's strings, from 0x400000: all empty here
@@ -557,6 +662,7 @@ int main(void) {
     test_plague();
     test_eliminate();
     test_faction_file();
+    test_landing();
     if (failures) return 1;
     printf("engine_events: ok\n");
     return 0;

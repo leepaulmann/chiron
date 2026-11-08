@@ -41,3 +41,11 @@ int battle_fight(int veh, int offset, int table_offset, int option, int *def_id)
 // (no humans, nerve gas, falling base with messages listed or planet
 // buster's blast playing).
 int battle_checkable(int veh, int tx, int ty);
+// A base taken by the faction, by force or (probe) mind control.
+void capture_base(int base, int faction, int probe);
+// Whether a base the faction takes yields it a tech (tech_pick(), which
+// allocates from the game's heap: a check can't run it).
+int capture_steals_tech(int faction);
+// Shadow mode: non-zero while probe.c checks a mission, when the game's
+// calls of capture_base() are held and made after the check.
+extern int capture_holding;
