@@ -250,7 +250,9 @@ module at a time. So far:
   rolls to turn on the leader), the score and its rating by difficulty;
 - diplomacy: the AI's answers when the player threatens it, asks for
   energy, or proposes a pact or a treaty (the price it asks, techs and
-  help wanted, surrender, the treaty made);
+  help wanted, surrender, the treaty made); gifts of energy, research or
+  a base and what the AI makes of them, joint attacks and their price,
+  techs bought, maps traded, and bases given or swapped;
 - events: the turn's random events (perihelion and the base and world
   events), a faction put out of the game, and the faction modifiers and
   social choices set when it starts;
