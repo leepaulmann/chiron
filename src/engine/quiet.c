@@ -108,15 +108,24 @@ static void shadow_communicate(int faction, int other, int unk) {
 int quiet_talk_answers[QUIET_TALK_ANSWERS], quiet_talk_next;
 static int talk_held(void) { return hooks_sweeping && hooks_protecting(); }
 static int (*orig_x_pops_11)(char *label, int flags, void *sprite, void *fn);
-static struct hook_stats stats_x_pops_11 = {"(swept x_pops_11)"};
+static struct hook_stats stats_x_pops_11 = {"(held x_pops_11)"};
 // Held only in a sweep, whose held calls are dropped, never made.
 static void replay_dropped(const struct hook_ui_call *c) {}
+// In a check of a game call (the Council's messages), a leader's message
+// is held like the others: answered 0, the original's made after.
+static void replay_x_pops_11(const struct hook_ui_call *c) {
+    orig_x_pops_11(c->has_text & 1 ? (char *)c->text[0] : NULL, c->arg[0], (void *)(intptr_t)c->arg[1],
+                   (void *)(intptr_t)c->arg[2]);
+}
 static int shadow_x_pops_11(char *label, int flags, void *sprite, void *fn) {
-    if (!talk_held()) return orig_x_pops_11(label, flags, sprite, fn);
+    if (!hooks_protecting()) return orig_x_pops_11(label, flags, sprite, fn);
     stats_x_pops_11.calls++;
-    struct hook_ui_call c = {.name = "x_pops_11", .replay = replay_dropped, .arg = {flags, (int)(intptr_t)sprite}};
+    struct hook_ui_call c = {.name = "x_pops_11",
+                             .replay = talk_held() ? replay_dropped : replay_x_pops_11,
+                             .arg = {flags, (int)(intptr_t)sprite, (int)(intptr_t)fn}};
     hooks_ui_text(&c, 0, label);
     hooks_ui_hold(&c);
+    if (!talk_held()) return 0;
     return quiet_talk_next < QUIET_TALK_ANSWERS ? quiet_talk_answers[quiet_talk_next++] : 0;
 }
 static void (*orig_help_topic)(int kind, int id);
@@ -171,10 +180,6 @@ HELD(int, x_pop, 0, (char *label, int unk), (label, unk), (hooks_ui_text(&c_, 0,
 HELD(int, x_pops, 0, (char *label, void *sprite, void *fn), (label, sprite, fn),
      (hooks_ui_text(&c_, 0, label), c_.arg[0] = (int)(intptr_t)sprite, c_.arg[1] = (int)(intptr_t)fn),
      orig_x_pops(TEXT(0), PTR(0), PTR(1)))
-// The same with a flag word, as a leader's answer in the talks.
-HELD(int, x_pops_11, 0, (char *label, int flags, void *sprite, void *fn), (label, flags, sprite, fn),
-     (hooks_ui_text(&c_, 0, label), c_.arg[0] = flags, c_.arg[1] = (int)(intptr_t)sprite, c_.arg[2] = (int)(intptr_t)fn),
-     orig_x_pops_11(TEXT(0), a_[0], PTR(1), PTR(2)))
 HELD(void, report_intel, (void)0, (int faction), (faction), (c_.arg[0] = faction), orig_report_intel(a_[0]))
 // The text variables a message fills in: a number, a string from the
 // string table, or a string.
@@ -578,7 +583,6 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x477100, mon_secret_project, MON_PROLOGUE),
     QUIET_HOOK(0x4779d0, mon_winning_trans, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0xd4, 0x64, 0x9a, 0x00),
     QUIET_HOOK(0x428350, council, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),  // sub esp, 8
-    QUIET_HOOK(0x5bf7d0, x_pops_11, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x14),  // mov eax, [ebp+20]
     QUIET_HOOK(0x424720, council_win_set_vote, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x8b, 0xd9),  // push ebx; mov ebx, ecx
     QUIET_HOOK(0x612a70, dialogs_item, 0x8b, 0xc1, 0x8b, 0x88, 0x80, 0x01, 0x00, 0x00),  // mov eax, ecx; mov ecx, [eax+0x180]
     QUIET_HOOK(0x6108e0, sprite_box_sprite, 0x8b, 0x44, 0x24, 0x04, 0x53),  // mov eax, [esp+4]; push ebx
