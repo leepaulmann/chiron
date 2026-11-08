@@ -221,7 +221,8 @@ module at a time. So far:
 - the AI's units: the faction's turn around its units (each given its
   moves, kind by kind), each unit's choice of move (formers' work,
   artifacts, convoys, repairs, probe teams, colony sites, garrisons,
-  sieges, warships, exploring; naval transports are still the game's),
+  sieges, warships, exploring, naval transports gathering and landing
+  invasions),
   carrying out each unit's move, native life's moves
   and the base it heads for, planet busters placed near their targets, and
   air units' and missiles' moves (interceptors, attack aircraft, patrols,
