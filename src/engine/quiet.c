@@ -73,6 +73,22 @@ static void __attribute__((thiscall)) shadow_status_win_redraw(void *win) {
         return quiet;                                                           \
     }
 
+// Talks between factions, in a sweep: first contact on a made-up landing
+// or move opens them, and they allocate on the game's heap even between
+// AIs (wants_to_speak()'s window). Both runs of a sweep's check skip them
+// alike. A check of a game call runs them; the game calls that could
+// bring a first contact (a landing during the game, a captive leader
+// freed) run the original unchecked instead (setup.c, probe.c).
+static void (*orig_communicate)(int faction, int other, int unk);
+static struct hook_stats stats_communicate = {"(swept communicate)"};
+static void shadow_communicate(int faction, int other, int unk) {
+    if (!hooks_sweeping || !hooks_protecting()) {
+        orig_communicate(faction, other, unk);
+        return;
+    }
+    stats_communicate.calls++;
+}
+
 // The held copy of string argument i, or NULL.
 #define TEXT(i) (c->has_text >> (i) & 1 ? (char *)c->text[i] : NULL)
 #define PTR(i) ((void *)(intptr_t)a_[i])
@@ -412,6 +428,7 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x5bf330, x_pop2, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x10),  // mov eax, [ebp+16]
     QUIET_HOOK(0x5bf310, x_pop, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x0c),   // mov eax, [ebp+12]
     QUIET_HOOK(0x5bf5d0, x_pops, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x10),  // mov eax, [ebp+16]
+    QUIET_HOOK(0x54ffd0, communicate, SEH_PROLOGUE),
     QUIET_HOOK(0x4acbd0, report_intel, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x0d, 0x2c, 0x39, 0x7d, 0x00),  // mov ecx, [0x7d392c]
     QUIET_HOOK(0x625e30, parse_num, 0x8b, 0x44, 0x24, 0x04, 0x83, 0xf8, 0x09),   // mov eax, [esp+4]; cmp eax, 9
     QUIET_HOOK(0x625e50, parse_say, 0x8b, 0x44, 0x24, 0x04, 0x83, 0xf8, 0x09),
