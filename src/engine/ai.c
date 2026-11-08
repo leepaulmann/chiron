@@ -5233,7 +5233,10 @@ static void sweep_enemy_move(void) {
         if (rnd(8) == 0) V->flags ^= 0x20;
         if (rnd(10) == 0) V->flags ^= 0x440;
         V->moves_spent = (uint8_t)(rnd(3) ? 0 : rnd(10));
-        V->damage = (uint8_t)(rnd(3) ? 0 : rnd(1 + game_range(proto_of(V->proto)->reactor, 1, 100) * 10));
+        // Short of its hit points: with none left it would be dead.
+        V->damage = (uint8_t)(rnd(3) || plan == PLAN_ALIEN_ARTIFACT
+                                  ? 0
+                                  : rnd(game_range(proto_of(V->proto)->reactor, 1, 100) * 10));
         V->status_icon = icons[rnd(13)];
         if (rnd(4) == 0) V->home_base = (int16_t)(rnd(5) ? rnd(*game_base_count + 1) - 1 : -1);
         V->movement_turns = (uint8_t)rnd(8);

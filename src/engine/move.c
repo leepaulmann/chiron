@@ -3323,13 +3323,22 @@ static void sweep_courses(int turn) {
     }
 }
 
+// Damage made up for a unit, short of its hit points: a unit with none
+// left is dead in the game, and a fight it takes part in divides by them
+// (the original's battle_fight_2 faults on it).
+static uint8_t some_damage(const struct veh *V, int damage) {
+    const struct unit_proto *P = &game_protos[V->proto];
+    int hp = P->plan == PLAN_ARTIFACT ? 1 : (P->reactor < 1 ? 1 : P->reactor > 100 ? 100 : P->reactor) * 10;
+    return (uint8_t)(damage < hp ? damage : hp - 1);
+}
+
 // Units' state made to vary for an order: alert posts, patrol bits,
 // damage, moves and turns aloft. Restored by the caller's protection.
 static void vary_unit(struct veh *V, uint32_t h) {
     if (h & 1) V->state |= VEH_STATE_UNK_200;
     else V->state &= ~(uint32_t)VEH_STATE_UNK_200;
     if ((h >> 1) % 3 == 0) V->order_auto_type = ORDER_AUTO_ALERT;
-    if ((h >> 3) % 3 == 0) V->damage = (uint8_t)((h >> 5) % 12);
+    if ((h >> 3) % 3 == 0) V->damage = some_damage(V, (int)((h >> 5) % 12));
     if ((h >> 9) % 2) V->moves_spent = (uint8_t)((h >> 10) % 10);
     if ((h >> 14) % 3 == 0) V->movement_turns = (uint8_t)((h >> 16) % 3);
 }
@@ -3918,7 +3927,7 @@ static void sweep_steps(int turn) {
         if ((u >> 11) % 6 == 0) P->abilities ^= (u >> 14) % 2 ? OV_ABL_AIR_SUPERIORITY : OV_ABL_AMPHIBIOUS;
         if ((u >> 12) % 9 == 0) P->abilities ^= OV_ABL_CLOAKED;
         V->moves_spent = (uint8_t)((u >> 15) % 3 ? (u >> 17) % 4 : veh_speed(v, 0) - (int)((u >> 17) % 3));
-        if ((u >> 19) % 3 == 0) V->damage = (uint8_t)((u >> 21) % 12);
+        if ((u >> 19) % 3 == 0) V->damage = some_damage(V, (int)((u >> 21) % 12));
         if ((u >> 23) % 3 == 0) V->movement_turns = (uint8_t)((u >> 25) % 4);
         if ((u >> 27) % 4 == 0) V->iter_count = (uint8_t)(20 + (u >> 29) % 6);
         for (int i = 0; i < 8; i++)
