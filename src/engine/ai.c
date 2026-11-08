@@ -4500,7 +4500,11 @@ static uint32_t mix(uint32_t a) {
 // the same for both runs, from the unit's state. It is done (1), or it
 // waits, or it spends some of its moves on an order: none, a former's work,
 // or (a few times a run) a go-to order a square away; now and then the
-// unit is killed.
+// unit is killed, and then it is done, as the real enemy_move answers
+// after a fight or anything else that may cost it the unit. (Answered 0,
+// enemy_veh would carry out the dead unit's order: for the last unit, the
+// slot left behind, lifted to (-1, -1), had action() find a path from
+// there, reading the square before the map's first.)
 static int holding_moves __attribute__((used));
 static uint32_t hold_seed;
 static struct hook_stats stats_enemy_move = {"enemy_move"};
@@ -4527,7 +4531,7 @@ int held_enemy_move(int veh) {
     case 3:
         if ((h >> 4) % 4 == 0) {
             veh_kill(veh);
-            return (h >> 6) & 1;
+            return 1;
         }
         break;
     }
@@ -5118,6 +5122,23 @@ static int pick_proto(int faction, int sea, int plan) {
     return -1;
 }
 
+// Whether a unit of a faction without a pact with the unit's shares its
+// square, which the game never allows but the cases below can make (units
+// put down, treaties changed). enemy_move would weigh an attack on its own
+// square (direction -1 of the near table, which reads as no move), and the
+// defender's blow back lands on a neighbouring square, perhaps empty:
+// battle_fight then reads the unit before the first as the defender.
+static int rival_on_square(int v) {
+    const struct veh *V = &game_vehs[v];
+    for (int u = 0; u < *game_veh_count; u++) {
+        const struct veh *U = &game_vehs[u];
+        if (U->x == V->x && U->y == V->y && U->faction != V->faction &&
+            !(game_factions[V->faction].diplo_status[U->faction] & TREATY_PACT))
+            return 1;
+    }
+    return 0;
+}
+
 // A unit's move, of AI units of every kind and the player's automated
 // ones, with their orders, state, damage and surroundings varied, and the
 // faction's plans for the continent; with the step held. Moves carried
@@ -5237,9 +5258,13 @@ static void sweep_enemy_move(void) {
             // Another faction's unit next to it.
             int u = pick_unit(-1), x, y;
             near_square(V->x, V->y, 1 + rnd(2), &x, &y);
-            if (u >= 0 && u != v && !occupied(tile(x, y), MAP_BASE)) put(u, x, y);
+            if (u >= 0 && u != v && (x != V->x || y != V->y) && !occupied(tile(x, y), MAP_BASE)) put(u, x, y);
         }
         vary_squares(V->x, V->y);
+        if (rival_on_square(v)) {
+            hooks_writes_abandon(&w);
+            continue;
+        }
         int veh = rnd(10) ? v : -1 - v;
         int32_t stale = rnd(3) ? 0 : rnd(3) ? 1 : (int32_t)rnd32();
         em_swept++;
