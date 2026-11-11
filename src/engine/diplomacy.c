@@ -27,6 +27,7 @@
 #include "faction.h"
 #include "game.h"
 #include "map.h"
+#include "path.h"
 #include "quiet.h"
 #include "shadow.h"
 #include "spot.h"
@@ -4894,7 +4895,7 @@ extern struct hook_module diplomacy_module;
     SHADOW_DECLARE(ret, name, params)                                                            \
     static ret check_##name params {                                                             \
         struct hook_writes w_ = {0};                                                             \
-        hooks_writes_game(&w_);                                                                  \
+        writes_paths(&w_, game_path);                                                                  \
         hooks_writes_begin(&w_);                                                                 \
         quiet_talk_next = 0, quiet_menu_next = 0;                                                \
         hooks_nested++;                                                                          \
@@ -4937,7 +4938,7 @@ __asm__(".text\n"
     static void *orig_##name;                                                                      \
     static int check_##name(int faction, int other, int c_) {                                              \
         struct hook_writes w_ = {0};                                                               \
-        hooks_writes_game(&w_);                                                                    \
+        writes_paths(&w_, game_path);                                                                    \
         hooks_writes_begin(&w_);                                                                   \
         quiet_talk_next = quiet_menu_next = 0;                                                     \
         hooks_nested++;                                                                            \
@@ -4982,7 +4983,7 @@ static struct hook_stats stats_communicate = {"communicate"};
 static void *orig_communicate;
 static void check_communicate(int faction, int other, int unk) {
     struct hook_writes w_ = {0};
-    hooks_writes_game(&w_);
+    writes_paths(&w_, game_path);
     hooks_writes_begin(&w_);
     quiet_talk_next = quiet_menu_next = 0;
     hooks_nested++;
@@ -5036,7 +5037,7 @@ static struct hook_stats stats_tech_trade = {"tech_trade"};
 static void *orig_tech_trade;
 static int check_tech_trade(int faction, int other, int ai, int counter, int proposal) {
     struct hook_writes w_ = {0};
-    hooks_writes_game(&w_);
+    writes_paths(&w_, game_path);
     hooks_writes_begin(&w_);
     quiet_talk_next = quiet_menu_next = 0;
     hooks_nested++;
@@ -5738,7 +5739,7 @@ static void diplomacy_sweep(void) {
         int faction = 1 + rnd(FACTION_COUNT - 1);
         if (!alive(faction) || F(faction)->base_count <= 0) continue;
         struct hook_writes w = {.protect_only = 1};
-        hooks_writes_game(&w);
+        writes_paths(&w, game_path);
         hooks_writes_begin(&w);
         *game_rand_state() = mix(seed + 1);
         whole = !rnd(3);

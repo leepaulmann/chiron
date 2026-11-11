@@ -257,7 +257,9 @@ module at a time. So far:
   proposal menus, the proposal put to the AI (and the Council's business
   raised in talks), joint battle plans, and tech trades (refusals out of
   hatred, fear or a lead to guard, free techs, the trade and its menu);
-  the AI's greeting when the player takes its call; and two AIs making
+  the AI's greeting when the player takes its call; the talks themselves
+  (first contact, the AI's demands, pleas, bribes and offers, loans,
+  truces asked or given, and how its patience runs out); and two AIs making
   peace step by step (truce, treaty, pact), with the news of it;
 - events: the turn's random events (perihelion and the base and world
   events), a faction put out of the game, and the faction modifiers and

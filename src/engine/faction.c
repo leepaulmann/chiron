@@ -10,6 +10,7 @@
 #include "faction.h"
 #include "game.h"
 #include "map.h"
+#include "path.h"
 #include "score.h"
 #include "shadow.h"
 #include "tech.h"
@@ -2179,7 +2180,7 @@ SHADOW3(FACTION, int, wants_to_attack, int, int, int)
 // The AI's diplomacy writes the factions and the game's diplomacy state.
 // While any faction is human the original runs unchecked: the AI may call
 // the player, whose answers a check would leave unanswered.
-SHADOW_WRITER_CHECK(void, enemy_diplomacy, (int a), (a), orig_enemy_diplomacy(a), hooks_writes_game(&w_), "%d", a)
+SHADOW_WRITER_CHECK(void, enemy_diplomacy, (int a), (a), orig_enemy_diplomacy(a), writes_paths(&w_, game_path), "%d", a)
 static void shadow_enemy_diplomacy(int a) {
     if (hooks_nested) {
         orig_enemy_diplomacy(a);
@@ -2212,7 +2213,7 @@ static void check_diplomacy_with_player(int faction, int human) {
 // player run the original unchecked when one is involved (`player`):
 // the sweep checks them on a copy, where no question is put.
 #define SHADOW_TALK(ret, name, params, args, player, fmt, ...)                                                  \
-    SHADOW_WRITER_CHECK(ret, name, params, args, orig_##name args, hooks_writes_game(&w_), fmt, __VA_ARGS__)     \
+    SHADOW_WRITER_CHECK(ret, name, params, args, orig_##name args, writes_paths(&w_, game_path), fmt, __VA_ARGS__)     \
     static ret shadow_##name params {                                                                         \
         if (hooks_nested) SHADOW_TAIL_##ret(orig_##name args);                                                \
         if (shadow_bypass()) SHADOW_TAIL_##ret(name args);                                                    \
@@ -2661,7 +2662,7 @@ static void sweep_talks(int full) {
 // vendetta declared in a check plays nothing.
 static void diplomacy_sweep(void) {
     struct hook_writes outer = {.protect_only = 1};
-    hooks_writes_game(&outer);
+    writes_paths(&outer, game_path);
     hooks_writes_begin(&outer);
     *game_preferences &= ~0x800;
     *game_console_veh_mode = 0;
