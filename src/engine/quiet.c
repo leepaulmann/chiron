@@ -276,7 +276,25 @@ QUIET_THIS(void, base_pop_string, (void)0, (void *pop, char *s), (pop, s))
 // (buy_council_vote()): they allocate.
 QUIET_THIS(int, dialogs_item, 0, (void *dialogs, char *text, int id), (dialogs, text, id))
 QUIET_THIS(void, sprite_box_sprite, (void)0, (void *box, void *sprite, int a, int b), (box, sprite, a, b))
-QUIET_THIS(int, base_pop_exec_3, quiet_answer, (void *pop, int a, int b), (pop, a, b))
+// A menu's choice: the next of quiet_menu_answers while a sweep lists
+// some (several menus in one call), else quiet_answer.
+int quiet_menu_answers[QUIET_MENU_ANSWERS], quiet_menu_count, quiet_menu_next;
+static int menu_answer(void) {
+    if (!quiet_menu_count) return quiet_answer;
+    return quiet_menu_next < quiet_menu_count ? quiet_menu_answers[quiet_menu_next++] : -1;
+}
+QUIET_THIS(int, base_pop_exec_3, menu_answer(), (void *pop, int a, int b), (pop, a, b))
+// The planet window, where the talks' base menus and battle plans show
+// bases and lines between them: it draws.
+QUIET_THIS(void, plan_win_init, (void)0, (void *win, int a), (win, a))
+QUIET_THIS(void, plan_win_find_view, (void)0, (void *win, int a, int b, int c, int d, int e, int f, int g, int h),
+           (win, a, b, c, d, e, f, g, h))
+QUIET_THIS(void, plan_win_back_redraw, (void)0, (void *win), (win))
+QUIET_THIS(void, plan_win_add_line_2, (void)0, (void *win, int a, int b, int c), (win, a, b, c))
+QUIET_THIS(void, plan_win_monocenter, (void)0, (void *win, int x, int y, int a), (win, x, y, a))
+QUIET_THIS(void, plan_win_on_redraw, (void)0, (void *win), (win))
+QUIET_THIS(void, plan_win_close, (void)0, (void *win), (win))
+QUIET_THIS(void, win_show, (void)0, (void *win, int a), (win, a))
 // A list box shown again after its list changed (base_kill's messages),
 // and the base window told a base is gone.
 QUIET_THIS(int, listbox_update_changes, 7, (void *box), (box))
@@ -641,5 +659,13 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x59e510, prefs_put, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0xcc, 0x00, 0x69, 0x00),  // mov eax, [0x6900cc]
     QUIET_HOOK(0x59e530, prefs_put_2, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x50),              // sub esp, 0x50
     QUIET_HOOK(0x5abec0, wipe_undo, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x50),
+    QUIET_HOOK(0x48bc60, plan_win_init, 0x56, 0x8b, 0xf1, 0xb8, 0x01, 0x00, 0x00, 0x00),  // push esi; mov esi, ecx; mov eax, 1
+    QUIET_HOOK(0x48b450, plan_win_find_view, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x8b, 0x45, 0x14),  // push ecx; mov eax, [ebp+20]
+    QUIET_HOOK(0x48b3f0, plan_win_back_redraw, 0x56, 0x8b, 0xf1, 0x6a, 0x00),               // push esi; mov esi, ecx; push 0
+    QUIET_HOOK(0x48ae90, plan_win_add_line_2, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x0c),       // mov eax, [ebp+12]
+    QUIET_HOOK(0x48b8e0, plan_win_monocenter, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x14),       // sub esp, 20
+    QUIET_HOOK(0x48af30, plan_win_on_redraw, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x2c),        // sub esp, 44
+    QUIET_HOOK(0x48bc50, plan_win_close, 0xc7, 0x81, 0x68, 0x1a, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00),
+    QUIET_HOOK(0x5ed9d0, win_show, 0x83, 0xec, 0x14, 0x56, 0x8b, 0xf1),                      // sub esp, 20; push esi; mov esi, ecx
 };
 struct hook_module quiet_module = {"quiet", quiet_hooks, HOOK_COUNT(quiet_hooks), NULL, NULL, -1};

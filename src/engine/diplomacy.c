@@ -2,8 +2,10 @@
 // of a threat (threaten), a request for energy (energy_trade), a pact or a
 // treaty proposed (propose_pact, propose_treaty), a gift (make_gift), a
 // joint attack (propose_attack), a tech bought (buy_tech, for tech_trade)
-// and a base asked for (base_swap). The game calls these only from the
-// player's talks (make_a_proposal(), from communicate()), so the first
+// and a base asked for (base_swap); the player's menus (proposal_menu)
+// and the proposal put (make_a_proposal), and the AI's battle plans
+// (battle_plans). The game calls these only from the player's talks
+// (communicate()), so the first
 // faction is always the player, at the console, and the second the AI it
 // talks to. The talks' deals use trade_maps() and give_a_base(), which the
 // AIs' own deals call too. Reimplemented from terranx.exe 2.0's disassembly; names follow
@@ -21,6 +23,7 @@
 #include <string.h>
 
 #include "base.h"
+#include "council.h"
 #include "faction.h"
 #include "game.h"
 #include "map.h"
@@ -35,7 +38,7 @@ enum {
     AGENDA_UNK_1000 = 0x1000, AGENDA_UNK_2000 = 0x2000,
     FACTION_FLAG_COOP_WITH_HUMAN_ = 0x400000,  // faction_data.flags
     TECH_COMMLINK_0 = 0x59,  // the commlink with faction 0; faction i's is 0x59 + i
-    RULES_SCN_NO_TECH_TRADING = 0x2000000,  // game_rules
+    RULES_SCN_NO_TECH_TRADING = 0x2000000, RULES_VICTORY_DIPLOMATIC = 0x8,  // game_rules
 };
 
 // The proposals and counter-proposals the player picks from the menus
@@ -1792,6 +1795,537 @@ __asm__(".text\n"
         "    popl %ebp\n"
         "    ret\n");
 
+// ---- proposal_menu, make_a_proposal --------------------------------------------------
+
+enum { POP_LIST_SELECT = 0x220c, POP_DEFAULT = 0xa44 };  // the list's callback, the menu's default item
+
+// A line of the menu being read (x_text_open()) put together into the
+// string buffer.
+static char *next_line(void) {
+    game_text_get();
+    game_str_buffer[0] = 0;
+    game_parse_string(*game_text_line, game_str_buffer);
+    return game_str_buffer;
+}
+static void item(uint8_t *pop, char *text, int id) { game_dialogs_item(pop + POP_DIALOGS, text, id); }
+static int menu(uint8_t *pop) { return game_base_pop_exec_3(pop, 0, (int)(intptr_t)game_pop_wait); }
+static void pop_start_flags(uint8_t *pop, char *label, int flags, int other) {
+    game_popup_start(pop, game_pop_file, label, -1, 0, flags, 0);
+    void *portrait = game_faction_portraits[other];
+    *(void **)(pop + POP_ICON) = *(int32_t *)(pop + POP_HAS_ICON) ? NULL : portrait;
+    game_sprite_box_sprite(pop + POP_SPRITE_BOX, portrait, 0, 0);
+}
+static int has_headquarters(int base) { return game_has_facility(&game_bases[base], FAC_HEADQUARTERS); }
+// Whether `faction` holds the Empath Guild, which gives commlinks.
+static int empath(int faction) {
+    int base = game_secret_projects[SP_EMPATH_GUILD];
+    return base >= 0 && game_bases[base].faction == faction;
+}
+// The planet window, where the base menus show the base picked.
+static void *plan_win(void) { return game_at(0x834d70); }
+static void plan_win_show(void) {
+    uint8_t *win = plan_win();
+    game_win_show(win + ((int32_t *)*(void **)win)[1], 0);
+}
+static void plan_win_line(int base) {
+    game_plan_win_clear_lines(plan_win());
+    game_plan_win_monocenter(plan_win(), game_bases[base].x, game_bases[base].y, 0);
+    game_plan_win_add_line_2(plan_win(), base, base, 0);
+    game_plan_win_on_redraw(game_at(0x856dc0));
+}
+
+// The player's (`faction`'s) menus in the talks with the AI (`other`): the
+// proposal (PROPOSALMENU), then for a joint attack or a commlink its
+// faction (ATTACKSTRING; an AI at war with the target already says so,
+// and one without a commlink to the faction asked for, or the Empath
+// Guild, says it has none to give), for a base swap the AI's base (one the
+// player has seen, not its headquarters, on the planet window); then,
+// but for maps, closing, a loan repaid, a tech bought or the Council, the
+// counter-proposal (COUNTERMENU), and for a base given the player's base.
+// Returns the proposal (game_diplo_proposal), 0 when nothing is proposed
+// or a menu can't be read; game_diplo_counter is 1 (friendship) when no
+// counter is asked. The original's check that the AI isn't already at war
+// with the target reads its diplo_status[8], past the array: its first
+// agenda (Thinker fixes it).
+static int proposal_menu_body(uint8_t *pop, int faction, int other) {
+    struct faction_data *me = F(faction), *ai = F(other);
+    *game_diplo_bid_base = *game_diplo_ask_base = -1;
+    *game_diplo_second = other;
+    *game_diplo_counter = *game_diplo_proposal = *game_diplo_proposal_faction = 0;
+    int swappable = 0, linked = 0, unlinked = 0;
+    for (int b = 0; b < *game_base_count; b++) {
+        const struct base *B = &game_bases[b];
+        if (B->faction == other && (other == faction || (B->visibility & (1u << faction))) && !has_headquarters(b))
+            swappable++;
+    }
+    for (int i = 1; i < FACTION_COUNT; i++) {
+        if (!(*game_factions_alive >> i & 1) || i == faction || i == other) continue;
+        if (status(faction, i) & TREATY_COMMLINK) linked++;
+        else if (!empath(faction)) unlinked++;
+    }
+    say_title(0, other);
+    game_parse_says(1, game_get_pact_hood(faction, other), -1, -1);
+    game_parse_num(0, me->loan_balance[other]);
+    game_diplomacy_caption(faction, other);
+    pop_start_flags(pop, text(0x68de7c), 0x100000, other);
+    if (game_x_text_open(*game_script_file, text(0x68de88))) return 0;
+    uint32_t st = status(faction, other);
+    item(pop, next_line(), 0);
+    item(pop, next_line(), PROPOSE_GIFT);
+    next_line();
+    if ((st & TREATY_TREATY) && !(st & TREATY_PACT)) item(pop, game_str_buffer, PROPOSE_PACT);
+    next_line();
+    if (!(status(faction, other) & TREATY_TREATY)) item(pop, game_str_buffer, PROPOSE_TREATY);
+    next_line();
+    if (!(*game_rules & RULES_SCN_NO_TECH_TRADING)) item(pop, game_str_buffer, PROPOSE_TECH);
+    next_line();
+    next_line();
+    if (unlinked) item(pop, game_str_buffer, PROPOSE_COMMLINK);
+    item(pop, next_line(), PROPOSE_ENERGY);
+    next_line();
+    int loan = me->loan_balance[other];
+    if (loan && me->energy_credits >= loan) item(pop, game_str_buffer, PROPOSE_REPAY_LOAN);
+    next_line();
+    next_line();
+    if (linked) item(pop, game_str_buffer, PROPOSE_ATTACK);
+    next_line();
+    if (ai->base_count > 1 && swappable && !*game_net_multiplayer) item(pop, game_str_buffer, PROPOSE_BASE_SWAP);
+    next_line();
+    int proposal = *game_diplo_proposal = menu(pop);
+
+    if (proposal == PROPOSE_ATTACK || proposal == PROPOSE_COMMLINK) {
+        int attack = proposal == PROPOSE_ATTACK;
+        pop_start_flags(pop, text(attack ? 0x68de98 : 0x68dec8), 0x100040, other);
+        if (game_x_text_open(*game_script_file, text(attack ? 0x68dea8 : 0x68ded8))) goto cancel;
+        game_text_get();
+        for (int i = 1; i < FACTION_COUNT; i++) {
+            if (!(*game_factions_alive >> i & 1) || i == faction || i == other) continue;
+            int linked_i = (status(faction, i) & TREATY_COMMLINK) != 0;
+            if (attack ? !linked_i && !game_is_human(i) : linked_i) continue;
+            say_title(0, i), say_name(1, i), say_noun(2, i);
+            game_str_buffer[0] = 0;
+            game_parse_string(*game_text_line, game_str_buffer);
+            item(pop, game_str_buffer, i);
+        }
+        int target = *game_diplo_proposal_faction = menu(pop);
+        if (target < 0) goto cancel;
+        if (attack) {
+            if (ai->diplo_agenda[0] & TREATY_VENDETTA) {  // the original's diplo_status[8]
+                say_title(0, target), say_name(1, *game_diplo_proposal_faction);
+                answer(text(0x68deb8), other);
+                goto cancel;
+            }
+        } else if (!(status(other, target) & TREATY_COMMLINK) && !empath(other)) {
+            say_title(0, target), say_name(1, *game_diplo_proposal_faction), say_noun(2, *game_diplo_proposal_faction);
+            *game_diplo_proposal = 0;
+            game_x_pops(text(0x68dee8), game_faction_portraits[other], game_pop_wait);
+        }
+    }
+    if (*game_diplo_proposal == PROPOSE_BASE_SWAP) {
+        game_plan_win_init(plan_win(), 0);
+        game_plan_win_back_redraw(plan_win());
+        pop_start_flags(pop, text(0x68def4), 0x100040, other);
+        int listed = 0;
+        for (int b = 0; b < *game_base_count; b++) {
+            const struct base *B = &game_bases[b];
+            if (B->faction != other || (other != faction && !(B->visibility & (1u << faction))) || has_headquarters(b))
+                continue;
+            game_str_buffer[0] = 0;
+            say_base(game_str_buffer, b);
+            item(pop, game_str_buffer, b);
+            if (!listed) listed = 1, plan_win_line(b);
+        }
+        if (listed) {
+            plan_win_show();
+            *(uint32_t *)(pop + POP_LIST_SELECT) = game_va(0x54b140);  // battle_routine()
+            if ((*game_diplo_ask_base = menu(pop)) < 0) *game_diplo_proposal = 0;
+        } else {
+            *game_diplo_ask_base = -1;
+            *game_diplo_proposal = 0;
+        }
+        game_plan_win_close(plan_win());
+    }
+    proposal = *game_diplo_proposal;
+    if (!proposal || proposal == PROPOSE_MAPS || proposal == PROPOSE_CLOSE || proposal == PROPOSE_REPAY_LOAN ||
+        proposal == PROPOSE_BUY_TECH || proposal == PROPOSE_COUNCIL)
+        goto done;
+
+    // The counter-proposal.
+    say_title(0, other), say_name(1, other);
+    game_parse_says(2, game_get_pact_hood(faction, other), -1, -1);
+    game_diplomacy_caption(faction, other);
+    char label[32];
+    snprintf(label, sizeof(label), "%s%d", text(0x68df00), *game_diplo_proposal == PROPOSE_GIFT);
+    strcpy(game_str_buffer, label);
+    pop_start_flags(pop, game_str_buffer, 0x100000, other);
+    if (game_x_text_open(*game_script_file, text(0x68df08))) return 0;
+    item(pop, next_line(), 0);
+    next_line();
+    if (*game_diplo_proposal == PROPOSE_ENERGY) item(pop, game_str_buffer, COUNTER_LOAN);
+    next_line();
+    if (*game_diplo_proposal != PROPOSE_GIFT) item(pop, game_str_buffer, COUNTER_FRIENDSHIP);
+    next_line();
+    if (*game_diplo_proposal != PROPOSE_GIFT) item(pop, game_str_buffer, COUNTER_NAME_A_PRICE);
+    next_line();
+    if (*game_diplo_proposal != PROPOSE_GIFT && !(status(faction, other) & TREATY_PACT))
+        item(pop, game_str_buffer, COUNTER_THREATEN);
+    next_line();
+    if (*game_diplo_proposal != PROPOSE_GIFT && (status(faction, other) & TREATY_PACT))
+        item(pop, game_str_buffer, COUNTER_THREATEN);
+    next_line();
+    if (!(*game_rules & RULES_SCN_NO_TECH_TRADING)) item(pop, game_str_buffer, COUNTER_RESEARCH);
+    next_line();
+    if (*game_diplo_proposal == PROPOSE_GIFT) item(pop, game_str_buffer, COUNTER_ALL_RESEARCH);
+    next_line();
+    if (*game_diplo_proposal != PROPOSE_ENERGY) item(pop, game_str_buffer, COUNTER_ENERGY);
+    next_line();
+    if (me->base_count > 1 && !*game_net_multiplayer &&
+        (*game_diplo_proposal == PROPOSE_BASE_SWAP || *game_diplo_proposal == PROPOSE_GIFT))
+        item(pop, game_str_buffer, COUNTER_BASE);
+    int counter = *game_diplo_counter = menu(pop);
+    if (counter == COUNTER_BASE) {
+        game_plan_win_init(plan_win(), 0);
+        game_plan_win_back_redraw(plan_win());
+        pop_start_flags(pop, text(0x68df14), 0x100040, other);
+        int listed = 0;
+        for (int b = 0; b < *game_base_count; b++) {
+            if (game_bases[b].faction != faction || has_headquarters(b)) continue;
+            game_str_buffer[0] = 0;
+            say_base(game_str_buffer, b);
+            item(pop, game_str_buffer, b);
+            if (!listed) listed = 1, plan_win_line(b);
+        }
+        plan_win_show();
+        *(uint32_t *)(pop + POP_LIST_SELECT) = game_va(0x54b140);
+        if ((*game_diplo_bid_base = menu(pop)) < 0) *game_diplo_proposal = 0;
+        game_plan_win_close(plan_win());
+        counter = *game_diplo_counter;
+    }
+    if (!counter) *game_diplo_proposal = 0;
+    return *game_diplo_proposal;
+
+cancel:
+    *game_diplo_proposal = 0;
+done:
+    *game_diplo_counter = COUNTER_FRIENDSHIP;
+    return *game_diplo_proposal;
+}
+int proposal_menu_in(uint8_t *pop, int faction, int other);
+int proposal_menu_in(uint8_t *pop, int faction, int other) {
+    game_popup_ctor(pop);
+    int r = proposal_menu_body(pop, faction, other);
+    pop_end(pop);
+    return r;
+}
+// The popup where the original's frame keeps it.
+__asm__(".text\n"
+        ".globl proposal_menu\n"
+        "proposal_menu:\n"
+        "    pushl %ebp\n"
+        "    movl %esp, %ebp\n"
+        "    subl $0x5410, %esp\n"
+        "    pushl 12(%ebp)\n"
+        "    pushl 8(%ebp)\n"
+        "    leal -0x53f4(%ebp), %eax\n"
+        "    pushl %eax\n"
+        "    call proposal_menu_in\n"
+        "    movl %ebp, %esp\n"
+        "    popl %ebp\n"
+        "    ret\n");
+
+// Whether the Council menu of the talks lists the proposal for the player
+// to put: by its tech (or in omniscient debugging), the Supreme Leader
+// under the diplomatic victory rule while the game goes on, unpassed, for
+// an eligible player, and the rest by what has passed before.
+static int council_listed(int faction, int prop) {
+    const int32_t *passes = game_proposal_passes;
+    if (!has_tech(game_proposals[prop].preq_tech, faction) &&
+        !((*game_state & GAME_STATE_OMNISCIENT) && (*game_state & GAME_STATE_DEBUG)))
+        return 0;
+    if (prop == PROP_SUPREME_LEADER && !(*game_rules & RULES_VICTORY_DIPLOMATIC)) return 0;
+    switch (prop) {
+    case PROP_SUPREME_LEADER: return !(*game_state & GAME_STATE_DONE) && !passes[prop] && eligible(faction);
+    case PROP_UNITY_CORE:
+    case PROP_SOLAR_SHADE: return !passes[prop];
+    case PROP_TRADE_PACT: return passes[prop] <= passes[PROP_REPEAL_TRADE_PACT];
+    case PROP_REPEAL_TRADE_PACT: return passes[prop] != passes[PROP_TRADE_PACT];
+    case PROP_INCREASE_SHADE: return passes[PROP_SOLAR_SHADE] != 0;
+    case PROP_REPEAL_CHARTER: return passes[prop] <= passes[PROP_REINSTATE_CHARTER];
+    case PROP_REINSTATE_CHARTER: return passes[prop] < passes[PROP_REPEAL_CHARTER];
+    default: return 1;
+    }
+}
+
+// The player's (`faction`'s) proposal to the AI (`other`), picked in the
+// menus (proposal_menu(), unless `skip`, when game_diplo_proposal and
+// game_diplo_counter are set already), put to the AI: a pact or a treaty
+// (a threat following one that the AI didn't settle), maps traded (when
+// in a pact or without friction, and friction at most 4; patience up 2),
+// a joint attack (from an AI that surrendered, whatever the counter),
+// else a threat, a joint attack, a base, a tech trade (whose answer and
+// an energy request's, in game_diplo_menu_a), a gift, a loan repaid, or
+// the Council: a proposal the player may put (as the Council's own menu
+// lists them, by the player's techs) and a vote bought for it
+// (buy_council_vote()), or for governor, a candidate.
+static void make_a_proposal_body(uint8_t *pop, int faction, int other, int skip) {
+    *game_diplo_second = other;
+    *game_diplo_menu_a = 0;
+    if (!skip && !proposal_menu(faction, other)) return;
+    int counter = *game_diplo_counter, threat = counter == COUNTER_THREATEN;
+    *game_diplo_menu_b = 1;
+    int proposal = *game_diplo_proposal;
+    if (proposal == PROPOSE_PACT) {
+        if (!propose_pact(faction, other) && threat) threaten(faction, other);
+        return;
+    }
+    if (proposal == PROPOSE_TREATY) {
+        if (!propose_treaty(faction, other) && threat) threaten(faction, other);
+        return;
+    }
+    if (proposal == PROPOSE_MAPS) {
+        *game_diplo_second = other;
+        int friction = *game_diplo_friction;
+        if (((status(faction, other) & TREATY_PACT) || friction <= 0) && friction <= 4) {
+            answer(text(0x68da68), other);
+            F(other)->diplo_patience[faction] += 2;
+            game_net_maps(faction, other, 1);
+            *game_diplo_maps_news = 1;
+        } else {
+            game_parse_says(0, game_faction_defs[other].adjective, -1, -1);
+            answer(text(0x68da60), other);
+        }
+        return;
+    }
+    if (proposal == PROPOSE_CLOSE) return;
+    if (proposal == PROPOSE_ATTACK && (status(other, faction) & TREATY_PACT) &&
+        (status(other, faction) & TREATY_SURRENDERED_)) {
+        propose_attack(faction, other);
+        return;
+    }
+    if (counter == COUNTER_THREATEN) {
+        threaten(faction, other);
+        return;
+    }
+    switch (proposal) {
+    case PROPOSE_ATTACK: propose_attack(faction, other); return;
+    case PROPOSE_BASE_SWAP: base_swap(faction, other); return;
+    case PROPOSE_TECH:
+    case PROPOSE_BUY_TECH:
+    case PROPOSE_COMMLINK: *game_diplo_menu_a = game_tech_trade(faction, other, 0, counter, proposal); return;
+    case PROPOSE_ENERGY: *game_diplo_menu_a = energy_trade(faction, other); return;
+    case PROPOSE_GIFT: make_gift(faction, other); return;
+    }
+    if (proposal == PROPOSE_REPAY_LOAN) {
+        say_title(0, faction), say_name(1, faction);
+        int loan = F(faction)->loan_balance[other];
+        net_energy(faction, -loan, other);
+        if (*game_net_multiplayer) {
+            net_post(0x68d4cc, faction, other, 0, 0x44e, faction, other, 0, 0);
+        } else {
+            F(faction)->loan_balance[other] = 0;
+            F(faction)->loan_payment[other] = 0;
+        }
+        answer(text(0x68df20), other);
+        proposal = *game_diplo_proposal;
+    }
+    if (proposal != PROPOSE_COUNCIL) return;
+    pop_start_flags(pop, text(0x68df2c), 0x100040, other);
+    for (int prop = 0; prop < PROP_COUNT; prop++) {
+        if (!council_listed(faction, prop)) continue;
+        game_str_buffer[0] = 0;
+        strcat(game_str_buffer, game_strings_get(game_strings, game_proposals[prop].name));
+        strcat(game_str_buffer, text(0x68df3c));
+        strcat(game_str_buffer, game_strings_get(game_strings, game_proposals[prop].description));
+        item(pop, game_str_buffer, prop);
+    }
+    int prop = menu(pop);
+    if (prop < 0) return;
+    if (prop) {
+        int vote = answer(text(0x68df40), other);
+        if (-1 - vote) buy_council_vote(faction, other, prop, -1 - vote);
+        return;
+    }
+    pop_start_flags(pop, text(0x68df4c), 0x100000, other);
+    for (int i = 1; i < FACTION_COUNT; i++) {
+        if (!(*game_factions_alive >> i & 1) || !eligible(i)) continue;
+        struct faction_def *d = &game_faction_defs[i];
+        game_str_buffer[0] = 0;
+        *game_parse_gender = d->leader_female, *game_parse_plural = 0;
+        strcat(game_str_buffer, d->leader_title);
+        strcat(game_str_buffer, text(0x682820));
+        *game_parse_gender = d->leader_female, *game_parse_plural = 0;
+        strcat(game_str_buffer, d->leader_name);
+        item(pop, game_str_buffer, i);
+        if (i == faction) *(int32_t *)(pop + POP_DEFAULT) = i;
+    }
+    int target = menu(pop);
+    if (target >= 0) buy_council_vote(faction, other, PROP_GOVERNOR, target);
+}
+void make_a_proposal_in(uint8_t *pop, int faction, int other, int skip);
+void make_a_proposal_in(uint8_t *pop, int faction, int other, int skip) {
+    game_popup_ctor(pop);
+    make_a_proposal_body(pop, faction, other, skip);
+    pop_end(pop);
+}
+// The popup where the original's frame keeps it.
+__asm__(".text\n"
+        ".globl make_a_proposal\n"
+        "make_a_proposal:\n"
+        "    pushl %ebp\n"
+        "    movl %esp, %ebp\n"
+        "    subl $0x53a0, %esp\n"
+        "    pushl 16(%ebp)\n"
+        "    pushl 12(%ebp)\n"
+        "    pushl 8(%ebp)\n"
+        "    leal -0x5388(%ebp), %eax\n"
+        "    pushl %eax\n"
+        "    call make_a_proposal_in\n"
+        "    movl %ebp, %esp\n"
+        "    popl %ebp\n"
+        "    ret\n");
+
+// ---- battle_plans --------------------------------------------------------------------
+
+// The player's pick of a target for the AI in battle_plans().
+static void battle_target(int faction, int other, int target, int theirs) {
+    struct faction_data *ai = F(other);
+    const struct base *T = &game_bases[target], *Bt = &game_bases[theirs];
+    game_parse_says(0, (char *)T->name, -1, -1);
+    if (T->faction != other && !(T->visibility & (1u << other))) spot_loc(T->x, T->y, other);
+    int region = tile_at(T->x, T->y)->region;
+    if (region >= 64 || !ai->region_total_bases[region]) {
+        int own = tile_at(Bt->x, Bt->y)->region, invading = 0;
+        if (ai->region_total_bases[own]) {
+            for (int r = 0; r < 64 && !invading; r++)
+                if ((r & 63) != 63 && (r & 63) && ai->region_total_bases[r] && ai->region_base_plan[r] == 7)
+                    invading = 1;
+            if (!invading) {
+                answer(text(0x68dd6c), other);
+                return;
+            }
+        }
+    }
+    game_base_find2(Bt->x, Bt->y, other);
+    int near = *game_base_find_dist;
+    game_base_find2(T->x, T->y, other);
+    if (*game_base_find_dist >= 2 * near) {
+        answer(text(0x68dd78), other);
+        return;
+    }
+    ai->attack_target_base = target;
+    answer(text(0x68dd84), other);
+    if (ai->target_x < 0) return;
+    if (tile_at(ai->target_x, ai->target_y)->region == tile_at(T->x, T->y)->region) return;
+    for (int v = 0; v < *game_veh_count; v++) {
+        struct veh *V = &game_vehs[v];
+        if (V->faction == other && (V->state & 0x40000)) V->state &= 0xfff9ffffu;
+    }
+    ai->target_x = ai->target_y = -1;
+    ai->target_kinds = 0, ai->target_units = 0;
+}
+
+// The AI (`other`) brings the player (`faction`) battle plans: each side's
+// target base (suggest_plan()) and where it would attack from
+// (attack_from()). Outside a pact it first wants maps (refusing outright
+// while it has grudges or the 0x8000 bit against the player, captured
+// bases, friction of 18 or more or hostility; the player may decline,
+// unless game_diplo_trade_offered). Without targets on both sides it says
+// so. Otherwise the planet window shows the plans, the AI takes its
+// target, and the player may pick a base of a common enemy that one of
+// them has seen for it instead: the AI declines one it has no bases near
+// (unless its target's continent has none of its bases either, or it has
+// a plan to invade another), or one twice as far from its bases as its
+// own target; else it takes it, and drops a target on another continent
+// with the units bound for it.
+static void battle_plans_body(uint8_t *pop, int faction, int other) {
+    struct faction_data *ai = F(other);
+    *game_diplo_second = other;
+    *game_diplo_plans_faction = faction, *game_diplo_plans_other = other;
+    int mine = game_suggest_plan(faction, other), theirs = game_suggest_plan(other, faction);
+    int mine_from = game_attack_from(mine, faction), theirs_from = game_attack_from(theirs, other);
+    if (!(status(faction, other) & TREATY_PACT)) {
+        if ((status(other, faction) & (TREATY_WANT_REVENGE | TREATY_UNK_8000)) || *game_diplo_captured_bases ||
+            *game_diplo_friction >= 18 || *game_diplo_hostility) {
+            answer(text(0x68dd20), other);
+            return;
+        }
+        if (!*game_diplo_trade_offered && !answer(text(0x68dd34), other)) return;
+        if (*game_net_multiplayer) net_send(0x68d4dc, faction, other, 0, 0x448, faction, other, 0, 0);
+        else trade_maps(faction, other);
+    }
+    if (mine < 0 || theirs < 0) {
+        answer(text(0x68dd44), other);
+        return;
+    }
+    const struct base *A = &game_bases[mine], *Bt = &game_bases[theirs], *Af = &game_bases[mine_from],
+                      *Bf = &game_bases[theirs_from];
+    int32_t *colors = game_at(0x68f9f0);
+    game_plan_win_init(plan_win(), 0);
+    game_plan_win_find_view(plan_win(), A->x, A->y, Bt->x, Bt->y, Af->x, Af->y, Bf->x, Bf->y);
+    game_plan_win_back_redraw(plan_win());
+    game_plan_win_add_line_2(plan_win(), mine_from, mine, colors[faction]);
+    game_plan_win_add_line_2(plan_win(), theirs_from, theirs, colors[other]);
+    plan_win_show();
+    ai->attack_target_base = theirs;
+    game_parse_says(0, (char *)Bt->name, -1, -1);
+    game_parse_says(1, (char *)A->name, -1, -1);
+    if (answer(text(0x68dd54), other)) {
+        say_title(0, faction), say_name(1, faction);
+        game_popup_start(pop, game_pop_file, text(0x68dd60), -1, 0, 0x100042, 0);
+        void *portrait = game_faction_portraits[other];
+        *(void **)(pop + POP_ICON) = *(int32_t *)(pop + POP_HAS_ICON) ? NULL : portrait;
+        game_sprite_box_sprite(pop + POP_SPRITE_BOX, portrait, 0, other);
+        int listed = 0;
+        for (int b = 0; b < *game_base_count; b++) {
+            const struct base *B = &game_bases[b];
+            int f = B->faction;
+            if (f == faction || f == other || !(status(faction, f) & TREATY_VENDETTA) ||
+                !(status(other, f) & TREATY_VENDETTA))
+                continue;
+            if (!(B->visibility & (1u << faction)) && !(B->visibility & (1u << other))) continue;
+            item(pop, (char *)B->name, b);
+            if (!listed) {
+                int from_a = game_attack_from(b, *game_diplo_plans_faction);
+                int from_b = game_attack_from(b, *game_diplo_plans_other);
+                game_plan_win_clear_lines(plan_win());
+                game_plan_win_add_line_2(plan_win(), from_a, b, colors[*game_diplo_plans_faction]);
+                game_plan_win_add_line_2(plan_win(), from_b, b, colors[*game_diplo_plans_other]);
+                game_plan_win_on_redraw(game_at(0x856dc0));
+            }
+            listed++;
+        }
+        int target = -1;
+        if (listed) {
+            *(uint32_t *)(pop + POP_LIST_SELECT) = game_va(0x54b140);  // battle_routine()
+            target = menu(pop);
+        }
+        if (target >= 0) battle_target(faction, other, target, theirs);
+    }
+    game_plan_win_close(plan_win());
+}
+
+void battle_plans_in(uint8_t *pop, int faction, int other);
+void battle_plans_in(uint8_t *pop, int faction, int other) {
+    game_popup_ctor(pop);
+    battle_plans_body(pop, faction, other);
+    pop_end(pop);
+}
+// The popup where the original's frame keeps it.
+__asm__(".text\n"
+        ".globl battle_plans\n"
+        "battle_plans:\n"
+        "    pushl %ebp\n"
+        "    movl %esp, %ebp\n"
+        "    subl $0x53b0, %esp\n"
+        "    pushl 12(%ebp)\n"
+        "    pushl 8(%ebp)\n"
+        "    leal -0x53a0(%ebp), %eax\n"
+        "    pushl %eax\n"
+        "    call battle_plans_in\n"
+        "    movl %ebp, %esp\n"
+        "    popl %ebp\n"
+        "    ret\n");
+
 // ---- Shadow mode -----------------------------------------------------------------------
 //
 // The game calls these only in the player's talks, where every line is a
@@ -1814,12 +2348,12 @@ extern struct hook_module diplomacy_module;
         struct hook_writes w_ = {0};                                                             \
         hooks_writes_game(&w_);                                                                  \
         hooks_writes_begin(&w_);                                                                 \
-        quiet_talk_next = 0;                                                                     \
+        quiet_talk_next = 0, quiet_menu_next = 0;                                                \
         hooks_nested++;                                                                          \
         SHADOW_RESULT_##ret(want) orig_##name args;                                              \
         hooks_nested--;                                                                          \
         hooks_writes_middle(&w_);                                                                \
-        quiet_talk_next = 0;                                                                     \
+        quiet_talk_next = 0, quiet_menu_next = 0;                                                \
         SHADOW_RESULT_##ret(got) name args;                                                      \
         const char *diff_ = hooks_writes_end(&w_, SHADOW_INT_##ret(got), SHADOW_INT_##ret(want)); \
         if (diff_) hooks_mismatch(&stats_##name, "(" fmt ") %s", __VA_ARGS__, diff_);            \
@@ -1838,11 +2372,12 @@ extern struct hook_module diplomacy_module;
 // at the same stack depth (talk_call()), so that the popup is at the same
 // address, as its parts point at each other and the game keeps some of
 // those pointers. A menu's answer is quiet_answer's.
-int talk_call(void *fn, int a, int b);
+int talk_call(void *fn, int a, int b, int c);
 __asm__(".text\n"
         "talk_call:\n"
         "    pushl %ebp\n"
         "    movl %esp, %ebp\n"
+        "    pushl 20(%ebp)\n"
         "    pushl 16(%ebp)\n"
         "    pushl 12(%ebp)\n"
         "    call *8(%ebp)\n"
@@ -1852,17 +2387,17 @@ __asm__(".text\n"
 #define TALK_CHECK_POP(name, has_result)                                                           \
     static struct hook_stats stats_##name = {#name};                                               \
     static void *orig_##name;                                                                      \
-    static int check_##name(int faction, int other) {                                              \
+    static int check_##name(int faction, int other, int c_) {                                              \
         struct hook_writes w_ = {0};                                                               \
         hooks_writes_game(&w_);                                                                    \
         hooks_writes_begin(&w_);                                                                   \
-        quiet_talk_next = 0;                                                                       \
+        quiet_talk_next = quiet_menu_next = 0;                                                     \
         hooks_nested++;                                                                            \
-        int want = talk_call(orig_##name, faction, other);                                         \
+        int want = talk_call(orig_##name, faction, other, c_);                                         \
         hooks_nested--;                                                                            \
         hooks_writes_middle(&w_);                                                                  \
-        quiet_talk_next = 0;                                                                       \
-        int got = talk_call((void *)name, faction, other);                                         \
+        quiet_talk_next = quiet_menu_next = 0;                                                     \
+        int got = talk_call((void *)name, faction, other, c_);                                         \
         if (!(has_result)) want = got = 0;                                                         \
         const char *diff_ = hooks_writes_end(&w_, got, want);                                      \
         if (diff_)                                                                                 \
@@ -1871,12 +2406,12 @@ __asm__(".text\n"
         hooks_ui_release();                                                                        \
         return want;                                                                               \
     }                                                                                              \
-    static int shadow_##name(int faction, int other) {                                             \
-        if (hooks_nested) return talk_call(orig_##name, faction, other);                           \
-        if (shadow_bypass()) return talk_call((void *)name, faction, other);                       \
+    static int shadow_##name(int faction, int other, int c_) {                                             \
+        if (hooks_nested) return talk_call(orig_##name, faction, other, c_);                           \
+        if (shadow_bypass()) return talk_call((void *)name, faction, other, c_);                       \
         stats_##name.calls++;                                                                      \
         shadow_tick(DIPLO);                                                                        \
-        return talk_call(orig_##name, faction, other);                                             \
+        return talk_call(orig_##name, faction, other, c_);                                             \
     }
 
 TALK_CHECK(void, threaten, (int a, int b), (a, b), "%d, %d", a, b)
@@ -1887,6 +2422,9 @@ TALK_CHECK(int, buy_tech, (int a, int b, int c, int d, int e), (a, b, c, d, e), 
 TALK_CHECK(int, base_swap, (int a, int b), (a, b), "%d, %d", a, b)
 TALK_CHECK_POP(make_gift, 0)
 TALK_CHECK_POP(propose_attack, 1)
+TALK_CHECK_POP(proposal_menu, 1)
+TALK_CHECK_POP(make_a_proposal, 0)
+TALK_CHECK_POP(battle_plans, 0)
 
 // trade_maps() and give_a_base() ask nothing: they are checked, whoever
 // calls them, on all of the game's state and the map.
@@ -1905,6 +2443,9 @@ static uint32_t mix(uint32_t a) {
     return a ^ (a >> 16);
 }
 static uint32_t seed;
+// Whether a case's proposal is put through make_a_proposal() (its
+// dispatch), past the menus, rather than to the function itself.
+static int whole;
 static int rnd(int n) {
     seed = mix(seed + 0x9e3779b9u);
     return (int)(seed % (uint32_t)n);
@@ -1985,6 +2526,10 @@ static int talks(int faction) {
     // player's ranking).
     if (!me->ranking || !ai->ranking) return 0;
     diplomacy_check(faction, other, rnd(2));
+    // Left over from other talks when not reckoned afresh: never the two
+    // talking (as communicate()'s full reckoning leaves them).
+    if (*game_diplo_help_faction == faction || *game_diplo_help_faction == other) *game_diplo_help_faction = 0;
+    if (*game_diplo_accepted_faction == faction || *game_diplo_accepted_faction == other) *game_diplo_accepted_faction = 0;
     // What diplomacy_check() found, varied.
     if (rnd(2)) *game_diplo_fear = rnd(3) ? rnd(4) : rnd(12);
     if (!rnd(3)) *game_diplo_friction = rnd(25);
@@ -2040,7 +2585,8 @@ static void sweep_threaten(int faction) {
         if (rnd(2)) *game_diplo_fear = 1 + rnd(8);
     }
     answers();
-    check_threaten(faction, other);
+    if (whole) check_make_a_proposal(faction, other, 1);
+    else check_threaten(faction, other);
 }
 
 // Energy, for a loan, friendship, research or a price (the menu's
@@ -2063,7 +2609,8 @@ static void sweep_energy_trade(int faction) {
     if (!rnd(4)) *game_diplo_reputation = rnd(12);
     if (!proposal(faction, other, PROPOSE_ENERGY, counters[rnd(4)])) return;
     answers();
-    check_energy_trade(faction, other);
+    if (whole) check_make_a_proposal(faction, other, 1);
+    else check_energy_trade(faction, other);
 }
 
 // The talks' findings a pact or treaty proposal reads, varied: a faction
@@ -2102,7 +2649,8 @@ static void sweep_propose_pact(int faction) {
     vary_pact_inputs(faction, other);
     if (!proposal(faction, other, PROPOSE_PACT, counters[rnd(5)])) return;
     answers();
-    check_propose_pact(faction, other);
+    if (whole) check_make_a_proposal(faction, other, 1);
+    else check_propose_pact(faction, other);
 }
 
 // A treaty, offered by a player without one (at war, in a truce or
@@ -2123,7 +2671,8 @@ static void sweep_propose_treaty(int faction) {
     if (!rnd(4)) F(other)->diplo_status[faction] ^= TREATY_WANT_REVENGE;
     if (!proposal(faction, other, PROPOSE_TREATY, counters[rnd(5)])) return;
     answers();
-    check_propose_treaty(faction, other);
+    if (whole) check_make_a_proposal(faction, other, 1);
+    else check_propose_treaty(faction, other);
 }
 
 // A base of the player's, without its headquarters, as the counter menu
@@ -2169,7 +2718,8 @@ static void sweep_make_gift(int faction) {
         } while (amount);
         quiet_answer = amounts[rnd(n)];
     }
-    check_make_gift(faction, other);
+    if (whole) check_make_a_proposal(faction, other, 1);
+    else check_make_gift(faction, other, 0);
     quiet_answer = 0;
 }
 
@@ -2211,7 +2761,8 @@ static void sweep_propose_attack(int faction) {
     int far = 0;
     if (!(status(other, target) & TREATY_COMMLINK) && !game_contiguous(other, target, 0, 1)) far = attack_far(other, target);
     quiet_answer = me->energy_credits >= attack_price(faction, other, target, far) ? rnd(2) : 0;
-    check_propose_attack(faction, other);
+    if (whole) check_make_a_proposal(faction, other, 1);
+    else check_propose_attack(faction, other, 0);
     quiet_answer = 0;
 }
 
@@ -2288,7 +2839,119 @@ static void sweep_base_swap(int faction) {
     if (!rnd(3)) me->tech_ranking = rnd(40), ai->tech_ranking = rnd(40);
     answers();
     for (int i = 0; i < QUIET_TALK_ANSWERS; i++) quiet_talk_answers[i] = rnd(2);
-    check_base_swap(faction, other);
+    if (whole) check_make_a_proposal(faction, other, 1);
+    else check_base_swap(faction, other);
+}
+
+// The player's menus (proposal_menu()), read with their lines left unread
+// (quiet_text), answered with items they list: a proposal (not the base
+// swap, whose menu draws on the planet window), a faction for a joint
+// attack or a commlink (or cancelled), and a counter (not a base given,
+// likewise). Or the proposals that need no counter put through
+// make_a_proposal(): maps, closing, a loan repaid, the Council (a
+// proposal it lists, and the vote bought, or a candidate for governor).
+static void sweep_menus(int faction) {
+    int other = talks(faction);
+    if (!other) return;
+    struct faction_data *me = F(faction);
+    if (!rnd(3)) me->loan_balance[other] = rnd(3) ? 0 : 50 + rnd(300);
+    int no_trading = (*game_rules & RULES_SCN_NO_TECH_TRADING) != 0, n = 0;
+    answers();
+    for (int i = 0; i < QUIET_TALK_ANSWERS; i++) quiet_talk_answers[i] = rnd(2);
+    if (rnd(2)) {
+        // Through make_a_proposal().
+        static const int kinds[] = {PROPOSE_MAPS, PROPOSE_CLOSE, PROPOSE_REPAY_LOAN, PROPOSE_COUNCIL};
+        int kind = kinds[rnd(4)];
+        if (kind == PROPOSE_REPAY_LOAN && (!me->loan_balance[other] || me->energy_credits < me->loan_balance[other]))
+            return;
+        proposal(faction, other, kind, COUNTER_FRIENDSHIP);
+        if (!rnd(3)) *game_diplo_friction = rnd(8) - 2;
+        if (kind == PROPOSE_COUNCIL) {
+            int props[PROP_COUNT], k = 0;
+            for (int prop = 0; prop < PROP_COUNT; prop++)
+                if (council_listed(faction, prop)) props[k++] = prop;
+            quiet_menu_answers[n++] = k && rnd(4) ? props[rnd(k)] : -1;
+            if (quiet_menu_answers[0] == PROP_GOVERNOR) {
+                int candidates[FACTION_COUNT], m = 0;
+                for (int i = 1; i < FACTION_COUNT; i++)
+                    if (alive(i) && eligible(i)) candidates[m++] = i;
+                quiet_menu_answers[n++] = m && rnd(4) ? candidates[rnd(m)] : -1;
+            }
+        }
+        quiet_menu_count = n, quiet_text = 1;
+        check_make_a_proposal(faction, other, 1);
+        quiet_menu_count = 0, quiet_text = 0;
+        return;
+    }
+    // The proposal menu's items, but the base swap.
+    uint32_t st = status(faction, other);
+    int items[12], k = 0, linked = 0, unlinked = 0;
+    for (int i = 1; i < FACTION_COUNT; i++) {
+        if (!alive(i) || i == faction || i == other) continue;
+        if (status(faction, i) & TREATY_COMMLINK) linked++;
+        else if (!empath(faction)) unlinked++;
+    }
+    items[k++] = 0, items[k++] = PROPOSE_GIFT, items[k++] = PROPOSE_ENERGY;
+    if ((st & TREATY_TREATY) && !(st & TREATY_PACT)) items[k++] = PROPOSE_PACT;
+    if (!(st & TREATY_TREATY)) items[k++] = PROPOSE_TREATY;
+    if (!no_trading) items[k++] = PROPOSE_TECH;
+    if (unlinked) items[k++] = PROPOSE_COMMLINK;
+    if (me->loan_balance[other] && me->energy_credits >= me->loan_balance[other]) items[k++] = PROPOSE_REPAY_LOAN;
+    if (linked) items[k++] = PROPOSE_ATTACK;
+    int kind = quiet_menu_answers[n++] = items[rnd(k)];
+    if (kind == PROPOSE_ATTACK || kind == PROPOSE_COMMLINK) {
+        int targets[FACTION_COUNT], m = 0;
+        for (int i = 1; i < FACTION_COUNT; i++) {
+            if (!alive(i) || i == faction || i == other) continue;
+            int l = (status(faction, i) & TREATY_COMMLINK) != 0;
+            if (kind == PROPOSE_ATTACK ? l || game_is_human(i) : !l) targets[m++] = i;
+        }
+        quiet_menu_answers[n++] = m && rnd(5) ? targets[rnd(m)] : -1;
+    }
+    // The counters.
+    int counters[10], c = 0;
+    counters[c++] = 0;
+    if (kind == PROPOSE_ENERGY) counters[c++] = COUNTER_LOAN;
+    if (kind != PROPOSE_GIFT) counters[c++] = COUNTER_FRIENDSHIP, counters[c++] = COUNTER_NAME_A_PRICE,
+                              counters[c++] = COUNTER_THREATEN;
+    if (!no_trading) counters[c++] = COUNTER_RESEARCH;
+    if (kind == PROPOSE_GIFT) counters[c++] = COUNTER_ALL_RESEARCH;
+    if (kind != PROPOSE_ENERGY) counters[c++] = COUNTER_ENERGY;
+    quiet_menu_answers[n++] = counters[rnd(c)];
+    quiet_menu_count = n;
+    quiet_text = 1;
+    check_proposal_menu(faction, other, 0);
+    quiet_text = 0, quiet_menu_count = 0;
+}
+
+// Battle plans the AI brings the player, in a pact or not, with common
+// enemies made now and then. The player's answers: yes or no, and a base
+// the menu lists (or cancelled).
+static void sweep_battle_plans(int faction) {
+    int other = talks(faction);
+    if (!other) return;
+    struct faction_data *me = F(faction), *ai = F(other);
+    if (!rnd(3)) {
+        me->diplo_status[other] |= TREATY_PACT | TREATY_TREATY, ai->diplo_status[faction] |= TREATY_PACT | TREATY_TREATY;
+        ai->diplo_status[faction] &= ~(uint32_t)(TREATY_WANT_REVENGE | TREATY_UNK_8000);
+    }
+    int t = third_faction(faction, other, 0);
+    if (t && rnd(2)) me->diplo_status[t] |= TREATY_VENDETTA, ai->diplo_status[t] |= TREATY_VENDETTA;
+    if (!rnd(3)) *game_diplo_trade_offered = rnd(2);
+    if (!rnd(4)) ai->target_x = -1, ai->target_y = -1;
+    answers();
+    for (int i = 0; i < QUIET_TALK_ANSWERS; i++) quiet_talk_answers[i] = rnd(4) ? 1 : 0;
+    int bases[64], n = 0;
+    for (int b = 0; b < *game_base_count && n < 64; b++) {
+        const struct base *B = &game_bases[b];
+        int f = B->faction;
+        if (f == faction || f == other || !(status(faction, f) & TREATY_VENDETTA) || !(status(other, f) & TREATY_VENDETTA))
+            continue;
+        if ((B->visibility & (1u << faction)) || (B->visibility & (1u << other))) bases[n++] = b;
+    }
+    quiet_answer = n && rnd(5) ? bases[rnd(n)] : -1;
+    check_battle_plans(faction, other, 0);
+    quiet_answer = 0;
 }
 
 // Once a turn, cases on protected copies of the game, each for a faction
@@ -2297,7 +2960,8 @@ static void diplomacy_sweep(void) {
     static void (*const cases[])(int faction) = {sweep_threaten, sweep_energy_trade, sweep_propose_pact,
                                                  sweep_propose_treaty, sweep_make_gift,
                                                  sweep_propose_attack, sweep_buy_tech, sweep_trade_maps,
-                                                 sweep_give_a_base, sweep_base_swap};
+                                                 sweep_give_a_base, sweep_base_swap, sweep_menus,
+                                                 sweep_battle_plans};
     enum { N_CASES = sizeof(cases) / sizeof(cases[0]) };
     if (!*game_map || *game_base_count <= 0 || *game_net_multiplayer || *game_pbem) return;
     // Not while the player is in talks: the diplomacy window is open, and
@@ -2313,6 +2977,7 @@ static void diplomacy_sweep(void) {
         hooks_writes_game(&w);
         hooks_writes_begin(&w);
         *game_rand_state() = mix(seed + 1);
+        whole = !rnd(3);
         cases[k % N_CASES](faction);
         hooks_writes_abandon(&w);
     }
@@ -2331,6 +2996,9 @@ static const struct hook diplomacy_hooks[] = {
     HOOK(0x543a20, trade_maps, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),  // sub esp, 8
     HOOK(0x54cf40, give_a_base, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x1c),  // sub esp, 0x1c
     HOOK(0x54d410, base_swap, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),  // sub esp, 8
+    HOOK(0x54dcf0, proposal_menu, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),
+    HOOK(0x54f420, make_a_proposal, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),
+    HOOK(0x54b1c0, battle_plans, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),
 };
 struct hook_module diplomacy_module = {"diplomacy", diplomacy_hooks, HOOK_COUNT(diplomacy_hooks), diplomacy_sweep, NULL,
                                        -1};

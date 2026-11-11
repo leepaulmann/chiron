@@ -70,7 +70,23 @@ static void __attribute__((thiscall)) item_stub(void *dialogs, char *text, int i
     if (n_items < 16) items[n_items] = id;
     n_items++;
 }
-static int __attribute__((thiscall)) exec_stub(void *pop, int a, int b) { return menu_answer; }
+// The menus' answers: menu_answers in turn while menu_count is set.
+static int menu_answers[4], menu_count, menu_next;
+static int __attribute__((thiscall)) exec_stub(void *pop, int a, int b) {
+    if (menu_count) return menu_next < menu_count ? menu_answers[menu_next++] : -1;
+    return menu_answer;
+}
+static int text_open_stub(char *file, char *label) { return 0; }
+static void text_get_stub(void) {}
+static char line[8] = "line", *line_p = line, *script = "script";
+static void parse_string_stub(char *text, char *buf) { strcpy(buf, text); }
+static char *hood_stub(int f, int o) { return "hood"; }
+static int32_t projects[64], menu_a, menu_b, maps_news, plans_a, plans_b, offered, hostility;
+static int maps_traded_calls;
+static void net_maps_stub(int f, int o, int unk) { maps_traded_calls++; }
+static int plan_stub(int f, int o) { return -1; }
+static int from_stub(int base, int f) { return 0; }
+static int x_pops_stub(char *label, void *sprite, void *fn) { return 0; }
 static int contiguous_stub(int f, int o, int region, int sea) { return 0; }
 static char *pacts1_stub(int f) { return "pacts"; }
 static int x_pop_stub(char *label, int unk) { return 0; }
@@ -80,6 +96,7 @@ static void reset(void) {
     memset(factions, 0, sizeof factions);
     n_shown = said = answer_with = captions = energy_updates = 0;
     n_items = menu_answer = popups = 0;
+    menu_count = menu_next = 0;
     talk_rep = player_pacts = rival_pacts = help_faction = accepted_faction = runaway = strong_pacts = goodwill = 0;
     captured = can_surrender = alter_fear = enemy_allies = pacts = treaties = 0;
     fear = friction = prev_hostility = attack_chance = exposed = satan = can_betray = 0;
@@ -130,6 +147,13 @@ int main(void) {
     game_popup_start = pop_start_stub, game_sprite_box_sprite = sprite_box_stub, game_dialogs_item = item_stub;
     game_base_pop_exec_3 = exec_stub, game_pop_file = pop_file, game_contiguous = contiguous_stub;
     game_get_pacts = pacts1_stub, game_get_him_her = phrase_stub, game_x_pop = x_pop_stub;
+    game_x_text_open = text_open_stub, game_text_get = text_get_stub, game_text_line = &line_p;
+    game_script_file = &script, game_parse_string = parse_string_stub, game_get_pact_hood = hood_stub;
+    for (int i = 0; i < 64; i++) projects[i] = -1;
+    game_secret_projects = projects, game_diplo_menu_a = &menu_a, game_diplo_menu_b = &menu_b;
+    game_net_maps = net_maps_stub, game_diplo_maps_news = &maps_news;
+    game_diplo_plans_faction = &plans_a, game_diplo_plans_other = &plans_b, game_diplo_trade_offered = &offered;
+    game_suggest_plan = plan_stub, game_x_pops = x_pops_stub, game_attack_from = from_stub, game_diplo_hostility = &hostility;
 
     // An AI set on betrayal declares a vendetta at once.
     reset();
@@ -453,6 +477,74 @@ int main(void) {
         EXPECT(factions[2].maps_traded, 6);
         current = 1;
     }
+
+    // ---- proposal_menu
+    // Energy asked for, offering energy: the counter.
+    reset();
+    menu_count = 2, menu_answers[0] = 6, menu_answers[1] = 5;
+    EXPECT(proposal_menu(1, 2), 6);
+    EXPECT(counter, 5);
+    EXPECT(proposal, 6);
+    // Closing the talks asks for no counter: friendship.
+    reset();
+    menu_count = 1, menu_answers[0] = 10;
+    EXPECT(proposal_menu(1, 2), 10);
+    EXPECT(counter, 1);
+    // A gift with nothing offered after all: nothing.
+    reset();
+    menu_count = 2, menu_answers[0] = 1, menu_answers[1] = 0;
+    EXPECT(proposal_menu(1, 2), 0);
+    EXPECT(proposal, 0);
+    // A commlink with a faction the AI has no commlink with either: it says
+    // so, and nothing is proposed.
+    reset();
+    factions[1].diplo_status[3] = 0, factions[2].diplo_status[3] = 0;
+    menu_count = 2, menu_answers[0] = 13, menu_answers[1] = 3;
+    EXPECT(proposal_menu(1, 2), 0);
+    EXPECT(proposal_faction, 3);
+    EXPECT(counter, 1);
+
+    // ---- make_a_proposal
+    // Maps, without friction: traded, the AI's patience up 2.
+    reset();
+    proposal = 7, counter = 1, maps_traded_calls = 0;
+    game_diplo_maps_news = &maps_news, maps_news = 0;
+    make_a_proposal(1, 2, 1);
+    EXPECT(maps_traded_calls, 1);
+    EXPECT(maps_news, 1);
+    EXPECT(factions[2].diplo_patience[1], 2);
+    EXPECT(shown[0], 0x68da68);
+    EXPECT(menu_b, 1);
+    // With friction, refused.
+    reset();
+    proposal = 7, counter = 1, friction = 5, maps_traded_calls = 0;
+    make_a_proposal(1, 2, 1);
+    EXPECT(maps_traded_calls, 0);
+    EXPECT(shown[0], 0x68da60);
+    // A loan repaid.
+    reset();
+    proposal = 11, counter = 1;
+    factions[1].loan_balance[2] = 60, factions[1].loan_payment[2] = 3, factions[1].energy_credits = 100;
+    make_a_proposal(1, 2, 1);
+    EXPECT(factions[1].energy_credits, 40);
+    EXPECT(factions[2].energy_credits, 60);
+    EXPECT(factions[1].loan_balance[2], 0);
+    EXPECT(factions[1].loan_payment[2], 0);
+
+    // ---- battle_plans
+    // In a pact, without targets: the AI says so.
+    reset();
+    factions[1].diplo_status[2] |= TREATY_PACT, factions[2].diplo_status[1] |= TREATY_PACT;
+    battle_plans(1, 2);
+    EXPECT(n_shown, 1);
+    EXPECT(shown[0], 0x68dd44);
+    EXPECT(plans_a, 1);
+    EXPECT(plans_b, 2);
+    // Outside a pact, with friction 18: refused at once.
+    reset();
+    friction = 18;
+    battle_plans(1, 2);
+    EXPECT(shown[0], 0x68dd20);
 
     if (failures) printf("%d failures\n", failures);
     else printf("ok\n");

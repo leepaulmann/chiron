@@ -26,6 +26,14 @@ void give_a_base(int base, int faction);
 // The player asks the AI for one of its bases; 0 once it changed hands.
 int base_swap(int faction, int other);
 
+// The player's menus in the talks: the proposal and the counter-proposal;
+// the proposal, or 0.
+int proposal_menu(int faction, int other);
+// The player's proposal, from the menus (unless `skip`), put to the AI.
+void make_a_proposal(int faction, int other, int skip);
+// The AI brings the player battle plans.
+void battle_plans(int faction, int other);
+
 // Shadow mode (quiet.c): in a sweep's copies of the game, the answers the
 // diplomacy window's dialogs give, in turn, and the next one to give.
 enum { QUIET_TALK_ANSWERS = 8 };

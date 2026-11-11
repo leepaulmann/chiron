@@ -1411,6 +1411,25 @@ extern char *(*game_get_noun_phrase)(int faction, int unk);
 extern char *(*game_get_phrase)(int faction, int unk);
 extern char *(*game_get_pact)(int faction);
 extern char *(*game_get_pacts)(int faction);
+// The talks: maps traded (net_maps(), or sent in a network game), a tech
+// trade (tech_trade()), and the planet window the base menus show bases on.
+extern void (*game_net_maps)(int faction, int other, int unk);
+extern int (*game_tech_trade)(int faction, int other, int unk, int counter, int proposal);
+extern void(__attribute__((thiscall)) * game_plan_win_init)(void *win, int unk);
+extern void(__attribute__((thiscall)) * game_plan_win_back_redraw)(void *win);
+extern void(__attribute__((thiscall)) * game_plan_win_clear_lines)(void *win);
+extern void(__attribute__((thiscall)) * game_plan_win_monocenter)(void *win, int x, int y, int unk);
+extern void(__attribute__((thiscall)) * game_plan_win_add_line_2)(void *win, int a, int b, int c);
+extern void(__attribute__((thiscall)) * game_plan_win_on_redraw)(void *win);
+extern void(__attribute__((thiscall)) * game_plan_win_close)(void *win);
+extern void(__attribute__((thiscall)) * game_win_show)(void *win, int unk);
+extern int32_t *game_diplo_menu_a, *game_diplo_menu_b;  // what the proposal's answer left for communicate()
+extern int32_t *game_diplo_trade_offered;  // set in the talks when the AI has offered a trade already
+extern int32_t *game_diplo_plans_faction, *game_diplo_plans_other;  // battle_plans()'s two, for its menu's lines
+extern int (*game_suggest_plan)(int faction, int other);  // a base to attack, or -1
+extern int (*game_attack_from)(int base, int faction);    // the base to attack it from
+extern void(__attribute__((thiscall)) * game_plan_win_find_view)(void *win, int x1, int y1, int x2, int y2, int x3,
+                                                                  int y3, int x4, int y4);
 extern char *(*game_get_pacts_2)(int faction, int other);
 extern void (*game_give_a_base)(int base, int faction);  // a base ceded in talks
 extern void (*game_pact_of_brotherhood)(int faction, int other);
