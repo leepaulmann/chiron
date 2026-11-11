@@ -35,6 +35,10 @@ void make_a_proposal(int faction, int other, int skip);
 // (offering `counter`) or by the AI (`ai`); 1 after a trade the player
 // proposed.
 int tech_trade(int faction, int other, int ai, int counter, int proposal);
+// The talks between the player (`faction`) and an AI that has something to say or
+// that the player called (`unk`): the AI's proposals and demands, its answers
+// to the player's menus, and the greeting.
+void communicate(int faction, int other, int unk);
 // The AI brings the player battle plans.
 void battle_plans(int faction, int other);
 

@@ -79,22 +79,6 @@ static void __attribute__((thiscall)) shadow_status_win_redraw(void *win) {
         return quiet;                                                           \
     }
 
-// Talks between factions, in a sweep: first contact on a made-up landing
-// or move opens them, and they allocate on the game's heap even between
-// AIs (wants_to_speak()'s window). Both runs of a sweep's check skip them
-// alike. A check of a game call runs them; the game calls that could
-// bring a first contact (a landing during the game, a captive leader
-// freed) run the original unchecked instead (setup.c, probe.c).
-static void (*orig_communicate)(int faction, int other, int unk);
-static struct hook_stats stats_communicate = {"(swept communicate)"};
-static void shadow_communicate(int faction, int other, int unk) {
-    if (!hooks_sweeping || !hooks_protecting()) {
-        orig_communicate(faction, other, unk);
-        return;
-    }
-    stats_communicate.calls++;
-}
-
 // The diplomacy window's dialogs (X_pops_11), in a sweep's copies of the
 // game: the player's answers to the talks (diplomacy.c) the sweep makes
 // up, held and answered from quiet_talk_answers in turn (0 once they run
@@ -124,6 +108,26 @@ static int shadow_x_pops_11(char *label, int flags, void *sprite, void *fn) {
                              .replay = talk_held() ? replay_dropped : replay_x_pops_11,
                              .arg = {flags, (int)(intptr_t)sprite, (int)(intptr_t)fn}};
     hooks_ui_text(&c, 0, label);
+    hooks_ui_hold(&c);
+    if (!talk_held()) return 0;
+    return quiet_talk_next < QUIET_TALK_ANSWERS ? quiet_talk_answers[quiet_talk_next++] : 0;
+}
+// The same for a message read from a faction's own file (X_pops_13), which
+// the AI's offers of a truce or a treaty use.
+static int (*orig_x_pops_13)(char *file, char *label, int flags, void *sprite, void *fn);
+static struct hook_stats stats_x_pops_13 = {"(held x_pops_13)"};
+static void replay_x_pops_13(const struct hook_ui_call *c) {
+    orig_x_pops_13(c->has_text & 2 ? (char *)c->text[1] : NULL, c->has_text & 1 ? (char *)c->text[0] : NULL, c->arg[0],
+                   (void *)(intptr_t)c->arg[1], (void *)(intptr_t)c->arg[2]);
+}
+static int shadow_x_pops_13(char *file, char *label, int flags, void *sprite, void *fn) {
+    if (!hooks_protecting()) return orig_x_pops_13(file, label, flags, sprite, fn);
+    stats_x_pops_13.calls++;
+    struct hook_ui_call c = {.name = "x_pops_13",
+                             .replay = talk_held() ? replay_dropped : replay_x_pops_13,
+                             .arg = {flags, (int)(intptr_t)sprite, (int)(intptr_t)fn}};
+    hooks_ui_text(&c, 0, label);
+    hooks_ui_text(&c, 1, file);
     hooks_ui_hold(&c);
     if (!talk_held()) return 0;
     return quiet_talk_next < QUIET_TALK_ANSWERS ? quiet_talk_answers[quiet_talk_next++] : 0;
@@ -342,6 +346,9 @@ static int shadow_pcx_dimensions(char *file, int *w, int *h) {
 // windows), and its centring on a lost base.
 HELD_THIS(console_update_data, (void *self, int unk), (self, unk), c_.arg[0] = unk, orig_console_update_data(SELF, a_[0]))
 HELD_THIS(console_center, (void *self), (self), (void)0, orig_console_center(SELF))
+// Focusing the map on a base the talks show.
+HELD_THIS(map_win_focus, (void *self, int x, int y), (self, x, y), (c_.arg[0] = x, c_.arg[1] = y),
+          orig_map_win_focus(SELF, a_[0], a_[1]))
 // Centring the map on a base that changed hands.
 HELD_THIS(map_win_set_center, (void *self, int x, int y, int unk), (self, x, y, unk),
           (c_.arg[0] = x, c_.arg[1] = y, c_.arg[2] = unk), orig_map_win_set_center(SELF, a_[0], a_[1], a_[2]))
@@ -566,8 +573,9 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x5bf330, x_pop2, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x10),  // mov eax, [ebp+16]
     QUIET_HOOK(0x5bf310, x_pop, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x0c),   // mov eax, [ebp+12]
     QUIET_HOOK(0x5bf5d0, x_pops, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x10),  // mov eax, [ebp+16]
-    QUIET_HOOK(0x54ffd0, communicate, SEH_PROLOGUE),
     QUIET_HOOK(0x5bf7d0, x_pops_11, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x14),  // mov eax, [ebp+20]
+    QUIET_HOOK(0x5bf830, x_pops_13, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x18),  // mov eax, [ebp+24]
+    QUIET_HOOK(0x46b310, map_win_focus, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x14),  // sub esp, 0x14
     QUIET_HOOK(0x44cb60, help_topic, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x0c),  // mov eax, [ebp+12]
     QUIET_HOOK(0x58f8b0, get_noun_phrase, PUSH_EBP_MOV_EBP_ESP, 0x81, 0xec, 0x00, 0x01, 0x00, 0x00),  // sub esp, 0x100
     QUIET_HOOK(0x58f810, get_phrase, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x4d, 0x08),  // mov ecx, [ebp+8]

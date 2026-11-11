@@ -115,6 +115,8 @@ static void reset(void) {
     }
 }
 
+static int zero_stub(void) { return 0; }
+static int x_pops_13_stub(char *file, char *label, int flags, void *sprite, void *fn) { return n_shown++, answer_with; }
 int main(void) {
     static uint8_t image[0x600000];  // strings, from 0x400000
     game_test_image = image;
@@ -661,6 +663,42 @@ int main(void) {
         EXPECT(n_shown, 1);
     }
 
+
+    // The talks end as communicate() leaves them: a call made by the AI on no
+    // news (nothing to say, the window open) only resets the patience, notes
+    // when they spoke and clears what the AI had asked for.
+    {
+        static int32_t d_state[8], d_tribute, d_conq, d_near, d_outranks, d_unmet_e, d_unmet_f, d_mutual, d_player_e;
+        static int32_t d_enemy_ally, d_wars, d_regions[128], d_cap_off, d_cap_mode, d_refused;
+        game_diplo_state = d_state, game_diplo_tribute = &d_tribute, game_diplo_conquest_fear = &d_conq;
+        game_diplo_near_endgame = &d_near, game_diplo_rival_outranks = &d_outranks, game_diplo_unmet_enemy = &d_unmet_e;
+        game_diplo_unmet_faction = &d_unmet_f, game_diplo_mutual_faction = &d_mutual;
+        game_diplo_player_enemy = &d_player_e, game_diplo_enemy_ally = &d_enemy_ally, game_diplo_rival_wars = &d_wars;
+        game_diplo_region_factions = d_regions, game_diplo_caption_off = &d_cap_off, game_diplo_caption_mode = &d_cap_mode;
+        game_diplo_trade_refused = &d_refused;
+        static int32_t d_diff, d_open, d_score, d_income;
+        game_difficulty = &d_diff, game_diplo_open_base = &d_open, game_diplo_rival_pact_score = &d_score;
+        game_net_income = &d_income;
+        game_energy_compute = (void *)zero_stub, game_stack_check = (void *)zero_stub;
+        game_stack_fix = (void *)zero_stub, game_veh_at = (void *)zero_stub;
+        static struct unit_proto d_protos[PROTO_COUNT];
+        static int32_t d_best, d_mention;
+        game_has_agenda = (void *)zero_stub, game_diplomacy_ends = (void *)zero_stub, game_do_withdrawal = (void *)zero_stub;
+        game_auto_contact = (void *)zero_stub, game_pledge_truce = (void *)zero_stub, game_set_agenda = (void *)zero_stub, game_diplomacy_menu = (void *)zero_stub, game_x_pops_13 = x_pops_13_stub, game_get_his_her = phrase_stub, game_net_loan = (void *)zero_stub;
+        game_protos = d_protos, game_diplo_best_proto = &d_best, game_diplo_mention_proto = &d_mention;
+        reset();
+        game_popup_dtor = pop_stub;
+        d_cap_off = 1;  // the window is open
+        factions[2].diplo_patience[1] = 5;
+        factions[2].diplo_status[1] |= TREATY_WANT_TO_TALK;
+        communicate(1, 2, 0);
+        EXPECT(second, 2);
+        EXPECT(factions[2].diplo_patience[1], 0);  // reset: the AI called
+        EXPECT(factions[1].diplo_spoke[2], turn);
+        EXPECT(factions[2].diplo_status[1] & TREATY_WANT_TO_TALK, 0);
+        EXPECT(n_shown, 0);
+
+    }
     if (failures) printf("%d failures\n", failures);
     else printf("ok\n");
     return failures != 0;

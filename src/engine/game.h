@@ -1391,6 +1391,19 @@ extern int(__attribute__((thiscall)) * game_tut_map)(void *win, char *label, int
 extern void (*game_diplomacy_caption)(int faction, int other);
 extern char *(*game_get_pact_hood)(int faction, int other);
 extern char *(*game_get_him_her)(int faction, int unk);
+// communicate()'s helpers: whether a faction has an agenda towards another (the bits of diplo_agenda), the player's
+// auto contact in a hotseat game, a loan sent in a network game, a truce pledged, and a faction's withdrawal.
+extern int (*game_has_agenda)(int faction, int other, uint32_t agenda);
+extern int (*game_auto_contact)(void);
+extern void (*game_net_loan)(int faction, int other, int total, int payment);
+extern void (*game_pledge_truce)(int faction, int other);
+extern void (*game_do_withdrawal)(int faction, int other);
+extern int (*game_diplomacy_menu)(int faction, int other);  // the player's menu of what to ask
+extern void (*game_demand_withdrawal)(int faction, int other);
+extern void (*game_call_off_vendetta)(int faction, int other);
+extern void (*game_diplomacy_ends)(int faction, int other);
+extern void(__attribute__((thiscall)) * game_map_win_focus)(void *win, int x, int y);
+extern int (*game_x_pops_13)(char *file, char *label, int flags, void *sprite, void *fn);  // a leader's message from a faction's file
 extern int (*game_x_pops)(char *label, void *sprite, void *fn);
 extern int (*game_x_pops_11)(char *label, int flags, void *sprite, void *fn);
 extern int (*game_wants_prototype)(int proto, int faction);

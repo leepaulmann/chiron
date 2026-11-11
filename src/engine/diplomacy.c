@@ -2832,6 +2832,2048 @@ __asm__(".text\n"
         "    popl %ebp\n"
         "    ret\n");
 
+// ---- communicate ---------------------------------------------------------------------
+
+// communicate(): the talks between the player (`faction`) and an AI (`other`),
+// whether the AI calls (unk 0) or the player does (unk 1), from the state
+// diplomacy_check() leaves and the call's kind (diplo_state: 4 first contact,
+// 8 a landing in the player's land, 0x20 their territory, 0x40 the AI asks
+// for help). It runs, in the original's order: the AI's social grudges as
+// friction; the call's own kind (first contact; the AI hanging up on a player
+// it has no patience for); the atrocity and the pact's help (an AI in a
+// pact pleads for help, or demands the player's join against a faction);
+// introductions of an enemy and betrayals of friends; the maps, commlink and
+// news the AI sells; the ransom, tribute and tech it demands (the bargaining
+// menu); a loan it asks; its social and pact demands, its vendetta; pacts,
+// truces and treaties it offers; its greeting; what it has heard (atrocities,
+// the war reports, a tech to share, the territory, a quisling); the player's
+// menu until its patience runs out; and the talk's end (what the AI asked
+// for is withdrawn, the patience kept in range, a truce renewed or ended).
+// It is ~35 KB of one function; the code below follows it label by label (a
+// label's name is the original's address, in comments the labels of the AI's
+// lines, as elsewhere in this file). Like the original it keeps its choice
+// and answers in two variables it reuses (the argument slot and ebx),
+// compares a faction's filename (strcmp) to tell the Hive, the Gaians and the
+// Morgan apart, tests the help faction's flags where it means the unmet
+// enemy's (INTRODUCEENEMY), and clears the mutual faction where it means the
+// player's enemy (the map sale). Only the sweep checks it: a game call involves
+// the player or the diplomacy window, so it runs the original unchecked.
+
+#define GI(a) (*(int32_t *)game_at(a))
+static void bclear(void) { game_str_buffer[0] = 0; }
+static void bsays(const char *s) { strcat(game_str_buffer, s); }
+static void bnum(int n) {
+    char d[16];
+    snprintf(d, sizeof(d), "%d", n);
+    strcat(game_str_buffer, d);
+}
+static char *label_n(uint32_t label, int n) { return label_digit(label, n); }
+static void say_insult(int slot, int f) {
+    struct faction_def *d = &game_faction_defs[f];
+    *game_parse_plural = 0, *game_parse_gender = d->leader_female;
+    game_parse_says(slot, (char *)d + 0x3ac, -1, -1);
+}
+static int round_down(int a, int b) { return a / b * b; }
+// The steps of the talks as the original makes them: with the `wait` argument of the net_*() functions.
+static void post_w(int wait, uint32_t label, int la, int lb, int lc, int type, int a, int b, int c, int d) {
+    net_post(label, la, lb, lc, type, a, b, c, d);
+    if (wait) game_net_daemon_await_diplo(game_net_daemon, type);
+}
+static void wtreaty_on(int f, int o, uint32_t bits, int wait) {
+    if (*game_net_multiplayer) post_w(wait, 0x68d444, f, o, (int)bits, 0x441, f, o, (int)bits, 0);
+    else treaty_on(f, o, bits);
+}
+static void wtreaty_off(int f, int o, uint32_t bits, int wait) {
+    if (*game_net_multiplayer) post_w(wait, 0x68d458, f, o, (int)bits, 0x442, f, o, (int)bits, 0);
+    else treaty_off(f, o, bits);
+}
+static void wset_treaty(int f, int o, uint32_t bits, int on, int wait) {
+    if (*game_net_multiplayer) post_w(wait, 0x68d46c, f, o, (int)bits, 0x443, f, o, (int)bits, on);
+    else set_treaty(f, o, bits, on);
+}
+static void wagenda_off(int f, int o, uint32_t bits, int wait) {
+    if (*game_net_multiplayer) post_w(wait, 0x68d494, f, o, (int)bits, 0x445, f, o, (int)bits, 0);
+    else agenda_off(f, o, bits);
+}
+static void wdouble_cross(int f, int v, int o, int wait) {
+    if (*game_net_multiplayer) post_w(wait, 0x68d53c, f, v, o, 0x440, f, v, o, 0);
+    else double_cross(f, v, o);
+}
+static void wtech(int f, int tech, int from, int wait) {
+    if (*game_net_multiplayer) post_w(wait, 0x68d4f0, f, tech, from, 0x44b, f, tech, from, 0);
+    else game_tech_achieve(f, tech, from, 0);
+}
+static void wenergy(int f, int amount, int o, int wait) {
+    if (*game_net_multiplayer) {
+        post_w(wait, 0x68d4bc, f, o, amount, 0x447, f, amount, o, -amount);
+    } else {
+        if (f) F(f)->energy_credits += amount;
+        if (o) F(o)->energy_credits += -amount;
+        game_console_update_data(game_console, 1);
+    }
+}
+static void wcede_base(int base, int f, int wait) {
+    if (*game_net_multiplayer) post_w(wait, 0x68d528, base, f, 0, 0x449, base, f, 0, 0);
+    else give_a_base(base, f);
+}
+static void net_withdrawal(int f, int o) {
+    if (*game_net_multiplayer) post_w(1, 0x68d514, f, o, 0, 0x44a, f, o, 0, 0);
+    else game_do_withdrawal(f, o);
+}
+// The first part of a demand for a tech: the techs asked and offered (mode 0 adds the pact and the second tech).
+static void demand_say(int A, int B, int mode) {
+    bclear();
+    say_tech(game_str_buffer, *game_trade_want_tech[0], 1);
+    game_parse_says(0, game_str_buffer, -1, -1);
+    say_title(1, A), say_name(2, A), say_title(3, B), say_name(4, B);
+    if (mode == 0) {
+        game_parse_says(5, game_get_pact(B), -1, -1);
+        if (*game_trade_want_tech[1] >= 0) {
+            bclear();
+            say_tech(game_str_buffer, *game_trade_want_tech[1], 1);
+            game_parse_says(6, game_str_buffer, -1, -1);
+        }
+    }
+}
+static void wset_agenda(int f, int o, uint32_t bits, int on, int wait) {
+    if (*game_net_multiplayer) post_w(wait, 0x68d4a8, f, o, (int)bits, 0x446, f, o, (int)bits, on);
+    else game_set_agenda(f, o, bits, on);
+}
+static void communicate_body(uint8_t *pop, int A, int B, int unk) {
+    struct faction_data *fa = F(A), *fb = F(B);
+    int state, r;
+    int v14 = 0, v1c = 0, v20 = 0, v34 = 0, v38 = 0, v3c = 0, v48 = 0, v54 = 0, v44, v50;
+    int base28 = 0, amount = 0, tech = 0, help = 0, choice = 0, ans = 0, price = 0, half = 0;
+    char suffix[16], num[16];
+    (void)choice, (void)ans, (void)price, (void)half, (void)help, (void)choice, (void)ans, (void)price, (void)half, (void)help, (void)choice, (void)ans, (void)price, (void)half, (void)help, (void)choice, (void)ans, (void)price, (void)half, (void)help, (void)choice, (void)ans, (void)price, (void)half, (void)help, (void)choice, (void)ans, (void)price, (void)half, (void)help, (void)v1c, (void)v3c, (void)v48, (void)v54, (void)v50, (void)v14, (void)v34, (void)tech, (void)r, (void)amount;
+    suffix[0] = 0;
+    *game_diplo_second = B;
+    GI(0x93fab4) = 1;
+    *game_diplo_accepted_faction = 0;
+    v44 = !(fb->diplo_status[A] & TREATY_UNK_8000000) || (*game_net_multiplayer && (game_diplo_state[B] & 2));
+    *game_diplo_trade_offered = 0;
+    v50 = (fa->diplo_status[B] & TREATY_TRUCE_) && !(fa->diplo_status[B] & 0x10000);
+    *game_diplo_caption_mode = unk ? 3 : 0;
+    if (v44) {
+        // The AI's social ideals against the player's models: friction.
+        struct faction_def *d = &game_faction_defs[B];
+        if (d->ideology_category >= 0 && d->ideology_model != 0) {
+            int cur = fa->se_models_pending[d->ideology_category];
+            if (cur != 0 && cur != d->ideology_model) {
+                fb->diplo_friction[A] = game_range(fb->diplo_friction[A] + 3, 0, 20);
+                if (*game_diplo_friction_faction == B && *game_diplo_friction_with == A) *game_diplo_friction += 3;
+            }
+        }
+        if (d->ideology_effect >= 0 && fa->se_pending[d->ideology_effect] < 0) {
+            fb->diplo_friction[A] = game_range(fb->diplo_friction[A] + 3, 0, 20);
+            if (*game_diplo_friction_faction == B && *game_diplo_friction_with == A) *game_diplo_friction += 3;
+        }
+    }
+    diplomacy_check(A, B, 1);
+    state = game_diplo_state[B];
+    game_diplo_state[B] = 0;
+    if (!(state & 0x2c)) goto L550a8b;
+    if (state & 0x24) *game_diplo_caption_mode = 8;
+    if (!wants_to_speak(A, B)) goto L5587c8;
+    if (state & 4) {
+        // First contact: the AI tells the player to get out, or whatever
+        // it makes of the landing.
+        game_territory(B, A, 0, &base28, 0);
+        game_diplomacy_caption(A, B);
+        {
+            struct base *bs = &game_bases[base28];
+            if (bs->faction != A && !(bs->visibility & (1u << A))) {
+                spot_base(base28, A);
+                game_draw_tile(bs->x, bs->y, 2);
+                game_console_focus(game_console, bs->x, bs->y, A);
+            }
+            game_parse_says(0, bs->name, -1, -1);
+        }
+        say_title(1, B), say_name(2, B), say_title(3, A), say_name(4, A);
+        game_parse_says(5, insult_adjective(A), -1, -1);
+        game_parse_says(6, game_faction_defs[B].adjective, -1, -1);
+        r = answer(label_n(0x68df5c, game_random(0, 5) + 1), B);  // GETOUT
+        if (r == 0) {
+            lock();
+            net_withdrawal(B, A);
+            unlock();
+            goto L550a82;
+        }
+        if (r == 1) {
+            int hostile = 0;
+            if (*game_diplo_hostility && ((fb->diplo_status[A] & TREATY_UNK_800) || !*game_diplo_fear)) {
+                if ((fb->diplo_status[A] & TREATY_WANT_REVENGE) ||
+                    (*game_diplo_friction >= 3 * (5 - fb->ai_fight) && fb->mil_strength > fa->mil_strength))
+                    hostile = 1;
+            }
+            if (hostile) {
+                v38 = 1;
+                goto L550522;
+            }
+            lock();
+            net_withdrawal(B, A);
+            net_withdrawal(A, B);
+            unlock();
+            answer(text(0x68df64), B);  // BOTHOUT
+            goto L550a82;
+        }
+        fb->diplo_friction[A] = game_range(fb->diplo_friction[A] + 10, 0, 20);
+        if (*game_diplo_friction_faction == B && *game_diplo_friction_with == A) *game_diplo_friction += 10;
+        lock();
+        net_double_cross(A, B, -1);
+        unlock();
+        say_title(0, A), say_name(1, A);
+        say_insult(2, A);
+        game_parse_says(3, insult_adjective(A), -1, -1);
+        answer(label_n(0x68df6c, game_random(0, 3)), B);  // OUTRAGE
+        goto L5587c8;
+    }
+    if (state & 8) {
+        // The AI has landed in the player's territory: the player may keep
+        // its treaty with the AI's landing.
+        game_territory(B, A, 0, &base28, 0);
+        if (state & 0x10) wset_treaty(A, B, TREATY_SHALL_BETRAY, 1, 1);
+        {
+            struct base *bs = &game_bases[base28];
+            if (bs->faction != A && !(bs->visibility & (1u << A))) {
+                spot_base(base28, A);
+                game_draw_tile(bs->x, bs->y, 2);
+            }
+            game_console_focus(game_console, bs->x, bs->y, A);
+            game_parse_says(0, bs->name, -1, -1);
+        }
+        answer(label_n(0x68df74, game_random(0, 2)), B);  // GOAWAY
+        goto L550a82;
+    }
+    if (state & 0x20) {
+        game_territory(B, A, 0, &base28, 0);
+        if (base28 >= 0) {
+            struct base *bs = &game_bases[base28];
+            if (bs->faction != B && !(bs->visibility & (1u << B))) {
+                spot_base(base28, B);
+                game_draw_map(1);
+            }
+        }
+        game_parse_says(0, game_bases[base28].name, -1, -1);
+        game_parse_says(1, game_faction_defs[B].adjective, -1, -1);
+        answer(text(0x68df7c), B);  // INOURTERRITORY2
+    }
+L550a82:
+    if (!(state & 3)) goto L5587c8;
+L550a8b:
+    if (!unk) {
+        // The AI called: it has been waiting, its patience and the troubles
+        // with its last talk are cleared.
+        fb->diplo_patience[A] = 0;
+        fa->diplo_spoke[B] = *game_turn;
+        wtreaty_off(B, A, 0x4000000, 1);
+        wagenda_off(B, A, 0x100, 1);
+        if (!(fb->diplo_status[A] & 0x10000) && state < 4) wtreaty_off(B, A, 4, 1);
+        goto L550e18;
+    }
+    if (fa->diplo_status[B] & TREATY_WANT_TO_TALK) {
+        fb->diplo_patience[A] = 0;
+        wtreaty_off(B, A, 0x100, 1);
+    }
+    say_title(2, A), say_name(3, A);
+    if (!v44) {
+        uint32_t st = fb->diplo_status[A];
+        int thr;
+        if (st & TREATY_VENDETTA) thr = 1;
+        else if (st & TREATY_PACT) thr = ((st & TREATY_SURRENDERED_) ? 0x1ee : 0) + 6;
+        else thr = ((st >> 1) & 1) - (*game_diplo_friction + 3) / 8 + 3;
+        if (fb->diplo_patience[A] >= thr || (st & 0x140)) {
+            if (!*game_diplo_caption_off) game_diplomacy_caption(A, B);
+            if (fa->diplo_status[B] & 3) {
+                say_title(0, B), say_name(1, B);
+                answer(text(0x68df8c), B);  // NOPATIENCEFRIEND
+            } else {
+                say_noun(0, B);
+                answer(text(0x68dfa0), B);  // NOPATIENCE
+            }
+            goto L5587c8;
+        }
+    }
+    wants_to_speak(A, B);
+L550e18:
+    if (fb->diplo_status[A] & TREATY_ATROCITY_VICTIM) {
+        *game_diplo_hostility = 1;
+        *game_diplo_tribute = -1;
+        goto L550522;
+    }
+    if (fb->diplo_status[A] & TREATY_PACT) {
+        if (fb->diplo_status[A] & TREATY_SURRENDERED_) {
+            tech_trade(A, B, 1, 4, 4);
+            goto L5571e7;
+        }
+        if (*game_diplo_near_endgame && *game_diplo_rival_outranks) *game_diplo_help_faction = 0;
+    } else if (*game_diplo_fear && !*game_diplo_hostility && !unk && !(state & 0x40) &&
+               (fb->diplo_status[A] & 7)) {
+        tech_trade(A, B, 1, 4, 4);
+        goto L5587c8;
+    }
+    tech_analysis(A, B);
+    if (!(state & 0x40)) goto L55178f;
+    help = *game_diplo_help_faction;
+    if (!help || !wants_to_speak(A, B)) goto L55362d;
+    // The AI asks the player for help against `help`'s faction, offering
+    // energy (up to a half of its reserves, in 25s) or a tech.
+    if (F(help)->mil_strength >= 2 * fb->mil_strength && fb->energy_credits >= 10) {
+        int e = fb->energy_credits;
+        amount = (e / 2) / 25 * 25;
+        if (amount < 25) amount = e >= 25 ? 25 : e;
+        game_parse_num(0, amount);
+        say_title(0, help), say_name(1, help), say_noun(2, help);
+        game_parse_says(3, game_get_pact_hood(A, B), -1, -1);
+        game_parse_says(5, game_get_pact_hood(A, help), -1, -1);
+        game_parse_says(6, game_get_his_her(help, 0), -1, -1);
+        game_parse_says(8, (char *)&game_faction_defs[help] + 0xe4, -1, -1);
+        game_parse_says(9, game_get_phrase(help, 2), -1, -1);
+        bclear();
+        bsays("PLEA");
+        if (fa->diplo_status[help] & TREATY_PACT) bsays("PACT");
+        if (*game_trade_offer_tech[0] >= 0) {
+            bsays("TECH");
+            game_parse_say(4, (int)(intptr_t)game_tech[*game_trade_offer_tech[0]].name, -1, -1);
+        }
+        r = answer(game_str_buffer, B);
+        if (!r) goto L551336;
+        lock();
+        game_pact_of_brotherhood(A, B);
+        wtreaty_off(A, B, 0x60, 0);
+        wdouble_cross(A, help, B, 0);
+        if (*game_trade_offer_tech[0] >= 0) {
+            tech = *game_trade_offer_tech[0];
+            net_tech_nowait(A, tech, B);
+            *game_trade_offer_tech[0] = -1;
+        }
+        net_energy(B, -amount, A);
+        v14 = 1;
+        unlock();
+        *game_diplo_accepted_faction = *game_diplo_help_faction;
+        goto L5516c7;
+    }
+    say_title(0, help), say_name(1, help), say_noun(2, help);
+    game_parse_says(3, game_get_him_her(help, 0), -1, -1);
+    game_parse_says(4, game_get_pact_hood(A, B), -1, -1);
+    say_title(5, A);
+    game_parse_says(6, game_get_pact(help), -1, -1);
+    bclear();
+    bsays("PROPOSE");
+    if (fa->diplo_status[help] & TREATY_PACT) {
+        bsays("PACT");
+        say_title(8, B);
+    } else {
+        game_parse_says(8, (char *)&game_faction_defs[help] + 0x1e4, -1, -1);
+    }
+    game_parse_says(9, game_get_phrase(help, fa->diplo_status[help] & TREATY_PACT ? 2 : 5), -1, -1);
+    r = answer(game_str_buffer, B);
+    if (r) {
+        lock();
+        game_pact_of_brotherhood(A, B);
+        wtreaty_off(A, B, 0x60, 0);
+        wdouble_cross(A, help = *game_diplo_help_faction, B, 1);
+        unlock();
+        *game_diplo_accepted_faction = *game_diplo_help_faction;
+L5516c7:
+        v20 = 1;
+        *game_diplo_help_faction = 0, *game_diplo_fear = 0, *game_diplo_tribute = 0, *game_diplo_prev_hostility = 0,
+        *game_diplo_hostility = 0, *game_diplo_enemy_allies = 0;
+        v34 = 1;
+        goto L55362d;
+    }
+L551336:
+    wtreaty_on(A, B, 0x800000, 0);
+    wtreaty_off(A, B, 0x1000000, 0);
+    *game_diplo_enemy_ally = *game_diplo_help_faction;
+    goto L55362d;
+L55178f:
+    // The AI wants the player's help against `help`'s faction.
+    if (fb->diplo_agenda[A] & 0x2408) goto L55362d;
+    if (fb->diplo_status[A] & TREATY_UNK_40) goto L55362d;
+    if (*game_diplo_attack_chance && !v44) goto L55362d;
+    help = *game_diplo_help_faction;
+    if (!help) goto L551ebe;
+    if (fa->diplo_status[help] & TREATY_UNK_80) goto L551ebe;
+    if (!*game_diplo_hostility && *game_diplo_conquest_fear) goto L551ecb;
+    if (!*game_diplo_fear || *game_diplo_alter_fear > 0) goto L551884;
+    if (*game_diplo_hostility && !*game_diplo_can_betray) goto L551884;
+    if (fa->ranking >= 6 && fb->ranking <= 4 && !*game_diplo_player_pacts && !*game_diplo_rival_strong_pacts)
+        goto L551884;
+    if (great_satan(help, 0)) goto L551884;
+    if (!(fb->diplo_status[A] & TREATY_PACT)) goto L551ebe;
+L551884:
+    if (!wants_to_speak(A, B)) goto L551ebe;
+    game_parse_says(0, game_get_pact(help), -1, -1);
+    say_title(1, help), say_name(2, help), say_noun(3, help);
+    game_parse_says(4, game_get_his_her(help, 0), -1, -1);
+    game_parse_says(5, game_get_him_her(help, 0), -1, -1);
+    game_parse_says(6, game_faction_defs[help].adjective, -1, -1);
+    {
+        int digit = 4;
+        suffix[0] = 0;
+        if ((fa->diplo_status[B] & TREATY_PACT) &&
+            ((fa->diplo_status[B] & TREATY_WANT_TO_TALK) || !(fa->diplo_status[help] & TREATY_COMMLINK))) {
+            digit = 3;
+        } else if (fa->diplo_status[help] & TREATY_PACT) {
+            game_parse_says(9, game_get_phrase(help, 5), -1, -1);
+            digit = 0;
+        } else if (fa->diplo_status[help] & TREATY_TREATY) {
+            game_parse_says(6, game_get_noun_phrase(help, 8), -1, -1);
+            game_parse_says(9, game_get_phrase(help, 5), -1, -1);
+            game_parse_says(8, game_get_phrase(help, 2), -1, -1);
+            strcat(suffix, game_random(0, 2) == 0 && !(fa->diplo_status[B] & TREATY_WANT_REVENGE) ? "b" : "a");
+            digit = 1;
+        } else if ((fa->diplo_status[help] & TREATY_TRUCE_) && !(fa->diplo_status[help] & 0x10000)) {
+            if (game_random(0, 2)) {
+                strcat(suffix, "a");
+                game_parse_says(8, (char *)&game_faction_defs[help] + 0xe4, -1, -1);
+                game_parse_says(9, (char *)&game_faction_defs[help] + 0x1e4, -1, -1);
+            } else {
+                strcat(suffix, "b");
+                game_parse_says(8, game_get_noun_phrase(B, 9), -1, -1);
+                game_parse_says(9, game_get_phrase(help, 2), -1, -1);
+            }
+            digit = 2;
+        }
+        bclear();
+        bsays("DEMANDATTACK");
+        snprintf(num, sizeof(num), "%d", digit);
+        bsays(num);
+        bsays(suffix);
+    }
+    r = answer(game_str_buffer, B);
+    if (r) {
+        lock();
+        wtreaty_on(A, B, 0x1000000, 0);
+        wtreaty_off(A, B, 0x800000, 0);
+        wdouble_cross(A, help, B, 1);
+        unlock();
+        *game_diplo_accepted_faction = *game_diplo_help_faction;
+        *game_diplo_help_faction = 0;
+        v20 = 1;
+        *game_diplo_enemy_allies = 0;
+        game_diplomacy_caption(A, B);
+        goto L553464;
+    }
+    if (fb->diplo_status[A] & TREATY_PACT) {
+        v38 = 1;
+        if (fb->diplo_status[A] & TREATY_WANT_TO_TALK) *game_diplo_hostility = 1;
+        fb->diplo_friction[A] = game_range(fb->diplo_friction[A] + 4, 0, 20);
+        if (*game_diplo_friction_faction == B && *game_diplo_friction_with == A) *game_diplo_friction += 4;
+    } else if (*game_diplo_enemy_allies && *game_diplo_friction >= 10 && !*game_diplo_fear &&
+               fb->mil_strength > fa->mil_strength) {
+        *game_diplo_hostility = 1;
+    }
+    wtreaty_on(A, B, 0x800000, 0);
+    wtreaty_off(A, B, 0x1000000, 0);
+    *game_diplo_enemy_ally = *game_diplo_help_faction;
+    game_diplomacy_caption(A, B);
+    goto L553464;
+L551ebe:
+    if (*game_diplo_hostility) goto L553464;
+L551ecb:
+    if (*game_diplo_can_betray) goto L553464;
+    // An enemy of the AI that the player has not met: the AI introduces it.
+    {
+        int u = *game_diplo_unmet_enemy;
+        if (!u) goto L5524ea;
+        if (fa->diplo_status[u] & (TREATY_UNK_8000000 | TREATY_COMMLINK)) goto L5524ea;
+        if (game_is_human(u)) {
+            if (*game_net_multiplayer && GI(0x949838)) goto L5524ea;
+            if (*game_pbem && GI(0x94983c)) goto L5524ea;
+        }
+        if (fa->diplo_status[B] & 0x31) goto L5524ea;
+        if (great_satan(A, 0)) goto L5524ea;
+        if (fa->ranking > 5 && fb->ranking > 4) goto L5524ea;
+        if (great_satan(u, 0) + (F(u)->ranking > fa->ranking) + (*game_diplo_player_pacts == 0) +
+                (*game_net_multiplayer == 0) < 2)
+            goto L5524ea;
+        if ((game_faction_defs[A].rule_flags & 0x80) || (game_faction_defs[B].rule_flags & 0x80)) goto L5524ea;
+        if (!wants_to_speak(A, B)) goto L5524ea;
+        say_title(0, u), say_name(1, u), say_noun(2, u);
+        game_parse_says(3, game_get_phrase(u, 5), -1, -1);
+        game_parse_says(4, game_get_pact_hood(A, B), -1, -1);
+        // (The original tests the help faction's flag here, not the
+        // unmet enemy's.)
+        r = answer(text(game_faction_defs[*game_diplo_help_faction].rule_flags & 0x80 ? 0x68dff4 : 0x68e008), B);
+        if (!r) goto L553464;
+        lock();
+        wset_treaty(A, u, 0x10000000, 1, 0);
+        game_pact_of_brotherhood(A, B);
+        wtreaty_on(A, B, 0x1000000, 0);
+        wtreaty_off(A, B, 0x800000, 0);
+        wdouble_cross(A, u, B, 1);
+        wtreaty_on(A, u, 0x8000008, 0);
+        unlock();
+        *game_diplo_accepted_faction = u;
+        *game_diplo_unmet_enemy = 0;
+    }
+L552331:
+    *game_diplo_help_faction = 0;
+    v20 = 1;
+    *game_diplo_enemy_allies = 0;
+    v34 = 1;
+    goto L553464;
+L5524ea:
+    // The AI proposes the player turn on a friend (the unmet faction,
+    // then the mutual one), both of which it would attack.
+    for (int pass = 0; pass < 2; pass++) {
+        int32_t *pm = pass ? game_diplo_mutual_faction : game_diplo_unmet_faction;
+        int m = *pm;
+        if (!m) continue;
+        if (fa->diplo_status[B] & 0x31) continue;
+        if (game_has_treaty(A, m, TREATY_VENDETTA)) continue;
+        if (*game_diplo_player_pacts >= 2 && !great_satan(m, 0) && !game_is_human(m)) continue;
+        if (!wants_to_attack(B, m, A)) continue;
+        if (fa->ranking > 5 && fb->ranking > 4 && !great_satan(m, 0)) continue;
+        if (!game_contiguous(A, m, 0, 0) && game_contiguous(B, m, 0, 0)) continue;
+        if (!wants_to_speak(A, B)) continue;
+        say_name(0, A), say_title(1, m), say_name(2, m);
+        game_parse_says(3, (char *)&game_faction_defs[m] + 0x1e4, -1, -1);
+        game_parse_says(4, game_get_phrase(m, 2), -1, -1);
+        game_parse_says(5, game_get_pact_hood(A, B), -1, -1);
+        say_noun(6, m);
+        r = answer(text(pass ? 0x68e028 : 0x68e018), B);  // BETRAYFRIEND
+        if (!r) goto L553464;
+        if (pass == 0) wset_treaty(A, m, 0x10000000, 1, 0);
+        lock();
+        if (pass) wset_treaty(A, m, 0x10000000, 1, 0);
+        game_pact_of_brotherhood(A, B);
+        wtreaty_on(A, B, 0x1000000, 0);
+        wtreaty_off(A, B, 0x800000, 0);
+        wdouble_cross(A, m, B, 1);
+        wtreaty_on(A, m, 0x8000008, 0);
+        unlock();
+        *game_diplo_accepted_faction = m;
+        *pm = 0;
+        goto L552331;
+    }
+    // The player is asked for maps for an enemy's.
+    {
+        int pe = *game_diplo_player_enemy;
+        uint32_t bit = 1u << (pe & 31);
+        int thr;
+        if (!pe) goto L552c98;
+        if (fa->diplo_status[B] & 0x31) goto L552c98;
+        if (game_has_treaty(A, pe, 0x10000001)) goto L552c98;
+        if (fa->maps_traded & bit) goto L552c98;
+        if (game_is_human(pe) && !(fb->maps_traded & bit)) goto L552c98;
+        thr = *game_turn < 50 ? 25 : 50;
+        if (*game_trade_want_tech[0] < 0 || (*game_rules & RULES_SCN_NO_TECH_TRADING)) {
+            if (fa->energy_credits < thr) goto L552c98;
+        }
+        if (!wants_to_speak(A, B)) goto L552c98;
+        say_title(0, A), say_name(1, A), say_title(2, pe), say_name(3, pe);
+        game_parse_says(4, game_faction_defs[pe].adjective, -1, -1);
+        bclear();
+        say_tech(game_str_buffer, *game_trade_want_tech[0], 1);
+        game_parse_says(5, game_str_buffer, -1, -1);
+        game_parse_num(0, thr);
+        bclear();
+        bsays("ENEMYMAP");
+        bsays(fa->energy_credits < thr ? "2" : "1");
+        wset_treaty(A, pe, 0x10000000, 1, 0);
+        r = answer(game_str_buffer, B);
+        if (!r) goto L553464;
+        wtreaty_on(A, B, 0x1000000, 0);
+        wtech(B, 9999, pe, 1);
+        wtech(A, 9999, pe, 1);
+        if (fa->energy_credits >= thr) net_energy(A, -thr, B);
+        else wtech(B, *game_trade_want_tech[0], A, 1);
+        *game_diplo_trade_offered = 1;
+        *game_trade_want_tech[0] = *game_trade_want_tech[1];
+        *game_trade_want_tech[1] = -1;
+        v20 = 1;
+        *game_diplo_player_enemy = 0;
+        goto L553464;
+    }
+L552c98:
+    // The AI sells a commlink with the unmet faction, for energy or for a
+    // tech.
+    {
+        int m = *game_diplo_unmet_faction;
+        if (!m) goto L55304a;
+        if (fa->diplo_status[B] & 0x30) goto L55304a;
+        if (has_project(4, B)) goto L55304a;
+        if (game_has_treaty(A, m, TREATY_COMMLINK)) goto L55304a;
+        if (game_is_human(m) && game_auto_contact()) goto L55304a;
+        if (!wants_to_speak(A, B)) goto L55304a;
+        {
+            int how = 0, best = -1, bestv = 0, t, price, e;
+            say_title(2, m), say_name(3, m), say_noun(4, m);
+            game_parse_says(5, game_get_noun_phrase(m, 9), -1, -1);
+            for (t = 0; t < 0x59; t++) {
+                if (has_tech(t, m) && !has_tech(t, A) && !has_tech(t, B)) {
+                    int v = tech_val(t, A, 1);
+                    if (v > bestv) bestv = v, best = t;
+                }
+            }
+            price = 10 * (*game_turn / 25 + 1);
+            if (fa->ranking < 5) price /= 2;
+            if (fa->ranking == 7) price += price / 2;
+            e = fa->energy_credits;
+            if (e >= price) {
+                how = 2;
+                price += 5 * game_random(0, *game_turn / 10 + 2);
+                if (price > e) price -= 5 * ((unsigned)(price - e + 4) / 5);
+                game_parse_num(0, price);
+                if (price <= 0) how = 0;
+            }
+            if (how <= 0 || price <= 0) {
+                if (*game_trade_want_tech[0] >= 0 && *game_turn > 25 && !(*game_rules & RULES_SCN_NO_TECH_TRADING)) {
+                    how = 1;
+                    bclear();
+                    say_tech(game_str_buffer, *game_trade_want_tech[0], 1);
+                    game_parse_says(6, game_str_buffer, -1, -1);
+                }
+            }
+            if (best >= 0) game_parse_say(8, (int)(intptr_t)game_tech[best].name, -1, -1);
+            bclear();
+            bsays((game_faction_defs[m].rule_flags & 0x80) ? "METALIEN" : "METFRIEND");
+            bnum(how);
+            if (best >= 0) bsays("a");
+            r = answer(game_str_buffer, B);
+            if (!r) goto L553464;
+            wtreaty_on(A, m, 8, 0);
+            wtreaty_on(A, B, 0x1000000, 0);
+            if (how == 1) {
+                cause_friction(B, A, -1);
+                wtech(B, *game_trade_want_tech[0], A, 1);
+                *game_trade_want_tech[0] = -1;
+            } else if (how == 2) {
+                cause_friction(B, A, -1);
+                net_energy(A, -price, B);
+            }
+            goto L553464;
+        }
+    }
+L55304a:
+    // The AI sells the player's map to a faction both have a treaty with.
+    {
+        int mm = *game_diplo_mutual_faction;
+        uint32_t bit = 1u << (mm & 31);
+        if (!mm) goto L55326c;
+        if (fa->diplo_status[B] & 0x30) goto L55326c;
+        if (game_has_treaty(A, mm, 0x10000001)) goto L55326c;
+        if (fa->maps_traded & bit) goto L55326c;
+        if (game_is_human(mm) && !(fb->maps_traded & bit)) goto L55326c;
+        if (!game_has_treaty(A, mm, TREATY_UNK_8000000)) goto L55326c;
+        if (*game_trade_want_tech[0] < 0) goto L55326c;
+        if (!wants_to_speak(A, B)) goto L55326c;
+        game_net_maps(B, mm, 1);
+        say_title(2, mm), say_name(3, mm);
+        game_parse_says(4, (char *)&game_faction_defs[mm] + 0x1e4, -1, -1);
+        game_parse_says(5, game_faction_defs[mm].adjective, -1, -1);
+        bclear();
+        say_tech(game_str_buffer, *game_trade_want_tech[0], 1);
+        game_parse_says(6, game_str_buffer, -1, -1);
+        wset_treaty(A, mm, 0x10000000, 1, 0);
+        r = answer(text((game_faction_defs[mm].rule_flags & 0x80) ? 0x68e068 : 0x68e078), B);  // BOTHFRIEND(ALIEN)
+        if (!r) goto L553464;
+        wtreaty_on(A, B, 0x1000000, 0);
+        game_net_maps(A, B, 1);
+        wtech(B, *game_trade_want_tech[0], A, 1);
+        *game_diplo_trade_offered = 1;
+        *game_trade_want_tech[0] = *game_trade_want_tech[1];
+        *game_trade_want_tech[1] = -1;
+        v20 = 1;
+        *game_diplo_player_enemy = 0;
+        goto L553464;
+    }
+L55326c:
+    // News the AI sells: an enemy the player has a commlink with.
+    if (fa->diplo_status[B] & 0x30) goto L553464;
+    if (has_project(4, B)) goto L553464;
+    if (fb->energy_credits < 10 * (*game_turn / 25 + 1)) goto L553464;
+    {
+        int f;
+        for (f = 1; f < FACTION_COUNT; f++) {
+            if (!(*game_factions_alive & (1u << f)) || f == A || f == B) continue;
+            if (!game_has_treaty(A, f, TREATY_COMMLINK)) continue;
+            if (game_has_treaty(B, f, TREATY_COMMLINK)) continue;
+            if (game_has_treaty(B, f, 0x10000000)) continue;
+            if (wants_to_attack(f, B, 0)) continue;
+            if (!wants_to_attack(B, f, 0)) break;
+        }
+        if (f >= FACTION_COUNT) goto L553464;
+        if (!wants_to_speak(A, B)) goto L553464;
+        say_title(0, f), say_name(1, f);
+        game_parse_says(2, game_faction_defs[f].adjective, -1, -1);
+        amount = 10 * (*game_turn / 25 + 1);
+        game_parse_num(0, amount);
+        r = answer(text((game_faction_defs[f].rule_flags & 0x80) ? 0x68e084 : 0x68e094), B);  // ANYALIENNEWS, ANYNEWS
+        if (!r) goto L553464;
+        wset_treaty(B, f, 0x10000000, 1, 0);
+        wtreaty_on(B, f, 8, 0);
+        net_energy(B, -amount, A);
+        v14 = 1;
+        cause_friction(B, A, -2);
+    }
+L553464:
+    // The AI that has the player at its mercy demands the player's gains
+    // back: ransom for a base, then a tribute, then a tech.
+    if (game_has_treaty(B, A, 3) || *game_diplo_fear || game_has_treaty(A, B, TREATY_SURRENDERED_) ||
+        *game_diplo_tribute <= 0 || !*game_diplo_hostility || *game_diplo_can_betray || *game_net_multiplayer || v20 ||
+        fb->mil_strength <= fa->mil_strength)
+        goto L55362d;
+    {
+        int bi = -1, best = 999;
+        for (int i = 0; i < *game_base_count; i++) {
+            struct base *bs = &game_bases[i];
+            if (bs->faction == A && bs->faction_former == B && bs->pop_size < best) best = bs->pop_size, bi = i;
+        }
+        if (bi < 0 || !wants_to_speak(A, B)) goto L55362d;
+        base28 = bi;
+        say_title(0, A), say_name(1, A);
+        game_parse_says(2, game_bases[bi].name, -1, -1);
+        r = answer(text(0x68e09c), B);  // RANSOMDEMAND
+        if (!r) {
+            v38 = 1;
+            goto L55362d;
+        }
+        v20 = 1;
+        wcede_base(bi, B, 1);
+        wset_treaty(A, B, TREATY_SURRENDERED_, 0, 0);
+        wtreaty_off(B, A, TREATY_WANT_REVENGE, 1);
+        game_diplomacy_caption(A, B);
+    }
+L55362d:
+    if (!(*game_rules & RULES_SCN_NO_TECH_TRADING)) tech_trade(A, B, 1, 4, 4);
+    // The AI may demand a tribute (energy), when the player is far ahead.
+    if (!great_satan(A, 0) && !(fa->ranking >= 6 && fb->ranking <= 4 && !*game_diplo_runaway_leader)) goto L55373a;
+    if (*game_diplo_hostility || *game_diplo_can_betray || game_has_agenda(A, B, 0x2000)) goto L55373a;
+    if (game_has_treaty(A, B, TREATY_PACT) && ((*game_rules & 0x1000) || *game_diplo_rival_wars)) goto L55373a;
+    v1c = 1;
+    if (*game_diplo_tribute || fa->energy_credits < 125) goto L55373a;
+    *game_diplo_tribute = round_down(fa->energy_credits / 5, 25);
+L55373a:
+    if (unk) {
+        if (!game_has_treaty(B, A, TREATY_VENDETTA)) {
+            *game_diplo_tribute = 0;
+            *game_diplo_hostility = 0;
+            goto L553d24;
+        }
+    } else if (game_has_treaty(A, B, TREATY_PACT) && !v20 && !game_has_agenda(A, B, 0x2000) &&
+               !(*game_rules & 0x1000) && !*game_diplo_rival_wars) {
+        if ((*game_diplo_near_endgame && *game_diplo_rival_outranks) || *game_diplo_reputation > 4 ||
+            *game_diplo_friction > 8)
+            v1c = 1;
+    }
+    if (*game_diplo_tribute <= 0 || fa->energy_credits < *game_diplo_tribute || v20) goto L553d24;
+    if (*game_diplo_exposed_bases || *game_diplo_attack_chance) {
+        if (*game_trade_want_tech[1] >= 0) goto L553d24;
+    }
+    if (game_has_agenda(B, A, 0x2008)) goto L553d24;
+    if (!*game_diplo_hostility && *game_diplo_conquest_fear) goto L553d24;
+    if (game_has_treaty(A, B, TREATY_PACT) && *game_trade_want_tech[0] >= 0) {
+        if (!*game_diplo_hostility) goto L553d24;
+    } else if (!*game_diplo_hostility) {
+        goto L553886;
+    }
+    if (!*game_diplo_can_betray) goto L5538ad;
+L553886:
+    if (v38) goto L5538ad;
+    if (!v1c || fa->energy_credits < 125 || *game_trade_want_tech[0] >= 0) goto L553d24;
+L5538ad:
+    if (!wants_to_speak(A, B)) goto L553d24;
+    if (!game_has_treaty(B, A, TREATY_VENDETTA | TREATY_PACT)) mention_prototypes(A, B);
+    say_title(0, A), say_name(1, A), say_title(2, B), say_name(3, B);
+    game_parse_says(4, game_faction_defs[B].adjective, -1, -1);
+    game_parse_says(5, game_get_pact(A), -1, -1);
+    say_noun(6, B);
+    game_parse_num(0, *game_diplo_tribute);
+    half = 10 * (*game_diplo_tribute / 20);
+    if (!half) half = 1;
+    game_parse_num(1, half);
+    bclear();
+    bsays(text(0x68e0ac));  // DEMANDBRIBE
+    v14 = 1;
+    choice = game_random(0, 4);
+    if (v1c) choice = 8;
+    if (game_has_treaty(B, A, TREATY_WANT_REVENGE) &&
+        (*game_diplo_fear || fb->mil_strength < fa->mil_strength))
+        choice = 9;
+    if (great_satan(A, 0) && fa->mil_strength > fb->mil_strength * 4 / 3 && *game_diplo_prev_hostility == 2)
+        choice = 7;
+    if (game_has_treaty(B, A, TREATY_PACT)) choice = 6;
+    if (game_has_treaty(B, A, TREATY_VENDETTA)) choice = unk ? 4 : 5;
+    if (game_has_treaty(B, A, TREATY_UNK_40)) choice = 10;
+    if (!*game_diplo_hostility && !*game_diplo_prev_hostility) v48 = 1;
+    v3c = 1;
+    bnum(choice);
+    if (choice <= 6) {
+        switch (choice) {
+        case 0:
+            game_parse_says(5, (char *)&game_faction_defs[A] + 0x64, -1, -1);
+            say_insult(6, B);
+            game_parse_says(8, game_get_noun_phrase(B, 11), -1, -1);
+            game_parse_says(9, game_get_phrase(B, 12), -1, -1);
+            break;
+        case 1:
+            game_parse_says(8, game_get_noun_phrase(A, 9), -1, -1);
+            game_parse_says(9, game_get_phrase(B, 13), -1, -1);
+            break;
+        case 2:
+            game_parse_says(6, game_get_noun_phrase(B, 10), -1, -1);
+            game_parse_says(8, game_get_noun_phrase(A, game_has_treaty(B, A, TREATY_WANT_REVENGE) ? 8 : 9), -1, -1);
+            game_parse_says(9, game_get_phrase(B, 1), -1, -1);
+            break;
+        case 3: game_parse_says(9, game_get_phrase(B, 14), -1, -1); break;
+        case 4: break;
+        case 5:
+            if (!*game_diplo_fear && fb->diplo_combat_count[A] > fa->diplo_combat_count[B]) {
+                bsays("a");
+            } else if (game_has_treaty(B, A, TREATY_WANT_REVENGE)) {
+                bclear();
+                bsays(text(0x68e0b8));  // DEMANDBRIBE9
+            } else {
+                bsays("b");
+            }
+            break;
+        case 6: game_parse_says(9, game_get_noun_phrase(B, 9), -1, -1); break;
+        }
+    }
+    r = answer(game_str_buffer, B);
+    if (r == 2) {
+        if (choice == 6) {
+            if (game_random(0, 2) == 0) goto L553ee7;
+            if (*game_diplo_hostility || (*game_diplo_near_endgame && *game_diplo_rival_outranks) ||
+                *game_diplo_exposed_bases || *game_diplo_attack_chance)
+                answer(text(0x68e0d0), B);  // HALFBRIBE
+            else
+                goto L553ee7;
+            goto L553d0c;
+        }
+        {
+            int betray = 0;
+            if (great_satan(A, 0) ||
+                ((*game_diplo_near_endgame && *game_diplo_rival_outranks) || *game_diplo_exposed_bases ||
+                 *game_diplo_attack_chance || game_has_treaty(B, A, TREATY_WANT_REVENGE))) {
+                betray = game_has_treaty(B, A, TREATY_SHALL_BETRAY) ? 1 : game_random(0, 3);
+                if (game_random(0, 2) == 0) goto L553d0c;
+            }
+            if (*game_diplo_hostility && (betray != 0 || game_random(0, 2) == 0)) {
+                say_insult(6, B);
+                r = answer(text(0x68e0dc), B);  // WEASELOUT
+                if (!r) goto L553d0c;
+                goto L553eee;
+            }
+            game_parse_num(2, half);
+            answer(text(0x68e0e8), B);  // WEASELEDOUT
+            goto L553ee7;
+        }
+    }
+    if (!r) goto L553d0c;
+    goto L553eee;
+L553ee7:
+    *game_diplo_tribute = half;
+L553eee:
+    v20 = 1;
+    if (choice == 10 && fa->diplo_gifts[B]) fa->diplo_gifts[B]--;
+    amount = *game_diplo_tribute;
+    net_energy(A, -amount, B);
+    GI(0x7ad330) = 0;
+    game_console_update_data(game_console, 0);
+    game_diplomacy_caption(A, B);
+    wtreaty_on(B, A, 0x5000000, 0);
+    if (v50) wtreaty_on(B, A, 4, 1);
+    goto L553d24;
+L553d0c:
+    wtreaty_off(B, A, 0x1000000, 0);
+    v38 = 1;
+L553d24:
+    // The AI sizes up the player (hostile if its friction is high) and may
+    // demand a tech.
+    if (!v44) goto L553fc5;
+    if (v20) goto L553fc5;
+    if (*game_trade_want_tech[0] < 0 && !v38) goto L553fc5;
+    if (*game_diplo_can_betray || *game_diplo_fear) goto L553fc5;
+    if (!*game_diplo_prev_hostility) {
+        if (!*game_diplo_rival_strong_pacts && fb->ranking < 6) goto L553fc5;
+        if (fa->ranking < 6) goto L553fc5;
+        if (*game_diplo_runaway_leader) goto L553fc5;
+    }
+    {
+        int lvl = (*game_rules & 0x40) ? 5 : fa->diff_level;
+        if (*game_diplo_friction + 2 * fb->ai_fight <= (5 - lvl) / 2 + 10) goto L553fc5;
+        *game_diplo_hostility = 1;
+        goto L553fdd;
+    }
+L553fc5:
+    if (!*game_diplo_hostility || v20) goto L5540e7;
+L553fdd:
+    if (v38 || *game_diplo_fear) goto L5540e7;
+    if ((*game_diplo_exposed_bases || *game_diplo_attack_chance) && *game_trade_want_tech[1] >= 0) goto L5540e7;
+    if (*game_diplo_tribute <= fa->energy_credits) goto L5540e7;
+    if (!great_beelzebub(A, 0)) {
+        if (fa->ranking < 6) goto L5540e7;
+        if (!*game_diplo_rival_strong_pacts && fb->ranking < 6) goto L5540e7;
+    }
+    {
+        int k = (*game_rules & 0x40) ? 2 : 3;
+        if (!great_satan(A, 0)) k++;
+        int x = tech_val(*game_trade_want_tech[0], B, 1) * ((*game_turn + 7) / 8) * k;
+        if (*game_diplo_tribute > x / 2) {
+            *game_trade_want_tech[0] = -1;
+            goto L554a4c;
+        }
+    }
+L5540e7:
+    if (*game_trade_want_tech[0] < 0 || *game_trade_want_tech[0] == 9999 || v20 || v38 ||
+        (*game_rules & RULES_SCN_NO_TECH_TRADING))
+        goto L554a4c;
+    if (*game_diplo_attack_chance && *game_trade_want_tech[1] < 0) goto L554a4c;
+    if (*game_diplo_attack_chance >= 2 &&
+        *game_diplo_attack_chance + fb->tech_ranking / 2 >= fa->tech_ranking / 2)
+        goto L554a4c;
+    if (game_has_agenda(B, A, 0x2008)) goto L554a4c;
+    if (game_has_treaty(B, A, TREATY_UNK_40) && *game_trade_want_tech[1] < 0 && fb->ranking <= fa->ranking)
+        goto L554a4c;
+    if (!*game_diplo_hostility && *game_diplo_conquest_fear) goto L554a4c;
+    if ((*game_diplo_fear || game_has_treaty(B, A, TREATY_PACT)) && !v1c) goto L554a4c;
+    if (fb->tech_commerce_bonus > fa->tech_commerce_bonus && GI(0x9a6508) != A && !v1c &&
+        !game_has_treaty(B, A, TREATY_WANT_REVENGE)) {
+        if (game_has_treaty(B, A, TREATY_TREATY)) goto L554a4c;
+        if (v44) goto L554a4c;
+    }
+    if (!wants_to_speak(A, B)) goto L554a4c;
+    if (!game_has_treaty(B, A, TREATY_VENDETTA | TREATY_PACT)) mention_prototypes(A, B);
+L5542c8:
+    if (*game_trade_want_tech[1] >= 0 && !*game_diplo_exposed_bases && !*game_diplo_attack_chance &&
+        *game_diplo_trade_refused && !game_has_treaty(B, A, TREATY_UNK_40)) {
+        int t = *game_trade_want_tech[0];
+        *game_trade_want_tech[0] = *game_trade_want_tech[1];
+        *game_trade_want_tech[1] = t;
+    }
+    demand_say(A, B, 0);
+    bclear();
+    bsays(text(0x68e0f4));  // DEMANDTECH
+    choice = game_random(0, 3);
+    if (!*game_diplo_hostility) {
+        if (!*game_diplo_prev_hostility) v48 = 1;
+        choice = game_random(0, 3) + 9;
+        if (game_has_treaty(B, A, TREATY_WANT_REVENGE) && !v1c) choice = 8;
+    }
+    if (great_satan(A, 0) || v1c) choice = 7;
+    if (game_has_treaty(B, A, TREATY_VENDETTA)) choice = (fb->diplo_combat_count[A] <= fa->diplo_combat_count[B]) + 3;
+    if (game_has_treaty(B, A, TREATY_PACT)) choice = 5;
+    if (game_has_treaty(B, A, TREATY_UNK_40) && !game_has_treaty(B, A, TREATY_WANT_REVENGE)) {
+        if (!(fa->diplo_gifts[B] != 0 && fa->diplo_gifts[B] > fa->diplo_wrongs[B])) {
+            if (*game_trade_want_tech[2] >= 0) {
+                bclear();
+                say_tech(game_str_buffer, *game_trade_want_tech[2], 1);
+                game_parse_says(8, game_str_buffer, -1, -1);
+                choice = 14;
+            }
+            if (*game_trade_want_tech[3] >= 0) {
+                bclear();
+                say_tech(game_str_buffer, *game_trade_want_tech[3], 1);
+                game_parse_says(9, game_str_buffer, -1, -1);
+                choice = 15;
+                goto L55456c;
+            }
+        }
+        if (choice < 14) choice = (*game_trade_want_tech[1] < 0) + 12;
+    }
+L55456c:
+    bnum(choice);
+    {
+        static const uint8_t cases[11] = {0, 1, 2, 4, 4, 4, 4, 4, 4, 3, 3};
+        int menu_it = 0;
+        switch (choice <= 10 ? cases[choice] : 4) {
+        case 0: game_parse_says(9, game_get_noun_phrase(A, 8), -1, -1); break;
+        case 1: game_parse_says(9, game_get_phrase(A, 7), -1, -1); break;
+        case 2: game_parse_says(9, game_get_phrase(A, 6), -1, -1); break;
+        case 3:
+            game_parse_says(9, game_get_noun_phrase(B, 9), -1, -1);
+            menu_it = 1;
+            break;
+        default:
+            if (choice >= 9 && choice < 12) menu_it = 1;
+            break;
+        }
+        if (!menu_it) {
+            ans = answer(game_str_buffer, B);
+            goto L5545db_check;
+        }
+    }
+    // The player may bargain: a menu of what to offer.
+    {
+        int n = game_bit_count(game_tech_achieved[*game_trade_want_tech[0]]) + 1;
+        int val = tech_val(*game_trade_want_tech[0], A, 1);
+        price = round_down((val * ((*game_turn + 7) / 8)) / n + 24, 25);
+        game_parse_num(0, price);
+        pop_start_flags(pop, game_str_buffer, 0x100000, B);
+        bsays("A");
+        if (game_x_text_open(*game_script_file, game_str_buffer)) {
+            ans = 0;
+            goto L554813;
+        }
+        if (*game_trade_offer_tech[0] >= 0) {
+            bclear();
+            say_tech(game_str_buffer, *game_trade_offer_tech[0], 1);
+            game_parse_says(6, game_str_buffer, -1, -1);
+        }
+        item(pop, next_line(), 0);
+        item(pop, next_line(), 1);
+        next_line();
+        if (price > 0) item(pop, game_str_buffer, 2);
+        next_line();
+        if (*game_trade_offer_tech[0] >= 0) item(pop, game_str_buffer, 3);
+        item(pop, next_line(), 4);
+        ans = menu(pop);
+    }
+L5545db_check:
+    if (ans == 2 || ans == 4) {
+        game_help_topic(14, *game_trade_want_tech[0]);
+        goto L5542c8;
+    }
+L554813:
+    demand_say(A, B, 1);
+    if (ans == 2) {
+        if (fb->energy_credits / 2 >= price &&
+            tech_val(*game_trade_want_tech[0], B, 1) * ((*game_turn + 7) / 8) > price) {
+            answer(text(0x68e104), B);  // AGREEDENERGY
+            wenergy(B, -price, A, 0);
+            goto L554e74;
+        }
+        goto L554918;
+    }
+    if (ans == 3) {
+        if (!*game_diplo_prev_hostility &&
+            (tech_val(*game_trade_offer_tech[0], B, 1) * 2) / 3 <= tech_val(*game_trade_want_tech[0], B, 1)) {
+            answer(text(0x68e128), B);  // AGREEDTECH
+            wtech(A, *game_trade_offer_tech[0], B, 0);
+            *game_trade_offer_tech[0] = -1;
+            goto L554e74;
+        }
+        r = answer(text(0x68e134), B);  // DEMANDTECHAGAIN2
+        goto L5549d7;
+    }
+    if (ans <= 0) goto L5549ea;
+    goto L554e74;
+L554918:
+    r = answer(text(0x68e114), B);  // DEMANDTECHAGAIN1
+L5549d7:
+    if (r) goto L554e74;
+    ans = -1;
+L5549ea:
+    wtreaty_off(B, A, 0x1000000, 0);
+    v38 = 1;
+    if (game_has_treaty(B, A, TREATY_PACT) && ans == 0) {
+        cause_friction(B, A, (2 * *game_diplo_reputation + 3) / 5);
+        fb->diplo_patience[A]++;
+    }
+L554a42:
+    game_diplomacy_caption(A, B);
+    goto L554a4c;
+L554e74:
+    wtech(B, *game_trade_want_tech[0], A, 1);
+    if (choice >= 15) wtech(B, *game_trade_want_tech[3], A, 1);
+    if (choice >= 14) {
+        wtech(B, *game_trade_want_tech[2], A, 1);
+        choice = 6;
+        goto L5550b0;
+    }
+    if (choice == 12) {
+        choice = 6;
+        goto L5550b0;
+    }
+    // The AI, hostile, asks for the second tech too.
+    if ((*game_diplo_exposed_bases || *game_diplo_attack_chance) && *game_diplo_hostility &&
+        *game_trade_want_tech[1] >= 0) {
+        demand_say(A, B, 1);
+        choice = 6;
+        bclear();
+        bsays(text(0x68e148));  // DEMANDTECH
+        bnum(6);
+        ans = answer(game_str_buffer, B);
+        if (ans > 1) {
+            choice = 6;
+            do {
+                game_help_topic(14, *game_trade_want_tech[1]);
+                demand_say(A, B, 1);
+                bclear();
+                bsays(text(0x68e148));  // DEMANDTECH
+                bnum(6);
+                ans = answer(game_str_buffer, B);
+            } while (ans > 1);
+        }
+    }
+L5550b0:
+    if (ans == 0) {
+        v38 = 1;
+        wtreaty_off(B, A, 0x1000000, 0);
+        goto L554a42;
+    }
+    {
+        int old1 = *game_trade_want_tech[1];
+        *game_trade_want_tech[0] = old1;
+        *game_trade_want_tech[1] = -1;
+        if (choice == 6) {
+            wtech(B, old1, A, 1);
+            *game_trade_want_tech[0] = -1;
+        }
+    }
+    wtreaty_on(B, A, 0x5000000, 0);
+    if (!game_has_treaty(B, A, TREATY_WANT_REVENGE)) *game_diplo_can_betray = 0;
+    v20 = 1;
+    if (v50) wtreaty_on(B, A, 4, 1);
+    if (ans != 1) goto L554a42;
+    if (fb->diplo_patience[A]) fb->diplo_patience[A]--;
+    if (choice >= 9 && choice < 12) {
+        cause_friction(B, A, -(tech_val(*game_trade_want_tech[0], B, 1) / 2));
+        if (!fa->diplo_gifts[B] || fa->diplo_gifts[B] < fa->integrity_blemishes) fa->diplo_gifts[B]++;
+    }
+    if (choice >= 12 && fa->diplo_gifts[B]) fa->diplo_gifts[B]--;
+    goto L554a42;
+L554a4c:
+    if (game_has_treaty(A, B, TREATY_PACT)) (*game_diplo_rival_wars)++;
+    if (!strcmp(game_faction_defs[B].filename, text(0x68e154))) (*game_diplo_rival_wars)++;  // MORGAN
+    // The AI asks the player for a loan.
+    if (fa->energy_credits <= fb->energy_credits || fa->energy_credits < 200 || *game_diplo_reputation >= 4)
+        goto L5551f7;
+    if (fa->energy_credits < 2 * fb->energy_credits) {
+        if (!game_has_treaty(A, B, TREATY_PACT)) goto L5551f7;
+        if (fa->ranking <= fb->ranking) goto L5551f7;
+    }
+    if (*game_diplo_hostility && !v20) goto L5551f7;
+    if (v14) goto L5551f7;
+    if (!v20 && v38 && !v48 && !game_has_treaty(A, B, TREATY_PACT)) goto L5551f7;
+    if (game_has_treaty(A, B, TREATY_VENDETTA)) goto L5551f7;
+    if (!game_has_treaty(A, B, TREATY_PACT | TREATY_TREATY | 0x10000)) goto L5551f7;
+    if (game_has_treaty(B, A, TREATY_WANT_REVENGE)) goto L5551f7;
+    if (fa->loan_balance[B] || fb->loan_balance[A]) goto L5551f7;
+    if (fb->energy_credits >= 100 * *game_diplo_rival_wars + 100) {
+        int h = *game_diplo_help_faction;
+        if (h <= 0) goto L5551f7;
+        if (fb->energy_credits >= F(h)->energy_credits * 3 / 4) goto L5551f7;
+    }
+    if (!wants_to_speak(A, B)) goto L5551f7;
+    {
+        int lend = fa->energy_credits / 2, cap = 100 * (fb->energy_surplus_total - fb->facility_maint_total);
+        int rate, terms, total, per, payments;
+        if (lend >= cap) lend = cap;
+        if (lend < 50) goto L5551f7;
+        rate = 5 * (fb->integrity_blemishes + 2 * (fa->tech_commerce_bonus - fb->tech_commerce_bonus) + 10);
+        if (game_has_treaty(A, B, TREATY_PACT)) rate -= 10;
+        if (rate < 10) rate = 10;
+        terms = 10 * (10 - fb->integrity_blemishes);
+        if (terms < 20) terms = 20;
+        total = (rate + 100) * lend / 100;
+        if (total < terms) terms = total;
+        per = (total + terms - 1) / (terms >= 1 ? terms : 1);
+        payments = terms * per;
+        say_title(0, A), say_name(1, A), say_title(2, B), say_name(3, B);
+        game_parse_num(0, lend);
+        game_parse_num(1, per);
+        game_parse_num(2, terms);
+        bclear();
+        bsays(text(0x68e15c));  // ASKFORLOAN
+        bnum((per != 1) + 1);
+        r = answer(game_str_buffer, B);
+        if (!r) {
+            if (game_has_treaty(A, B, TREATY_PACT)) cause_friction(B, A, 1);
+            goto L5551f7;
+        }
+        if (r == 2) {
+            lend = lend / 2;
+            total = (rate + 100) * lend / 100;
+            if (total < terms) terms = total;
+            per = (total + terms - 1) / (terms >= 1 ? terms : 1);
+            payments = terms * per;
+        }
+        wtreaty_on(B, A, 0x5000000, 0);
+        wenergy(A, -lend, B, 1);
+        game_net_loan(B, A, payments, per);
+        cause_friction(B, A, -energy_value(lend));
+        v20 = 1;
+    }
+L5551f7:
+    // The AI wants the player to change a social model, or give up.
+    choice = 0;
+    if (!unk && !v20 &&
+        ((*game_diplo_rival_strong_pacts || !*game_diplo_fear || game_has_treaty(B, A, TREATY_PACT)) ||
+         game_has_agenda(B, A, 0x400)) &&
+        game_has_agenda(B, A, 1) && !game_has_agenda(A, B, 0x2000)) {
+        struct faction_def *d = &game_faction_defs[B];
+        if (d->ideology_category >= 0 && d->ideology_model != 0) {
+            int cur = fa->se_models_pending[d->ideology_category];
+            if (cur != 0 && cur != d->ideology_model) goto L5553de;
+        }
+    }
+    goto L5552a5;
+L5553de:
+    wants_to_speak(A, B);
+    if (!*game_diplo_caption_off) game_diplomacy_caption(A, B);
+    say_title(0, A), say_name(1, A);
+    game_parse_says(2, game_get_pact_hood(A, B), -1, -1);
+    say_noun(3, B);
+    bclear();
+    bsays(text(0x68e168));  // SOCIAL
+    bnum(game_faction_defs[B].ideology_category);
+    bsays(text(0x68e170));  // CAT
+    bnum(fa->se_models_pending[game_faction_defs[B].ideology_category]);
+    bsays(text(game_has_treaty(A, B, TREATY_PACT) ? 0x68e174 : 0x68e17c));  // PACT, WAR
+    bnum(game_faction_defs[B].ideology_model);
+    answer(game_str_buffer, B);
+    if (game_has_treaty(A, B, TREATY_PACT)) {
+        lock();
+        net_pact_ends(B, A);
+        unlock();
+        fa->diplo_spoke[B] = *game_turn;
+        goto L5587c8;
+    }
+    wset_treaty(B, A, 0x40, 1, 1);
+    wtreaty_on(B, A, 0x10, 1);
+    fa->diplo_spoke[B] = *game_turn;
+    goto L5587c8;
+L5552a5:
+    choice = 0;
+    if (fa->diplo_gifts[B] != 0 && fa->diplo_gifts[B] > fa->diplo_wrongs[B] && !game_has_treaty(B, A, 0x50) &&
+        !game_has_agenda(B, A, 0x2008) && !game_has_treaty(B, A, 0x40020))
+        choice = 1;
+    if (!game_has_treaty(B, A, TREATY_PACT)) goto L555646;
+    if (v20) goto L55565d;
+    if (unk || game_has_agenda(B, A, 0x2000)) goto L55564d;
+    if (*game_diplo_hostility) goto L555562;
+    if (!(fa->ranking >= 6 && fb->ranking >= 6)) {
+        if (*game_diplo_friction >= 2 * (fb->tech_commerce_bonus - fa->tech_commerce_bonus) + 10) {
+            if (fb->ranking >= 5 || !(*game_rules & 0x1000) || *game_turn < 200) goto L555562;
+        }
+        if (!*game_diplo_near_endgame || !*game_diplo_rival_outranks || (*game_rules & 0x1000)) goto L55564d;
+    }
+L555562:
+    if (!choice) {
+        wants_to_speak(A, B);
+        if (!*game_diplo_caption_off) game_diplomacy_caption(A, B);
+        say_title(0, A), say_name(1, A);
+        game_parse_says(2, game_get_pacts_2(A, B), -1, -1);
+        game_parse_says(3, game_get_noun_phrase(A, 8), -1, -1);
+        answer(text(0x68e180), B);  // BREAKPACT
+        lock();
+        net_pact_ends(B, A);
+        unlock();
+        fa->diplo_spoke[B] = *game_turn;
+        goto L5587c8;
+    }
+    *game_diplo_hostility = 0;
+    fa->diplo_gifts[B]--;
+    goto L55564d;
+L555646:
+    if (v20) goto L55565d;
+L55564d:
+    if (game_has_treaty(A, B, TREATY_PACT)) {
+L55565d:
+        *game_diplo_hostility = 0;
+        goto L555707;
+    }
+    if (*game_diplo_hostility) {
+        if (choice) {
+            *game_diplo_hostility = 0;
+            fa->diplo_gifts[B]--;
+            goto L555707;
+        }
+        if (fa->ranking > fb->ranking && *game_diplo_captured_bases > *game_diplo_rival_strong_pacts + fa->integrity_blemishes &&
+            !*game_diplo_attack_chance && !*game_diplo_exposed_bases && game_has_treaty(B, A, TREATY_VENDETTA) &&
+            !game_has_agenda(B, A, 8) && game_has_treaty(B, A, TREATY_WANT_TO_TALK))
+            goto L555c42;
+    }
+L555707:
+    if (!*game_diplo_enemy_allies || game_has_treaty(A, B, TREATY_VENDETTA)) goto L55586d;
+    if (!(*game_diplo_hostility && *game_diplo_help_faction)) {
+        if (!(game_faction_defs[B].rule_flags & 0x80)) goto L55586d;
+        if (!(game_faction_defs[*game_diplo_enemy_ally].rule_flags & 0x80)) goto L55586d;
+    }
+    wants_to_speak(A, B);
+    wset_treaty(B, A, 0x40, 1, 1);
+    wtreaty_on(B, A, 0x10, 1);
+    fa->diplo_spoke[B] = *game_turn;
+    game_diplomacy_caption(A, B);
+    bclear();
+    say_title(0, A), say_name(1, A);
+    say_title(2, *game_diplo_enemy_ally), say_name(3, *game_diplo_enemy_ally);
+    r = (game_faction_defs[B].rule_flags & 0x80) && (game_faction_defs[*game_diplo_enemy_ally].rule_flags & 0x80);
+    answer(text(r ? 0x68e18c : 0x68e198), B);  // ALIENHATRED, COLLABORATOR
+    goto L5587c8;
+L55586d:
+    if (!*game_diplo_hostility || !v38) goto L550522;
+    if (!game_has_treaty(A, B, TREATY_TREATY | TREATY_TRUCE_)) {
+        if (game_has_treaty(B, A, TREATY_VENDETTA)) goto L550522;
+        if (*game_diplo_spoke_turn <= 0) goto L550529;
+        if (game_has_treaty(B, A, TREATY_WANT_TO_TALK)) goto L550522;
+    }
+    wants_to_speak(A, B);
+    wtreaty_on(B, A, 0x10, 1);
+    game_diplomacy_caption(A, B);
+    fa->diplo_spoke[B] = *game_turn;
+    bclear();
+    say_title(0, A), say_name(1, A);
+    game_parse_says(2, (char *)&game_faction_defs[A] + 0x1e4, -1, -1);
+    game_parse_says(3, (char *)&game_faction_defs[A] + 0x64, -1, -1);
+    game_parse_says(4, game_get_phrase(B, 13), -1, -1);
+    game_parse_says(5, game_get_noun_phrase(A, 10), -1, -1);
+    bsays(text(0x68e1a8));  // BULLY
+    bnum(game_random(0, 7));
+    answer(game_str_buffer, B);
+    goto L5587c8;
+L550522:
+    if (*game_diplo_spoke_turn < 0) goto L5559cb;
+L550529:
+    if (*game_diplo_spoke_turn < 0) goto L5559cb;
+    if (unk) goto L5559cb;
+    if (game_has_treaty(B, A, TREATY_WANT_TO_TALK)) goto L5559cb;
+    if (game_has_agenda(B, A, 4)) goto L5559cb;
+    choice = 0;
+    goto L5559d0;
+L5559cb:
+    choice = 1;
+L5559d0:
+    // The AI declares a vendetta.
+    if (!*game_diplo_hostility) goto L555c42;
+    if (!v38 && !choice) goto L5587c8;
+    if (*game_diplo_tribute >= 0) wants_to_speak(A, B);
+    r = game_has_treaty(B, A, TREATY_VENDETTA);
+    wtreaty_on(B, A, 0x10, 1);
+    fa->diplo_spoke[B] = *game_turn;
+    game_diplomacy_caption(A, B);
+    bclear();
+    say_title(0, A), say_name(1, A);
+    game_parse_says(2, (char *)&game_faction_defs[A] + 0xe4, -1, -1);
+    game_parse_says(3, (char *)&game_faction_defs[A] + 0x1e4, -1, -1);
+    game_parse_says(4, game_get_noun_phrase(A, 8), -1, -1);
+    game_parse_says(5, game_get_phrase(A, 3), -1, -1);
+    game_parse_says(6, game_get_phrase(B, 13), -1, -1);
+    game_parse_says(8, game_get_phrase(A, 4), -1, -1);
+    say_insult(9, A);
+    bsays(text(0x68e1b0));  // VENDETTA
+    if (v38 && !r) ans = game_random(0, 3);
+    else ans = game_random(0, 6) + 3;
+    if (great_satan(A, 0) && game_random(0, 3) != 0) ans = game_random(0, 4) + 15;
+    if (choice && *game_diplo_tribute >= 0) ans = 14;
+    if (game_has_treaty(B, A, TREATY_ATROCITY_VICTIM) && game_has_treaty(B, A, TREATY_WANT_REVENGE))
+        ans = game_random(0, 5) + 9;
+    bnum(ans);
+    if (ans == 5 && !strcmp(game_faction_defs[A].filename, text(0x68e1bc))) bsays(text(0x68e1c4));  // CYBORG, X
+    if (game_has_agenda(B, A, 4)) {
+        bclear();
+        bsays(text(0x68e1c8));  // ATROCIOUS
+    }
+    answer(game_str_buffer, B);
+    goto L5587c8;
+L555c42:
+    // The AI offers the player a pact.
+    if (v50 && v20) wtreaty_on(B, A, 4, 1);
+    if (!game_has_treaty(B, A, TREATY_TREATY)) {
+        if (!*game_diplo_accepted_faction) goto L556113;
+        if (game_has_treaty(B, A, TREATY_VENDETTA)) goto L556113;
+    }
+    if (game_has_treaty(B, A, 0x21) || game_has_agenda(B, A, 0x2000) || *game_diplo_great_satan) goto L556113;
+    v1c = 0, v14 = 0;
+    for (int i = 1; i < FACTION_COUNT; i++) {
+        if (!(*game_factions_alive & (1u << i))) continue;
+        if (!game_has_treaty(B, i, TREATY_VENDETTA)) continue;
+        if (game_has_treaty(A, i, 0x14)) v14 = 1;
+        if (game_has_treaty(A, i, TREATY_PACT)) goto L556113;
+        for (int rg = 1; rg < 0x80; rg++) {
+            if (!game_bad_region(rg) && fb->region_total_bases[rg] && F(i)->region_total_bases[rg]) {
+                v1c++;
+                break;
+            }
+        }
+    }
+    if (great_satan(A, 0) || game_has_agenda(B, A, 0x400) || v3c) goto L556113;
+    {
+        int hive = !strcmp(game_faction_defs[B].filename, text(0x68e1d4));  // HIVE
+        int sum = game_range(fb->tech_commerce_bonus - fa->tech_commerce_bonus, 0, 99) + hive +
+                  ((*game_rules >> 12) & 1) + (*game_diplo_accepted_faction != 0) + 3;
+        int lim, vc2, tot;
+        if (*game_diplo_reputation >= sum) goto L556113;
+        lim = fa->diplo_reputation > 3 ? 3 : fa->diplo_reputation;
+        v3c = lim;
+        vc2 = (*game_rules & 0x1000) && !(*game_rules & 0x40) ? 1 : 0;
+        hive = !strcmp(game_faction_defs[B].filename, text(0x68e1dc));  // HIVE
+        tot = 6 + (v14 ? 5 : 0) + vc2 + (*game_diplo_accepted_faction != 0) + hive +
+              game_range(fb->tech_commerce_bonus - fa->tech_commerce_bonus + 1, 0, 99);
+        if (*game_diplo_reputation - lim + *game_diplo_friction >= tot) goto L556113;
+    }
+    if (v1c && !*game_diplo_player_pacts && !*game_diplo_rival_strong_pacts) {
+        if (!*game_diplo_fear && !v14 && fa->ranking > 5 && fb->ranking > 5) goto L556113;
+    } else if (fa->ranking > 5 || fb->ranking > 5) {
+        goto L556113;
+    }
+    if (!wants_to_speak(A, B)) goto L556113;
+    say_title(0, A), say_name(1, A);
+    game_parse_says(2, game_get_pact_hood(A, B), -1, -1);
+    r = answer(text(0x68e1e4), B);  // SWEARAPACT
+    if (r) goto L556113;
+    help = *game_diplo_help_faction;
+    if (help) {
+        say_title(5, A);
+        say_noun(6, help);
+        r = answer(text(0x68e1f0), B);  // GIMMEHELP
+        if (r) {
+            lock();
+            wdouble_cross(A, help, B, 0);
+            wtreaty_off(A, B, 0x800000, 0);
+            wset_treaty(A, help, 0x40, 1, 1);
+            unlock();
+            *game_diplo_help_faction = 0;
+            *game_diplo_enemy_allies = 0;
+        } else {
+            if (!*game_diplo_fear) {
+                game_parse_says(2, game_get_pacts_2(A, B), -1, -1);
+                answer(text(0x68e1fc), B);  // REJPACTNOHELP
+                goto L55610c;
+            }
+            if (!v34) goto L55610c;
+        }
+    }
+    game_pact_of_brotherhood(A, B);
+    game_diplomacy_caption(A, B);
+L55610c:
+    v34 = 1;
+L556113:
+    // The AI at war with the player, afraid of it, offers its base for a
+    // treaty.
+    if (!game_has_treaty(B, A, TREATY_VENDETTA) || !*game_diplo_fear || *game_diplo_reputation > 2) goto L5562d9;
+    if (game_has_treaty(B, A, TREATY_ATROCITY_VICTIM) || game_has_treaty(B, A, TREATY_SURRENDERED_) ||
+        game_has_agenda(B, A, 0x2000))
+        goto L5562d9;
+    if (*game_diplo_fear <= *game_diplo_alter_fear + 2 || *game_net_multiplayer) goto L5562d9;
+    if (!wants_to_speak(A, B)) goto L5562d9;
+    {
+        int bi = -1, best = 999;
+        for (int i = 0; i < *game_base_count; i++) {
+            struct base *bs = &game_bases[i];
+            if (bs->faction == B && bs->faction_former == A && bs->pop_size < best) best = bs->pop_size, bi = i;
+        }
+        if (bi < 0 || !wants_to_speak(A, B)) goto L5562d9;
+        base28 = bi;
+        say_title(0, A), say_name(1, A);
+        game_parse_says(2, game_bases[bi].name, -1, -1);
+        r = answer(text(0x68e20c), B);  // RANSOMTREATY
+        if (r) goto L5562d9;
+        v34 = 1;
+        wcede_base(bi, A, 1);
+        wset_treaty(B, A, TREATY_SURRENDERED_, 1, 0);
+        game_pledge_truce(A, B);
+        game_make_treaty(A, B);
+        game_diplomacy_caption(A, B);
+    }
+L5562d9:
+    // The AI at war with the player offers a truce, or presses on.
+    if (!game_has_treaty(B, A, TREATY_VENDETTA)) goto L556cde;
+    if (!wants_to_speak(A, B)) goto L556cde;
+    if (*game_diplo_can_surrender) {
+        if (game_has_agenda(B, A, 0x800)) {
+            ans = 1;
+            goto L5564d7;
+        }
+        if (game_has_treaty(B, A, TREATY_WANT_REVENGE) &&
+            game_random(0, game_has_treaty(B, A, TREATY_SHALL_BETRAY) ? 2 : 3) == 0) {
+            ans = 1;
+            goto L5564d7;
+        }
+    }
+    if (v20) {
+        ans = answer(text(0x68e21c), B);  // OFFERTRUCE
+        goto L5564d7;
+    }
+    if (*game_diplo_hostility) {
+        ans = answer(text(0x68e228), B);  // MUSTTRUCE
+        goto L5564d7;
+    }
+    mention_prototypes(A, B);
+    say_title(0, A), say_name(1, A), say_title(2, B), say_name(3, B);
+    bclear();
+    r = game_random(0, 4);
+    if ((r != 2 || !game_has_treaty(B, A, TREATY_WANT_REVENGE)) && r < 3) {
+        bsays(text(0x68e234));  // WANTTOTRUCE
+        bnum(r);
+        ans = answer(game_str_buffer, B);
+    } else {
+        if (game_faction_defs[A].rule_flags & 0x80) bsays(text(0x68e240));  // ALIEN
+        bsays(text(0x68e248));  // FACTIONTRUCE
+        ans = game_x_pops_13(game_faction_defs[B].filename, game_str_buffer, 0x100000, game_faction_portraits[B], game_pop_wait);
+    }
+L5564d7:
+    v1c = ans;
+    choice = *game_diplo_reputation + 2;
+    if (game_has_treaty(B, A, TREATY_WANT_REVENGE)) choice *= 2;
+    r = game_range(choice, 0, fb->base_count + 1);
+    if (ans == 0) goto L556b38;
+    r = game_random(0, r);
+    if (r >= *game_diplo_fear && !*game_diplo_can_surrender) goto L556c2a;
+    // A tech the AI would give for the truce.
+    if (*game_trade_offer_tech[0] >= 0 && *game_diplo_fear >= tech_val(*game_trade_offer_tech[0], B, 1) / 2 &&
+        !*game_diplo_can_surrender && !*game_diplo_can_betray && !(*game_rules & RULES_SCN_NO_TECH_TRADING)) {
+        bclear();
+        say_tech(game_str_buffer, *game_trade_offer_tech[0], 1);
+        game_parse_says(0, game_str_buffer, -1, -1);
+        r = answer(text(0x68e258), B);  // TECHTRUCE
+        while (r > 1) {
+            game_help_topic(14, *game_trade_offer_tech[0]);
+            bclear();
+            say_tech(game_str_buffer, *game_trade_offer_tech[0], 1);
+            game_parse_says(0, game_str_buffer, -1, -1);
+            r = answer(text(0x68e258), B);
+        }
+        if (!r) {
+            v1c = 0;
+            wtech(A, *game_trade_offer_tech[0], B, 1);
+            v54 = 1;
+            goto L556723;
+        }
+    }
+    if ((*game_trade_offer_tech[0] < 0 || *game_diplo_fear < 4) && !*game_diplo_can_surrender &&
+        !*game_diplo_can_betray) {
+        int e = 100 * *game_diplo_fear;
+        if (e >= fb->energy_credits) e = fb->energy_credits;
+        e = round_down(e, 25);
+        if (e) {
+            game_parse_num(0, e);
+            r = answer(text(0x68e264), B);  // ENERGYTRUCE
+            if (!r) {
+                v1c = 0;
+                v54 = 1;
+                wenergy(B, -e, A, 1);
+                GI(0x7ad330) = 0;
+                game_console_update_data(game_console, 0);
+            }
+        }
+    }
+L556723:
+    {
+        // Weigh the forces in each region.
+        int rg, f, mine, theirs;
+        int32_t units_b = fb->total_combat_units, base_b = fb->base_count;
+        (void)units_b;
+        mine = ((fa->mil_attack + fb->total_combat_units) *
+                (fa->diplo_combat_total[B] + fa->diplo_combat_count[B])) / 4 + 1;
+        theirs = fb->diplo_combat_total[A] + fb->diplo_combat_count[A] + 1;
+        for (rg = 0; rg < REGION_COUNT; rg++) {
+            if (fb->region_total_bases[rg] == 0) {
+                mine += fa->region_force_rating[rg] / 2;
+            } else {
+                theirs += fb->region_total_combat_units[rg] + fb->region_force_rating[rg];
+                mine += fa->region_force_rating[rg];
+                for (f = 1; f < FACTION_COUNT; f++)
+                    if (game_has_treaty(f, B, TREATY_PACT) || !game_has_treaty(f, A, TREATY_VENDETTA))
+                        theirs += F(f)->region_force_rating[rg];
+            }
+        }
+        if (v1c == 0) goto L556b2c;
+        if (game_faction_defs[B].rule_flags & 0x80) goto L556c2a;
+        if (!*game_diplo_can_surrender) {
+            if (*game_diplo_fear < base_b) goto L556c2a;
+            if (base_b > 1) {
+                if (base_b > mine / theirs) goto L556c2a;
+                if (base_b > 4) goto L556c2a;
+                if (fb->mil_strength >= fa->mil_strength) goto L556c2a;
+            }
+        }
+    }
+    say_title(0, A), say_name(1, A);
+    game_parse_num(0, fb->energy_credits);
+    {
+        int n = 0;
+        for (int t = 0; t < 0x59; t++)
+            if (has_tech(t, B) && !has_tech(t, A)) n++;
+        game_parse_num(1, n);
+    }
+    r = answer(text(0x68e270), B);  // TRUCEPLEASE
+    if (r) goto L556c0f;
+    v54 = 1;
+    if (!(*game_rules & RULES_SCN_NO_TECH_TRADING)) {
+        for (int t = 0; t < 0x59; t++)
+            if (has_tech(t, B) && !has_tech(t, A)) wtech(A, t, B, 0);
+    }
+    wenergy(A, fb->energy_credits, B, 1);
+    GI(0x7ad330) = 0;
+    game_console_update_data(game_console, 0);
+    fa->diplo_friction[B] = 0;
+    wtreaty_off(B, A, TREATY_WANT_REVENGE, 1);
+    wtreaty_on(A, B, TREATY_TREATY, 0);
+    wset_treaty(B, A, TREATY_SURRENDERED_, 1, 0);
+    game_pact_of_brotherhood(A, B);
+    game_diplomacy_caption(A, B);
+    if (!*game_net_multiplayer && (*game_rules & 2)) {
+        int alive_n = 0, held = 0;
+        for (int f = 1; f < FACTION_COUNT; f++) {
+            if (!(*game_factions_alive & (1u << f))) continue;
+            alive_n++;
+            if (game_has_treaty(f, *game_current_faction, TREATY_PACT) &&
+                game_has_treaty(f, *game_current_faction, TREATY_SURRENDERED_)) {
+                alive_n--;
+            } else if (game_has_treaty(f, *game_current_faction, TREATY_PACT) && (*game_rules & 0x1000) && held < 2) {
+                held++;
+            }
+        }
+        if (alive_n - held < 2) {
+            GI(0x9b206c) = 4;
+            GI(0x9a64c0) |= 0x2001;
+            if (held) GI(0x9b206c) = 5;
+        }
+    }
+L556b2c:
+    *game_diplo_spoke_turn = *game_turn;
+L556b38:
+    v34 = 1;
+    if (!game_has_treaty(A, B, TREATY_PACT)) game_pledge_truce(A, B);
+    game_diplomacy_caption(A, B);
+    say_title(0, A), say_name(1, A);
+    if (*game_diplo_reputation > 5) answer(text(0x68e27c), B);  // NOTORIETY
+    if (fa->loan_balance[B]) {
+        game_parse_num(0, fa->loan_payment[B]);
+        game_parse_num(1, fa->loan_balance[B]);
+        answer(text(0x68e288), B);  // TRUCEMEPAY
+        goto L556cde;
+    }
+    if (fb->loan_balance[A]) {
+        game_parse_num(0, fb->loan_payment[A]);
+        answer(text(0x68e294), B);  // TRUCEYOUPAY
+    }
+    goto L556cde;
+L556c0f:
+    wset_agenda(B, A, 8, 1, 0);
+    wtreaty_on(B, A, TREATY_WANT_REVENGE, 1);
+L556c2a:
+    say_title(0, A), say_name(1, A);
+    game_parse_says(2, (char *)&game_faction_defs[A] + 0x1e4, -1, -1);
+    answer(text(0x68e2a0), B);  // MOREWAR
+    fa->diplo_spoke[B] = *game_turn;
+    goto L5587c8;
+L556cde:
+    if (v44 && !game_has_treaty(B, A, TREATY_VENDETTA)) wtreaty_on(B, A, 0x10004, 1);
+    if (*game_diplo_reputation > 5 && game_has_treaty(B, A, TREATY_WANT_REVENGE) &&
+        (*game_diplo_rival_pacts || *game_diplo_great_satan || fb->mil_strength > fa->mil_strength))
+        *game_diplo_can_betray = 1;
+    // The AI offers the player a treaty.
+    if (game_has_treaty(A, B, TREATY_TREATY) || game_has_agenda(A, B, 0x2000)) goto L5571e7;
+    v14 = v50 && !game_has_treaty(A, B, TREATY_TRUCE_);
+    {
+        int gaians = !strcmp(game_faction_defs[B].filename, text(0x68e2a8));  // GAIANS
+        int thr, rating;
+        choice = 2 * (fa->mil_strength + 1) * (4 - fb->ai_fight) / (fb->mil_strength + 1);
+        if (gaians) choice += 2;
+        if (v14) choice += 3 - fb->ai_fight;
+        if (fa->base_count != 0 && fb->tech_commerce_bonus >= fa->tech_commerce_bonus) {
+            choice += fa->energy_surplus_total / fa->base_count;
+            if (fb->tech_commerce_bonus > fa->tech_commerce_bonus) choice++;
+        }
+        thr = choice;
+        if (!great_satan(A, 0) && (fa->ranking <= 4 || fb->ranking <= 4)) {
+            thr++;
+            if (!*game_diplo_rival_strong_pacts) thr++;
+        }
+        if (!*game_diplo_fear && *game_diplo_friction > thr) goto L5571e7;
+        if (*game_diplo_great_satan) goto L5571e7;
+        if (v14 || !strcmp(game_faction_defs[B].filename, text(0x68e2b0))) choice = 1;  // GAIANS
+        else choice = 0;
+        rating = game_range(fb->tech_commerce_bonus - fa->tech_commerce_bonus, 0, 99);
+        if (*game_diplo_captured_bases + *game_diplo_reputation >= (*game_diplo_fear != 0) + rating + choice + 5)
+            goto L5571e7;
+    }
+    if (game_has_treaty(A, B, TREATY_WANT_REVENGE)) {
+        if (!*game_diplo_fear || !v14 || *game_diplo_reputation > 4) goto L5571e7;
+    }
+    if (!wants_to_speak(A, B)) goto L5571e7;
+    say_title(0, A), say_name(1, A);
+    game_parse_says(2, (char *)&game_faction_defs[A] + 0x164, -1, -1);
+    say_name(3, B), say_title(4, B);
+    if (!v50) {
+        bclear();
+        if (game_faction_defs[A].rule_flags & 0x80) bsays(text(0x68e2b8));  // ALIEN
+        bsays(text(0x68e2c0));  // FACTIONTREATY
+        r = game_x_pops_13(game_faction_defs[B].filename, game_str_buffer, 0x100000, game_faction_portraits[B],
+                           game_pop_wait);
+    } else {
+        bclear();
+        bsays(text(0x68e2d0));  // OFFERTREATY
+        if (!game_has_treaty(A, B, TREATY_TRUCE_)) bsays(text(0x68e2dc));  // "2"
+        r = answer(game_str_buffer, B);
+    }
+    v1c = r;
+    if (r && !game_has_treaty(B, A, TREATY_WANT_REVENGE)) {
+        int e = 50 * *game_diplo_fear;
+        if (fb->energy_credits < e) e = fb->energy_credits;
+        e = round_down(e, 25);
+        if (e) {
+            say_title(0, B), say_name(1, B);
+            game_parse_says(2, game_get_noun_phrase(A, 9), -1, -1);
+            game_parse_num(0, e);
+            r = answer(text(0x68e2e0), B);  // ENERGYTREATY
+            if (!r) {
+                v54 = 1;
+                v1c = 0;
+                wenergy(B, -e, A, 1);
+                GI(0x7ad330) = 0;
+                game_console_update_data(game_console, 0);
+            }
+        }
+    }
+    v34 = 1;
+    if (!v1c) {
+        game_make_treaty(A, B);
+        game_diplomacy_caption(A, B);
+    }
+L5571e7:
+    if (v44) wants_to_speak(A, B);
+    if (!(*game_diplo_caption_off && *game_diplo_caption_mode) && !unk) goto L5587c8;
+    // The greeting: what the AI says to the player when it is done.
+    if (v34) goto L5575c7;
+    if (v38 && !v20) {
+        say_title(0, A), say_name(1, A);
+        game_parse_says(2, game_get_pacts_2(A, B), -1, -1);
+        game_parse_says(3, game_get_pact(A), -1, -1);
+        if (v48) {
+            if (game_has_treaty(B, A, TREATY_PACT)) {
+                answer(text(0x68e2f0), B);  // MILDPACT
+                goto L55778a;
+            }
+            if (game_has_treaty(A, B, TREATY_TREATY)) {
+                answer(text(0x68e2fc), B);  // MILDTREATY
+                goto L55778a;
+            }
+            r = answer(text(0x68e308), B);  // MILD
+            mention_prototypes(A, B);
+            goto L55778a;
+        }
+        if (game_has_treaty(B, A, TREATY_PACT)) {
+            answer(text(0x68e310), B);  // REBUFFEDPACT
+            goto L55778a;
+        }
+        answer(text(game_has_treaty(A, B, 6) ? 0x68e320 : 0x68e330), B);  // REBUFFEDTREATY, REBUFFED
+        mention_prototypes(A, B);
+        goto L55778a;
+    }
+    if (unk) {
+        if (fb->diplo_patience[A] > 1) {
+            if (game_has_treaty(B, A, TREATY_PACT)) {
+                game_parse_says(0, game_get_pact(A), -1, -1);
+                answer(text(0x68e33c), B);  // LOWPATIENCEPACT
+            } else {
+                say_title(0, A);
+                answer(text(0x68e34c), B);  // LOWPATIENCE
+            }
+            goto L55778a;
+        }
+        say_title(0, A), say_name(1, A);
+        if (game_has_treaty(B, A, TREATY_PACT)) answer(text(0x68e358), B);  // WHATSUPPACT
+        else if (game_has_treaty(B, A, TREATY_TREATY)) answer(text(0x68e364), B);  // WHATSUPTREATY
+        else answer(text(0x68e374), B);  // WHATSUP
+        goto L55778a;
+    }
+    game_parse_says(0, game_get_pact_hood(A, B), -1, -1);
+    say_title(1, A), say_name(2, A);
+    game_parse_says(3, game_get_noun_phrase(B, 9), -1, -1);
+    if (game_has_treaty(B, A, TREATY_PACT)) {
+        answer(text(0x68e37c), B);  // HELLOPACT
+        goto L55778a;
+    }
+    if (game_has_treaty(B, A, TREATY_TREATY)) {
+        answer(text(0x68e388), B);  // HELLOTREATY
+        goto L55778a;
+    }
+    answer(text(0x68e394), B);  // HELLO
+    mention_prototypes(A, B);
+    goto L55778a;
+L5575c7:
+    // A deal was made: the AI airs a wrong done to it.
+    if (game_has_treaty(B, A, 0x60)) {
+        if (unk) goto L55778a;
+        if (*game_diplo_reputation >= 5) goto L55778a;
+    }
+    {
+        int who = -1, worst = 0;
+        for (int f = 1; f < FACTION_COUNT; f++) {
+            if (f == A || f == B || game_has_treaty(A, f, TREATY_VENDETTA)) continue;
+            if (fa->diplo_wrongs[f] <= worst) continue;
+            worst = fa->diplo_wrongs[f];
+            who = f;
+        }
+        if (who < 0) goto L55778a;
+        say_title(0, who), say_name(1, who), say_noun(2, who);
+        game_parse_says(3, game_get_him_her(who, 0), -1, -1);
+        say_title(4, A), say_name(5, A);
+        fa->diplo_wrongs[who] = 0;
+        bclear();
+        bsays(text(0x68e39c));  // WRONGED
+        if (game_has_treaty(B, who, TREATY_VENDETTA)) bsays(text(0x68e3a4));  // ENEMY
+        else bsays(text(fb->mil_strength > fa->mil_strength ? 0x68e3ac : 0x68e3b4));  // MIGHTY, MEEK
+        answer(game_str_buffer, B);
+        mention_prototypes(A, B);
+    }
+L55778a:
+    GI(0x93f7b4) = 0;
+    {
+        struct faction_def *d = &game_faction_defs[B];
+        if (d->ideology_category >= 0 && d->ideology_model != 0) {
+            int cur;
+            say_title(0, A), say_name(1, A);
+            bclear();
+            bsays(text(0x68e3bc));  // SOCIAL
+            bnum(d->ideology_category);
+            bsays(text(0x68e3c4));  // CAT
+            cur = fa->se_models_pending[d->ideology_category];
+            if (cur == d->ideology_model) {
+                bnum(d->ideology_model);
+                bsays(text(0x68e3c8));  // GOOD
+                answer(game_str_buffer, B);
+            } else if (cur != 0) {
+                GI(0x93f7b4) = 1;
+                if (!*game_diplo_fear &&
+                    !(game_has_treaty(B, A, TREATY_PACT) && game_has_treaty(B, A, TREATY_SURRENDERED_))) {
+                    bnum(cur);
+                    bsays(text(0x68e3d0));  // BAD
+                    bnum(d->ideology_model);
+                    answer(game_str_buffer, B);
+                    wset_agenda(B, A, 1, 1, 1);
+                }
+            }
+        }
+    }
+    if (!GI(0x93f7b4)) wset_agenda(B, A, 1, 0, 1);
+    // The AI has heard of the player's atrocities.
+    if (fa->atrocities != 0 && (!game_has_treaty(B, A, 0x200000) || game_has_treaty(B, A, 0x400000)) &&
+        fa->atrocities > fb->ai_fight + 1 && !(game_faction_defs[B].rule_flags & 0x80) &&
+        !(game_has_treaty(B, A, TREATY_PACT) && game_has_treaty(B, A, TREATY_SURRENDERED_))) {
+        int victim = -1;
+        for (int f = 1; f < FACTION_COUNT; f++) {
+            if (f == A || f == B) continue;
+            if (game_has_treaty(f, A, TREATY_ATROCITY_VICTIM)) {
+                victim = f;
+                break;
+            }
+        }
+        if (victim < 0) {
+            say_title(0, A), say_name(1, A);
+            answer(text(0x68e3e8), B);  // SELFATROCITY
+        } else {
+            say_title(0, A), say_name(1, A), say_noun(2, victim);
+            answer(text(0x68e3d4), B);  // COMMITTEDATROCITY
+        }
+        if (!game_has_treaty(B, A, 0x200000) && fa->atrocities > 1) {
+            fa->atrocities--;
+            if (fa->integrity_blemishes > 1) fa->integrity_blemishes--;
+        }
+        wset_treaty(B, A, 0x200000, 1, 0);
+        wset_treaty(B, A, 0x400000, 0, 0);
+    }
+    if (game_has_treaty(A, B, TREATY_PACT)) {
+        game_parse_says(0, game_get_pact(A), -1, -1);
+        game_net_maps(A, B, 1);
+        if (*game_diplo_maps_news) answer(text(0x68e3f8), B);  // HERESTHEMAP
+    }
+    // The AI reports how its wars go.
+    if (!(game_has_treaty(A, B, TREATY_PACT) || game_has_treaty(B, A, TREATY_UNK_80)) || (state & 0x40)) goto L558152;
+    {
+        int strongest = 0, weakest = 0, other = 0, best = 0, low = 9999, rg;
+        for (int f = 1; f < FACTION_COUNT; f++) {
+            if (!(*game_factions_alive & (1u << f)) || f == A || f == B) continue;
+            if (!game_has_treaty(B, f, TREATY_VENDETTA) || !game_has_treaty(B, f, TREATY_COMMLINK) ||
+                !game_has_treaty(B, f, TREATY_UNK_8000) || !game_has_treaty(A, f, TREATY_COMMLINK))
+                continue;
+            if (!game_has_treaty(B, f, TREATY_UNK_40) && !game_has_treaty(B, A, TREATY_PACT)) continue;
+            if (F(f)->mil_strength > best) best = F(f)->mil_strength, strongest = f;
+            if (F(f)->mil_strength < low) {
+                int found = 0;
+                for (rg = 1; rg < 64; rg++) {
+                    if (game_bad_region(rg) || !fb->region_total_bases[rg] || !F(f)->region_total_bases[rg]) continue;
+                    if (F(f)->region_force_rating[rg] > fb->region_total_combat_units[rg] + fb->region_force_rating[rg])
+                        continue;
+                    if (game_contiguous(B, f, rg, 0)) {
+                        found = 1;
+                        break;
+                    }
+                }
+                if (found) {
+                    weakest = f;
+                    low = F(f)->mil_strength;
+                    continue;
+                }
+            }
+            if (weakest != f && strongest != f) other = f;
+        }
+        if (strongest) {
+            int pressed = 0;
+            for (rg = 1; rg < 127; rg++) {
+                if (game_bad_region(rg) || !(game_diplo_region_factions[rg] & (1 << B))) continue;
+                if (F(strongest)->region_force_rating[rg] > fb->region_total_combat_units[rg]) {
+                    pressed = 1;
+                    break;
+                }
+            }
+            if (game_has_treaty(A, B, 0x2000) || pressed) {
+                say_title(1, strongest), say_name(2, strongest), say_noun(3, strongest);
+                game_parse_says(4, game_get_his_her(strongest, 0), -1, -1);
+                game_parse_says(5, (char *)&game_faction_defs[strongest] + 0x1e4, -1, -1);
+                answer(text(0x68e404), B);  // REPORTLOSING
+                goto L558152;
+            }
+        }
+        if (weakest && !game_has_treaty(A, B, 0x2000)) {
+            for (rg = 1; rg < 127; rg++) {
+                if (game_bad_region(rg) || !game_diplo_region_factions[rg]) continue;
+                if (fb->region_force_rating[rg] > F(weakest)->region_total_combat_units[rg]) {
+                    game_parse_says(0, game_faction_defs[weakest].adjective, -1, -1);
+                    say_title(1, weakest), say_name(2, weakest);
+                    game_parse_says(3, game_get_phrase(weakest, 5), -1, -1);
+                    answer(text(0x68e414), B);  // REPORTWINNING
+                    goto L558152;
+                }
+            }
+        }
+        if (other) {
+            for (rg = 1; rg < 128; rg++) {
+                if (game_bad_region(rg) || !F(other)->region_total_bases[rg] || !fb->region_total_bases[rg]) continue;
+                say_title(1, other), say_name(2, other), say_noun(3, other);
+                game_parse_says(4, game_faction_defs[other].adjective, -1, -1);
+                game_parse_says(5, game_get_noun_phrase(other, 8), -1, -1);
+                answer(text(0x68e424), B);  // REPORTEVEN
+                goto L558152;
+            }
+        }
+    }
+L558152:
+    if (game_has_treaty(A, B, TREATY_PACT)) mention_prototypes(A, B);
+    // The AI and the player each study a tech, and share the work.
+    if (game_has_treaty(A, B, TREATY_PACT) && !(*game_rules & 0x200) && fb->tech_research_id >= 0 &&
+        !has_tech(fb->tech_research_id, A) && fb->tech_research_id != fa->tech_research_id &&
+        !(*game_rules & 0x6000000) && *(int32_t *)((char *)fa + 0x3c8) >= tech_rate(A) / 2) {
+        int pick = -1, bestv = 0;
+        const struct rules_tech *tp = game_tech;
+        for (int t = 0; t < TECH_COUNT; t++, tp++) {
+            if (has_tech(t, A) || t == fa->tech_research_id || t == fb->tech_research_id || !tech_avail(t, A)) continue;
+            if ((t - fa->tech_ranking + A + 2) % 3 == 0) continue;
+            if (!has_tech(tp->preq1, A) || !has_tech(tp->preq2, A)) continue;
+            int v = tech_val(t, B, 0);
+            if (v > bestv) bestv = v, pick = t;
+        }
+        if (pick >= 0) {
+            int off;
+            uint32_t mask;
+            bitmask(fb->tech_research_id, &off, &mask);
+            ((uint32_t *)((char *)fb + 0x32c))[off] |= mask;
+            game_parse_say(0, (int)(intptr_t)game_tech[fb->tech_research_id].name, -1, -1);
+            bitmask(pick, &off, &mask);
+            ((uint32_t *)((char *)fa + 0x32c))[off] |= mask;
+            game_parse_say(1, (int)(intptr_t)game_tech[pick].name, -1, -1);
+            answer(text(0x68e430), B);  // TEAMTECH
+        }
+    }
+    if (!game_has_treaty(B, A, 3) && game_territory(B, A, 0, &base28, 0)) {
+        spot_base(base28, A);
+        game_map_win_focus(game_map_wins[0], game_bases[base28].x, game_bases[base28].y);
+        game_parse_says(1, game_faction_defs[B].adjective, -1, -1);
+        answer(text(0x68e43c), B);  // TERRITORY
+        mention_prototypes(A, B);
+    }
+    if (*game_diplo_enemy_allies) {
+        int ea = *game_diplo_enemy_ally;
+        say_title(0, ea), say_name(1, ea);
+        game_parse_says(2, (char *)&game_faction_defs[ea] + 0xe4, -1, -1);
+        answer(text(0x68e448), B);  // QUISLING
+    }
+    // The player's menu: what to ask the AI, until its patience runs out.
+    *game_diplo_menu_a = 0, *game_diplo_menu_b = 0;
+    {
+        int8_t *pp = &fb->diplo_patience[A];
+        do {
+            if (*pp < 0) *pp = 0;
+            GI(0x93fa94) = -1, GI(0x93f7dc) = -1;
+            for (int f = 1; f < FACTION_COUNT; f++) {
+                if (!(*game_factions_alive & (1u << f)) || f == A || f == B) continue;
+                if (!game_has_treaty(B, f, TREATY_VENDETTA) || !game_has_treaty(A, f, TREATY_COMMLINK)) continue;
+                if (game_has_treaty(A, f, 7)) GI(0x93f7dc) = f;
+                if (game_has_treaty(A, f, TREATY_VENDETTA)) GI(0x93fa94) = f;
+            }
+            if (*game_net_multiplayer && (GI(0x9a64c0) & 0x800)) break;
+            r = game_diplomacy_menu(A, B);
+            if (r > 7 || r < 0) goto L55870b;
+            switch (r) {
+            case 0: goto L5587c8;
+            case 1:
+            case 2:
+                make_a_proposal(A, B, r == 1);
+                if (*game_diplo_counter == 6) *game_diplo_menu_a = 0;
+                break;
+            case 3:
+                if (!answer(text(0x68e454), B)) {  // REALLYBROKE
+                    game_parse_says(0, game_get_pact_hood(A, B), -1, -1);
+                    answer(text(0x68e460), B);  // DROIDS
+                    (*pp)--;
+                } else {
+                    lock();
+                    fa->integrity_blemishes++;
+                    wtreaty_off(B, A, TREATY_PACT, 1);
+                    diplomacy_check(A, B, 0);
+                    game_diplomacy_caption(A, B);
+                    game_parse_says(0, game_get_pact(A), -1, -1);
+                    say_title(1, A), say_name(2, A);
+                    answer(text(0x68e468), B);  // BROKEPACT
+                    net_pact_ends(A, B);
+                    unlock();
+                }
+                break;
+            case 4: game_demand_withdrawal(A, B); break;
+            case 5: battle_plans(A, B); break;
+            case 6: game_call_off_vendetta(A, B); break;
+            case 7:
+                *game_diplo_proposal = 0xc;
+                *game_diplo_counter = 1;
+                make_a_proposal(A, B, 1);
+                *game_diplo_menu_a = 0;
+                break;
+            }
+L55870b:
+            (*pp)++;
+        } while (*pp < get_patience(A, B));
+    }
+    game_diplomacy_caption(A, B);
+    if (game_has_treaty(A, B, TREATY_VENDETTA)) goto L5587c8;
+    say_title(0, A), say_name(1, A), say_name(2, B);
+    answer(text(game_has_treaty(B, A, TREATY_PACT) ? 0x68e474 : 0x68e480), B);  // TIMESUPALLY, TIMESUP
+L5587c8:
+    // The talks are over: what the AI has asked for is withdrawn, and its mood noted.
+    wtreaty_off(B, A, 0x2000, 0);
+    wagenda_off(B, A, 4, 0);
+    wset_agenda(B, A, 0x10, *game_diplo_attack_chance && !game_has_treaty(A, B, 0x11), 0);
+    wset_treaty(B, A, TREATY_SHALL_BETRAY, *game_diplo_can_betray && !game_has_treaty(A, B, 0x11), 1);
+    if (v54 || (*game_diplo_hostility && !game_has_treaty(A, B, TREATY_VENDETTA)))
+        fb->diplo_patience[A] = (int8_t)game_range(fb->diplo_patience[A], get_patience(A, B), 999);
+    game_diplomacy_ends(A, B);
+    if (v50 && !game_has_treaty(A, B, 0x10013) && !unk) {
+        say_title(0, B), say_name(1, B), say_noun(2, B);
+        answer(text(game_has_treaty(A, B, TREATY_TRUCE_) ? 0x68e488 : 0x68e494), B);  // RENEWTRUCE, ENDTRUCE
+    }
+}
+
+void communicate_in(uint8_t *pop, int faction, int other, int unk);
+void communicate_in(uint8_t *pop, int faction, int other, int unk) {
+    game_popup_ctor(pop);
+    communicate_body(pop, faction, other, unk);
+    game_popup_dtor(pop);
+}
+// The popup where the original's frame keeps it.
+__asm__(".text\n"
+        ".globl communicate\n"
+        "communicate:\n"
+        "    pushl %ebp\n"
+        "    movl %esp, %ebp\n"
+        "    subl $0x5540, %esp\n"
+        "    pushl 16(%ebp)\n"
+        "    pushl 12(%ebp)\n"
+        "    pushl 8(%ebp)\n"
+        "    leal -0x5534(%ebp), %eax\n"
+        "    pushl %eax\n"
+        "    call communicate_in\n"
+        "    movl %ebp, %esp\n"
+        "    popl %ebp\n"
+        "    ret\n");
+
 // ---- Shadow mode -----------------------------------------------------------------------
 //
 // The game calls these only in the player's talks, where every line is a
@@ -2931,6 +4973,47 @@ TALK_CHECK_POP(propose_attack, 1)
 TALK_CHECK_POP(proposal_menu, 1)
 TALK_CHECK_POP(make_a_proposal, 0)
 TALK_CHECK_POP(battle_plans, 0)
+
+// communicate() itself. Game calls run the original unchecked: they involve the
+// player's talks and the diplomacy window. Another module's sweep drops them
+// (they would open the window, which allocates from the game's heap); this
+// module's sweep checks both on a protected copy with the window's dialogs held.
+static struct hook_stats stats_communicate = {"communicate"};
+static void *orig_communicate;
+static void check_communicate(int faction, int other, int unk) {
+    struct hook_writes w_ = {0};
+    hooks_writes_game(&w_);
+    hooks_writes_begin(&w_);
+    quiet_talk_next = quiet_menu_next = 0;
+    hooks_nested++;
+    talk_call(orig_communicate, faction, other, unk);
+    hooks_nested--;
+    char want_buf[48];
+    snprintf(want_buf, sizeof want_buf, "%s", game_str_buffer);
+    hooks_writes_middle(&w_);
+    quiet_talk_next = quiet_menu_next = 0;
+    talk_call((void *)communicate, faction, other, unk);
+    char got_buf[48];
+    snprintf(got_buf, sizeof got_buf, "%s", game_str_buffer);
+    const char *diff_ = hooks_writes_end(&w_, 0, 0);
+    if (diff_) hooks_mismatch(&stats_communicate, "(%d, %d, %d; text %s, ours %.40s) %s", faction, other, unk, want_buf, got_buf, diff_);
+    hooks_ui_release();
+}
+static struct hook_stats stats_communicate_dropped = {"(swept communicate, other modules)"};
+static void shadow_communicate(int faction, int other, int unk) {
+    // (Before the nesting test: another module's check runs its original's
+    // calls nested, and they would open the window too.)
+    if (hooks_sweeping && hooks_protecting()) {
+        stats_communicate_dropped.calls++;
+        return;
+    }
+    if (hooks_nested) {
+        talk_call(orig_communicate, faction, other, unk);
+        return;
+    }
+    stats_communicate.calls++;
+    talk_call(orig_communicate, faction, other, unk);
+}
 TALK_CHECK_POP(introduce, 0)
 
 // tech_trade() has five arguments: its checks call both runs at the same
@@ -3576,6 +5659,65 @@ static void sweep_introduce(int faction) {
     check_introduce(faction, other, 0);
 }
 
+// The whole of a talk, as communicate() makes it: the player (`faction`) calling
+// (unk) or the AI calling (first contact and territory, which make the window
+// open at once: the other calls ask the player, which a check can't answer).
+// What the talk has to go on is varied: the state it was called in, the
+// treaties (and the bits they carry) and agendas, the AI's patience, the
+// player's loans, atrocities, social models, gifts and wrongs, the tech the AI
+// researches. The dialogs are answered 0 to 3 as the sweep's other talks, the
+// menus (the bargaining, the player's own) mostly with 0: nothing asked.
+static void sweep_communicate(int faction) {
+    static const int states[] = {0, 0, 0, 1, 2, 3, 4, 4 | 1, 8 | 1, 8 | 0x10 | 1, 0x20 | 1, 0x20 | 2, 0x20 | 3,
+                                 0x40, 0x40 | 1, 0x40 | 2};
+    static const uint32_t bits[] = {TREATY_WANT_REVENGE, TREATY_UNK_40, TREATY_UNK_80, TREATY_SHALL_BETRAY,
+                                    TREATY_WANT_TO_TALK, TREATY_UNK_8000, TREATY_ATROCITY_VICTIM, 0x200000, 0x400000,
+                                    TREATY_UNK_800};
+    static const uint32_t agendas[] = {1, 4, 8, 0x400, 0x800, 0x2000, 0x100, 0x2408};
+    int other = talks(faction);
+    if (!other) return;
+    struct faction_data *me = F(faction), *ai = F(other);
+    int unk = rnd(3) != 0;
+    game_diplo_state[other] = states[rnd(16)];
+    ai->diplo_patience[faction] = (int8_t)rnd(8);
+    for (int i = 0; i < 3; i++) {
+        if (!rnd(3)) ai->diplo_status[faction] ^= bits[rnd(10)];
+        if (!rnd(4)) me->diplo_status[other] ^= bits[rnd(10)];
+        if (!rnd(3)) ai->diplo_agenda[faction] ^= agendas[rnd(8)];
+        if (!rnd(5)) me->diplo_agenda[other] ^= agendas[rnd(8)];
+    }
+    if (!rnd(3)) ai->diplo_status[faction] ^= TREATY_UNK_8000000;
+    if (!rnd(3)) {
+        // At war, with the player far the stronger: the AI fears it and offers a truce, for a price.
+        me->diplo_status[other] = (me->diplo_status[other] & ~(uint32_t)(TREATY_PACT | TREATY_TREATY | TREATY_TRUCE_)) | TREATY_VENDETTA;
+        ai->diplo_status[faction] = (ai->diplo_status[faction] & ~(uint32_t)(TREATY_PACT | TREATY_TREATY | TREATY_TRUCE_)) | TREATY_VENDETTA;
+        me->mil_strength = 150 + rnd(250), ai->mil_strength = rnd(30);
+        if (rnd(2)) ai->energy_credits = 100 + rnd(900);
+        for (int rg = 1; rg < REGION_COUNT; rg++) {
+            if (!ai->region_total_bases[rg] && !ai->region_total_combat_units[rg]) continue;
+            me->region_total_combat_units[rg] += (uint16_t)(1 + rnd(5));
+            me->region_force_rating[rg] = (uint16_t)(300 + rnd(1500));
+            ai->region_force_rating[rg] = (uint16_t)rnd(100);
+        }
+    }
+    if (!rnd(3)) me->loan_balance[other] = rnd(3) ? 0 : 50 + rnd(300), me->loan_payment[other] = rnd(40);
+    if (!rnd(3)) ai->loan_balance[faction] = rnd(3) ? 0 : 50 + rnd(300), ai->loan_payment[faction] = rnd(40);
+    if (!rnd(3)) me->atrocities = rnd(6), me->integrity_blemishes = rnd(6);
+    if (!rnd(3)) me->diplo_gifts[other] = rnd(5), me->diplo_wrongs[other] = rnd(5);
+    for (int c = 0; c < 4; c++)
+        if (!rnd(3)) me->se_models_pending[c] = rnd(4);
+    if (!rnd(2)) ai->tech_research_id = rnd(TECH_FIRST_SMACX);
+    if (!rnd(2)) me->tech_research_id = rnd(TECH_FIRST_SMACX);
+    if (!rnd(3)) me->tech_ranking = rnd(60), ai->tech_ranking = rnd(60);
+    if (!rnd(3)) *game_diplo_maps_news = rnd(2);
+    answers();
+    for (int i = 0; i < QUIET_MENU_ANSWERS; i++) quiet_menu_answers[i] = !rnd(4) ? 4 : !rnd(5) ? 1 : 0;
+    quiet_menu_count = QUIET_MENU_ANSWERS;
+    quiet_text = 1, quiet_talk_pops = 1;
+    check_communicate(faction, other, unk);
+    quiet_text = 0, quiet_talk_pops = 0, quiet_menu_count = 0;
+}
+
 // Once a turn, cases on protected copies of the game, each for a faction
 // with bases made the player.
 static void diplomacy_sweep(void) {
@@ -3583,7 +5725,7 @@ static void diplomacy_sweep(void) {
                                                  sweep_propose_treaty, sweep_make_gift,
                                                  sweep_propose_attack, sweep_buy_tech, sweep_trade_maps,
                                                  sweep_give_a_base, sweep_base_swap, sweep_menus,
-                                                 sweep_battle_plans, sweep_tech_trade, sweep_introduce};
+                                                 sweep_battle_plans, sweep_tech_trade, sweep_introduce, sweep_communicate};
     enum { N_CASES = sizeof(cases) / sizeof(cases[0]) };
     if (!*game_map || *game_base_count <= 0 || *game_net_multiplayer || *game_pbem) return;
     // Not while the player is in talks: the diplomacy window is open, and
@@ -3621,8 +5763,10 @@ static const struct hook diplomacy_hooks[] = {
     HOOK(0x54dcf0, proposal_menu, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),
     HOOK(0x54f420, make_a_proposal, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),
     HOOK(0x54b1c0, battle_plans, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),
+    HOOK(0x54ffd0, communicate, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),
     HOOK(0x541100, tech_trade, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),
     HOOK(0x53d360, introduce, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),
 };
 struct hook_module diplomacy_module = {"diplomacy", diplomacy_hooks, HOOK_COUNT(diplomacy_hooks), diplomacy_sweep, NULL,
                                        -1};
+
