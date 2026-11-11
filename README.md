@@ -253,7 +253,9 @@ module at a time. So far:
   energy, or proposes a pact or a treaty (the price it asks, techs and
   help wanted, surrender, the treaty made); gifts of energy, research or
   a base and what the AI makes of them, joint attacks and their price,
-  techs bought, maps traded, and bases given or swapped;
+  techs bought, maps traded, and bases given or swapped; the player's
+  proposal menus, the proposal put to the AI (and the Council's business
+  raised in talks), and joint battle plans;
 - events: the turn's random events (perihelion and the base and world
   events), a faction put out of the game, and the faction modifiers and
   social choices set when it starts;
