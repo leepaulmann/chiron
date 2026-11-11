@@ -1679,6 +1679,143 @@ void major_atrocity(int faction, int other) {
     }
 }
 
+// ---- enemies_treaty --------------------------------------------------------------
+
+// Whether the player (the current faction) sees what passes between two
+// AIs: through the Empath Guild or an infiltrator, or as the governor
+// (game_spying(), of either), or in a game where all is seen
+// (OMNISCIENT, when `omniscient`).
+static int sees_deal(int faction, int other, int omniscient) {
+    return game_spying(faction) || game_spying(other) || (omniscient && (*game_state & GAME_STATE_OMNISCIENT));
+}
+
+// The news of two AIs' truce or treaty, the player being in a pact with
+// the first (`a`): "A pact partner (title, name, noun, he or she) and the
+// other (title, name, noun)", or for a treaty only the other's noun.
+static void news_pact(int a, int b, uint32_t label, int truce) {
+    say_title(0, a), say_name(1, a), say_noun(2, a);
+    game_parse_says(3, game_get_he_she(a, 0), -1, -1);
+    if (truce) say_title(4, b), say_name(5, b), say_noun(6, b);
+    else say_noun(4, b);
+    game_netmsg_pop(game_netmsg, text(label), 5000, 0, NULL);
+}
+// And of one the player is not in a pact with, if it can see it: both
+// nouns.
+static void news_other(int a, int b, uint32_t label) {
+    say_noun(0, a), say_noun(1, b);
+    game_netmsg_pop(game_netmsg, text(label), 5000, 0, NULL);
+}
+
+// Two AIs (`faction` and `other`) who have met make peace, step by step:
+// from a vendetta or a truce to a treaty (or a truce, if they have
+// reason to be wary of each other), from a treaty to a pact, or back down
+// to a truce. With `trade` they first trade techs
+// (enemies_trade_tech()). The player is told of each step if it is in a
+// pact with either, or sees what they do (a pact's news is its partner's
+// own; the others are shown to whoever sees both: the Empath Guild, an
+// infiltrator, or in an omniscient game); the news is a message that
+// names them (and, for a pact, their enemy). Steps:
+// - No treaty yet, and in a vendetta or a truce: the truce, at once, if
+//   either wants revenge or has been betrayed (0x40 or 0x20), or both rank 6
+//   or above, or a roll of 0 to 15 is below their fighting spirits (the AI's,
+//   each, in -1 to 1) less the difficulty (5 with intense rivalry) plus 8. Failing
+//   that, the treaty.
+// - Otherwise no treaty: the treaty.
+// - A treaty: they end it if the leader (the first in the rankings) is
+//   one of them and the other ranks 5 or above, or either wants revenge
+//   or was the victim of an atrocity, or has committed a major one.
+//   Otherwise a third faction is sought, among those they have commlinks
+//   with (both, or the great satan), that is a pact partner of either (it
+//   counts against the pact, if it ranks as high as either) or that has
+//   some level and is the great satan, or is at peace with neither and
+//   either their pact partners already or at war with one of them and
+//   outranking one; found, they pact against it unless they already did,
+//   or unless the pacts counted are more than the third's blemishes (it
+//   being the great satan, or nothing), when they part instead.
+//   They team up against it (enemies_team_up(), each way), and the player,
+//   if it is the third faction or sees it, is told.
+// The two last steps, ending a pact and teaming up, are the game's own
+// (enemies_unpact() and enemies_team_up()); Thinker has the same logic
+// (its pact_truce() and the rest are inlined here as in the original, and
+// its player_spying() is game_spying() of either).
+void enemies_treaty(int faction, int other, int trade) {
+    struct faction_data *F1 = &game_factions[faction], *F2 = &game_factions[other];
+    if (trade) game_enemies_trade_tech(faction, other);
+    uint32_t st = F1->diplo_status[other];
+    if (!(st & TREATY_TREATY) && (st & (TREATY_VENDETTA | 0x4))) {
+        int difficulty = (*game_rules & RULES_INTENSE_RIVALRY) ? 5 : *game_difficulty;
+        if ((st & (TREATY_WANT_REVENGE | TREATY_UNK_40)) ||
+            (F2->diplo_status[faction] & (TREATY_WANT_REVENGE | TREATY_UNK_40)) ||
+            (F2->ranking >= 6 && F1->ranking >= 6) ||
+            game_rand() % 16 < F1->ai_fight + F2->ai_fight - difficulty + 8) {
+            int player = *game_current_faction;
+            if (game_factions[player].diplo_status[faction] & TREATY_PACT) news_pact(faction, other, 0x68e620, 1);
+            else if (game_factions[player].diplo_status[other] & TREATY_PACT) news_pact(other, faction, 0x68e620, 1);
+            else if (sees_deal(faction, other, 1)) news_other(faction, other, 0x68e668);
+            treaty_on(faction, other, 0x4);
+            return;
+        }
+    }
+    st = F1->diplo_status[other];
+    if (!(st & TREATY_TREATY)) {
+        int player = *game_current_faction;
+        if (game_factions[player].diplo_status[faction] & TREATY_PACT) news_pact(faction, other, 0x68e62c, 0);
+        else if (game_factions[player].diplo_status[other] & TREATY_PACT) news_pact(other, faction, 0x68e62c, 0);
+        else if (sees_deal(faction, other, 1)) news_other(faction, other, 0x68e674);
+        treaty_on(faction, other, TREATY_TREATY);
+        return;
+    }
+    if ((game_faction_rankings[7] == faction && F2->ranking >= 5) || (game_faction_rankings[7] == other && F1->ranking >= 5) ||
+        (st & (TREATY_ATROCITY_VICTIM | TREATY_WANT_REVENGE)) ||
+        (F2->diplo_status[faction] & (TREATY_ATROCITY_VICTIM | TREATY_WANT_REVENGE)) || F1->major_atrocities ||
+        F2->major_atrocities) {
+        game_enemies_unpact(faction, other);
+        return;
+    }
+    int pacts = 0, third;
+    for (third = 1; third < FACTION_COUNT; third++) {
+        uint32_t s13 = F1->diplo_status[third], s23 = F2->diplo_status[third];
+        if (third == faction || third == other) continue;
+        if (!(s13 & TREATY_COMMLINK) && !(s23 & TREATY_COMMLINK)) continue;
+        if (!((s13 & TREATY_COMMLINK) && (s23 & TREATY_COMMLINK)) && !great_satan(third, 0)) continue;
+        struct faction_data *F3 = &game_factions[third];
+        if ((s13 & TREATY_PACT) || (s23 & TREATY_PACT)) {
+            if (F3->ranking >= F1->ranking || F3->ranking >= F2->ranking) pacts++;
+            continue;
+        }
+        if (!F3->diff_level) continue;
+        if (great_satan(third, 0)) break;
+        if ((s13 & (TREATY_PACT | TREATY_TREATY | 0x4)) || (s23 & (TREATY_PACT | TREATY_TREATY | 0x4))) continue;
+        if (F1->diplo_status[other] & TREATY_PACT) break;
+        if (!(s13 & TREATY_VENDETTA)) continue;
+        if (F1->ranking < F3->ranking || F2->ranking < F3->ranking) break;
+    }
+    if (third >= FACTION_COUNT) {
+        game_enemies_unpact(faction, other);
+        return;
+    }
+    if (F1->diplo_status[other] & TREATY_PACT) return;
+    int blemishes = great_satan(third, 0) ? game_factions[third].integrity_blemishes : 0;
+    if (pacts > blemishes) {
+        game_enemies_unpact(faction, other);
+        return;
+    }
+    treaty_on(faction, other, TREATY_PACT);
+    game_enemies_team_up(faction, other, third);
+    game_enemies_team_up(other, faction, third);
+    // Told if the third is the player, or the player sees them (but here
+    // not in an omniscient game).
+    int player = *game_current_faction;
+    if (third != player && !sees_deal(faction, other, 0)) return;
+    say_noun(0, faction), say_noun(1, other), say_noun(2, third);
+    game_str_buffer[0] = 0;
+    strcat(game_str_buffer, text(0x68e680));
+    if (third != player) strcat(game_str_buffer, text(0x68e690));
+    else if (!(F1->diplo_status[third] & TREATY_VENDETTA) && !(F2->diplo_status[third] & TREATY_VENDETTA))
+        strcat(game_str_buffer, text(0x68e694));
+    game_netmsg_pop(game_netmsg, game_str_buffer, 5000, 0, NULL);
+}
+
 // ---- Hooks and shadow checks ------------------------------------------------
 
 // stack_fix(), called by mind_control(), changes the stack only in a
@@ -2106,6 +2243,9 @@ SHADOW_TALK(void, encounter, (int a, int b, int c, int d, int e, int f), (a, b, 
 // ends its pacts.
 SHADOW_TALK(void, atrocity, (int a, int b, int c, int d), (a, b, c, d), is_human(a), "%d, %d, %d, %d", a, b, c, d)
 SHADOW_TALK(void, major_atrocity, (int a, int b), (a, b), is_human(a), "%d, %d", a, b)
+// Between AIs, with a message for the player; a human involved may be put
+// a question by the techs traded.
+SHADOW_TALK(void, enemies_treaty, (int a, int b, int c), (a, b, c), is_human(a) || is_human(b), "%d, %d, %d", a, b, c)
 
 // territory() also answers in its caller's variables, which are compared
 // apart from the game's state.
@@ -2438,6 +2578,43 @@ static void sweep_talks(int full) {
         }
         check_encounter(f, o, x, y, rnd(2), rnd(2));
     }
+    // Two AIs making peace, from each step: the pair's standing and the
+    // others' ties to them (commlinks, pacts, treaties, vendettas), their
+    // fighting spirits, levels, rankings, blemishes and atrocities, and who
+    // is the player (not one of them; the news names whoever it is in a
+    // pact with). Trading techs first now and then.
+    for (int n = 0; n < (full ? 16 : 6); n++) {
+        int f, o;
+        some_pair(&f, &o);
+        if (is_human(f) || is_human(o)) continue;
+        struct faction_data *F1 = &game_factions[f], *F2 = &game_factions[o];
+        static const uint32_t kinds[] = {TREATY_VENDETTA, 0x4, 0x4 | TREATY_VENDETTA, TREATY_TREATY, TREATY_TREATY,
+                                         TREATY_TREATY | TREATY_PACT, 0};
+        const uint32_t mask = TREATY_VENDETTA | 0x4 | TREATY_TREATY | TREATY_PACT;
+        if (rnd(4)) {
+            uint32_t k = kinds[rnd(7)];
+            F1->diplo_status[o] = (F1->diplo_status[o] & ~mask) | k | TREATY_COMMLINK;
+            F2->diplo_status[f] = (F2->diplo_status[f] & ~mask) | k | TREATY_COMMLINK;
+        }
+        for (int t = 1; t < FACTION_COUNT; t++) {
+            if (t == f || t == o) continue;
+            if (rnd(3)) F1->diplo_status[t] |= TREATY_COMMLINK, F2->diplo_status[t] |= TREATY_COMMLINK;
+            else if (rnd(2)) F1->diplo_status[t] ^= TREATY_COMMLINK;
+            static const uint32_t ties[] = {TREATY_PACT, TREATY_TREATY, 0x4, TREATY_VENDETTA};
+            for (int j = 0; j < 4; j++) {
+                if (!rnd(5)) F1->diplo_status[t] ^= ties[j];
+                if (!rnd(5)) F2->diplo_status[t] ^= ties[j];
+            }
+            if (!rnd(4)) game_factions[t].diff_level = rnd(6);
+            if (!rnd(4)) game_factions[t].integrity_blemishes = rnd(6);
+        }
+        if (!rnd(3)) F1->ai_fight = rnd(3) - 1, F2->ai_fight = rnd(3) - 1;
+        if (!rnd(4)) F1->major_atrocities = rnd(2);
+        if (!rnd(4)) F2->major_atrocities = rnd(2);
+        int p = bystander(f, o);
+        if (p && rnd(4)) *game_current_faction = p;
+        check_enemies_treaty(f, o, rnd(4) == 0);
+    }
     {
         // A human culprit who is the player would be told in a window.
         int f, o;
@@ -2563,6 +2740,7 @@ static const struct hook faction_hooks[] = {
     HOOK(0x55eb80, territory, PUSH_EBP_MOV_EBP_ESP, 0x81, 0xec, 0x18, 0x01, 0x00, 0x00),  // sub esp, 0x118
     HOOK(0x55eee0, atrocity, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),                    // sub esp, 12
     HOOK(0x55f450, major_atrocity, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x58),              // sub esp, 0x58
+    HOOK(0x55d760, enemies_treaty, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x14),              // sub esp, 0x14
 };
 // The diplomacy talks (diplomacy.c) are swept with it: the game calls them
 // only when a human player talks.

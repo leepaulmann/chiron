@@ -28,3 +28,7 @@ int order_veh(int veh, int dir, int type);
 // might start a fight.
 void move_hold_steps(int on);
 int move_destroy_fights(int veh, int x, int y);
+// A supply crawler's menu at a base, for the player; 1 if it was used up
+// there (or the call was a question only), 0 if it set off on a convoy or
+// nothing was offered.
+int supply_options(int veh, int base);

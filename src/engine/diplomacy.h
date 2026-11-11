@@ -38,6 +38,10 @@ int tech_trade(int faction, int other, int ai, int counter, int proposal);
 // The AI brings the player battle plans.
 void battle_plans(int faction, int other);
 
+// The player meets the AI as it takes the AI's call: the greeting and, if
+// either has planet busters, a word of them.
+void introduce(int faction, int other);
+
 // Shadow mode (quiet.c): in a sweep's copies of the game, the answers the
 // diplomacy window's dialogs give, in turn, and the next one to give.
 enum { QUIET_TALK_ANSWERS = 8 };

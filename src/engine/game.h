@@ -330,12 +330,14 @@ struct faction_def {
     char filename[24];
     char search_key[24];
     char leader_name[24], leader_title[24];
-    GAME_PAD(0x064, 0x2e4);
+    char adj_leader[128], adj_insult_leader[128];  // the leader's name as an adjective, and the insulting one
+    char adj_faction[128], adj_insult_faction[128];  // the same for the faction
+    GAME_PAD(0x264, 0x2e4);
     char noun[24];
     int32_t noun_gender;
     int32_t noun_plural;
     char adjective[128];  // the name as an adjective, such as "Gaian"
-    GAME_PAD(0x384, 0x3dc);
+    char formal_name[40], insult_leader[24], desc_name[24];  // formal name; the noun for insulting the leader
     char assistant_name[24], scientist_name[24];
     char assistant_city[24];  // the name the Assistant Worm's killer's home takes, captured by the player
     GAME_PAD(0x424, 0x4d4);
@@ -356,6 +358,9 @@ struct faction_def {
 _Static_assert(sizeof(struct faction_def) == 0x59c, "faction_def size");
 GAME_AT(struct faction_def, noun, 0x2e4);
 GAME_AT(struct faction_def, adjective, 0x304);
+GAME_AT(struct faction_def, adj_insult_faction, 0x1e4);
+GAME_AT(struct faction_def, insult_leader, 0x3ac);
+GAME_AT(struct faction_def, assistant_name, 0x3dc);
 GAME_AT(struct faction_def, assistant_city, 0x40c);
 GAME_AT(struct faction_def, rule_flags, 0x508);
 GAME_AT(struct faction_def, rule_tech_selected, 0x4d4);
@@ -1258,6 +1263,7 @@ extern int (*game_action_terraform)(int veh, int terraform, int unk);
 extern void (*game_say_loc)(char *buf, int x, int y, int a, int b, int c);
 extern char *game_text_road_to_done, *game_text_tube_to_done;
 extern void (*game_synch_veh)(int veh);
+extern void (*game_synch_base)(int base);  // tells the other players of a base (a no-op outside network games)
 extern int(__attribute__((thiscall)) * game_net_order_veh)(void *daemon, int veh, int dir, int unk);
 extern int(__attribute__((thiscall)) * game_net_await_exec)(void *daemon, int unk);
 extern int(__attribute__((thiscall)) * game_net_await_synch)(void *daemon);
@@ -1376,6 +1382,9 @@ extern void (*game_energy_compute)(int faction, int unk);
 extern void (*game_comm_check)(int faction, int other);
 extern void (*game_enemies_war)(int faction, int other);
 extern void (*game_enemies_treaty)(int faction, int other, int trade);
+extern void (*game_enemies_unpact)(int faction, int other);  // two AIs in a pact part
+extern void (*game_enemies_team_up)(int faction, int other, int third);  // two AIs in a pact turn on a third
+extern char *(*game_get_he_she)(int faction, int unk);
 extern int (*game_tut_check2)(int bit);
 extern int(__attribute__((thiscall)) * game_tut_map)(void *win, char *label, int x, int y, int a, void *sprite, int b,
                                                      int x2, int y2);

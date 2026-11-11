@@ -32,14 +32,22 @@ static void *portraits[FACTION_COUNT];
 static uint32_t shown[16];
 static int n_shown, said, answer_with, captions, energy_updates;
 static uint32_t at(const char *p) { return (uint32_t)(p - (const char *)game_at(0x400000)) + 0x400000; }
+static char shown_text[16][40];
 static int x_pops_11_stub(char *label, int flags, void *sprite, void *fn) {
     if (n_shown < 16) shown[n_shown] = label == game_str_buffer ? 1 : at(label);
+    if (n_shown < 16) snprintf(shown_text[n_shown], sizeof shown_text[0], "%s", label);
     n_shown++;
     return answer_with;
 }
-static int says_stub(int slot, char *text, int g, int p) { return said++, 0; }
+static char says_text[16][40];
+static int says_stub(int slot, char *text, int g, int p) {
+    snprintf(says_text[slot & 15], sizeof says_text[0], "%s", text);
+    return said++, 0;
+}
+static char *__attribute__((thiscall)) strings_stub(void *table, char *s) { return s; }
 static int num_stub(int slot, int value) { return 0; }
-static int random_stub(int lo, int hi) { return lo; }
+static int roll_force = -1;
+static int random_stub(int lo, int hi) { return roll_force >= 0 ? roll_force : lo; }
 static void caption_stub(int f, int o) { captions++; }
 static char *phrase_stub(int f, int unk) { return "phrase"; }
 static char *pact_stub(int f) { return "pact"; }
@@ -108,7 +116,7 @@ static void reset(void) {
 }
 
 int main(void) {
-    static uint8_t image[0x300000];  // strings, from 0x400000
+    static uint8_t image[0x600000];  // strings, from 0x400000
     game_test_image = image;
     strcpy((char *)game_at(0x68dc8c), "PROVOKED");
     strcpy((char *)game_at(0x68dd0c), "PROVOKED");
@@ -545,6 +553,84 @@ int main(void) {
     friction = 18;
     battle_plans(1, 2);
     EXPECT(shown[0], 0x68dd20);
+
+
+    // ---- introduce
+    {
+        static char *labels[0x120];
+        static int32_t language, pbem, intro_state[FACTION_COUNT];
+        static char an[] = "An", a[] = "A", might[] = "Awesome", might2[] = "Strong";
+        static char **labels_p = labels;
+        labels[0x114] = a, labels[0x115] = an;
+        game_labels = &labels_p, game_language = &language, game_pbem = &pbem, game_diplo_state = intro_state;
+        game_strings_get = strings_stub;
+        *(char **)game_at(0x94c55c + 6 * 8) = might;
+        *(char **)game_at(0x94c55c + 3 * 8) = might2;
+        strcpy((char *)game_at(0x68d624), "INTRO"), strcpy((char *)game_at(0x68d62c), "NEW");
+        strcpy((char *)game_at(0x68d630), "MAD"), strcpy((char *)game_at(0x68d634), "PLANETBUSTER0");
+        strcpy((char *)game_at(0x68d644), "PLANETBUSTER"), strcpy((char *)game_at(0x682820), " ");
+        // Strangers: NEW, the roll the stand-in gives (0 here).
+        reset();
+        introduce(1, 2);
+        EXPECT(strcmp(shown_text[0], "INTRONEW0"), 0);
+        EXPECT(n_shown, 1);
+        EXPECT(second, 2);
+        // Met, and the AI wants revenge: MAD.
+        reset();
+        factions[1].diplo_status[2] |= TREATY_UNK_8000000 | TREATY_WANT_REVENGE;
+        roll_force = 3;
+        introduce(1, 2);
+        EXPECT(strcmp(shown_text[0], "INTROMAD3"), 0);
+        // Met, in a pact: the plain greeting.
+        reset();
+        factions[1].diplo_status[2] |= TREATY_UNK_8000000 | TREATY_PACT;
+        roll_force = 2;
+        introduce(1, 2);
+        EXPECT(strcmp(shown_text[0], "INTRO2"), 0);
+        // A stranger of rank 1 is mighty enough for "An": the roll 3 words.
+        reset();
+        roll_force = 3;
+        factions[1].ranking = 1;
+        introduce(1, 2);
+        EXPECT(strcmp(shown_text[0], "INTRONEW3"), 0);
+        EXPECT(strcmp(says_text[5], "An Awesome"), 0);
+        factions[1].ranking = 4;
+        introduce(1, 2);
+        EXPECT(strcmp(says_text[5], "A Strong"), 0);
+        language = 1;
+        introduce(1, 2);
+        EXPECT(strcmp(says_text[5], "Strong"), 0);
+        language = 0;
+        // In PBEM, a met faction that asks again is a stranger too.
+        reset();
+        factions[1].diplo_status[2] |= TREATY_UNK_8000000;
+        pbem = 1, intro_state[2] = 2, roll_force = 1;
+        introduce(1, 2);
+        EXPECT(strcmp(shown_text[0], "INTRONEW1"), 0);
+        pbem = 0, intro_state[2] = 0;
+        // Planet busters: the AI's are mentioned at once, the player's once,
+        // and the bit 0x4000 is set; the player's say "2" if the AI has them.
+        reset();
+        roll_force = -1;
+        factions[1].diplo_status[2] |= TREATY_UNK_8000000;
+        factions[1].planet_busters = 1, factions[2].planet_busters = 1;
+        introduce(1, 2);
+        EXPECT(n_shown, 3);
+        EXPECT(shown[1], 0x68d634);
+        EXPECT(strcmp(shown_text[2], "PLANETBUSTER2"), 0);
+        EXPECT(factions[1].diplo_status[2] & 0x4000, 0x4000);
+        reset();
+        factions[1].diplo_status[2] |= TREATY_UNK_8000000;
+        factions[1].planet_busters = 1;
+        introduce(1, 2);
+        EXPECT(strcmp(shown_text[1], "PLANETBUSTER1"), 0);
+        reset();
+        factions[1].diplo_status[2] |= TREATY_UNK_8000000 | 0x4000;
+        factions[1].planet_busters = 1;
+        introduce(1, 2);
+        EXPECT(n_shown, 1);
+        roll_force = -1;
+    }
 
     // ---- tech_trade (the rules here forbid trading techs: none to trade)
     {

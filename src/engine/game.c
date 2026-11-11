@@ -297,6 +297,7 @@ int (*game_action_terraform)(int veh, int terraform, int unk);
 void (*game_say_loc)(char *buf, int x, int y, int a, int b, int c);
 char *game_text_road_to_done, *game_text_tube_to_done;
 void (*game_synch_veh)(int veh);
+void (*game_synch_base)(int base);
 int(__attribute__((thiscall)) * game_net_order_veh)(void *daemon, int veh, int dir, int unk);
 int(__attribute__((thiscall)) * game_net_await_exec)(void *daemon, int unk);
 int(__attribute__((thiscall)) * game_net_await_synch)(void *daemon);
@@ -372,6 +373,9 @@ void (*game_energy_compute)(int faction, int unk);
 void (*game_comm_check)(int faction, int other);
 void (*game_enemies_war)(int faction, int other);
 void (*game_enemies_treaty)(int faction, int other, int trade);
+void (*game_enemies_unpact)(int faction, int other);
+void (*game_enemies_team_up)(int faction, int other, int third);
+char *(*game_get_he_she)(int faction, int unk);
 int (*game_tut_check2)(int bit);
 int(__attribute__((thiscall)) * game_tut_map)(void *win, char *label, int x, int y, int a, void *sprite, int b, int x2,
                                               int y2);
@@ -911,6 +915,7 @@ void game_bind(struct pe_image *exe) {
     game_text_road_to_done = (char *)code_at(exe, 0x687e20);
     game_text_tube_to_done = (char *)code_at(exe, 0x687e2c);
     game_synch_veh = (void *)code_at(exe, 0x593220);
+    game_synch_base = (void *)code_at(exe, 0x593250);
     game_net_order_veh = (void *)code_at(exe, 0x531780);
     game_net_await_exec = (void *)code_at(exe, 0x531300);
     game_net_await_synch = (void *)code_at(exe, 0x531480);
@@ -1033,6 +1038,9 @@ void game_bind(struct pe_image *exe) {
     game_comm_check = (void *)code_at(exe, 0x55c430);
     game_enemies_war = (void *)code_at(exe, 0x55c840);
     game_enemies_treaty = (void *)code_at(exe, 0x55d760);
+    game_enemies_unpact = (void *)code_at(exe, 0x55ce20);
+    game_enemies_team_up = (void *)code_at(exe, 0x55d2a0);
+    game_get_he_she = (void *)code_at(exe, 0x58fce0);
     game_tut_check2 = (void *)code_at(exe, 0x4ba650);
     game_tut_map = (void *)code_at(exe, 0x4be650);
     game_diplomacy_caption = (void *)code_at(exe, 0x5399a0);

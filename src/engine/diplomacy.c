@@ -2694,6 +2694,144 @@ __asm__(".text\n"
         "    popl %ebp\n"
         "    ret\n");
 
+// ---- introduce -----------------------------------------------------------------------
+
+// The player (`faction`) meets the AI (`other`) in the diplomacy window, which
+// opens when the player takes its call (wants_to_speak()): the leaders greet
+// each other with the INTRO line of a kind chosen by how they stand, and
+// a planet buster is mentioned. The AI's portrait shows the lines. The
+// words the line may use (slots 0 to 4: the titles and names, and the AI's
+// noun; 8 and 9: the AI's adjective and the player's leader's adjective) are
+// set first, then those the kind adds from the player's faction's phrases
+// (slots 5, 6 and 8).
+// - NEW, if the player has not met them (or, in a network or PBEM game, when
+//   the console asks again: game_diplo_state's bit 2): a phrase of the AI's;
+//   at one in 6 the player's noun, or at one in 3 a word for how mighty it is
+//   (the faction's ranking), with "a" or "an" before it in English (the
+//   original tells a vowel by the capital letters A E I O U only, where
+//   Thinker's version also takes the small ones).
+// - MAD, when the AI wants revenge (the player's status towards it has
+//   0x20): five ways to insult, by the player's phrases, adjectives and
+//   the leader's insult.
+// - Otherwise four ways of describing the player, kindly in a pact or
+//   without hostility, insulting otherwise.
+// Then the planet busters: the AI's (a line, as soon as it has any, where
+// Thinker's version asks for the bit 0x4000 or a roll against its mood), and
+// the player's (once, with the bit 0x4000 set on the status towards the AI,
+// which is announced to the other players in a network game).
+void introduce_in(uint8_t *pop, int faction, int other);
+void introduce_in(uint8_t *pop, int faction, int other) {
+    game_popup_ctor(pop);
+    struct faction_def *me = &game_faction_defs[faction], *ai = &game_faction_defs[other];
+    struct faction_data *player = F(faction), *rival = F(other);
+    *game_diplo_second = other;
+    *(int32_t *)game_at(0x93fab4) = 1;  // the talks' window state
+    game_diplomacy_caption(faction, other);
+    say_title(0, faction), say_name(1, faction);
+    say_title(2, other), say_name(3, other);
+    say_noun(4, other);
+    game_parse_says(8, ai->adjective, -1, -1);
+    game_parse_says(9, me->adj_leader, -1, -1);
+    game_str_buffer[0] = 0;
+    strcat(game_str_buffer, text(0x68d624));
+    int roll;
+    if (!(status(faction, other) & TREATY_UNK_8000000) ||
+        ((*game_net_multiplayer || *game_pbem) && (game_diplo_state[other] & 2))) {
+        strcat(game_str_buffer, text(0x68d62c));
+        roll = game_random(0, 6);
+        game_parse_says(6, game_get_phrase(other, 1), -1, -1);
+        if (roll == 2) {
+            say_noun(5, faction);
+        } else if (roll == 3) {
+            char buf[80];
+            int might = 7 - player->ranking;
+            might = might < 0 ? 0 : might > 6 ? 6 : might;
+            char *adj = game_strings_get(game_strings, *(char **)game_at(0x94c55c + might * 8));
+            buf[0] = 0;
+            if (!*game_language) {
+                char c = adj[0];
+                int vowel = c == 'A' || c == 'E' || c == 'I' || c == 'O' || c == 'U';
+                strcat(buf, game_label(vowel ? 0x115 : 0x114));
+                strcat(buf, text(0x682820));
+            }
+            strcat(buf, adj);
+            game_parse_says(5, buf, -1, -1);
+        }
+    } else if (status(faction, other) & TREATY_WANT_REVENGE) {
+        strcat(game_str_buffer, text(0x68d630));
+        roll = game_random(0, 5);
+        switch (roll) {
+        case 0:
+            game_parse_says(5, game_get_phrase(faction, 3), -1, -1);
+            game_parse_says(6, game_get_noun_phrase(faction, 8), -1, -1);
+            break;
+        case 1:
+            game_parse_says(5, me->adj_insult_faction, -1, -1);
+            game_parse_says(6, game_get_phrase(faction, 3), -1, -1);
+            break;
+        case 2:
+            game_parse_says(6, game_get_noun_phrase(faction, 8), -1, -1);
+            break;
+        case 3:
+            game_parse_says(8, game_get_phrase(faction, 6), -1, -1);
+            break;
+        default:
+            game_parse_says(5, me->adj_insult_leader, -1, -1);
+            *game_parse_gender = me->leader_female, *game_parse_plural = 0;
+            game_parse_says(6, me->insult_leader, -1, -1);
+            game_parse_says(8, game_get_phrase(faction, 6), -1, -1);
+            break;
+        }
+    } else {
+        roll = game_random(0, 4);
+        int kind = (status(faction, other) & TREATY_PACT) || !*game_diplo_hostility;
+        switch (roll) {
+        case 0:
+            game_parse_says(5, game_get_noun_phrase(faction, kind ? 9 : 10), -1, -1);
+            break;
+        case 1:
+            game_parse_says(9, kind ? me->adj_leader : me->adj_insult_leader, -1, -1);
+            break;
+        case 2:
+            game_parse_says(5, kind ? me->adj_faction : me->adj_insult_faction, -1, -1);
+            break;
+        default:
+            game_parse_says(9, kind ? me->adj_leader : me->adj_insult_leader, -1, -1);
+            game_parse_says(5, kind ? me->adj_faction : me->adj_insult_faction, -1, -1);
+            break;
+        }
+    }
+    char digits[12];
+    snprintf(digits, sizeof(digits), "%d", roll);
+    strcat(game_str_buffer, digits);
+    answer(game_str_buffer, other);
+    if (rival->planet_busters) answer(text(0x68d634), other);
+    if (player->planet_busters && !(status(faction, other) & 0x4000)) {
+        game_str_buffer[0] = 0;
+        strcat(game_str_buffer, text(0x68d644));
+        snprintf(digits, sizeof(digits), "%d", (rival->planet_busters != 0) + 1);
+        strcat(game_str_buffer, digits);
+        answer(game_str_buffer, other);
+        net_set_treaty(faction, other, 0x4000, 1);
+    }
+    pop_end(pop);
+}
+// The popup where the original's frame keeps it.
+__asm__(".text\n"
+        ".globl introduce\n"
+        "introduce:\n"
+        "    pushl %ebp\n"
+        "    movl %esp, %ebp\n"
+        "    subl $0x5440, %esp\n"
+        "    pushl 12(%ebp)\n"
+        "    pushl 8(%ebp)\n"
+        "    leal -0x5430(%ebp), %eax\n"
+        "    pushl %eax\n"
+        "    call introduce_in\n"
+        "    movl %ebp, %esp\n"
+        "    popl %ebp\n"
+        "    ret\n");
+
 // ---- Shadow mode -----------------------------------------------------------------------
 //
 // The game calls these only in the player's talks, where every line is a
@@ -2793,6 +2931,7 @@ TALK_CHECK_POP(propose_attack, 1)
 TALK_CHECK_POP(proposal_menu, 1)
 TALK_CHECK_POP(make_a_proposal, 0)
 TALK_CHECK_POP(battle_plans, 0)
+TALK_CHECK_POP(introduce, 0)
 
 // tech_trade() has five arguments: its checks call both runs at the same
 // depth too.
@@ -3416,6 +3555,27 @@ static void sweep_tech_trade(int faction) {
     quiet_text = 0, quiet_talk_pops = 0, quiet_menu_count = 0;
 }
 
+// The player meets the AI: whether they have met, a grudge, a pact, the
+// hostility, the factions' rankings, planet busters on either side (and the
+// player's having told them already), in a PBEM game now and then (the
+// console's asking again), and English or another language.
+static void sweep_introduce(int faction) {
+    int other = talks(faction);
+    if (!other) return;
+    struct faction_data *me = F(faction), *ai = F(other);
+    if (rnd(2)) me->diplo_status[other] ^= TREATY_UNK_8000000;
+    if (!rnd(3)) me->diplo_status[other] ^= TREATY_WANT_REVENGE;
+    if (!rnd(3)) me->diplo_status[other] ^= TREATY_PACT;
+    if (rnd(2)) *game_diplo_hostility = rnd(5);
+    if (rnd(2)) me->ranking = 1 + rnd(7);
+    if (!rnd(3)) me->planet_busters = 1 + rnd(2);
+    if (!rnd(3)) ai->planet_busters = 1 + rnd(2);
+    if (!rnd(3)) me->diplo_status[other] ^= 0x4000;
+    if (!rnd(3)) *game_pbem = 1, game_diplo_state[other] ^= 2;
+    if (!rnd(3)) *game_language = rnd(2);
+    check_introduce(faction, other, 0);
+}
+
 // Once a turn, cases on protected copies of the game, each for a faction
 // with bases made the player.
 static void diplomacy_sweep(void) {
@@ -3423,7 +3583,7 @@ static void diplomacy_sweep(void) {
                                                  sweep_propose_treaty, sweep_make_gift,
                                                  sweep_propose_attack, sweep_buy_tech, sweep_trade_maps,
                                                  sweep_give_a_base, sweep_base_swap, sweep_menus,
-                                                 sweep_battle_plans, sweep_tech_trade};
+                                                 sweep_battle_plans, sweep_tech_trade, sweep_introduce};
     enum { N_CASES = sizeof(cases) / sizeof(cases[0]) };
     if (!*game_map || *game_base_count <= 0 || *game_net_multiplayer || *game_pbem) return;
     // Not while the player is in talks: the diplomacy window is open, and
@@ -3462,6 +3622,7 @@ static const struct hook diplomacy_hooks[] = {
     HOOK(0x54f420, make_a_proposal, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),
     HOOK(0x54b1c0, battle_plans, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),
     HOOK(0x541100, tech_trade, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),
+    HOOK(0x53d360, introduce, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),
 };
 struct hook_module diplomacy_module = {"diplomacy", diplomacy_hooks, HOOK_COUNT(diplomacy_hooks), diplomacy_sweep, NULL,
                                        -1};

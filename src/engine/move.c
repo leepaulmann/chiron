@@ -24,6 +24,7 @@
 #include "map.h"
 #include "mapgen.h"
 #include "path.h"
+#include "quiet.h"
 #include "score.h"
 #include "shadow.h"
 #include "spot.h"
@@ -1791,14 +1792,12 @@ static enum next step_zoc(struct step *s) {
     return GO_END;
 }
 
-// supply_options(): a supply crawler's menu at a base, for the player.
-// The AI is offered nothing (0), on a popup made and taken down at once
-// where the original's frame has it (the call's frame lies 0x542c below
-// order_veh's, and its popup 0x53a0 below that).
-static int supply_menu(struct step *s, int veh, int base) {
-    if (is_human_(game_vehs[veh].faction)) return game_supply_options(veh, base);
-    uint8_t *pop = s->pop + 0x5410 - 0xa7dc;
-    game_popup_ctor(pop);
+// ---- supply_options ----------------------------------------------------------------
+
+// The popup the originals keep on their stacks, and its parts (as in
+// diplomacy.c); taken down as the originals inline it.
+enum { POP_DIALOGS = 0x21d0, POP_SPRITE = 0x2118, POP_ICON = 0x2144 };
+static void pop_end(uint8_t *pop) {
     *(uint32_t *)pop = game_va(0x6695c8);
     *(uint32_t *)(pop + 0x444) = game_va(0x6695c0);
     game_popup_close(pop);
@@ -1809,6 +1808,167 @@ static int supply_menu(struct step *s, int veh, int base) {
     game_flat_button_dtor(pop + 0x3cdc);
     game_graphic_win_dtor(pop + 0x3230);
     game_base_pop_dtor(pop);
+}
+
+// A supply crawler (`veh`) at a base (`base`), for the player: the menu of
+// what it can do there. Nothing is offered (0) to the AI, to a unit on
+// the way somewhere (a go to more than a square or two from its goal, or
+// a road or tube, or a move), one already given a convoy for the turn, or
+// to a crawler at a base that is neither its faction's nor a pact
+// partner's. The popup names the unit (slot 1), the base (2) and its home
+// (3), the minerals the base has and the cost of its production (0 and 1:
+// a facility's or a project's in rows, a unit's by veh_cost(); times the
+// minerals a row is worth), under the faction's picture (the alien's
+// own); its lines come from script.txt: a header (id 0); one (id 1) to
+// disband the crawler into the base's production, if that is a secret
+// project (the project named in slot 0) or a custom unit that isn't one
+// of the flagged kinds (a prototype of the faction's, slot 0 its name),
+// and three, ids 2 to 4, for a convoy of nutrients, minerals or energy,
+// if convoy() allows one. With nothing to offer it returns 0.
+//
+// The player at the console (the faction is the current one, and the
+// attack flags have bit 1) picks from the menu, and the pick is kept on
+// the unit (unk_2c[0]: other callers replay it); with the flags at 1 alone
+// (a question, no move made) the call ends there, 1. Otherwise the choice
+// is carried out: 1 disbands the crawler for its cost in minerals (the
+// unit's, times a row) added to the base's, told to the other players, the
+// player (the current faction) shown how many minerals are still wanted
+// to finish (at most 9999) before the unit dies (in a network game, the
+// kill is sent instead and awaited), and the call returns 1; any other
+// choice (2 to 4 here) puts the unit on a convoy (ORDER_CONVOY) of the
+// resource it names, which is the choice less 2, and returns 0. A choice
+// of 0 ends the call at once. The original does nothing about a choice
+// the menu can't give (a cancelled menu may be -1, which sets a convoy
+// of "resource" 0xfd); nor does this.
+//
+// OpenSMACX has no version of this function; Thinker only replaces its
+// calls of veh_cost().
+int supply_options_in(uint8_t *pop, int veh, int base);
+int supply_options_in(uint8_t *pop, int veh, int base) {
+#define RETURN(r)    \
+    do {             \
+        pop_end(pop); \
+        return (r);  \
+    } while (0)
+    game_popup_ctor(pop);
+    struct veh *V = &game_vehs[veh];
+    struct base *B = &game_bases[base];
+    int faction = V->faction;
+    if (!is_human_(faction)) RETURN(0);
+    int order = V->order;
+    if (order == ORDER_ROAD_TO || order == ORDER_MAGTUBE_TO || order == ORDER_MOVE || (V->state & 0x4000)) RETURN(0);
+    if (order == ORDER_MOVE_TO && ((x_dist(V->x, waypoint_x(V)[0]) + abs(V->y - waypoint_y(V)[0])) & ~1) > 2)
+        RETURN(0);
+    if (faction != B->faction && !(game_factions[faction].diplo_status[B->faction] & TREATY_PACT)) RETURN(0);
+
+    game_parse_says(1, game_protos[V->proto].name, -1, -1);
+    game_parse_says(2, B->name, -1, -1);
+    if (V->home_base >= 0) game_parse_says(3, game_bases[V->home_base].name, -1, -1);
+    int item = B->queue[0], cost;
+    if (item < 0) cost = cost_factor(faction, 1, -1) * game_facilities[-item].cost;
+    else cost = veh_cost(item, base, NULL) * cost_factor(faction, 1, -1);
+    game_parse_num(0, B->minerals);
+    game_parse_num(1, cost);
+    game_popup_start(pop, game_pop_file, text(0x68fc28), -1, 0, 0, 0);
+    {
+        int w, h;
+        int alien = game_faction_defs[faction].rule_flags & RULE_FLAG_ALIEN;
+        if (!game_pcx_dimensions(text(alien ? 0x68fc34 : 0x68fc54), &w, &h) &&
+            !game_sprite_init(pop + POP_SPRITE, text(alien ? 0x68fc44 : 0x68fc64), w, h))
+            *(void **)(pop + POP_ICON) = pop + POP_SPRITE;
+    }
+    if (game_x_text_open(*game_script_file, text(0x68fc74))) RETURN(0);
+    // The lines are read in turn, one for each item the menu may have
+    // (a line read but not shown is skipped).
+    game_text_get();
+    game_str_buffer[0] = 0;
+    game_parse_string(*game_text_line, game_str_buffer);
+    game_dialogs_item(pop + POP_DIALOGS, game_str_buffer, 0);
+    int count = 1;
+    game_text_get();
+    if (B->queue[0] <= -70) {
+        game_parse_say(0, (int)(intptr_t)game_facilities[-B->queue[0]].name, -1, -1);
+        game_parse_string(*game_text_line, game_str_buffer);
+        game_dialogs_item(pop + POP_DIALOGS, game_str_buffer, 1);
+        count = 2;
+    }
+    game_text_get();
+    item = B->queue[0];
+    if (item >= 0 && item >= 64 && !(game_protos[item].flags & 4)) {
+        game_parse_says(0, game_protos[item].name, -1, -1);
+        game_parse_string(*game_text_line, game_str_buffer);
+        game_dialogs_item(pop + POP_DIALOGS, game_str_buffer, 1);
+        count++;
+    }
+    if (convoy(veh, base)) {
+        count += 3;
+        for (int id = 2; id <= 4; id++) {
+            game_text_get();
+            game_parse_string(*game_text_line, game_str_buffer);
+            game_dialogs_item(pop + POP_DIALOGS, game_str_buffer, id);
+        }
+    }
+    if (count <= 1) RETURN(0);
+
+    int flags = *game_veh_attack_flags, action;
+    if (faction == *game_current_faction && (flags & 1)) {
+        action = game_base_pop_exec_3(pop, 0, 0);
+        if (!action) RETURN(0);
+        flags = *game_veh_attack_flags;
+        V->unk_2c[0] = (uint8_t)action;
+    } else {
+        action = V->unk_2c[0];
+    }
+    if ((flags & 1) && !(flags & 2)) RETURN(1);
+    if (action == 1) {
+        B->minerals += cost_factor(faction, 1, -1) * game_protos[V->proto].cost;
+        B->minerals_2 = B->minerals;
+        B->production_last = B->queue[0];
+        game_synch_base(base);
+        int wanted = cost - B->minerals;
+        wanted = wanted < 0 ? 0 : wanted > 9999 ? 9999 : wanted;
+        if (faction == *game_current_faction) {
+            game_parse_num(0, wanted);
+            game_netmsg_pop(game_netmsg, text(0x68fc80), 5000, 0, NULL);
+        }
+        if (*game_net_multiplayer) {
+            game_message_veh(0x2407, veh, 1, 0);
+            game_net_await_exec(game_net_daemon, 1);
+        } else {
+            game_kill(veh);
+        }
+        RETURN(1);
+    }
+    V->order = ORDER_CONVOY;
+    V->order_auto_type = (uint8_t)(action - 2);
+    RETURN(0);
+#undef RETURN
+}
+// The popup where the original's frame keeps it.
+__asm__(".text\n"
+        ".globl supply_options\n"
+        "supply_options:\n"
+        "    pushl %ebp\n"
+        "    movl %esp, %ebp\n"
+        "    subl $0x53b0, %esp\n"
+        "    pushl 12(%ebp)\n"
+        "    pushl 8(%ebp)\n"
+        "    leal -0x53a0(%ebp), %eax\n"
+        "    pushl %eax\n"
+        "    call supply_options_in\n"
+        "    movl %ebp, %esp\n"
+        "    popl %ebp\n"
+        "    ret\n");
+
+// order_veh()'s own call of it: the AI is offered nothing (0), on a popup
+// made and taken down at once where the original's frame has it (the
+// call's frame lies 0x542c below order_veh's, and its popup 0x53a0 below
+// that).
+static int supply_menu(struct step *s, int veh, int base) {
+    if (is_human_(game_vehs[veh].faction)) return game_supply_options(veh, base);
+    uint8_t *pop = s->pop + 0x5410 - 0xa7dc;
+    game_popup_ctor(pop);
+    pop_end(pop);
     return 0;
 }
 static enum next step_supply(struct step *s) {
@@ -2951,6 +3111,48 @@ SHADOW_WRITER_CHECK(void, action_road_to, (int a), (a), orig_action_road_to(a), 
 SHADOW_UNCHECKED(action_go_to)
 SHADOW_UNCHECKED(action_road_to)
 
+// supply_options() keeps a popup on its stack: both runs of a check are made
+// at the same depth, so that it lies at the same address (as the talks'
+// checks do). The game's own calls (the player's menu, its windows
+// allocating from the game's heap) run the original; the sweep checks it on
+// copies of the game, where the menu's lines are not read and its choice is
+// quiet_answer's.
+SHADOW_DECLARE(int, supply_options, (int veh, int base))
+int supply_call(void *fn, int veh, int base);
+__asm__(".text\n"
+        "supply_call:\n"
+        "    pushl %ebp\n"
+        "    movl %esp, %ebp\n"
+        "    pushl 16(%ebp)\n"
+        "    pushl 12(%ebp)\n"
+        "    call *8(%ebp)\n"
+        "    movl %ebp, %esp\n"
+        "    popl %ebp\n"
+        "    ret\n");
+static int check_supply_options(int veh, int base) {
+    struct hook_writes w_ = {0};
+    hooks_writes_game(&w_);
+    hooks_writes_begin(&w_);
+    hooks_nested++;
+    int want = supply_call(orig_supply_options, veh, base);
+    hooks_nested--;
+    hooks_writes_middle(&w_);
+    int got = supply_call((void *)supply_options, veh, base);
+    const char *diff_ = hooks_writes_end(&w_, got, want);
+    if (diff_)
+        hooks_mismatch(&stats_supply_options, "(%d, %d; answer %d, flags %d) %s", veh, base, quiet_answer,
+                       *game_veh_attack_flags, diff_);
+    hooks_ui_release();
+    return want;
+}
+static int shadow_supply_options(int veh, int base) {
+    if (hooks_nested) return supply_call(orig_supply_options, veh, base);
+    if (shadow_bypass()) return supply_call((void *)supply_options, veh, base);
+    stats_supply_options.calls++;
+    shadow_tick(MOVE);
+    return supply_call(orig_supply_options, veh, base);
+}
+
 // Held in the sweep's checks of the orders above: the step and the start
 // of a former's work. A held step returns `hold_result`; with `hold_moves`
 // it also puts the unit on the square it stepped to (its coordinates
@@ -4019,6 +4221,70 @@ static void sweep_actions(int turn) {
     sweep_other_actions(turn);
 }
 
+// A crawler's menu at a base. The unit is a supply crawler (its design
+// put on some units now and then), the player's or not, at a base of
+// its faction or a pact partner's (or another's), with orders (a go to
+// near or far from its goal, a road, a move, a convoy), the production at
+// the base (a unit of either kind, a facility or a secret project), the
+// minerals there, the menu's flags and which faction is at the console
+// varied. The player's choices: the ones the menu offers (nothing, the
+// disbanding, a convoy of each resource), and the one a replay would
+// bring (the unit's stored choice); a cancelled menu. Network games are
+// left out, as in the other sweeps; the call's network messages aren't
+// checked.
+static char supply_line[] = "line";
+static void sweep_supply(int turn) {
+    int bases = *game_base_count, crawler = -1;
+    if (bases <= 0 || *game_veh_count <= 0) return;
+    for (int p = 0; p < 64 && crawler < 0; p++)
+        if (game_protos[p].plan == OV_PLAN_SUPPLY) crawler = p;
+    for (int k = 0; k < 16; k++) {
+        uint32_t h = mix((uint32_t)turn * 0x85ebca6bu + (uint32_t)k), g = mix(h), s = mix(g);
+        int v = (int)(h % (uint32_t)*game_veh_count);
+        struct veh *V = &game_vehs[v];
+        if (!V->faction || V->proto < 0 || !on_map(V->x, V->y)) continue;
+        if (crawler >= 0 && (h >> 8) % 2 == 0) V->proto = (int16_t)crawler;
+        int faction = V->faction, b = -1;
+        for (int j = 0; j < bases && b < 0; j++) {
+            int c = (int)((g + (uint32_t)j) % (uint32_t)bases);
+            if ((g >> 8) % 5 ? game_bases[c].faction == faction : game_bases[c].faction != faction) b = c;
+        }
+        if (b < 0) continue;
+        struct base *B = &game_bases[b];
+        if (B->faction != faction && (g >> 12) % 2)
+            game_factions[faction].diplo_status[B->faction] ^= TREATY_PACT;
+        *game_human_factions = (uint8_t)((s >> 3) % 6 ? 1u << faction : 0);
+        if ((s >> 6) % 4 == 0) *game_human_factions |= (uint8_t)(1u << (1 + (s >> 9) % 7));
+        *game_current_faction = (s >> 12) % 4 ? faction : B->faction;
+        static const int flagses[] = {0, 1, 1, 2, 3, 3};
+        *game_veh_attack_flags = flagses[(s >> 14) % 6];
+        static const int orders[] = {0, 3, ORDER_MOVE_TO, ORDER_MOVE_TO, ORDER_MOVE, ORDER_ROAD_TO, ORDER_MAGTUBE_TO, 9};
+        V->order = (uint8_t)orders[(h >> 12) % 8];
+        waypoint_x(V)[0] = (int16_t)(V->x + (int)((h >> 15) % 7) - 3);
+        waypoint_y(V)[0] = (int16_t)(V->y + (int)((h >> 18) % 7) - 3);
+        if ((h >> 21) % 6 == 0) V->state ^= 0x4000;
+        V->home_base = (int16_t)((h >> 23) % 5 ? (int)((g >> 20) % (uint32_t)bases) : -1);
+        V->unk_2c[0] = (uint8_t)((h >> 26) % 6);
+        B->minerals = (int32_t)((g >> 22) % 400);
+        int kind = (int)((g >> 3) % 4);
+        if (kind == 0) B->queue[0] = (int32_t)((g >> 5) % 64);
+        else if (kind == 1) B->queue[0] = -(int32_t)(1 + (g >> 5) % 69);
+        else if (kind == 2) B->queue[0] = -(int32_t)(70 + (g >> 5) % 8);
+        else {
+            int p = 64 + (int)((g >> 5) % 64);
+            B->queue[0] = game_protos[p].name[0] ? p : (int32_t)((g >> 5) % 64);
+            if (B->queue[0] >= 64 && (g >> 11) % 2) game_protos[B->queue[0]].flags ^= 4;
+        }
+        static const int answers[] = {0, 1, 1, 2, 3, 4, -1};
+        quiet_answer = answers[(s >> 17) % 7];
+        quiet_text = 1;
+        *game_text_line = supply_line;
+        *game_rand_state() = mix(s + 1);
+        check_supply_options(v, b);
+        quiet_answer = 0, quiet_text = 0;
+    }
+}
+
 // Once a turn, on a protected copy of the game: courses for units of
 // every kind, transports' passengers, the way home, patrols, and the go to
 // and road to orders.
@@ -4035,6 +4301,7 @@ static void move_sweep(void) {
     sweep_orders(turn);
     sweep_actions(turn);
     sweep_steps(turn);
+    sweep_supply(turn);
     hooks_writes_abandon(&outer);
     sweep_found(turn);
     hooks_sweeping = sweeping;
@@ -4062,6 +4329,7 @@ static const struct hook move_hooks[] = {
     HOOK(0x4ce790, action_fungal, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x34),        // sub esp, 52
     HOOK(0x4cf380, action_gate, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x8b, 0x5d, 0x08),    // push ebx; mov ebx, [ebp+8]
     HOOK(0x4cf740, action, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x4d, 0x08),               // mov ecx, [ebp+8]
+    HOOK(0x593a00, supply_options, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),  // mov eax, fs:[0]
     HOOK(0x5947c0, order_veh, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),  // mov eax, fs:[0]
 };
 // A unit's step takes bases (capture_base) and fights (combat.c) inside

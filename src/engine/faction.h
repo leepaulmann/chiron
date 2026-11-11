@@ -53,6 +53,9 @@ void scan_prototypes(int faction, int other);
 void mention_prototypes(int faction, int other);
 // Whether the player takes the call (opening the diplomacy window).
 int wants_to_speak(int faction, int other);
+// Two AIs that have met make peace, step by step: truce, treaty, pact, or
+// back down (see faction.c); with `trade` they trade techs first.
+void enemies_treaty(int faction, int other, int trade);
 // Units each side has in the other's bases or territory go home when a
 // pact ends; returns how many of `faction`'s moved.
 int pact_withdraw(int faction, int other);

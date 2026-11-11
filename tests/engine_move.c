@@ -595,6 +595,119 @@ static void test_step(void) {
     EXPECT(goodies, g + 1);
 }
 
+
+// A supply crawler's menu: the lines it offers and what its choice does.
+static int menu_items[8], menu_n, menu_answer, killed, synched_bases, menu_calls, menu_popups;
+static char menu_line[] = "line";
+static char *menu_line_p = menu_line;
+static int menu_text_open(char *file, char *label) { return (void)file, (void)label, 0; }
+static void menu_text_get(void) {}
+static void menu_parse_string(char *text, char *buffer) { strcpy(buffer, text); }
+static void __attribute__((thiscall)) menu_item(void *dialogs, char *text, int id) {
+    (void)dialogs, (void)text;
+    if (menu_n < 8) menu_items[menu_n] = id;
+    menu_n++;
+}
+static int __attribute__((thiscall)) menu_exec(void *pop, int a, int b) { return (void)pop, (void)a, (void)b, menu_calls++, menu_answer; }
+static int __attribute__((thiscall)) menu_start(void *pop, char *file, char *label, int a, int b, int c, int d) {
+    return (void)pop, (void)file, (void)label, (void)a, (void)b, (void)c, (void)d, menu_popups++, 0;
+}
+static int menu_pcx(char *file, int *w, int *h) { return (void)file, (void)w, (void)h, 1; }
+static int menu_kill(int veh) { return killed++, (void)veh, 0; }
+static void menu_synch_base(int base) { (void)base, synched_bases++; }
+static void __attribute__((thiscall)) menu_close(void *pop) { (void)pop; }
+static void test_supply(void) {
+    static struct rules_facility facilities[FACILITY_COUNT];
+    static char pop_file[] = "pop", buffer[256];
+    static int32_t map_settings[7] = {2}, cost_base[6];
+    game_facilities = facilities, game_map_settings = map_settings, game_cost_base = cost_base;
+    game_x_text_open = menu_text_open, game_text_get = menu_text_get, game_text_line = &menu_line_p;
+    game_parse_string = menu_parse_string, game_dialogs_item = menu_item, game_base_pop_exec_3 = menu_exec;
+    game_popup_start = menu_start, game_pcx_dimensions = menu_pcx, game_pop_file = pop_file, game_str_buffer = buffer;
+    game_kill = menu_kill, game_synch_base = menu_synch_base, game_popup_close = menu_close, game_scroll_close = menu_close;
+    game_flat_button_dtor = menu_close, game_graphic_win_dtor = menu_close, game_base_pop_dtor = menu_close;
+    game_popup_ctor = menu_close, game_netmsg_pop = netmsg_pop_;
+    rules.mineral_cost_multi = 10;
+    facilities[1].cost = 4, facilities[70].cost = 9;
+    protos[0] = (struct unit_proto){.chassis = 2, .cost = 3};  // the crawler, in the air to need no regions
+    memset(vehs, 0, sizeof vehs), memset(bases, 0, sizeof bases);
+    veh_count = 1, base_count = 2;
+    vehs[0] = (struct veh){.x = 4, .y = 2, .faction = 1, .proto = 0, .home_base = -1};
+    bases[0] = (struct base){.x = 4, .y = 2, .faction = 1, .minerals = 5};
+    bases[1] = (struct base){.x = 2, .y = 4, .faction = 1};
+    humans = 1 << 1, current_faction = 1, attack_flags = 3;
+    struct veh *V = &vehs[0];
+    struct base *B = &bases[0];
+
+#define RUN(want)                                                       \
+    do {                                                                \
+        menu_n = menu_calls = killed = synched_bases = menu_popups = 0; \
+        EXPECT(supply_options(0, 0), want);                             \
+    } while (0)
+    // The AI is offered nothing.
+    humans = 0, B->queue[0] = -70;
+    RUN(0);
+    EXPECT(menu_n, 0);
+    humans = 1 << 1;
+    // A facility in production, no convoy: no choice but the header.
+    B->queue[0] = -1;
+    RUN(0);
+    EXPECT(menu_n, 1);
+    EXPECT(menu_calls, 0);
+    // A secret project: the header and the disbanding. Asked (flags 1), it
+    // ends there and the pick is kept on the unit.
+    B->queue[0] = -70;
+    attack_flags = 1, menu_answer = 1;
+    RUN(1);
+    EXPECT(menu_n, 2);
+    EXPECT(menu_items[1], 1);
+    EXPECT(V->unk_2c[0], 1);
+    EXPECT(killed, 0);
+    // Made (flags 3): the crawler is worth 3 rows (30) of minerals, the
+    // project costs 90; the unit dies.
+    attack_flags = 3;
+    RUN(1);
+    EXPECT(B->minerals, 35);
+    EXPECT(B->minerals_2, 35);
+    EXPECT(B->production_last, -70);
+    EXPECT(killed, 1);
+    EXPECT(synched_bases, 1);
+    // Cancelled: nothing happens.
+    B->minerals = 5, menu_answer = 0;
+    RUN(0);
+    EXPECT(B->minerals, 5);
+    // A convoy (the unit's home is another base): ids 2 to 4 are offered; a
+    // replayed choice (flags 2, not the console's faction) of 3 sets the
+    // convoy of resource 1.
+    V->home_base = 1, B->queue[0] = -1;
+    current_faction = 2, attack_flags = 2, V->unk_2c[0] = 3;
+    RUN(0);
+    EXPECT(menu_n, 4);
+    EXPECT(menu_items[3], 4);
+    EXPECT(V->order, ORDER_CONVOY);
+    EXPECT(V->order_auto_type, 1);
+    EXPECT(menu_calls, 0);
+    // A unit on its way, or one with a convoy's order on a road: nothing.
+    V->order = 0x1b;
+    RUN(0);
+    EXPECT(menu_n, 0);
+    V->order = 0x18;
+    V->waypoint_count = 1;
+    ((int16_t *)((char *)V + 0x14))[0] = 12, ((int16_t *)((char *)V + 0x1c))[0] = 2;
+    RUN(0);
+    EXPECT(menu_n, 0);
+    // At a base that isn't its faction's (or a pact partner's): nothing.
+    V->order = 0;
+    B->faction = 2;
+    RUN(0);
+    EXPECT(menu_n, 0);
+    factions[1].diplo_status[2] = 1;
+    RUN(0);
+    EXPECT(menu_n, 4);
+    factions[1].diplo_status[2] = 0, B->faction = 1;
+#undef RUN
+}
+
 int main(void) {
     game_map = &tiles_ptr, game_map_width = &width, game_map_height = &height, game_map_half_width = &half_width;
     game_map_area = &area, game_map_flat = &flat, game_state = &state;
@@ -664,6 +777,7 @@ int main(void) {
     game_veh_at = veh_at, game_veh_at_rebuilt = &rebuilt, game_veh_lift_x = &lift_x, game_veh_lift_y = &lift_y, game_veh_lifted = &lifted;
     for (int i = 0; i < 32; i++) abilities[i].name = ability_name;
     test_step();
+    test_supply();
     if (failures) return 1;
     printf("engine_move: ok\n");
     return 0;

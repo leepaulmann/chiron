@@ -40,7 +40,8 @@ static int sat_attacks, last_sat[4];
 static int32_t rankings[8], scores[8], objectives = 1000, friction_faction = -1, friction_with = -1, ambience_flags;
 static int32_t multi_visible, difficulty = 3, gender, plural;
 static int ambience_calls, pops, climactic;
-static int rand_stub(void) { return 0; }
+static int rand_value;
+static int rand_stub(void) { return rand_value; }
 static int random_stub(int lo, int hi) { return lo; }
 static int ambience_stub(int sound) { return ambience_calls++, sound; }
 static void __attribute__((thiscall)) redraw_stub(void *win) {}
@@ -433,6 +434,123 @@ static void talk_setup(void) {
     bases[2] = (struct base){.x = 10, .y = 10, .faction = 1, .faction_former = 1, .pop_size = 3};
 }
 
+
+// Two AIs making peace (enemies_treaty): the steps, and the news.
+static int spied, unpacts, team_ups, team_up_args[4], trade_calls;
+static char last_news[64];
+static int spying_stub(int f) { return spied; }
+static char *he_she_stub(int f, int unk) { return "he"; }
+static void unpact_stub(int f, int o) { unpacts++; }
+static void team_up_stub(int f, int o, int t) { team_ups++, team_up_args[0] = f, team_up_args[1] = o, team_up_args[2] = t; }
+static void trade_count_stub(int f, int o) { trade_calls++; }
+static void __attribute__((thiscall)) news_stub(void *n, char *label, int delay, int unk, char *sound) {
+    netmsgs++;
+    snprintf(last_news, sizeof last_news, "%s", label);
+}
+static void enemies_tests(void) {
+    talk_setup();
+    strcpy((char *)game_at(0x68e620), "PACTTRUCE"), strcpy((char *)game_at(0x68e62c), "PACTTREATY");
+    strcpy((char *)game_at(0x68e668), "ENEMYTRUCE"), strcpy((char *)game_at(0x68e674), "ENEMYTREATY");
+    strcpy((char *)game_at(0x68e680), "ENEMIESTEAMUP"), strcpy((char *)game_at(0x68e690), "1");
+    strcpy((char *)game_at(0x68e694), "0");
+    static char buffer[64];
+    game_str_buffer = buffer, game_spying = spying_stub, game_get_he_she = he_she_stub;
+    game_enemies_unpact = unpact_stub, game_enemies_team_up = team_up_stub, game_enemies_trade_tech = trade_count_stub;
+    game_netmsg_pop = news_stub, game_faction_rankings = rankings, game_state = &game_state_;
+    game_difficulty = &difficulty, game_parse_says = says_stub, game_parse_gender = &gender, game_parse_plural = &plural;
+    for (int f = 1; f < 8; f++) factions[f].diff_level = 3, factions[f].ranking = f;
+    unpacts = team_ups = netmsgs = trade_calls = spied = 0;
+    rand_value = 15, current = 7, difficulty = 3, game_state_ = 0;
+
+    // A vendetta between two ranked 6 and 7: a truce at once (both set to
+    // 0x4), without a word to a player who sees nothing, but with trades.
+    factions[1].ranking = 6, factions[2].ranking = 7;
+    factions[1].diplo_status[2] = factions[2].diplo_status[1] = TREATY_VENDETTA | TREATY_COMMLINK;
+    enemies_treaty(1, 2, 1);
+    EXPECT(trade_calls, 1);
+    EXPECT(factions[1].diplo_status[2] & 0x4, 0x4);
+    EXPECT(factions[2].diplo_status[1] & 0x4, 0x4);
+    EXPECT(netmsgs, 0);
+    // The player (7) in a pact with the second faction hears it: the news
+    // of its partner's truce; one who sees them both (and in an omniscient
+    // game, any) hears the public one.
+    factions[1].diplo_status[2] = factions[2].diplo_status[1] = TREATY_VENDETTA | TREATY_COMMLINK;
+    factions[7].diplo_status[2] = TREATY_PACT;
+    enemies_treaty(1, 2, 0);
+    EXPECT(netmsgs, 1);
+    EXPECT(strcmp(last_news, "PACTTRUCE"), 0);
+    factions[7].diplo_status[2] = 0, spied = 1;
+    factions[1].diplo_status[2] = factions[2].diplo_status[1] = TREATY_VENDETTA | TREATY_COMMLINK;
+    enemies_treaty(1, 2, 0);
+    EXPECT(strcmp(last_news, "ENEMYTRUCE"), 0);
+    spied = 0, game_state_ = GAME_STATE_OMNISCIENT, netmsgs = 0;
+    factions[1].diplo_status[2] = factions[2].diplo_status[1] = TREATY_VENDETTA | TREATY_COMMLINK;
+    enemies_treaty(1, 2, 0);
+    EXPECT(netmsgs, 1);
+    game_state_ = 0, netmsgs = 0;
+    // Neither wants revenge, low ranks, the roll too high (15 against
+    // 0 + 0 - 3 + 8 = 5): the treaty instead (without the news).
+    factions[1].ranking = factions[2].ranking = 2;
+    factions[1].diplo_status[2] = factions[2].diplo_status[1] = TREATY_VENDETTA | TREATY_COMMLINK;
+    enemies_treaty(1, 2, 0);
+    EXPECT(factions[1].diplo_status[2] & TREATY_TREATY, TREATY_TREATY);
+    EXPECT(netmsgs, 0);
+    // A low roll: the truce after all, and a grudge makes it one too.
+    factions[1].diplo_status[2] = factions[2].diplo_status[1] = TREATY_VENDETTA | TREATY_COMMLINK;
+    rand_value = 4;
+    enemies_treaty(1, 2, 0);
+    EXPECT(factions[1].diplo_status[2] & TREATY_TREATY, 0);
+    EXPECT(factions[1].diplo_status[2] & 0x4, 0x4);
+    rand_value = 15;
+    factions[1].diplo_status[2] = factions[2].diplo_status[1] = TREATY_VENDETTA | TREATY_COMMLINK | TREATY_WANT_REVENGE;
+    enemies_treaty(1, 2, 0);
+    EXPECT(factions[1].diplo_status[2] & 0x4, 0x4);
+    // With intense rivalry the difficulty counts 5: a roll of 3 is not
+    // below 0 + 0 - 5 + 8 = 3.
+    rules = RULES_INTENSE_RIVALRY, rand_value = 3;
+    factions[1].diplo_status[2] = factions[2].diplo_status[1] = TREATY_VENDETTA | TREATY_COMMLINK;
+    enemies_treaty(1, 2, 0);
+    EXPECT(factions[1].diplo_status[2] & TREATY_TREATY, TREATY_TREATY);
+    rules = 0;
+
+    // A treaty: ended if one has committed a major atrocity.
+    factions[1].diplo_status[2] = factions[2].diplo_status[1] = TREATY_TREATY | TREATY_COMMLINK;
+    factions[2].major_atrocities = 1;
+    enemies_treaty(1, 2, 0);
+    EXPECT(unpacts, 1);
+    factions[2].major_atrocities = 0;
+    // With no third faction they have commlinks with, the same.
+    enemies_treaty(1, 2, 0);
+    EXPECT(unpacts, 2);
+    // A third one at war with the first and outranking it: a pact (and the
+    // team up, each way), told to the player if it is the third (with no
+    // number: the player is at war with the first).
+    factions[1].diplo_status[3] = factions[2].diplo_status[3] = TREATY_COMMLINK;
+    factions[1].diplo_status[3] |= TREATY_VENDETTA;
+    factions[3].ranking = 5, factions[1].ranking = 2, factions[2].ranking = 2;
+    current = 3, netmsgs = 0;
+    enemies_treaty(1, 2, 0);
+    EXPECT(unpacts, 2);
+    EXPECT(factions[1].diplo_status[2] & TREATY_PACT, TREATY_PACT);
+    EXPECT(team_ups, 2);
+    EXPECT(team_up_args[2], 3);
+    EXPECT(netmsgs, 1);
+    EXPECT(strcmp(last_news, "ENEMIESTEAMUP"), 0);
+    // Already in a pact: nothing more. Another player who sees nothing
+    // hears nothing; one who sees it, "1".
+    team_ups = 0, netmsgs = 0, current = 7;
+    enemies_treaty(1, 2, 0);
+    EXPECT(team_ups, 0);
+    factions[1].diplo_status[2] &= ~TREATY_PACT, factions[2].diplo_status[1] &= ~TREATY_PACT;
+    enemies_treaty(1, 2, 0);
+    EXPECT(netmsgs, 0);
+    factions[1].diplo_status[2] &= ~TREATY_PACT, factions[2].diplo_status[1] &= ~TREATY_PACT;
+    spied = 1;
+    enemies_treaty(1, 2, 0);
+    EXPECT(strcmp(last_news, "ENEMIESTEAMUP1"), 0);
+    spied = 0;
+}
+
 static void talks_tests(void) {
     talk_setup();
 
@@ -719,6 +837,7 @@ int main(void) {
     reckoning_tests();
     attack_tests();
     talks_tests();
+    enemies_tests();
     if (failures) return 1;
     printf("engine_faction: all tests passed\n");
     return 0;
