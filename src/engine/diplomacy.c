@@ -3141,6 +3141,8 @@ L550e18:
         if (!r) goto L551336;
         lock();
         game_pact_of_brotherhood(A, B);
+        // (The pact moves the help faction on: the original reads it again.)
+        help = *game_diplo_help_faction;
         wtreaty_off(A, B, 0x60, 0);
         wdouble_cross(A, help, B, 0);
         if (*game_trade_offer_tech[0] >= 0) {
@@ -3302,6 +3304,7 @@ L551ecb:
         lock();
         wset_treaty(A, u, 0x10000000, 1, 0);
         game_pact_of_brotherhood(A, B);
+        u = *game_diplo_unmet_enemy;  // (read again, as above)
         wtreaty_on(A, B, 0x1000000, 0);
         wtreaty_off(A, B, 0x800000, 0);
         wdouble_cross(A, u, B, 1);
@@ -3341,6 +3344,7 @@ L5524ea:
         lock();
         if (pass) wset_treaty(A, m, 0x10000000, 1, 0);
         game_pact_of_brotherhood(A, B);
+        m = *pm;  // (read again, as above)
         wtreaty_on(A, B, 0x1000000, 0);
         wtreaty_off(A, B, 0x800000, 0);
         wdouble_cross(A, m, B, 1);
@@ -5692,11 +5696,24 @@ static void sweep_communicate(int faction) {
         if (!rnd(5)) me->diplo_agenda[other] ^= agendas[rnd(8)];
     }
     if (!rnd(3)) ai->diplo_status[faction] ^= TREATY_UNK_8000000;
+    // The late game: the two have dealings with the others too.
+    for (int f = 1; f < FACTION_COUNT; f++) {
+        if (!alive(f) || f == faction || f == other) continue;
+        if (rnd(2)) standing(faction, f);
+        if (rnd(2)) standing(other, f);
+        if (!rnd(4)) F(f)->diplo_status[other] ^= bits[rnd(10)];
+        if (!rnd(4)) F(other)->diplo_status[f] ^= bits[rnd(10)];
+        if (!rnd(4)) me->diplo_status[f] ^= bits[rnd(10)];
+    }
     if (!rnd(3)) {
         // At war, with the player far the stronger: the AI fears it and offers a truce, for a price.
         me->diplo_status[other] = (me->diplo_status[other] & ~(uint32_t)(TREATY_PACT | TREATY_TREATY | TREATY_TRUCE_)) | TREATY_VENDETTA;
         ai->diplo_status[faction] = (ai->diplo_status[faction] & ~(uint32_t)(TREATY_PACT | TREATY_TREATY | TREATY_TRUCE_)) | TREATY_VENDETTA;
         me->mil_strength = 150 + rnd(250), ai->mil_strength = rnd(30);
+        me->mil_attack = rnd(20000), ai->mil_attack = rnd(20000);
+        me->diplo_combat_total[other] = rnd(5000), me->diplo_combat_count[other] = rnd(5000);
+        ai->diplo_combat_total[faction] = rnd(5000), ai->diplo_combat_count[faction] = rnd(5000);
+        ai->total_combat_units = rnd(3000);
         if (rnd(2)) ai->energy_credits = 100 + rnd(900);
         for (int rg = 1; rg < REGION_COUNT; rg++) {
             if (!ai->region_total_bases[rg] && !ai->region_total_combat_units[rg]) continue;
@@ -5716,7 +5733,7 @@ static void sweep_communicate(int faction) {
     if (!rnd(3)) me->tech_ranking = rnd(60), ai->tech_ranking = rnd(60);
     if (!rnd(3)) *game_diplo_maps_news = rnd(2);
     answers();
-    for (int i = 0; i < QUIET_MENU_ANSWERS; i++) quiet_menu_answers[i] = !rnd(4) ? 4 : !rnd(5) ? 1 : 0;
+    for (int i = 0; i < QUIET_MENU_ANSWERS; i++) quiet_menu_answers[i] = i < 2 && !rnd(4) ? 4 : i < 2 && !rnd(5) ? 1 : 0;
     quiet_menu_count = QUIET_MENU_ANSWERS;
     quiet_text = 1, quiet_talk_pops = 1;
     check_communicate(faction, other, unk);

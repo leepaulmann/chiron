@@ -106,6 +106,14 @@ static void __attribute__((thiscall)) shadow_status_win_redraw(void *win) {
 SCRUBBED(demand_withdrawal);
 SCRUBBED(call_off_vendetta);
 SCRUBBED(diplomacy_menu);
+SCRUBBED(pact_of_brotherhood);
+SCRUBBED(make_treaty);
+SCRUBBED(pledge_truce);
+SCRUBBED(diplomacy_ends);
+SCRUBBED(do_withdrawal);
+SCRUBBED(net_loan);
+SCRUBBED(net_maps);
+SCRUBBED(diplomacy_caption);
 
 // The diplomacy window's dialogs (X_pops_11), in a sweep's copies of the
 // game: the player's answers to the talks (diplomacy.c) the sweep makes
@@ -604,6 +612,14 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x549270, demand_withdrawal, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53, 0x56, 0x8b, 0x75, 0x08),
     QUIET_HOOK(0x54bec0, call_off_vendetta, SEH_PROLOGUE),
     QUIET_HOOK(0x54c560, diplomacy_menu, SEH_PROLOGUE),
+    QUIET_HOOK(0x53caf0, pact_of_brotherhood, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0x60, 0xf6, 0x93, 0x00),
+    QUIET_HOOK(0x53ce10, make_treaty, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x50),
+    QUIET_HOOK(0x53d160, pledge_truce, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0x60, 0xf6, 0x93, 0x00),
+    QUIET_HOOK(0x53e470, diplomacy_ends, PUSH_EBP_MOV_EBP_ESP, 0x33, 0xc0),
+    QUIET_HOOK(0x548f80, do_withdrawal, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x18),
+    QUIET_HOOK(0x539510, net_loan, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0x60, 0xf6, 0x93, 0x00),
+    QUIET_HOOK(0x539580, net_maps, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0x60, 0xf6, 0x93, 0x00),
+    QUIET_HOOK(0x5399a0, diplomacy_caption, PUSH_EBP_MOV_EBP_ESP, 0x81, 0xec, 0x00, 0x01, 0x00, 0x00),
     QUIET_HOOK(0x5bf7d0, x_pops_11, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x14),  // mov eax, [ebp+20]
     QUIET_HOOK(0x5bf830, x_pops_13, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x18),  // mov eax, [ebp+24]
     QUIET_HOOK(0x46b310, map_win_focus, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x14),  // sub esp, 0x14
