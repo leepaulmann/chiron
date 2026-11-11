@@ -4989,15 +4989,19 @@ static void check_communicate(int faction, int other, int unk) {
     hooks_nested++;
     talk_call(orig_communicate, faction, other, unk);
     hooks_nested--;
+    int want_talk = quiet_talk_next, want_menu = quiet_menu_next;
     char want_buf[48];
     snprintf(want_buf, sizeof want_buf, "%s", game_str_buffer);
     hooks_writes_middle(&w_);
     quiet_talk_next = quiet_menu_next = 0;
     talk_call((void *)communicate, faction, other, unk);
+    int got_talk = quiet_talk_next, got_menu = quiet_menu_next;
     char got_buf[48];
     snprintf(got_buf, sizeof got_buf, "%s", game_str_buffer);
     const char *diff_ = hooks_writes_end(&w_, 0, 0);
-    if (diff_) hooks_mismatch(&stats_communicate, "(%d, %d, %d; text %s, ours %.40s) %s", faction, other, unk, want_buf, got_buf, diff_);
+    if (diff_)
+        hooks_mismatch(&stats_communicate, "(%d, %d, %d; text %s, ours %.40s; answers used: talk %d/%d, menu %d/%d) %s", faction,
+                       other, unk, want_buf, got_buf, want_talk, got_talk, want_menu, got_menu, diff_);
     hooks_ui_release();
 }
 static struct hook_stats stats_communicate_dropped = {"(swept communicate, other modules)"};

@@ -79,6 +79,34 @@ static void __attribute__((thiscall)) shadow_status_win_redraw(void *win) {
         return quiet;                                                           \
     }
 
+// Originals the talks call that read stack slots they never set (the player's
+// menu, a withdrawal demanded, a vendetta called off): called from communicate()'s
+// frame by the original and from ours by the sweep's check, they would see
+// different leftovers. In shadow mode they run on a cleared stack, so that
+// both runs see the same.
+#define SCRUBBED(name)                                                \
+    static void *orig_##name;                                          \
+    static struct hook_stats stats_##name = {"(scrubbed " #name ")"}; \
+    void shadow_##name(void);                                          \
+    __asm__(".text\n"                                                 \
+            ".globl shadow_" #name "\n"                               \
+            "shadow_" #name ":\n"                                     \
+            "    pushl %edi\n"                                        \
+            "    pushl %ecx\n"                                        \
+            "    pushl %eax\n"                                        \
+            "    leal -0x400(%esp), %edi\n"                           \
+            "    movl $0x100, %ecx\n"                                 \
+            "    xorl %eax, %eax\n"                                   \
+            "    cld\n"                                               \
+            "    rep stosl\n"                                         \
+            "    popl %eax\n"                                         \
+            "    popl %ecx\n"                                         \
+            "    popl %edi\n"                                         \
+            "    jmp *orig_" #name "\n")
+SCRUBBED(demand_withdrawal);
+SCRUBBED(call_off_vendetta);
+SCRUBBED(diplomacy_menu);
+
 // The diplomacy window's dialogs (X_pops_11), in a sweep's copies of the
 // game: the player's answers to the talks (diplomacy.c) the sweep makes
 // up, held and answered from quiet_talk_answers in turn (0 once they run
@@ -573,6 +601,9 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x5bf330, x_pop2, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x10),  // mov eax, [ebp+16]
     QUIET_HOOK(0x5bf310, x_pop, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x0c),   // mov eax, [ebp+12]
     QUIET_HOOK(0x5bf5d0, x_pops, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x10),  // mov eax, [ebp+16]
+    QUIET_HOOK(0x549270, demand_withdrawal, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53, 0x56, 0x8b, 0x75, 0x08),
+    QUIET_HOOK(0x54bec0, call_off_vendetta, SEH_PROLOGUE),
+    QUIET_HOOK(0x54c560, diplomacy_menu, SEH_PROLOGUE),
     QUIET_HOOK(0x5bf7d0, x_pops_11, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x14),  // mov eax, [ebp+20]
     QUIET_HOOK(0x5bf830, x_pops_13, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x18),  // mov eax, [ebp+24]
     QUIET_HOOK(0x46b310, map_win_focus, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x14),  // sub esp, 0x14
