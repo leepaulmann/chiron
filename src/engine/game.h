@@ -1424,6 +1424,7 @@ extern void(__attribute__((thiscall)) * game_plan_win_on_redraw)(void *win);
 extern void(__attribute__((thiscall)) * game_plan_win_close)(void *win);
 extern void(__attribute__((thiscall)) * game_win_show)(void *win, int unk);
 extern int32_t *game_diplo_menu_a, *game_diplo_menu_b;  // what the proposal's answer left for communicate()
+extern int32_t *game_diplo_trade_refused;  // the player declined the last tech trade
 extern int32_t *game_diplo_trade_offered;  // set in the talks when the AI has offered a trade already
 extern int32_t *game_diplo_plans_faction, *game_diplo_plans_other;  // battle_plans()'s two, for its menu's lines
 extern int (*game_suggest_plan)(int faction, int other);  // a base to attack, or -1

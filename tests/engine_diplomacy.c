@@ -546,6 +546,35 @@ int main(void) {
     battle_plans(1, 2);
     EXPECT(shown[0], 0x68dd20);
 
+    // ---- tech_trade (the rules here forbid trading techs: none to trade)
+    {
+        static struct rules_reactor reactors[4];
+        static int32_t refused;
+        for (int i = 0; i < 4; i++) reactors[i].preq_tech = -1;
+        game_reactors = reactors, game_diplo_trade_refused = &refused;
+        // Friction of 18 outside a pact: hatred, said only to the player's
+        // proposal.
+        reset();
+        friction = 18, refused = 1;
+        EXPECT(tech_trade(1, 2, 0, 1, 4), 0);
+        EXPECT(n_shown, 1);
+        EXPECT(shown[0], 1);
+        EXPECT(refused, 0);
+        reset();
+        friction = 18;
+        EXPECT(tech_trade(1, 2, 1, 4, 4), 0);
+        EXPECT(n_shown, 0);
+        // Without friction, the AI wants the player's map (it has seen
+        // none of the player's bases), but nothing is offered for
+        // friendship: later.
+        reset();
+        offered = 0;
+        for (int i = 0; i < 4; i++) want_tech[i] = -1;
+        EXPECT(tech_trade(1, 2, 0, 1, 4), 0);
+        EXPECT(want_tech[0], 9999);
+        EXPECT(n_shown, 1);
+    }
+
     if (failures) printf("%d failures\n", failures);
     else printf("ok\n");
     return failures != 0;

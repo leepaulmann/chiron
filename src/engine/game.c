@@ -409,7 +409,7 @@ void(__attribute__((thiscall)) * game_plan_win_on_redraw)(void *win);
 void(__attribute__((thiscall)) * game_plan_win_close)(void *win);
 void(__attribute__((thiscall)) * game_win_show)(void *win, int unk);
 int32_t *game_diplo_menu_a, *game_diplo_menu_b;
-int32_t *game_diplo_trade_offered, *game_diplo_plans_faction, *game_diplo_plans_other;
+int32_t *game_diplo_trade_refused, *game_diplo_trade_offered, *game_diplo_plans_faction, *game_diplo_plans_other;
 int (*game_suggest_plan)(int faction, int other);
 int (*game_attack_from)(int base, int faction);
 void(__attribute__((thiscall)) * game_plan_win_find_view)(void *win, int x1, int y1, int x2, int y2, int x3, int y3,
@@ -1076,6 +1076,7 @@ void game_bind(struct pe_image *exe) {
     game_diplo_menu_a = (int32_t *)code_at(exe, 0x93fad0);
     game_diplo_menu_b = (int32_t *)code_at(exe, 0x93fad4);
     game_diplo_trade_offered = (int32_t *)code_at(exe, 0x93fa48);
+    game_diplo_trade_refused = (int32_t *)code_at(exe, 0x93f7c4);
     game_diplo_plans_faction = (int32_t *)code_at(exe, 0x93f7bc);
     game_diplo_plans_other = (int32_t *)code_at(exe, 0x93f810);
     game_suggest_plan = (void *)code_at(exe, 0x54acc0);

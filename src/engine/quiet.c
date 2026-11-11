@@ -177,7 +177,14 @@ HELD(int, x_pop, 0, (char *label, int unk), (label, unk), (hooks_ui_text(&c_, 0,
 // A message with a faction leader's portrait, as when a probe team's
 // victim lets it go, and the intelligence report a probe team's
 // infiltration opens (a window, which allocates from the game's heap).
-HELD(int, x_pops, 0, (char *label, void *sprite, void *fn), (label, sprite, fn),
+// In a sweep's talks (quiet_talk_pops set), one answers like the leader's
+// messages (x_pops_11), from quiet_talk_answers.
+int quiet_talk_pops;
+static int x_pops_answer(void) {
+    if (!quiet_talk_pops || !hooks_sweeping) return 0;
+    return quiet_talk_next < QUIET_TALK_ANSWERS ? quiet_talk_answers[quiet_talk_next++] : 0;
+}
+HELD(int, x_pops, x_pops_answer(), (char *label, void *sprite, void *fn), (label, sprite, fn),
      (hooks_ui_text(&c_, 0, label), c_.arg[0] = (int)(intptr_t)sprite, c_.arg[1] = (int)(intptr_t)fn),
      orig_x_pops(TEXT(0), PTR(0), PTR(1)))
 HELD(void, report_intel, (void)0, (int faction), (faction), (c_.arg[0] = faction), orig_report_intel(a_[0]))

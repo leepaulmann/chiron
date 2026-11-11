@@ -31,6 +31,10 @@ int base_swap(int faction, int other);
 int proposal_menu(int faction, int other);
 // The player's proposal, from the menus (unless `skip`), put to the AI.
 void make_a_proposal(int faction, int other, int skip);
+// Techs traded between the player and the AI, proposed by the player
+// (offering `counter`) or by the AI (`ai`); 1 after a trade the player
+// proposed.
+int tech_trade(int faction, int other, int ai, int counter, int proposal);
 // The AI brings the player battle plans.
 void battle_plans(int faction, int other);
 
@@ -38,3 +42,5 @@ void battle_plans(int faction, int other);
 // diplomacy window's dialogs give, in turn, and the next one to give.
 enum { QUIET_TALK_ANSWERS = 8 };
 extern int quiet_talk_answers[QUIET_TALK_ANSWERS], quiet_talk_next;
+// While set, a message with a portrait (x_pops) answers from them too.
+extern int quiet_talk_pops;
