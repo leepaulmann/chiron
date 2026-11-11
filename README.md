@@ -255,7 +255,8 @@ module at a time. So far:
   a base and what the AI makes of them, joint attacks and their price,
   techs bought, maps traded, and bases given or swapped; the player's
   proposal menus, the proposal put to the AI (and the Council's business
-  raised in talks), and joint battle plans;
+  raised in talks), joint battle plans, and tech trades (refusals out of
+  hatred, fear or a lead to guard, free techs, the trade and its menu);
 - events: the turn's random events (perihelion and the base and world
   events), a faction put out of the game, and the faction modifiers and
   social choices set when it starts;
