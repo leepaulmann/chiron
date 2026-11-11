@@ -215,7 +215,7 @@ module at a time. So far:
   a former's turn of work and what the finished work does), founding a
   base, nerve stapling, bombarding and pillaging, artillery fire,
   self-destruct, obliterating a base, tectonic and fungal missiles, and
-  psi gates; and a unit's step to the next square, with all it may meet
+  psi gates; a supply crawler's menu at a base; and a unit's step to the next square, with all it may meet
   there (zones of control, transports, foreign bases, captures, pods,
   monoliths, artifacts and the menus a player is shown);
 - the AI's units: the faction's turn around its units (each given its
@@ -257,6 +257,8 @@ module at a time. So far:
   proposal menus, the proposal put to the AI (and the Council's business
   raised in talks), joint battle plans, and tech trades (refusals out of
   hatred, fear or a lead to guard, free techs, the trade and its menu);
+  the AI's greeting when the player takes its call; and two AIs making
+  peace step by step (truce, treaty, pact), with the news of it;
 - events: the turn's random events (perihelion and the base and world
   events), a faction put out of the game, and the faction modifiers and
   social choices set when it starts;
