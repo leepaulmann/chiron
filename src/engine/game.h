@@ -1415,7 +1415,7 @@ extern char *(*game_get_him_her)(int faction, int unk);
 extern int (*game_has_agenda)(int faction, int other, uint32_t agenda);
 extern int (*game_auto_contact)(void);
 extern void (*game_net_loan)(int faction, int other, int total, int payment);
-extern void (*game_pledge_truce)(int faction, int other);
+extern void (*game_pledge_truce)(int faction, int other, int wait);
 extern int (*game_do_withdrawal)(int faction, int other);
 extern int (*game_diplomacy_menu)(int faction, int other);  // the player's menu of what to ask
 extern int (*game_demand_withdrawal)(int faction, int other);

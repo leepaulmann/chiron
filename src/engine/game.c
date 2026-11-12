@@ -395,7 +395,7 @@ char *(*game_get_him_her)(int faction, int unk);
 int (*game_has_agenda)(int faction, int other, uint32_t agenda);
 int (*game_auto_contact)(void);
 void (*game_net_loan)(int faction, int other, int total, int payment);
-void (*game_pledge_truce)(int faction, int other);
+void (*game_pledge_truce)(int faction, int other, int wait);
 int (*game_do_withdrawal)(int faction, int other);
 int (*game_diplomacy_menu)(int faction, int other);
 int (*game_demand_withdrawal)(int faction, int other);

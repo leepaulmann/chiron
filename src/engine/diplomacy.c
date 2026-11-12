@@ -4263,7 +4263,7 @@ L556113:
         v34 = 1;
         wcede_base(bi, A, 1);
         wset_treaty(B, A, TREATY_SURRENDERED_, 1, 0);
-        game_pledge_truce(A, B);
+        game_pledge_truce(A, B, 0);
         game_make_treaty(A, B);
         game_diplomacy_caption(A, B);
     }
@@ -4426,7 +4426,7 @@ L556b2c:
     *game_diplo_spoke_turn = *game_turn;
 L556b38:
     v34 = 1;
-    if (!game_has_treaty(A, B, TREATY_PACT)) game_pledge_truce(A, B);
+    if (!game_has_treaty(A, B, TREATY_PACT)) game_pledge_truce(A, B, 1);
     game_diplomacy_caption(A, B);
     say_title(0, A), say_name(1, A);
     if (*game_diplo_reputation > 5) answer(text(0x68e27c), B);  // NOTORIETY
