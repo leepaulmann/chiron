@@ -1803,6 +1803,82 @@ extern void *(__attribute__((stdcall)) * game_get_stock_object)(int which);
 extern int(__attribute__((thiscall)) * game_font_init)(void *font, const char *face, int size, int flags);
 extern void **game_font_dc, **game_font_default;
 extern int32_t *game_font_slack;
+// ---- Sprites (sprite.c) ---------------------------------------------------------
+
+// The game's Sprite class (OpenSMACX calls it so): a keyed 8-bit image with
+// its transparent margins cut away. `left` and `top` say how far the picture
+// sits from where the sprite is drawn, `width` by `height` is what is kept,
+// and `full_w` by `full_h` the size before the margins were cut. `data` is
+// shared with the buffer it was cut from when `shared` is set.
+struct game_sprite {
+    char *name;       // set for a sprite loaded by name: drawn through the game's resource code
+    uint8_t *data;    // width * height pixels
+    uint8_t key;      // the transparent colour it was cut with
+    uint8_t pad_9[3];
+    int32_t stride;   // bytes from one row to the next (the width)
+    int32_t width, height;
+    int32_t full_w, full_h;
+    int32_t left, top;
+    int32_t shared;
+};
+_Static_assert(sizeof(struct game_sprite) == 0x2c, "layout of the game's Sprite");
+GAME_AT(struct game_sprite, data, 4);
+GAME_AT(struct game_sprite, key, 8);
+GAME_AT(struct game_sprite, stride, 0xc);
+GAME_AT(struct game_sprite, width, 0x10);
+GAME_AT(struct game_sprite, height, 0x14);
+GAME_AT(struct game_sprite, left, 0x20);
+GAME_AT(struct game_sprite, top, 0x24);
+GAME_AT(struct game_sprite, shared, 0x28);
+
+// The scratch memory the sprite drawing code works in: the tables made from
+// the scale (how many pixels each source pixel makes, or how many source
+// pixels each pixel drawn takes), the clipped ones for the part of the
+// sprite on the buffer, and the loop counters the original keeps in memory.
+// All of it is state only while one drawing call runs, but the originals
+// leave it behind, and a check compares it.
+struct game_sprite_scratch {
+    uint32_t ytab_ptr;       // 0x9b3ab8: the next entry of the row table
+    int32_t src_gap;         // 0x9b3abc: sprite stride less the pixels a row uses
+    uint8_t pad_c0[0x9b3ac8 - 0x9b3ac0];
+    int32_t pitch;           // 0x9b3ac8: bytes a row of the buffer
+    int32_t dst_gap;         // 0x9b3acc: pitch less the pixels a row draws
+    uint8_t pad_d0[4];
+    int32_t width;           // 0x9b3ad4: pixels a row draws
+    int32_t scale[800];      // 0x9b3ad8: the scaling table
+    int32_t x_rem;           // 0x9b4758
+    int32_t x_count;         // 0x9b475c: source pixels (or entries) in a row
+    int32_t ytab[800];       // 0x9b4760: row table of the part drawn
+    int32_t color;           // 0x9b53e0: the colour the mono draw uses
+    uint8_t pad_e4[4];
+    int32_t rows;            // 0x9b53e8: rows to draw
+    int32_t xtab[800];       // 0x9b53ec: pixel table of the part drawn
+    uint32_t xtab_ptr;       // 0x9b606c
+    int32_t stride;          // 0x9b6070: the sprite's stride
+    int32_t ycount;          // 0x9b6074
+    int32_t xgroups;         // 0x9b6078: pixels a row draws in fours, rounded up
+};
+_Static_assert(sizeof(struct game_sprite_scratch) == 0x9b607c - 0x9b3ab8, "layout of the sprite scratch");
+GAME_AT(struct game_sprite_scratch, pitch, 0x9b3ac8 - 0x9b3ab8);
+GAME_AT(struct game_sprite_scratch, width, 0x9b3ad4 - 0x9b3ab8);
+GAME_AT(struct game_sprite_scratch, scale, 0x9b3ad8 - 0x9b3ab8);
+GAME_AT(struct game_sprite_scratch, x_rem, 0x9b4758 - 0x9b3ab8);
+GAME_AT(struct game_sprite_scratch, ytab, 0x9b4760 - 0x9b3ab8);
+GAME_AT(struct game_sprite_scratch, color, 0x9b53e0 - 0x9b3ab8);
+GAME_AT(struct game_sprite_scratch, rows, 0x9b53e8 - 0x9b3ab8);
+GAME_AT(struct game_sprite_scratch, xtab, 0x9b53ec - 0x9b3ab8);
+GAME_AT(struct game_sprite_scratch, xtab_ptr, 0x9b606c - 0x9b3ab8);
+GAME_AT(struct game_sprite_scratch, xgroups, 0x9b6078 - 0x9b3ab8);
+extern struct game_sprite_scratch *game_sprite_scratch;
+// The scale sprites are drawn at, numerator then denominator, and the pair the
+// scaling table was last made for (0x696d18).
+extern int32_t *game_sprite_scale;
+// The scale as a float (0x9b6624), the largest the game draws (0x66fdc8, a
+// double), and the smallest width and height it draws when shrinking
+// (0x9b661c, 0x9b6620).
+extern float *game_sprite_ratio;
+extern double *game_sprite_max_ratio;
+extern int32_t *game_sprite_min_size;
 
 // Point the variables above at a loaded terranx.exe.
 void game_bind(struct pe_image *exe);

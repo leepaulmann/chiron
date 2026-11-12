@@ -98,6 +98,10 @@ void *(__attribute__((stdcall)) * game_get_stock_object)(int which);
 int(__attribute__((thiscall)) * game_font_init)(void *font, const char *face, int size, int flags);
 void **game_font_dc, **game_font_default;
 int32_t *game_font_slack;
+struct game_sprite_scratch *game_sprite_scratch;
+int32_t *game_sprite_scale, *game_sprite_min_size;
+float *game_sprite_ratio;
+double *game_sprite_max_ratio;
 int32_t *game_fill_gap, *game_copy_rem, *game_mask_units, *game_mask_gap_a, *game_mask_gap_b;
 int32_t *game_base_workers, *game_base_reserved, *game_base_food_ok, *game_current_turn;
 int32_t *game_base_square_flags;
@@ -1319,4 +1323,9 @@ void game_bind(struct pe_image *exe) {
     game_font_dc = (void **)code_at(exe, 0x9bb488);
     game_font_default = (void **)code_at(exe, 0x9bb484);
     game_font_slack = (int32_t *)code_at(exe, 0x9b3a9c);
+    game_sprite_scratch = (struct game_sprite_scratch *)code_at(exe, 0x9b3ab8);
+    game_sprite_scale = (int32_t *)code_at(exe, 0x696d18);
+    game_sprite_ratio = (float *)code_at(exe, 0x9b6624);
+    game_sprite_max_ratio = (double *)code_at(exe, 0x66fdc8);
+    game_sprite_min_size = (int32_t *)code_at(exe, 0x9b661c);
 }
