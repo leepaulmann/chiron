@@ -71,6 +71,8 @@ static inline int shadow_bypass(void) { return hooks_sweeping || hooks_checking(
 // check compares that memory as well as the return value. For a function
 // that returns nothing, give void as `ret`.
 #define WRITES(p, size) hooks_writes_add(&w_, (void *)(p), (size))
+// A device context's state in Chiron's GDI (see hooks_dc_state).
+#define WRITES_DC(hdc) hooks_writes_dc(&w_, (void *)(hdc))
 
 #define SHADOW_WRITER(module, ret, name, params, args, writes, fmt, ...) \
     SHADOW_WRITER_VIA(module, ret, name, params, args, orig_##name args, writes, fmt, __VA_ARGS__)

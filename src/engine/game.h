@@ -1800,6 +1800,10 @@ extern int32_t *game_copy_rem, *game_mask_units, *game_mask_gap_a, *game_mask_ga
 extern void *(__attribute__((stdcall)) * game_select_object)(void *dc, void *obj);
 extern int(__attribute__((stdcall)) * game_get_text_extent)(void *dc, const char *s, int n, int32_t *size);
 extern void *(__attribute__((stdcall)) * game_get_stock_object)(int which);
+// Text drawing's calls (Buffer_write_*), likewise as imported.
+extern int(__attribute__((stdcall)) * game_set_bk_mode)(void *dc, int mode);
+extern uint32_t(__attribute__((stdcall)) * game_set_text_color)(void *dc, uint32_t color);
+extern int(__attribute__((stdcall)) * game_text_out)(void *dc, int x, int y, const char *s, int n);
 extern int(__attribute__((thiscall)) * game_font_init)(void *font, const char *face, int size, int flags);
 extern void **game_font_dc, **game_font_default;
 extern int32_t *game_font_slack;

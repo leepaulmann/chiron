@@ -136,6 +136,7 @@ void hooks_mismatch(struct hook_stats *s, const char *fmt, ...) {
 int hooks_sweeping;
 const char *hooks_sweep_module;
 void (*hooks_hold_time)(int hold);
+void *(*hooks_dc_state)(void *hdc, int *size);
 
 // Two save buffers per nesting level: the memory before the original ran,
 // and after.
@@ -213,6 +214,12 @@ void hooks_writes_add(struct hook_writes *w, void *p, size_t size) {
     w->span[w->n].p = p;
     w->span[w->n].size = size;
     w->n++;
+}
+
+void hooks_writes_dc(struct hook_writes *w, void *hdc) {
+    int size;
+    void *p = hooks_dc_state ? hooks_dc_state(hdc, &size) : NULL;
+    if (p) hooks_writes_add(w, p, size);
 }
 
 static size_t writes_total(const struct hook_writes *w) {

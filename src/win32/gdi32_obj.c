@@ -175,6 +175,12 @@ struct dc *gdi_dc(HDC hdc) {
     return dc && (uintptr_t)dc > 0x10000 && dc->magic == DC_MAGIC ? dc : NULL;
 }
 
+void *gdi_dc_state(void *hdc, int *size) {
+    struct dc *dc = gdi_dc(hdc);
+    if (dc) *size = sizeof *dc;
+    return dc;
+}
+
 HDC gdi_create_window_dc(HWND hwnd) { return new_dc(1, hwnd); }
 
 void gdi_release_window_dc(HDC hdc) {

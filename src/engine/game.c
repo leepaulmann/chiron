@@ -93,6 +93,9 @@ void (*game_check_tamper)(void);
 void(__attribute__((thiscall)) * game_string_list_add)(void *list, int id);
 uint32_t *game_palette_handle;
 void *(__attribute__((stdcall)) * game_select_object)(void *dc, void *obj);
+int(__attribute__((stdcall)) * game_set_bk_mode)(void *dc, int mode);
+uint32_t(__attribute__((stdcall)) * game_set_text_color)(void *dc, uint32_t color);
+int(__attribute__((stdcall)) * game_text_out)(void *dc, int x, int y, const char *s, int n);
 int(__attribute__((stdcall)) * game_get_text_extent)(void *dc, const char *s, int n, int32_t *size);
 void *(__attribute__((stdcall)) * game_get_stock_object)(int which);
 int(__attribute__((thiscall)) * game_font_init)(void *font, const char *face, int size, int flags);
@@ -1321,6 +1324,9 @@ void game_bind(struct pe_image *exe) {
     game_select_object = *(void **)code_at(exe, 0x669060);  // filled in when imports were bound
     game_get_text_extent = *(void **)code_at(exe, 0x669088);
     game_get_stock_object = *(void **)code_at(exe, 0x6690c0);
+    game_set_bk_mode = *(void **)code_at(exe, 0x669068);
+    game_set_text_color = *(void **)code_at(exe, 0x6690b0);
+    game_text_out = *(void **)code_at(exe, 0x6690bc);
     game_font_init = (void *)code_at(exe, 0x618f40);
     game_font_dc = (void **)code_at(exe, 0x9bb488);
     game_font_default = (void **)code_at(exe, 0x9bb484);

@@ -90,8 +90,14 @@ extern const char *hooks_sweep_module;
 // nonzero calls outnumber zero ones. Checks of writing functions hold it, so
 // both runs read the same time.
 extern void (*hooks_hold_time)(int hold);
+// Set by the host: the state of a Windows device context as Chiron's GDI
+// keeps it (colours, background mode, selected objects, alignment), with its
+// size, or NULL if `hdc` isn't a DC. Text drawing changes it, so a check of a
+// function that draws text lists it with WRITES_DC.
+extern void *(*hooks_dc_state)(void *hdc, int *size);
 
 void hooks_writes_add(struct hook_writes *w, void *p, size_t size);
+void hooks_writes_dc(struct hook_writes *w, void *hdc);  // nothing if hdc isn't a DC
 // Before the original runs.
 void hooks_writes_begin(struct hook_writes *w);
 // After the original: save its writes and put the memory back.

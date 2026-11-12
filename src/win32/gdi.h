@@ -37,6 +37,9 @@ static inline uint8_t *surface_row(const struct surface *s, int y) {
     return s->bits + (size_t)(s->bottom_up ? s->height - 1 - y : y) * s->stride;
 }
 void surface_colors_changed(struct surface *s);
+// A device context's state (colours, modes, selected objects) and its size,
+// for the engine's shadow checks; NULL if hdc isn't a DC.
+void *gdi_dc_state(void *hdc, int *size);
 
 // Display settings reported to the game.
 extern int display_width, display_height, display_bpp;
