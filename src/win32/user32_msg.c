@@ -703,10 +703,21 @@ LRESULT WINAPI DispatchMessageA(const MSG *m) {
     return user32_send(m->hwnd, m->message, m->wparam, m->lparam);
 }
 
+void WINAPI ExitProcess(UINT code);
+
 LRESULT WINAPI DefWindowProcA(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_NCCREATE: return TRUE;
-    case WM_CLOSE: DestroyWindow(hwnd); return 0;
+    case WM_CLOSE: {
+        // The game leaves its window's close button to the default, which
+        // destroys the window, but nothing in it then ends: its loops run
+        // on with nothing to draw into, which looks like a freeze. Closing
+        // the window on screen ends the program, as the game's own Quit does.
+        int main = hwnd == user32_main_window();
+        DestroyWindow(hwnd);
+        if (main) ExitProcess(0);
+        return 0;
+    }
     case WM_ERASEBKGND: return 1;
     case WM_SETCURSOR:
         user32_apply_cursor(user32_class_cursor(hwnd));
