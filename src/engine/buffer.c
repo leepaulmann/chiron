@@ -415,11 +415,12 @@ int __attribute__((thiscall)) buffer_dotted_box_rect(buffer_t *b, const int32_t 
 
 // ---- Copies between buffers --------------------------------------------------
 
-// Copies a rectangle of the buffer `s` to this one: (sx, sy) in `s`, to (x, y)
-// here, w by h pixels. It is cut to this buffer first and then to `s`'s clip
-// rectangle, and the part cut off the left or top of the destination moves the
-// source corner with it. 7 if this buffer has no pixels, 3 if `s` is missing
-// or a corner is outside, else 0.
+// Copies a rectangle of this buffer, (x, y) w by h pixels, into the buffer `s`
+// at (sx, sy). (OpenSMACX has the pixels going the other way; the original
+// reads this buffer and writes the other.) The rectangle is cut to this buffer
+// first, the part cut off the left or top moving the corner in `s` with it,
+// and then to the clip rectangle of `s`. 7 if this buffer has no pixels, 3 if
+// `s` is missing or a corner is outside, else 0.
 //
 // The original also copies within one buffer, choosing the order of rows and
 // bytes from where the rectangles lie; that is left to it, as are surfaces.
@@ -454,7 +455,7 @@ int __attribute__((thiscall)) buffer_copy_full(buffer_t *d, buffer_t *s, int x, 
         return 3;
     }
     *game_copy_rem = w & 3;
-    for (int row = 0; row < h; row++) memcpy(dp + (intptr_t)d->pitch * row, sp + (intptr_t)s->pitch * row, (size_t)w);
+    for (int row = 0; row < h; row++) memcpy(sp + (intptr_t)s->pitch * row, dp + (intptr_t)d->pitch * row, (size_t)w);
     unlock_dib(d);
     unlock_dib(s);
     return 0;
@@ -472,11 +473,10 @@ static uint8_t *lock_at(buffer_t *b, int x, int y) {
     return b->base + b->pitch * y + x;
 }
 
-// Cut the same way as the copy, but the pixels of the buffer given that are
-// the key colour are replaced by the pixels of *this* buffer, not the other
-// way round (OpenSMACX has it as a copy to this buffer; the original writes
-// into the other and only reads this). The other buffer's clip rectangle
-// still decides which part is drawn. Does not look at overlap.
+// Cut the same way as the copy, and likewise reading this buffer and writing
+// the other: the pixels of the other buffer that are the key colour are
+// replaced by this buffer's. The other buffer's clip rectangle decides which
+// part. It does not look at overlap.
 int __attribute__((thiscall)) buffer_copy_mask(buffer_t *d, buffer_t *s, int x, int y, int sx, int sy, int w, int h, int key) {
     if (d->dd || (s && s->dd)) return orig_buffer_copy_mask(d, s, x, y, sx, sy, w, h, key);
     if (!d->bits) return 7;
@@ -613,20 +613,15 @@ BUF_WRITER(int, buffer_dotted_box_rect, (buffer_t * b, const int32_t *rect, int 
            rect ? writes_rect(&w_, b, rect[0], rect[1], rect[2], rect[3]) : writes_rect(&w_, b, 0, 0, 0, 0), "%d, %d",
            rect != NULL, color)
 
-// The copies write the scratch the original leaves in the game's globals; the
-// destination's pixels (and, for the masked one, the other buffer's) as well.
+// The copies write the scratch the original leaves in the game's globals, and
+// the pixels of the other buffer.
 static void writes_scratch(struct hook_writes *w) {
     hooks_writes_add(w, (void *)game_copy_rem, 4);
     hooks_writes_add(w, (void *)game_mask_units, 4);
     hooks_writes_add(w, (void *)game_mask_gap_a, 4);
     hooks_writes_add(w, (void *)game_mask_gap_b, 4);
 }
-static void writes_copy(struct hook_writes *w, buffer_t *d, buffer_t *s, int x, int y, int cw, int ch) {
-    writes_rect(w, d, x, y, x + cw, y + ch);
-    if (s) hooks_writes_add(w, (void *)s, sizeof *s);
-    writes_scratch(w);
-}
-// The masked copy writes the other buffer, at the place its corner is given, less what was cut off here.
+// Both copies write the other buffer, at the place its corner is given, less what was cut off here.
 static void writes_mask(struct hook_writes *w, buffer_t *d, buffer_t *s, int x, int y, int sx, int sy, int cw, int ch) {
     hooks_writes_add(w, (void *)d, sizeof *d);
     writes_scratch(w);
@@ -648,7 +643,7 @@ static void writes_mask(struct hook_writes *w, buffer_t *d, buffer_t *s, int x, 
     }
 
 BUF2_WRITER(int, buffer_copy_full, (buffer_t * d, buffer_t *s, int x, int y, int sx, int sy, int w, int h),
-            (d, s, x, y, sx, sy, w, h), writes_copy(&w_, d, s, x, y, w, h), s == d, "%d, %d, %d, %d, %d, %d", x, y, sx, sy,
+            (d, s, x, y, sx, sy, w, h), writes_mask(&w_, d, s, x, y, sx, sy, w, h), s == d, "%d, %d, %d, %d, %d, %d", x, y, sx, sy,
             w, h)
 BUF2_WRITER(int, buffer_copy_mask, (buffer_t * d, buffer_t *s, int x, int y, int sx, int sy, int w, int h, int key),
             (d, s, x, y, sx, sy, w, h, key), writes_mask(&w_, d, s, x, y, sx, sy, w, h), 0, "%d, %d, %d, %d, %d, %d, %d", x,

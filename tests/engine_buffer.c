@@ -159,42 +159,44 @@ int main(void) {
     buffer_dotted_box(&b, 0, 0, 8, 4, 9);
     EXPECT(count(9) > 0, 1), EXPECT(px(0, 0), 9);
 
-    // Copies: another buffer with a different pitch and size.
+    // Copies: this buffer's pixels go into another buffer, of another pitch and size.
     static uint8_t spix[8 * 5 + 4];
     static struct game_buffer sb;
     memset(&sb, 0, sizeof sb);
     sb.bits = spix, sb.width = 8, sb.neg_height = -5, sb.pitch = 8;
     sb.full[2] = 8, sb.full[3] = 5, sb.clip[2] = 8, sb.clip[3] = 5;
-    for (int i = 0; i < 40; i++) spix[i] = (uint8_t)(i + 1);
     reset();
-    EXPECT(buffer_copy_full(&b, &sb, 2, 1, 1, 2, 3, 2), 0);
-    EXPECT(px(2, 1), spix[2 * 8 + 1]), EXPECT(px(4, 1), spix[2 * 8 + 3]), EXPECT(px(2, 2), spix[3 * 8 + 1]),
-        EXPECT(px(5, 1), 0), EXPECT(px(2, 3), 0), EXPECT(*game_copy_rem, 3 & 3);
-    EXPECT(b.locks, 0), EXPECT(sb.locks, 0), EXPECT(b.base == NULL, 1);
-    // Cut at the left and top of the destination: the source corner moves with it.
-    reset();
+    for (int i = 0; i < PITCH * H; i++) pixels[i] = (uint8_t)(i + 1);
+    EXPECT(buffer_copy_full(&b, &sb, 2, 1, 1, 2, 3, 2), 0);  // from (2, 1) here to (1, 2) there
+    EXPECT(spix[2 * 8 + 1], px(2, 1)), EXPECT(spix[2 * 8 + 3], px(4, 1)), EXPECT(spix[3 * 8 + 1], px(2, 2)),
+        EXPECT(spix[2 * 8 + 4], 0), EXPECT(spix[4 * 8 + 1], 0), EXPECT(*game_copy_rem, 3 & 3);
+    EXPECT(b.locks, 0), EXPECT(sb.locks, 0), EXPECT(b.base == NULL, 1), EXPECT(px(2, 1), 1 * PITCH + 2 + 1);
+    // Cut at the left and top of this buffer: the corner in the other moves with it.
+    memset(spix, 0, sizeof spix);
     EXPECT(buffer_copy_full(&b, &sb, -2, -1, 0, 0, 4, 3), 0);
-    EXPECT(px(0, 0), spix[1 * 8 + 2]), EXPECT(px(1, 0), spix[1 * 8 + 3]), EXPECT(px(2, 0), 0), EXPECT(px(0, 1), spix[2 * 8 + 2]);
-    // Cut by the source's clip rectangle, and at the right and bottom of this buffer.
-    reset();
+    EXPECT(spix[1 * 8 + 2], px(0, 0)), EXPECT(spix[1 * 8 + 3], px(1, 0)), EXPECT(spix[1 * 8 + 4], 0), EXPECT(spix[2 * 8 + 2], px(0, 1));
+    EXPECT(spix[0], 0);
+    // Cut by the other buffer's clip rectangle, and at the right and bottom of this one.
+    memset(spix, 0, sizeof spix);
     sb.clip[0] = 2, sb.clip[1] = 1, sb.clip[2] = 5, sb.clip[3] = 3;
     EXPECT(buffer_copy_full(&b, &sb, 0, 0, 0, 0, 8, 5), 0);
-    EXPECT(px(0, 0), 0), EXPECT(px(2, 1), spix[1 * 8 + 2]), EXPECT(px(4, 2), spix[2 * 8 + 4]), EXPECT(px(5, 1), 0), EXPECT(px(2, 3), 0);
+    EXPECT(spix[0], 0), EXPECT(spix[1 * 8 + 2], px(2, 1)), EXPECT(spix[2 * 8 + 4], px(4, 2)), EXPECT(spix[1 * 8 + 5], 0), EXPECT(spix[3 * 8 + 2], 0);
     sb.clip[0] = 0, sb.clip[1] = 0, sb.clip[2] = 8, sb.clip[3] = 5;
-    reset();
-    EXPECT(buffer_copy_full(&b, &sb, 8, 4, 0, 0, 8, 5), 0);
-    EXPECT(px(8, 4), spix[0]), EXPECT(px(9, 4), spix[1]), EXPECT(px(7, 4), 0), EXPECT(px(8, 5), spix[8]);
+    memset(spix, 0, sizeof spix);
+    EXPECT(buffer_copy_full(&b, &sb, W - 3, H - 2, 0, 0, 8, 5), 0);  // only 3 by 2 of it is in this buffer
+    EXPECT(spix[0], px(W - 3, H - 2)), EXPECT(spix[2], px(W - 1, H - 2)), EXPECT(spix[3], 0), EXPECT(spix[8], px(W - 3, H - 1)), EXPECT(spix[16], 0);
     EXPECT(buffer_copy_full(&b, NULL, 0, 0, 0, 0, 1, 1), 3);
     EXPECT(buffer_copy_full(&b, &sb, W + 1, 0, 0, 0, 1, 1), 0);
     b.bits = NULL;
     EXPECT(buffer_copy_full(&b, &sb, 0, 0, 0, 0, 1, 1), 7);
 
-    // The masked copy replaces the key colour in the *other* buffer with this buffer's pixels.
+    // The masked copy replaces the key colour in the other buffer with this buffer's pixels.
     reset();
     for (int i = 0; i < PITCH * H; i++) pixels[i] = 100;
+    for (int i = 0; i < 40; i++) spix[i] = (uint8_t)(i + 1);
     spix[1 * 8 + 2] = 7, spix[1 * 8 + 3] = 7;
     EXPECT(buffer_copy_mask(&b, &sb, 2, 1, 2, 1, 3, 2, 7), 0);
-    EXPECT(spix[1 * 8 + 2], 100), EXPECT(spix[1 * 8 + 3], 100), EXPECT(spix[1 * 8 + 4], 1 * 8 + 4 + 1), EXPECT(pixels[1 * PITCH + 2], 100);
+    EXPECT(spix[1 * 8 + 2], 100), EXPECT(spix[1 * 8 + 3], 100), EXPECT(spix[1 * 8 + 4], 1 * 8 + 4 + 1), EXPECT(px(2, 1), 100);
     EXPECT(b.locks, 0), EXPECT(sb.locks, 0);
 
     printf(failures ? "buffer: %d failures\n" : "buffer: all passed\n", failures);
