@@ -44,6 +44,15 @@ static int parse_says_stub(int slot, char *text, int gender, int plural) {
     return 0;
 }
 static int x_pop_stub(char *label, int unk) { return snprintf(popped, sizeof(popped), "%s", label), 0; }
+static int log_calls, secret_calls;
+static char logged[64];
+static void log_say5_stub(char *a, char *b, int n1, int n2, int n3) {
+    log_calls++;
+    snprintf(logged, sizeof(logged), "%s %d %d %d", b, n1, n2, n3);
+}
+static int ambience_stub(int sound) { return 0; }
+static void __attribute__((thiscall)) popup_stub(void *pop) {}
+static void mon_secrets_stub(int faction) { secret_calls++; }
 static int rand_zero(void) { return 0; }
 static int random_top(int min, int max) { return max - 1; }
 
@@ -410,6 +419,73 @@ int main(void) {
     humans = 0, rules = 0;
     achieved[0] |= 1 << 4, achieved[1] |= 1 << 4, achieved[2] |= 1 << 4, achieved[6] = achieved[7] = achieved[60] = 1 << 4;
     EXPECT(tech_ai(4), -1);  // nothing left to research
+
+    // tech_achieved: at the start of a game a tech is only known; later its
+    // ranking counts too; a map, a comm link. Factions 2 and 3 are human, so no
+    // designs are made, and not the player, so no window is shown.
+    {
+        static struct map_tile tiles[3];
+        struct map_tile *tp = tiles;
+        static int32_t skip, prefs, net, first_new, governor, area = 3, multi_visible;
+        static uint32_t state, ambience_flags;
+        game_log_say5 = log_say5_stub, game_ambience = ambience_stub, game_popup_ctor = popup_stub,
+        game_popup_dtor = popup_stub, game_mon_secrets_of_tech = mon_secrets_stub;
+        game_skip_tech_screen = &skip, game_preferences = &prefs, game_net_multiplayer = &net,
+        game_first_new_proto = &first_new, game_governor_faction = &governor, game_state = &state,
+        game_map = &tp, game_map_area = &area, game_multi_win_visible = &multi_visible,
+        game_ambience_flags = (int32_t *)&ambience_flags;
+        humans = 1 << 2 | 1 << 3;
+        base_count = 1, bases[0].faction = 1, bases[0].visibility = 0;
+        tree[7].flags = 0;
+        achieved[7] = 0;
+        factions[2].tech_research_id = 7, factions[2].tech_ranking = 10, factions[2].unk_360 = 3;
+        turn = 0;
+        tech_achieved(2, 7, 3, 0);
+        EXPECT(factions[2].tech_source[7], 3);
+        EXPECT(achieved[7], 1 << 2);
+        EXPECT(factions[2].techs_achieved, 1);
+        EXPECT(factions[2].tech_research_id, -1);
+        EXPECT(factions[2].tech_ranking, 10);  // not at the start
+        EXPECT(log_calls, 1);
+        EXPECT_STR(logged, " 2 7 3");
+        tech_achieved(2, -1, 0, 0);  // nothing at all
+        EXPECT(log_calls, 1);
+        // The window skipped: still no ranking. Found, not traded: no source.
+        turn = 5, skip = 1;
+        tech_achieved(2, 7, 0, 0);
+        EXPECT(factions[2].tech_source[7], 0);
+        EXPECT(achieved[7], 1 << 2);
+        EXPECT(factions[2].tech_ranking, 10);
+        // A first secret: the ranking, its decay, the monument and the news.
+        skip = 0, achieved[7] = 0, tree[7].flags = TECH_FLAG_SECRETS;
+        tech_achieved(2, 7, 0, 0);
+        EXPECT(factions[2].tech_ranking, 12);
+        EXPECT(factions[2].unk_360, 1);
+        EXPECT(factions[2].transcendent_techs, 0);
+        EXPECT(secret_calls, 1);
+        EXPECT((int)(factions[2].flags & 0x40), 0x40);
+        EXPECT_STR(popped, "THESECRET1");
+        // Not the first: no news. The last tech counts.
+        factions[2].flags = 0, tree[TECH_TRANSCEND].flags = 0;
+        tech_achieved(3, 7, 0, 0);
+        EXPECT((int)(factions[3].flags & 0x40), 0);
+        tech_achieved(2, TECH_TRANSCEND, 0, 0);
+        EXPECT(factions[2].transcendent_techs, 1);
+        // A comm link, in both directions.
+        tech_achieved(2, TECH_COUNT + 3, 0, 0);
+        EXPECT((int)(factions[2].diplo_status[3] & TREATY_COMMLINK), TREATY_COMMLINK);
+        EXPECT((int)(factions[3].diplo_status[2] & TREATY_COMMLINK), TREATY_COMMLINK);
+        // The map of faction 3: what it has seen, and what it saw there.
+        factions[3].maps_traded = 1 << 5;
+        tiles[0].visibility = 1 << 3, tiles[1].visibility = 1 << 5;
+        tiles[0].bits = 0x14, tiles[0].bits_seen[2] = 0x6, tiles[0].bits_seen[1] = 0x1;
+        tech_achieved(2, 9999, 3, 0);
+        EXPECT(tiles[0].visibility, 1 << 3 | 1 << 2);
+        EXPECT(tiles[1].visibility, 1 << 5);
+        EXPECT((int)tiles[0].bits_seen[1], 1 | (0x14 & 0x6));
+        EXPECT((int)factions[2].maps_traded, 1 << 5 | 1 << 3);
+        tree[7].flags = 0;
+    }
 
     if (failures) return 1;
     puts("PASS");

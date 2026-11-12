@@ -10,9 +10,12 @@
 #include <string.h>
 
 #include "base.h"
+#include "faction.h"
 #include "game.h"
 #include "map.h"
 #include "shadow.h"
+#include "social.h"
+#include "spot.h"
 #include "veh.h"
 
 static const struct rules_tech *tech_entry(uint32_t tech) { return &game_tech[tech]; }
@@ -533,6 +536,462 @@ int tech_ai(int faction) {
     return pick;
 }
 
+// ---- tech_achieved ---------------------------------------------------------------
+//
+// A faction gains a tech (or, past the end of the tree, a map, a comm link
+// or a prototype). The original keeps its New Tech popup, one of the game's
+// big window objects, on its stack at [ebp-0x5400], where the help text for
+// the tech records its address; ours is given the same place by an assembly
+// entry, and the popup is built and taken down as the original does, on
+// whatever path. The names follow Thinker's tech_achieved() (MIT), which was
+// a map; where it differs from the original (it fixes some of its quirks)
+// the original is followed.
+
+enum {
+    TA_MAPS = 9999,                          // the tech is the map of `from`
+    TA_COMMLINKS = TECH_COUNT,               // TECH_COUNT + faction: a comm link with it
+    TA_PROTOS = TECH_COUNT + FACTION_COUNT,  // then 0x59 + 8 + proto: a stock design is made over
+    BONUS_FREE_FACILITY = 0xc, BONUS_FREE_ABILITY = 0xf,  // faction_def.bonus_id
+    TECH_FLAG_REVEALS_MAP = 0x8,
+    FACTION_FLAG_NEW_TECH = 0x2,       // a network game: designs to bring up to date
+    FACTION_FLAG_SECRET_FIRST = 0x40,  // the first to learn a secret (its free tech is pending)
+    FACTION_FLAG_MAP_SEEN = 0x200,     // a tech has shown the whole map
+    PREF_AUTO_DESIGN = 0x4000,         // game_preferences: new designs are shown to the player
+    PROTO_FLAG_PROTOTYPED_ = 0x4, PROTO_FLAG_NEW_DESIGN = 0x80, PROTO_FLAG_UPGRADE = 0x100,
+    PLAN_AUTO_ = -1, PLAN_PROTOTYPE_DONE_ = -2,
+    SP_PLANETARY_DATALINKS_ = 11,
+    DATALINKS_FACTIONS = 3,  // a tech this many know is given to the Datalinks' holder
+    FAC_BIOLOGY_LAB_ = 9, FORMER_FOREST_ = 4,
+    TECH_SELF_AWARE = 34, TECH_MATTER_COMP = 57, TECH_SOCIAL_PSYCH = 4,  // the tutorial's notes
+    RULE_FLAG_SHARE_TECH = 0x20,  // faction_def.rule_flags (with sharetech): spies on those it shares with
+    DIPLO_INFILTRATOR = 0x1000,
+    // Offsets in the popup object.
+    TA_POP_ICON = 0x2144, TA_POP_SPRITE_BOX = 0x2240, TA_POP_SPRITE_SET = 0x2274, TA_POP_FIELD_A = 0x3104,
+    TA_POP_FIELD_B = 0x3108,
+};
+
+// A string in the game's image, and the value of a pointer or integer in it.
+static char *image_text(uint32_t addr) { return (char *)game_at(addr); }
+static char *image_str(uint32_t addr) { return *(char **)game_at(addr); }
+static int32_t image_int(uint32_t addr) { return *(int32_t *)game_at(addr); }
+
+// A design propose_proto() made, for a stock design handed over or an old
+// one with a better reactor: in a network game a human's is marked to be
+// brought up to date later, else the faction's old designs are pruned and
+// brought up to date at once. (Nothing keeps the original from doing this
+// for a design number of -1.)
+static void ta_new_design(int faction, int proto) {
+    if (*game_net_multiplayer && game_is_human(faction)) {
+        *((uint8_t *)game_protos + proto * (int)sizeof(struct unit_proto) + 0x31) |= 1;
+    } else {
+        prune_protos(faction, proto, 0);
+        game_upgrade_any_prototypes(faction);
+    }
+}
+
+// The map of another faction: what it has seen, and what it has seen of the
+// items on each square, and the bases it knows of.
+static void ta_map(int f, int from) {
+    uint32_t bit_from = 1u << (from & 31), bit = 1u << (f & 31);
+    game_factions[f].maps_traded |= game_factions[from].maps_traded | bit_from;
+    struct map_tile *tile = *game_map;
+    for (int i = 0; i < *game_map_area; i++, tile++) {
+        if (!(tile->visibility & (uint8_t)bit_from)) continue;
+        tile->visibility |= (uint8_t)bit;
+        if (f && from) tile->bits_seen[f - 1] |= tile->bits & tile->bits_seen[from - 1];
+    }
+    for (int b = 0; b < *game_base_count; b++)
+        if ((game_bases[b].visibility & (uint8_t)bit_from) || game_bases[b].faction == from) spot_base(b, f);
+    if (f == *game_current_faction) {
+        game_draw_map(1);
+        *game_draw_state |= 4;
+        game_graphic_win_redraw(game_world_win);
+    }
+}
+
+// The reactor a tech unlocks: every design of the faction with a weaker one
+// is made again with it. Returns the reactor, or 0 if no design was.
+static int ta_reactors(int f, int tech) {
+    uint8_t bit = (uint8_t)(1u << (f & 31));
+    int upgraded = 0;
+    for (int n = 2; n <= 4; n++) {
+        if (tech != game_reactors[n - 1].preq_tech) continue;
+        for (int j = 0; j < 64; j++) {
+            int id = f * 64 + j;
+            struct unit_proto *P = &game_protos[id];
+            if (!(P->flags & PROTO_FLAG_ACTIVE) || (P->obsolete_factions & bit) || P->reactor >= n) continue;
+            int plan = (P->flags & PROTO_FLAG_PROTOTYPED_) ? PLAN_PROTOTYPE_DONE_ : PLAN_AUTO_;
+            int made = propose_proto(f, P->chassis, P->weapon, P->armor, P->abilities, n, plan, NULL);
+            upgraded = n;
+            if (made != id) ta_new_design(f, made);
+        }
+    }
+    return upgraded;
+}
+
+// The New Tech popup (and, for the player, the window after it) for a
+// faction that sees it: the player, or anyone when the game is shown in
+// full. The popup's text and picture are the game's; the window that
+// follows is held in a check (quiet.c), as are the sounds and messages.
+static void ta_announce(uint8_t *pop, int f, int tech, int from, int steal) {
+    char *text = game_battle_text, number[16];
+    const struct faction_def *D = &game_faction_defs[f];
+    int cur = *game_current_faction;
+    text[0] = 0;
+    say_tech(text, tech, 0);
+    game_parse_says(0, text, -1, -1);
+    *game_parse_gender = D->noun_gender, *game_parse_plural = D->noun_plural;
+    game_parse_says(1, (char *)D->noun, -1, -1);
+    if (from > 0) {
+        const struct faction_def *S = &game_faction_defs[from];
+        *game_parse_gender = S->noun_gender, *game_parse_plural = S->noun_plural;
+        game_parse_says(2, (char *)S->noun, -1, -1);
+    } else if (from < 0) {
+        // -1: the Datalinks gave it; below: shared by a faction's file.
+        if (from == -1) game_parse_say(2, image_int(0x9a5a98), -1, -1);
+        else game_parse_says(2, game_label(215), -1, -1);
+    }
+    int flags = 0;
+    if (f == cur) {
+        text[0] = 0;
+        strcat(text, image_text(0x69171c));
+        snprintf(number, sizeof(number), "%d", tech);
+        strcat(text, number);
+        game_base_pop_init(pop, 0, 0);
+        game_base_pop_set_width(pop, 500);
+        game_popup_start(pop, image_str(0x691b04), text, -1, 0, 0x80, 0);
+        game_base_pop_string(pop, image_text(0x691724));
+        game_base_pop_string(pop, image_text(0x691728));
+        game_base_pop_string(pop, image_text(0x691730));
+        flags = 0x80;
+    }
+    text[0] = 0;
+    strcat(text, image_text(f == cur ? 0x691734 : 0x691738));
+    strcat(text, image_text(from ? 0x691740 : 0x691748));
+    if (steal) {
+        text[0] = 0;  // the text so far is dropped, as in the original
+        strcat(text, image_text(0x691750));
+    }
+    // The popup's picture is the tech's icon, unless the sprite box says it
+    // has one (the original reads that word of the popup as it is; a check
+    // never shows the popup, so only its address, kept by the help text,
+    // would tell two runs apart, and the assembly entry gives both the same).
+    void *icon = game_tech_sprites + tech * 0x2c;
+    *(void **)(pop + TA_POP_ICON) = *(int32_t *)(pop + TA_POP_SPRITE_SET) ? NULL : icon;
+    game_sprite_box_sprite(pop + TA_POP_SPRITE_BOX, icon, 0, tech);
+    *(int32_t *)(pop + TA_POP_FIELD_A) = 1, *(int32_t *)(pop + TA_POP_FIELD_B) = 2;
+    game_popup_start(pop, game_pop_file, text, -1, 0, flags, 0);
+    if (f == cur) game_help_tech_info_2(pop, tech, f);
+    game_fx_play(game_fx, 0x33);
+    if (f != cur) {
+        if (!*game_net_multiplayer) game_base_pop_exec_3(pop, 0, 0);
+    } else if (*game_net_multiplayer && (image_int(0x93fab4) || image_int(0x7492cc) || *game_council_session)) {
+        // A network game with the talks or the Council open: a message
+        // instead of the window.
+        game_parse_say(0, (int)(intptr_t)game_tech[tech].name, -1, -1);
+        game_netmsg_pop(game_netmsg, image_text(0x691760), 5000, 0, NULL);
+    } else {
+        game_new_tech_win_exec(game_new_tech_win, tech, from);
+    }
+}
+
+// The faction's free facilities and abilities from its file, whose tech it
+// now has: a facility goes up in all its bases, an ability is only told of.
+static void ta_free_bonuses(int f, int tech) {
+    const struct faction_def *D = &game_faction_defs[f];
+    int cur = *game_current_faction, any = 0;
+    for (int i = 0; i < D->bonus_count; i++) {
+        if (D->bonus_id[i] != BONUS_FREE_FACILITY) continue;
+        int fac = D->bonus_val1[i];
+        if (tech != game_facilities[fac].preq_tech) continue;
+        any = 1;
+        for (int b = 0; b < *game_base_count; b++)
+            if (game_bases[b].faction == f) set_fac(fac, b, 1);
+        if (f == cur) {
+            game_parse_say(0, (int)(intptr_t)game_tech[tech].name, -1, -1);
+            game_parse_say(1, (int)(intptr_t)game_facilities[fac].name, -1, -1);
+            game_netmsg_pop(game_netmsg, image_text(0x691770), -5000, 0, NULL);
+        }
+    }
+    if (any) game_net_daemon_synch(game_net_daemon, 0x14, 0, 0, 0, 0, 1, 0x2101);
+    for (int i = 0; i < D->bonus_count; i++) {
+        if (D->bonus_id[i] != BONUS_FREE_ABILITY) continue;
+        int abl = D->bonus_val1[i];
+        if (tech != game_abilities[abl].preq_tech || f != cur) continue;
+        game_parse_say(0, (int)(intptr_t)game_tech[tech].name, -1, -1);
+        game_parse_say(1, (int)(intptr_t)game_abilities[abl].name, -1, -1);
+        game_netmsg_pop(game_netmsg, image_text(0x69177c), -5000, 0, NULL);
+    }
+}
+
+// The player's offer to look at the designs the tech brings: the stock
+// designs it makes possible (but not a psi design or the Spore Launcher,
+// design 15), then the faction's own newly flagged ones. Asked once, and the
+// answer holds for all.
+static void ta_designs(int f, int tech) {
+    uint8_t bit = (uint8_t)(1u << (f & 31));
+    int asked = 0;
+    *game_base_proto_upkeep = 0;
+    *(int32_t *)game_at(0x73396c) = 1;
+    for (int i = 0; i < 64; i++) {
+        const struct unit_proto *P = &game_protos[i];
+        if (!(P->flags & PROTO_FLAG_ACTIVE) || tech != P->preq_tech) continue;
+        if (game_weapons[P->weapon].offense < 0 || i == 15) continue;
+        if (!asked) {
+            if (!game_x_pop(image_text(0x691798), 0)) {
+                asked = -1;
+                continue;
+            }
+            asked = 1;
+        } else if (asked < 0) {
+            continue;
+        }
+        game_design_new_veh(-f, i);
+    }
+    for (int j = 0; j < 64; j++) {
+        struct unit_proto *P = &game_protos[f * 64 + j];
+        if (!(P->flags & PROTO_FLAG_NEW_DESIGN) || (P->obsolete_factions & bit)) continue;
+        if (!asked) {
+            if (!game_x_pop(image_text(0x6917a8), 0)) {
+                asked = -1;
+            } else {
+                asked = 1;
+                game_design_new_veh(-f, f * 64 + j);
+            }
+        } else if (asked > 0) {
+            game_design_new_veh(-f, f * 64 + j);
+        }
+        P->flags &= (uint16_t)~PROTO_FLAG_NEW_DESIGN;
+    }
+    game_design_win_shutdown(game_design_win);
+    for (int j = 0; j < 64; j++) {
+        int id = f * 64 + j;
+        const struct unit_proto *P = &game_protos[id];
+        if ((P->obsolete_factions & bit) || !(P->flags & PROTO_FLAG_UPGRADE)) continue;
+        if (*game_net_multiplayer && game_is_human(f)) continue;
+        upgrade_prototypes(f, id);
+    }
+}
+
+// A social model the tech opens: the player is asked whether to change the
+// faction's society, and again for an answer of 2 (look at it first).
+static void ta_social(int f, int tech) {
+    for (int cat = 0; cat < 4; cat++) {
+        for (int m = 0; m < 4; m++) {
+            if (tech != game_social_preqs[cat * SOCIAL_PREQ_STRIDE + m] || !society_avail(cat, m, f)) continue;
+            int choice;
+            do {
+                game_parse_say(0, (int)(intptr_t)game_tech[tech].name, -1, -1);
+                game_parse_say(1, game_social_preqs[cat * SOCIAL_PREQ_STRIDE + 4 + m], -1, -1);
+                game_battle_text[0] = 0;
+                strcat(game_battle_text, image_text(0x6917b8));
+                choice = game_x_pop2(image_str(0x691b14), game_battle_text, 0);
+                if (choice) game_social_select(f);
+            } while (choice == 2);
+        }
+    }
+}
+
+// A tech that shows the whole map, the first time the faction learns one.
+static void ta_reveal_map(int f, int tech) {
+    uint8_t bit = (uint8_t)(1u << (f & 31));
+    struct map_tile *tile = *game_map;
+    for (int i = 0; i < *game_map_area; i++, tile++) {
+        tile->visibility |= bit;
+        if (f) tile->bits_seen[f - 1] = tile->bits;
+    }
+    for (int b = 0; b < *game_base_count; b++) {
+        game_bases[b].visibility |= bit;
+        game_bases[b].pop_seen[f] = game_bases[b].pop_size;
+    }
+    game_factions[f].flags |= FACTION_FLAG_MAP_SEEN;
+    if (*game_turn && f == *game_current_faction) {
+        game_parse_say(0, (int)(intptr_t)game_tech[tech].name, -1, -1);
+        game_popp(image_str(0x691b0c), image_text(0x6917d0), 0, image_text(0x6917c0), 0);
+        game_draw_map(1);
+        game_set_dirty();
+        game_graphic_win_redraw(game_world_win);
+    }
+}
+
+// The tutorial's notes, for the player.
+static void ta_notes(int f, int tech) {
+    if (tech == game_facilities[FAC_BIOLOGY_LAB_].preq_tech) game_interlude(1, NULL, 1, 0);
+    if (tech == TECH_CENTMED) game_interlude(2, NULL, 1, 0);
+    if (game_secret_projects[SP_VOICE_OF_PLANET] != -1 && f > 0 && has_tech(TECH_SELF_AWARE, f) &&
+        has_tech(TECH_MATTER_COMP, f)) {
+        game_interlude(0xf, NULL, 1, 0);
+        game_interlude(0x10, NULL, 0, 0);
+    }
+    if (tech == TECH_SOCIAL_PSYCH && (game_faction_defs[f].rule_flags & RULE_FLAG_ALIEN)) {
+        for (int i = 1; i < FACTION_COUNT; i++)
+            if (f != i && !(game_faction_defs[i].rule_flags & RULE_FLAG_ALIEN) &&
+                (game_factions[f].diplo_status[i] & TREATY_COMMLINK))
+                game_interlude(0x24, NULL, 1, 0);
+    }
+}
+
+// The Planetary Datalinks hand a tech that three of the factions have to
+// their holder; and a faction whose file has it share tech takes a tech that
+// enough others have, if they have been spied on (or the original's other
+// ways, which are as written here).
+static void ta_spread(int f, int tech) {
+    int links = game_secret_projects[SP_PLANETARY_DATALINKS_];
+    if (links >= 0) {
+        int owner = game_bases[links].faction;
+        if (owner > 0 && f > 0 && has_tech(tech, f) && !has_tech(tech, owner)) {
+            int known = 0;
+            for (int i = 1; i < FACTION_COUNT; i++) known += has_tech(tech, i);
+            if (known >= DATALINKS_FACTIONS) tech_achieved(owner, tech, -1, 0);
+        }
+    }
+    if (f <= 0 || !has_tech(tech, f)) return;
+    for (int i = 1; i < FACTION_COUNT; i++) {
+        const struct faction_def *D = &game_faction_defs[i];
+        if (D->rule_sharetech <= 0 || has_tech(tech, i)) continue;
+        int count = 0;
+        for (int j = 1; j < FACTION_COUNT; j++) {
+            if (!has_tech(tech, j)) continue;
+            uint32_t status = game_factions[i].diplo_status[j];
+            if (!*game_expansion || !(D->rule_flags & RULE_FLAG_SHARE_TECH) || (status & DIPLO_INFILTRATOR) ||
+                (status & TREATY_PACT) || has_project(SP_EMPATH_GUILD, i) ||
+                (i == *game_governor_faction && !(game_faction_defs[j].rule_flags & RULE_FLAG_ALIEN)))
+                count++;
+        }
+        if (count >= D->rule_sharetech) tech_achieved(i, tech, -2, 1);
+    }
+}
+
+// What a real tech does besides being known: the faction's ranking, the
+// reactors and designs it opens, the window and notes, the facilities and
+// maps it brings, the Datalinks and sharing.
+static void ta_tech(uint8_t *pop, int f, int tech, int from, int steal, int first) {
+    struct faction_data *F = &game_factions[f];
+    const struct faction_def *D = &game_faction_defs[f];
+    int cur = *game_current_faction;
+    // The tech ranking counts it twice, and what the faction owes for its
+    // last techs comes down by as much.
+    F->tech_ranking++;
+    if (F->unk_360) F->unk_360--;
+    F->tech_ranking++;
+    if (F->unk_360) F->unk_360--;
+    if (tech == TECH_TRANSCEND) F->transcendent_techs++;
+
+    int reactor = ta_reactors(f, tech);
+    if (reactor && f == cur && !*game_net_multiplayer) {
+        game_parse_say(0, (int)(intptr_t)game_reactors[reactor - 1].name, -1, -1);
+        game_x_pop(image_text(0x69170c), 0);
+    }
+
+    // Designs: in a network game they wait for the faction's next turn;
+    // else the faction's are made anew (for the AI, or a player who has
+    // chosen it), and the player is shown which stock design is new.
+    *game_first_new_proto = -1;
+    if (*game_net_multiplayer) {
+        F->flags |= FACTION_FLAG_NEW_TECH;
+    } else if (!game_is_human(f) || (*game_preferences & PREF_AUTO_DESIGN)) {
+        for (int j = 0; j < 64; j++) game_protos[f * 64 + j].flags &= (uint16_t)~0xc0;
+        consider_designs(f);
+        if (f == cur) {
+            for (int i = 0; i < 64; i++)
+                if ((game_protos[i].flags & PROTO_FLAG_ACTIVE) && tech == game_protos[i].preq_tech &&
+                    *game_first_new_proto < 0)
+                    *game_first_new_proto = i;
+        }
+    }
+    *(int32_t *)game_at(0x7591a4) = -1;
+    *(int32_t *)game_at(0x7591a8) = -1;
+
+    if (f == cur || (*game_state & GAME_STATE_OMNISCIENT)) ta_announce(pop, f, tech, from, steal);
+    ta_free_bonuses(f, tech);
+    if (game_tech[tech].flags & TECH_FLAG_SECRETS) game_mon_secrets_of_tech(f);
+
+    if (f == cur) {
+        if (tech == game_terraform[FORMER_FOREST_].preq_tech && !*game_net_multiplayer) {
+            game_parse_say(0, (int)(intptr_t)game_tech[tech].name, -1, -1);
+            game_x_pop2(image_str(0x691b14), image_text(0x69178c), 0);
+        }
+        if ((*game_preferences & PREF_AUTO_DESIGN) && *game_first_new_proto >= 0 && !*game_net_multiplayer)
+            ta_designs(f, tech);
+        if (F->diff_level > 1 && !*game_net_multiplayer) ta_social(f, tech);
+    }
+    if ((game_tech[tech].flags & TECH_FLAG_REVEALS_MAP) && !(F->flags & FACTION_FLAG_MAP_SEEN)) ta_reveal_map(f, tech);
+
+    tech_effects(f);
+    if (f == cur) ta_notes(f, tech);
+    ta_spread(f, tech);
+
+    // The first to learn a secret is told, and may take a free tech.
+    if (*game_turn && first && (game_tech[tech].flags & TECH_FLAG_SECRETS)) {
+        char number[16];
+        F->flags |= FACTION_FLAG_SECRET_FIRST;
+        game_parse_say(0, (int)(intptr_t)game_tech[tech].name, -1, -1);
+        game_parse_says(1, (char *)D->adjective, -1, -1);
+        game_battle_text[0] = 0;
+        strcat(game_battle_text, image_text(0x6916f0));
+        snprintf(number, sizeof(number), "%d", f != cur);
+        strcat(game_battle_text, number);
+        game_x_pop(game_battle_text, 0);
+        game_log_say5(image_text(0x6917d8), (char *)D->leader_name, f, tech, game_tech_achieved[tech]);
+    }
+}
+
+static void ta_body(uint8_t *pop, int f, int tech, int from, int steal) {
+    if (tech < 0) return;
+    struct faction_data *F = &game_factions[f];
+    game_log_say5(image_text(0x6916fc), game_faction_defs[f].leader_name, f, tech, from);
+    if (game_is_human(f)) game_ambience(0xc9);
+    if (tech >= TA_MAPS) {
+        ta_map(f, from);
+        return;
+    }
+    if (tech >= TA_COMMLINKS && tech < TA_PROTOS) {
+        treaty_on(f, tech - TA_COMMLINKS, TREATY_COMMLINK);
+        return;
+    }
+    if (tech >= TA_PROTOS) {
+        const struct unit_proto *P = &game_protos[tech - TA_PROTOS];
+        int made = propose_proto(f, P->chassis, P->weapon, P->armor, P->abilities, P->reactor, PLAN_PROTOTYPE_DONE_,
+                                 (char *)P->name);
+        if (made >= 0) ta_new_design(f, made);
+        return;
+    }
+    if (F->tech_research_id == tech) F->tech_research_id = -1;
+    uint8_t old = game_tech_achieved[tech];
+    F->tech_source[tech] = (uint8_t)(from > 0 ? from : 0);
+    game_tech_achieved[tech] = (uint8_t)(old | (1u << (f & 31)));
+    F->techs_achieved++;
+    // At the start of the game, and when the New Tech window is skipped,
+    // that is all.
+    if (!*game_turn || *game_skip_tech_screen) return;
+    ta_tech(pop, f, tech, from, steal, old == 0);
+}
+
+// The popup, which the assembly entry places.
+__attribute__((used)) void tech_achieved_in(uint8_t *pop, int f, int tech, int from, int steal);
+void tech_achieved_in(uint8_t *pop, int f, int tech, int from, int steal) {
+    game_popup_ctor(pop);
+    ta_body(pop, f, tech, from, steal);
+    game_popup_dtor(pop);
+}
+
+__asm__(".text\n"
+        ".globl tech_achieved\n"
+        "tech_achieved:\n"
+        "    pushl %ebp\n"
+        "    movl %esp, %ebp\n"
+        "    subl $0x5500, %esp\n"
+        "    pushl 20(%ebp)\n"
+        "    pushl 16(%ebp)\n"
+        "    pushl 12(%ebp)\n"
+        "    pushl 8(%ebp)\n"
+        "    leal -0x5400(%ebp), %eax\n"
+        "    pushl %eax\n"
+        "    call tech_achieved_in\n"
+        "    movl %ebp, %esp\n"
+        "    popl %ebp\n"
+        "    ret\n");
+
 // ---- Hooks and shadow checks ------------------------------------------------
 
 extern struct hook_module tech_module;
@@ -577,6 +1036,32 @@ static int check_facility_avail(int fac, int faction, int base, int queue) {
 SHADOW_ENTRY(TECH, int, facility_avail, (int fac, int faction, int base, int queue), (fac, faction, base, queue))
 SHADOW_WRITER(TECH, void, tech_secret, (int a, int b), (a, b), WRITES(game_battle_text, 32), "%d, %d", a, b)
 SHADOW_WRITER(TECH, int, tech_ai, (int a), (a), (WRITES(game_rand_state(), 4), WRITES(game_random_seed, 4)), "%d", a)
+
+// tech_achieved: a check of the whole game. The windows and messages it
+// makes are held or dropped (quiet.c), but a held question answers 0, which
+// only the AI could mean, and a network game sends messages: both run the
+// original as it is. The calls it makes to itself (the Datalinks, the
+// sharing of tech) go straight to the original or to ours within a check.
+SHADOW_WRITER_CHECK(void, tech_achieved, (int a, int b, int c, int d), (a, b, c, d), orig_tech_achieved(a, b, c, d),
+                    hooks_writes_game(&w_), "%d, %d, %d, %d", a, b, c, d)
+static int tech_achieved_checkable(void) { return !*game_net_multiplayer && !*game_human_factions; }
+static void shadow_tech_achieved(int faction, int tech, int from, int steal) {
+    if (hooks_nested) {
+        orig_tech_achieved(faction, tech, from, steal);
+        return;
+    }
+    if (shadow_bypass()) {
+        tech_achieved(faction, tech, from, steal);
+        return;
+    }
+    stats_tech_achieved.calls++;
+    shadow_tick(TECH);
+    if (!tech_achieved_checkable()) {
+        orig_tech_achieved(faction, tech, from, steal);
+        return;
+    }
+    check_tech_achieved(faction, tech, from, steal);
+}
 
 // The functions below write instead of returning a value. Each check runs
 // the original on a copy of what it writes, runs ours on another, compares,
@@ -978,6 +1463,164 @@ static void sweep_tech_ai(void) {
     *game_rules = rules;
 }
 
+// tech_achieved over a spread of cases on protected copies of the game: an
+// ordinary tech, the last one, a map, a comm link, a stock design, and a
+// number that is none of them; given by a faction or found, taken from
+// another or from the Datalinks or by sharing; with the faction the
+// player, a human (hotseat), or neither; the tech the first of its kind, a
+// secret, one that shows the map, that unlocks a reactor, a free facility
+// or ability, a social model, a design; the tutorial's techs. The windows
+// and messages are held and dropped, and every question answers 0. A
+// network game is never set up here: its branches are covered by reading.
+static uint32_t ta_mix(uint32_t a) {
+    a ^= a >> 16, a *= 0x7feb352du;
+    a ^= a >> 15, a *= 0x846ca68bu;
+    return a ^ (a >> 16);
+}
+static inline int ta_coin(uint32_t h, int bit, int n) { return (int)((h >> bit) % (uint32_t)n) == 0; }
+
+static int ta_base_of(int faction, uint32_t h) {
+    int n = *game_base_count;
+    for (int k = 0; k < n; k++) {
+        int b = (int)((h + (uint32_t)k) % (uint32_t)n);
+        if (game_bases[b].faction == faction) return b;
+    }
+    return -1;
+}
+
+static void ta_case(int turn, int k) {
+    uint32_t h = ta_mix((uint32_t)turn * 0x9e3779b1u + (uint32_t)k), g = ta_mix(h), s = ta_mix(g), u = ta_mix(s),
+             x = ta_mix(u);
+    int f = 1 + (int)(h % 7);
+    struct hook_writes w = {.protect_only = 1};
+    hooks_writes_game(&w);
+    hooks_writes_begin(&w);
+
+    // The tech.
+    int tech;
+    static const int special[] = {TECH_SOCIAL_PSYCH, TECH_SELF_AWARE, TECH_CENTMED, TECH_MATTER_COMP, TECH_TRANSCEND, 0, 1};
+    switch (g % 16) {
+    case 0: tech = TA_MAPS + (int)((g >> 4) % 3); break;
+    case 1: tech = TA_COMMLINKS + (int)((g >> 4) % 8); break;
+    case 2: tech = TA_PROTOS + (int)((g >> 4) % 64); break;
+    case 3: tech = (g >> 4) % 4 ? -1 - (int)((g >> 6) % 3) : TA_PROTOS + (int)((g >> 8) % PROTO_COUNT); break;
+    case 4: case 5: tech = special[(g >> 4) % (sizeof special / sizeof special[0])]; break;
+    default: tech = (int)((g >> 4) % TECH_COUNT); break;
+    }
+    // Where it comes from: nobody, the Datalinks, sharing, or a faction.
+    int from;
+    switch ((g >> 10) % 8) {
+    case 0: case 1: from = 0; break;
+    case 2: from = -1; break;
+    case 3: from = -2; break;
+    default: from = 1 + (int)((g >> 13) % 7); break;
+    }
+    int steal = ta_coin(g, 17, 4);
+    if (tech >= TA_MAPS && from <= 0) from = 1 + (int)((g >> 13) % 7);  // a map comes from a faction
+
+    // Who is the player, and who is human.
+    int cur = ta_coin(u, 0, 3) ? f : 1 + (int)((u >> 2) % 7);
+    *game_current_faction = cur;
+    uint8_t humans = 0;
+    if (ta_coin(u, 5, 4)) humans |= (uint8_t)(1u << f);
+    if (ta_coin(u, 7, 4)) humans |= (uint8_t)(1u << cur);
+    if (ta_coin(u, 9, 5)) humans |= (uint8_t)(1u << (1 + (u >> 11) % 7));
+    *game_human_factions = humans;
+    if (ta_coin(u, 14, 8)) *game_turn = 0;
+    if (ta_coin(u, 17, 10)) *game_skip_tech_screen = 1;
+    if (ta_coin(u, 20, 4)) *game_state ^= GAME_STATE_OMNISCIENT;
+    if (ta_coin(u, 22, 3)) *game_preferences ^= PREF_AUTO_DESIGN;
+    if (ta_coin(u, 25, 3)) *game_expansion = !*game_expansion;
+    if (ta_coin(u, 30, 2)) *game_difficulty = 2 + (int32_t)((x >> 20) % 5);  // at 1 or lower every design is built
+    if (ta_coin(u, 31, 3)) {
+        game_tech_achieved[TECH_SELF_AWARE] |= (uint8_t)(1u << f);
+        game_tech_achieved[TECH_MATTER_COMP] |= (uint8_t)(1u << f);
+    }
+    if (ta_coin(u, 28, 3)) *game_governor_faction = 1 + (int)((u >> 29) % 7);
+    if (ta_coin(h, 20, 4)) game_factions[f].diff_level = (int32_t)((h >> 22) % 4);
+    if (ta_coin(h, 24, 3)) game_factions[f].tech_research_id = tech;
+    if (ta_coin(h, 26, 3)) game_factions[f].unk_360 = (int32_t)((h >> 28) % 3);
+
+    if (tech >= 0 && tech < TECH_COUNT) {
+        struct rules_tech *T = &game_tech[tech];
+        // Who has the tech already: none (so it is a first), or some.
+        if (ta_coin(s, 0, 3)) game_tech_achieved[tech] = 0;
+        else if (ta_coin(s, 2, 2)) game_tech_achieved[tech] = (uint8_t)(s >> 4) & 0xfe;
+        if (ta_coin(s, 12, 3)) T->flags ^= TECH_FLAG_SECRETS;
+        if (ta_coin(s, 14, 3)) T->flags ^= TECH_FLAG_REVEALS_MAP;
+        if (ta_coin(s, 16, 4)) game_factions[f].flags ^= FACTION_FLAG_MAP_SEEN;
+        // A reactor, a facility, an ability, a social model, the forest
+        // and the Biology Lab it opens.
+        if (ta_coin(x, 0, 4)) game_reactors[(x >> 2) % 3 + 1].preq_tech = (int16_t)tech;
+        if (ta_coin(x, 4, 5)) {
+            struct faction_def *D = &game_faction_defs[f];
+            D->bonus_count = 1 + (int32_t)((x >> 6) % 2);
+            int abl = ta_coin(x, 8, 2);
+            for (int i = 0; i < D->bonus_count; i++) {
+                D->bonus_id[i] = abl ? BONUS_FREE_ABILITY : BONUS_FREE_FACILITY;
+                D->bonus_val1[i] = abl ? (int32_t)((x >> 9) % 16) : (int32_t)((x >> 9) % 66);
+                if (abl) game_abilities[D->bonus_val1[i]].preq_tech = (int16_t)tech;
+                else game_facilities[D->bonus_val1[i]].preq_tech = tech;
+            }
+        }
+        if (ta_coin(x, 16, 5)) game_social_preqs[(x >> 18) % 4 * SOCIAL_PREQ_STRIDE + (x >> 20) % 4] = tech;
+        if (ta_coin(x, 22, 6)) game_terraform[FORMER_FOREST_].preq_tech = tech;
+        if (ta_coin(x, 25, 6)) game_facilities[FAC_BIOLOGY_LAB_].preq_tech = tech;
+        // The Datalinks and the Voice of Planet held, and others that
+        // know the tech, sharing, spying and the Empath Guild.
+        if (ta_coin(s, 18, 3)) game_secret_projects[SP_PLANETARY_DATALINKS_] = ta_base_of(1 + (int)((s >> 20) % 7), s);
+        if (ta_coin(s, 23, 4)) game_secret_projects[SP_VOICE_OF_PLANET] = ta_base_of(f, s);
+        if (ta_coin(s, 25, 4)) game_secret_projects[SP_EMPATH_GUILD] = ta_base_of(1 + (int)((s >> 27) % 7), s);
+        if (ta_coin(h, 1, 3)) game_tech_achieved[tech] |= (uint8_t)(h >> 3);
+        for (int i = 1; i < FACTION_COUNT; i++) {
+            uint32_t c = ta_mix(x + 0x100 + (uint32_t)i);
+            struct faction_def *D = &game_faction_defs[i];
+            if (ta_coin(c, 0, 5)) D->rule_sharetech = 1 + (int32_t)((c >> 2) % 3);
+            if (ta_coin(c, 5, 3)) D->rule_flags ^= RULE_FLAG_SHARE_TECH;
+            if (ta_coin(c, 7, 8)) D->rule_flags ^= RULE_FLAG_ALIEN;
+            for (int j = 1; j < FACTION_COUNT; j++) {
+                uint32_t d = ta_mix(c + (uint32_t)j);
+                if (ta_coin(d, 0, 5)) game_factions[i].diplo_status[j] ^= DIPLO_INFILTRATOR;
+                if (ta_coin(d, 3, 5)) game_factions[i].diplo_status[j] ^= TREATY_PACT;
+                if (ta_coin(d, 6, 4)) game_factions[i].diplo_status[j] ^= TREATY_COMMLINK;
+            }
+        }
+    }
+    // A stock design offered (made over from one of the faction's, so it
+    // is a design the faction lacks), the stock designs a tech makes
+    // possible, and designs flagged as new.
+    if (tech >= TA_PROTOS && tech < TA_PROTOS + PROTO_COUNT) {
+        struct unit_proto *P = &game_protos[tech - TA_PROTOS], *B = &game_protos[f * 64 + (h >> 3) % 8];
+        if (ta_coin(x, 1, 4)) {
+            *P = *B;
+            P->armor = (uint8_t)((B->armor + 1 + (x >> 4) % 3) % ARMOR_COUNT);
+        }
+        if (ta_coin(x, 6, 3)) P->reactor = (uint8_t)(1 + (x >> 8) % 4);
+        if (ta_coin(x, 10, 3)) P->weapon = (uint8_t)((x >> 12) % 6);
+    }
+    if (ta_coin(x, 28, 4) && tech >= 0) game_protos[(x >> 30) * 3 + 1].preq_tech = (int16_t)tech;
+    if (ta_coin(g, 28, 4)) *game_first_new_proto = (int32_t)((g >> 30) % 4);
+    if (ta_coin(h, 5, 3)) game_protos[f * 64 + (h >> 7) % 8].flags ^= PROTO_FLAG_NEW_DESIGN;
+    if (ta_coin(h, 10, 3)) game_protos[f * 64 + (h >> 12) % 8].flags ^= PROTO_FLAG_UPGRADE;
+    if (ta_coin(h, 14, 3)) game_protos[f * 64 + (h >> 16) % 8].flags ^= PROTO_FLAG_PROTOTYPED_;
+    if (ta_coin(h, 18, 3)) game_protos[f * 64 + (h >> 20) % 8].reactor = 1;
+    // Another faction's map to take, and bases seen by it.
+    if (tech >= TA_MAPS && from > 0) {
+        int n = *game_map_area;
+        struct map_tile *tile = *game_map;
+        for (int i = 0; i < n; i += 1 + (int)(g % 5)) tile[i].visibility |= (uint8_t)(1u << from);
+    }
+    *game_rand_state() = ta_mix(x + 3);
+    check_tech_achieved(f, tech, from, steal);
+    hooks_writes_abandon(&w);
+}
+
+static void ta_sweep_cases(void) {
+    if (!*game_map || *game_base_count <= 0 || *game_net_multiplayer) return;
+    int turn = *game_turn;
+    for (int k = 0; k < 24; k++) ta_case(turn, k);
+}
+
 static void tech_sweep(void) {
     sweep_has_tech();
     sweep_tech_recurse();
@@ -1005,6 +1648,7 @@ static void tech_sweep(void) {
     sweep_terrain_avail();
     sweep_tech_secret();
     sweep_tech_ai();
+    ta_sweep_cases();
     memcpy(game_battle_text, text, sizeof(text));
     hooks_sweeping = sweeping;
 }
@@ -1031,5 +1675,6 @@ static const struct hook tech_hooks[] = {
     HOOK(0x5bab40, terrain_avail, 0x55, 0x8b, 0xec, 0x8b, 0x45, 0x08),            // ...; mov eax, [ebp+8]
     HOOK(0x5badc0, tech_secret, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x50),              // ...; sub esp, 0x50
     HOOK(0x5bdc10, tech_ai, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x10),                  // ...; sub esp, 0x10
+    HOOK(0x5bb000, tech_achieved, 0x55, 0x8b, 0xec, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),  // ...; mov eax, fs:[0]
 };
 struct hook_module tech_module = {"technology", tech_hooks, HOOK_COUNT(tech_hooks), tech_sweep, NULL, -1};

@@ -144,7 +144,7 @@ struct faction_data {
     int32_t unk_360;
     int32_t odp_deployed;  // orbital defense pods used this turn
     int32_t transcendent_techs;  // techs past the end of the tree
-    GAME_PAD(0x36c, 0x3cc);
+    uint8_t tech_source[0x60];  // per tech: the faction it came from by trade or theft, or 0
     int32_t tech_research_id;  // the tech being researched, or negative
     int32_t tech_cost;  // research cost, or negative until computed
     int32_t earned_techs_saved;
@@ -216,7 +216,9 @@ struct faction_data {
     uint8_t region_base_plan[REGION_COUNT];  // PLAN_* for the AI
     struct goal goals[GOAL_COUNT];  // the AI's, for this turn
     struct goal sites[SITE_COUNT];  // places the AI means to settle (type 3) or otherwise act on
-    GAME_PAD(0x203c, 0x205c);
+    GAME_PAD(0x203c, 0x2050);
+    int32_t techs_achieved;  // techs it has gained (tech_achieved counts them)
+    GAME_PAD(0x2054, 0x205c);
     // News of the secret projects other factions have begun: bitmask()'s
     // byte index and bit, so 8 bits a word.
     uint32_t project_intel[8];
@@ -240,6 +242,8 @@ GAME_AT(struct faction_data, diplo_gifts, 0x12c);
 GAME_AT(struct faction_data, maps_traded, 0x1cc);
 GAME_AT(struct faction_data, diplo_combat_count, 0x1ac);
 GAME_AT(struct faction_data, odp_deployed, 0x364);
+GAME_AT(struct faction_data, tech_source, 0x36c);
+GAME_AT(struct faction_data, techs_achieved, 0x2050);
 GAME_AT(struct faction_data, target_x, 0x3f0);
 GAME_AT(struct faction_data, mil_strength, 0x1060);
 GAME_AT(struct faction_data, flags_ext, 0x2090);
@@ -1206,6 +1210,20 @@ struct design_suggestion {
 _Static_assert(sizeof(struct design_suggestion) == 0x24, "design_suggestion size");
 extern struct design_suggestion *game_design_suggestion;
 extern int32_t *game_first_new_proto;  // a design new with a tech, shown with it; -1 for none
+// tech_achieved(): the other half of a prototype upgrade (every design of a
+// faction brought up to date), the design workshop for a design new with
+// a tech and its shutdown, the New Tech window, the net daemon's call to
+// synchronise bases, the Monuments' record of a secret learned, and the
+// popup's help text for a tech; the sprites of the techs' icons, 0x2c bytes each.
+extern void (*game_upgrade_any_prototypes)(int faction);
+extern void (*game_design_new_veh)(int faction, int proto);
+extern void *game_design_win, *game_new_tech_win;
+extern void(__attribute__((thiscall)) * game_design_win_shutdown)(void *win);
+extern void(__attribute__((thiscall)) * game_new_tech_win_exec)(void *win, int tech, int from);
+extern void(__attribute__((thiscall)) * game_net_daemon_synch)(void *daemon, int a, int b, int c, int d, int e, int f, int g);
+extern void (*game_mon_secrets_of_tech)(int faction);
+extern void (*game_help_tech_info_2)(void *pop, int tech, int faction);
+extern uint8_t *game_tech_sprites;
 extern void (*game_synch_obs)(int proto);  // a design's obsolete bits, sent in a network game
 extern void (*game_say_stats_2)(char *text, int proto);  // a design's strengths, added to text
 // Network games: a base kept from the other players while it changes.

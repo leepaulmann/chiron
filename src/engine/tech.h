@@ -24,3 +24,4 @@ int facility_avail(int fac, int faction, int base, int queue);
 int terrain_avail(int terraform, int sea, int faction);
 void tech_secret(int tech, int faction);
 int tech_ai(int faction);
+void tech_achieved(int faction, int tech, int from, int steal);

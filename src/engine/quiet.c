@@ -501,10 +501,11 @@ HELD(void, text_close, (void)0, (void), (), (void)0, orig_text_close())
 // A tech given away (by a secret project), with its announcement and the
 // window that shows it, which allocates as the monuments do.
 HELD(void, tech_advance, (void)0, (int faction), (faction), (c_.arg[0] = faction), orig_tech_advance(a_[0]))
-// A tech gained some other way, as by the AI's trades in diplomacy.
-HELD(void, tech_achieved, (void)0, (int faction, int tech, int from, int steal), (faction, tech, from, steal),
-     (c_.arg[0] = faction, c_.arg[1] = tech, c_.arg[2] = from, c_.arg[3] = steal),
-     orig_tech_achieved(a_[0], a_[1], a_[2], a_[3]))
+// What tech_achieved() shows: the Monuments' record of a secret learned,
+// the New Tech window the player's own tech comes with (it waits for the
+// player), and the help text it puts under the popup (a popup that is
+// dropped, with its address kept by the help text).
+HELD_MON(mon_secrets_of_tech)
 // Research paid in, which may discover a tech in the same way.
 HELD(void, tech_research, (void)0, (int faction, int labs), (faction, labs), (c_.arg[0] = faction, c_.arg[1] = labs),
      orig_tech_research(a_[0], a_[1]))
@@ -535,6 +536,9 @@ static char *shadow_text_get(void) {
     return *game_text_line;
 }
 
+HELD_THIS(new_tech_win_exec, (void *self, int tech, int from), (self, tech, from), (c_.arg[0] = tech, c_.arg[1] = from),
+          orig_new_tech_win_exec(SELF, a_[0], a_[1]))
+QUIET(help_tech_info_2, "(quiet help_tech_info_2)", (void *pop, int tech, int faction), (pop, tech, faction))
 // The battle (battle_fight_2): the status and battle windows drawn, the
 // map squares around the fight redrawn, and input put aside. The battle
 // window made the interface's mode, and its timer restarted after a
@@ -675,8 +679,10 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x515400, console_center, 0xa1, 0xb8, 0x92, 0x93, 0x00),                       // mov eax, [0x9392b8]
     QUIET_HOOK(0x46b1f0, map_win_set_center, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53, 0x56, 0x8b, 0xf1),  // push ecx, ebx, esi; mov esi, ecx
     QUIET_HOOK(0x5be940, tech_research, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x0c),             // mov eax, [ebp+12]
-    QUIET_HOOK(0x5bb000, tech_achieved, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),  // mov eax, fs:[0]
     QUIET_HOOK(0x5be530, tech_advance, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x8b, 0x75, 0x08),  // push ebx; push esi; mov esi, [ebp+8]
+    QUIET_HOOK(0x476da0, mon_secrets_of_tech, MON_PROLOGUE),
+    QUIET_HOOK(0x483f90, new_tech_win_exec, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x74, 0x8b, 0x45, 0x0c),  // sub esp, 0x74; mov eax, [ebp+12]
+    QUIET_HOOK(0x44c7f0, help_tech_info_2, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x4d, 0x10, 0x8b, 0x55, 0x0c),  // mov ecx, [ebp+16]; mov edx, [ebp+12]
     QUIET_HOOK(0x44c9e0, help_project, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                // mov eax, [ebp+8]
     QUIET_HOOK(0x405140, pop2, SEH_PROLOGUE),
     QUIET_HOOK(0x504aa0, boom, PUSH_EBP_MOV_EBP_ESP, 0x81, 0xec, 0x44, 0x01, 0x00, 0x00),   // sub esp, 0x144
