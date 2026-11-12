@@ -240,7 +240,7 @@ module at a time. So far:
   plague, freeing a captive leader, framing a rival, the team caught or
   coming home, and the victim's answer);
 - what units find on the map: supply and unity pods with all their
-  outcomes, monoliths, and artifacts studied at a Network Node;
+  outcomes (and the Unity's wreck found early on), monoliths, and artifacts studied at a Network Node;
 - the path finder: the route search behind every unit's moves (with its
   costs for terrain, roads, fungus, zones of control and borders), a
   unit's next step towards its waypoint, zones of control, the AI's choice
@@ -259,8 +259,11 @@ module at a time. So far:
   hatred, fear or a lead to guard, free techs, the trade and its menu);
   the AI's greeting when the player takes its call; the talks themselves
   (first contact, the AI's demands, pleas, bribes and offers, loans,
-  truces asked or given, and how its patience runs out); and two AIs making
-  peace step by step (truce, treaty, pact), with the news of it;
+  truces asked or given, and how its patience runs out); pacts and
+  treaties sealed, withdrawals demanded and carried out, and the plans the
+  AI suggests; the wars and tech trades the AI arranges with others; and
+  two AIs making peace step by step (truce, treaty, pact), with the news
+  of it;
 - events: the turn's random events (perihelion and the base and world
   events), a faction put out of the game, and the faction modifiers and
   social choices set when it starts;
