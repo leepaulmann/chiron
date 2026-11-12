@@ -1788,6 +1788,10 @@ GAME_AT(struct game_buffer, pitch, 0x4a8);
 // Scratch the original's rectangle fill leaves behind: the pitch less the
 // width of the last rectangle.
 extern int32_t *game_fill_gap;
+// Scratch the original's buffer copies leave behind: the bytes left over after whole
+// 4-byte units in a row; and for the masked copy the row length in units and the
+// gaps to the next row of the buffer read and the buffer written.
+extern int32_t *game_copy_rem, *game_mask_units, *game_mask_gap_a, *game_mask_gap_b;
 
 // Point the variables above at a loaded terranx.exe.
 void game_bind(struct pe_image *exe);
