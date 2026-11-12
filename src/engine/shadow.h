@@ -164,6 +164,52 @@ static inline int shadow_bypass(void) { return hooks_sweeping || hooks_checking(
             "    addl $0x104, %esp\n"                                            \
             "    ret\n");
 
+// The same for methods, which the game calls with `this` in ecx: ours, orig_
+// and shadow_ are thiscall, and the first parameter is the object. The
+// callee pops its stack arguments, as the original does.
+#define THISCALL __attribute__((thiscall))
+#define SHADOW_DECLARE_T(ret, name, params)   \
+    static ret(THISCALL *orig_##name) params; \
+    static struct hook_stats stats_##name = {#name};
+
+#define SHADOW_ENTRY_T(module, ret, name, params, args) \
+    static ret THISCALL shadow_##name params {          \
+        if (hooks_nested) return orig_##name args;      \
+        if (shadow_bypass()) return name args;          \
+        stats_##name.calls++;                           \
+        shadow_tick(module);                            \
+        return check_##name args;                       \
+    }
+
+// A method that returns a value and has no side effects.
+#define SHADOW_THIS_FN(module, ret, name, params, args, fmt, ...) \
+    SHADOW_DECLARE_T(ret, name, params)                           \
+    SHADOW_CHECK(ret, name, params, args, fmt, __VA_ARGS__)       \
+    SHADOW_ENTRY_T(module, ret, name, params, args)
+
+// A method that writes: the check, for a function whose orig_ and stats_ are
+// declared (SHADOW_DECLARE_T) before ours, and whose shadow_ is its own.
+#define SHADOW_WRITER_BODY(ret, name, params, args, writes, fmt, ...)                 \
+    static ret check_##name params {                                                  \
+        struct hook_writes w_ = {0};                                                  \
+        writes;                                                                       \
+        hooks_writes_begin(&w_);                                                      \
+        hooks_nested++;                                                               \
+        SHADOW_RESULT_##ret(want) orig_##name args;                                   \
+        hooks_nested--;                                                               \
+        hooks_writes_middle(&w_);                                                     \
+        SHADOW_RESULT_##ret(got) name args;                                           \
+        const char *diff_ = hooks_writes_end(&w_, SHADOW_INT_##ret(got), SHADOW_INT_##ret(want)); \
+        if (diff_) hooks_mismatch(&stats_##name, "(" fmt ") %s", __VA_ARGS__, diff_);    \
+        hooks_ui_release();                                                           \
+        SHADOW_RETURN_##ret(want);                                                    \
+    }
+
+#define SHADOW_WRITER_T(module, ret, name, params, args, writes, fmt, ...) \
+    SHADOW_DECLARE_T(ret, name, params)                                    \
+    SHADOW_WRITER_BODY(ret, name, params, args, writes, fmt, __VA_ARGS__)  \
+    SHADOW_ENTRY_T(module, ret, name, params, args)
+
 // A hook table entry: the original's address, our function, and the first
 // bytes of the original (whole instructions, no relative jumps).
 #define HOOK(addr, name, ...)                                                                   \

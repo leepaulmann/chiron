@@ -73,6 +73,7 @@ add_executable(chiron
   src/engine/spot.c
   src/engine/council.c
   src/engine/path.c
+  src/engine/palette.c src/engine/buffer.c
   src/engine/move.c
   src/engine/events.c
   src/engine/combat.c

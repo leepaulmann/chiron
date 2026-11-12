@@ -1726,6 +1726,69 @@ extern void (*game_check_tamper)(void);
 // A string list's add: the text at list->src_text, under id.
 extern void(__attribute__((thiscall)) * game_string_list_add)(void *list, int id);
 
+// ---- Drawing: palettes and buffers ----------------------------------------------
+
+// The game's Palette class: 256 entries of red, green, blue and a flag byte
+// (the Windows PALETTEENTRY order), a number that changes whenever the
+// colours do, and five colour cycles.
+struct palette_cycle {
+    int32_t id;       // -1 when the slot is free
+    void *timer;      // the game's Time object, which calls Palette_timer_callback
+    uint8_t start, count;
+    uint8_t pad[2];
+    void *saved;      // the cycled entries as they were
+};
+struct palette {
+    uint8_t rgb[256][4];
+    uint32_t serial;
+    struct palette_cycle cycle[5];
+};
+_Static_assert(sizeof(struct palette) == 0x454, "layout of the game's Palette");
+GAME_AT(struct palette, serial, 0x400);
+GAME_AT(struct palette, cycle, 0x404);
+GAME_AT(struct palette_cycle, start, 8);
+GAME_AT(struct palette_cycle, saved, 12);
+
+// Non-zero once the game has a GDI palette (the functions that need one
+// return 7 until then).
+extern uint32_t *game_palette_handle;
+
+// The game's Buffer class (OpenSMACX calls it so): a drawing surface that is
+// either a DIB (bits, drawn on directly) or a DirectDraw surface (dd, locked
+// for each drawing call). Only the fields the reimplemented functions read.
+struct game_buffer {
+    void **vtable;
+    uint8_t pad_4[0x20 - 4];
+    int32_t clip[4];   // left, top, right, bottom: what drawing is clipped to
+    int32_t full[4];   // the whole surface
+    uint8_t pad_40[0x50 - 0x40];
+    uint8_t *base;     // the pixels while locked, else NULL
+    uint8_t *bits;     // a DIB's pixels
+    void *dd;          // a DirectDraw surface, or NULL
+    uint8_t pad_5c[0x6c - 0x5c];
+    int32_t locks;     // how many drawing calls are in progress
+    uint8_t pad_70[0x80 - 0x70];
+    int32_t width;
+    int32_t neg_height;  // minus the number of rows
+    uint8_t pad_88[0x4a8 - 0x88];
+    int32_t pitch;       // bytes from one row to the next
+    uint8_t pad_4ac[0x588 - 0x4ac];
+};
+_Static_assert(sizeof(struct game_buffer) == 0x588, "layout of the game's Buffer");
+GAME_AT(struct game_buffer, clip, 0x20);
+GAME_AT(struct game_buffer, full, 0x30);
+GAME_AT(struct game_buffer, base, 0x50);
+GAME_AT(struct game_buffer, bits, 0x54);
+GAME_AT(struct game_buffer, dd, 0x58);
+GAME_AT(struct game_buffer, locks, 0x6c);
+GAME_AT(struct game_buffer, width, 0x80);
+GAME_AT(struct game_buffer, neg_height, 0x84);
+GAME_AT(struct game_buffer, pitch, 0x4a8);
+
+// Scratch the original's rectangle fill leaves behind: the pitch less the
+// width of the last rectangle.
+extern int32_t *game_fill_gap;
+
 // Point the variables above at a loaded terranx.exe.
 void game_bind(struct pe_image *exe);
 

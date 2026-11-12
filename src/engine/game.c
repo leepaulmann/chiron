@@ -91,6 +91,8 @@ void(__attribute__((thiscall)) * game_map_win_close)(void *win);
 void(__attribute__((thiscall)) * game_path_init)(void *path);
 void (*game_check_tamper)(void);
 void(__attribute__((thiscall)) * game_string_list_add)(void *list, int id);
+uint32_t *game_palette_handle;
+int32_t *game_fill_gap;
 int32_t *game_base_workers, *game_base_reserved, *game_base_food_ok, *game_current_turn;
 int32_t *game_base_square_flags;
 void (*game_add_goal)(int faction, int type, int priority, int x, int y, int base);
@@ -1298,4 +1300,6 @@ void game_bind(struct pe_image *exe) {
     game_path_init = (void *)code_at(exe, 0x59a220);
     game_check_tamper = (void *)code_at(exe, 0x51e110);
     game_string_list_add = (void *)code_at(exe, 0x401100);
+    game_palette_handle = (uint32_t *)code_at(exe, 0x9b8178);
+    game_fill_gap = (int32_t *)code_at(exe, 0x9b3a10);
 }
