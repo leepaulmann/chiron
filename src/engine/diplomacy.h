@@ -43,6 +43,8 @@ void communicate(int faction, int other, int unk);
 // demands that the AI withdraw (2: it declared war, 1: it refused, else 0);
 // `second`'s units leave `first`'s territory (returns how many).
 void comm_check(int faction, int other);
+// The base `faction` could ask `other` to attack with it, or -1.
+int suggest_plan(int faction, int other);
 void pact_of_brotherhood(int faction, int other);
 void make_treaty(int faction, int other);
 int demand_withdrawal(int faction, int other);

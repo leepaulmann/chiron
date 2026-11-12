@@ -626,6 +626,47 @@ int new_landmark(int x, int y, const char *name) {
     return n;
 }
 
+
+// Rainfall raised a step (moist after dry, rainy after moist), but no higher
+// than rainy (2): climate_set() with one more than the square's, at most 2.
+// Nothing in the game calls it (no reference to it is found), so this is
+// the original's own and unused, kept in step with it.
+void rain_up(int x, int y) {
+    int rain = ((tile(x, y)->climate >> 3) & 3) + 1;
+    climate_set(x, y, rain > 2 ? 2 : rain);
+}
+
+// The marks a landmark left on its square are taken off when the square's
+// altitude changes (changed terrain): its flag that it is lit (0x80) is
+// cleared, and what its code names (the five tile codes the landmark's
+// sequence number picks, a row of 5 in the game's table) are blanked in
+// the tables the volcano (0x1, craters), 0x2, mesa-ish and canyon-ish ones
+// (0x100, 0x200, 0x800) keep; the sequence is stored inverted, which marks
+// the landmark deleted. The map windows then redraw the square.
+void delete_landmark(int x, int y) {
+    struct map_tile *t = tile(x, y);
+    uint32_t old = t->bits2;
+    if (!old) return;
+    t->bits2 = old & ~0x80u;
+    int lm = (int32_t)t->bits2 >> 24;
+    if (lm < 0) return;
+    const uint8_t *row = (const uint8_t *)game_at(0x685684) + lm * 5;
+    static const struct { uint32_t bit; uint32_t table; } tables[] = {
+        {0x1, 0x7f65d0}, {0x2, 0x7d3b74}, {0x200, 0x7f655c}, {0x100, 0x7d3a78}, {0x800, 0x7d3a78},
+    };
+    for (unsigned i = 0; i < sizeof tables / sizeof tables[0]; i++)
+        if (old & tables[i].bit)
+            for (int k = 0; k < 5; k++) *(uint8_t *)game_at(tables[i].table + row[k]) = 0;
+    t->bits2 = (t->bits2 & 0xffffff) | ((uint32_t)(-1 - lm) << 24);
+    *(uint32_t *)game_at(0x90d91c) |= 4;
+    for (uint32_t at = 0x7d3c3c; at < 0x7d3c5c; at += 4) {
+        void *win = *(void **)game_at(at);
+        if (*(int32_t *)((uint8_t *)win + 0x1dd74) == 0) continue;
+        *(int32_t *)((uint8_t *)win + 8) = 0x98967f;
+        game_map_win_clear_alt(win, x, y, 1);
+    }
+}
+
 // Removes the first landmark on or next to the square.
 void kill_landmark(int x, int y) {
     int l = find_landmark(x, y, 1);
@@ -912,6 +953,9 @@ SHADOW_WRITER(MAP, void, quick_zoc, (int a, int b, int c, int d, int e, int *f, 
     SHADOW_WRITER(MAP, void, name, (int a, int b, t3 c, int d), (a, b, c, d), WRITES_SQUARE(a, b), "%d, %d, 0x%x, %d", a, b, (unsigned)c, d)
 SET3(void, temp_set, int, WRITES_SQUARE(a, b))
 SET3(void, climate_set, int, WRITES_SQUARE_DRAW(a, b))
+SHADOW_WRITER(MAP, void, rain_up, (int a, int b), (a, b), WRITES_SQUARE_DRAW(a, b), "%d, %d", a, b)
+// The tables of the landmarks' codes and the windows' flags are the game's.
+SHADOW_WRITER(MAP, void, delete_landmark, (int a, int b), (a, b), hooks_writes_game(&w_); WRITES_SQUARE_DRAW(a, b), "%d, %d", a, b)
 SET3(void, alt_put_detail, int, WRITES_SQUARE(a, b))
 SET3(void, owner_set, int, WRITES_SQUARE(a, b))
 SET3(void, site_set, int, WRITES_SQUARE(a, b))
@@ -1085,6 +1129,14 @@ static void sweep_setters(void) {
             int v = x * 7 + y * 3 + slice, f = v & 7;
             check_temp_set(x, y, v);
             check_climate_set(x, y, v >> 1);
+            check_rain_up(x, y);
+            if ((v + slice) % 5 == 0) {
+                // A landmark's squares, as the terraforming meets them.
+                uint32_t saved = tile(x, y)->bits2;
+                tile(x, y)->bits2 = (saved & 0xffffff) | (uint32_t)((v & 15) << 24) | (uint32_t)(v & 0xb83 ? v & 0xb83 : 0x80);
+                check_delete_landmark(x, y);
+                tile(x, y)->bits2 = saved;
+            }
             check_alt_put_detail(x, y, v * 11);
             check_owner_set(x, y, v);
             check_site_set(x, y, v >> 2);
@@ -1193,6 +1245,8 @@ static const struct hook map_hooks[] = {
     HOOK(0x593830, quick_zoc, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10),
     HOOK(0x591ad0, temp_set, PUSH_EBP_MOV_EBP_ESP, LOAD_HALF_WIDTH),
     HOOK(0x591a80, climate_set, PUSH_EBP_MOV_EBP_ESP, LOAD_HALF_WIDTH),
+    HOOK(0x5c4410, rain_up, PUSH_EBP_MOV_EBP_ESP, LOAD_HALF_WIDTH),
+    HOOK(0x5927d0, delete_landmark, PUSH_EBP_MOV_EBP_ESP, 0x51, 0xa1, 0xf0, 0xfa, 0x68, 0x00),  // push ecx; mov eax, [half_width]
     HOOK(0x591260, alt_put_detail, PUSH_EBP_MOV_EBP_ESP, LOAD_HALF_WIDTH),
     HOOK(0x591b10, owner_set, PUSH_EBP_MOV_EBP_ESP, LOAD_HALF_WIDTH),
     HOOK(0x591b50, site_set, PUSH_EBP_MOV_EBP_ESP, LOAD_HALF_WIDTH),

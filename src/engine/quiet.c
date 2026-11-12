@@ -49,6 +49,16 @@ static void __attribute__((thiscall)) shadow_map_win_clear_terrain(void *win) {
     orig_map_win_clear_terrain(win);
 }
 
+static void(__attribute__((thiscall)) * orig_map_win_clear_alt)(void *win, int x, int y, int unk);
+static struct hook_stats stats_map_win_clear_alt = {"(quiet MapWin_clear_alt)"};
+static void __attribute__((thiscall)) shadow_map_win_clear_alt(void *win, int x, int y, int unk) {
+    if (hooks_protecting()) {
+        stats_map_win_clear_alt.calls++;
+        return;
+    }
+    orig_map_win_clear_alt(win, x, y, unk);
+}
+
 QUIET(draw_tiles, "(quiet draw_tiles)", (int x, int y, int unk), (x, y, unk))
 static void(__attribute__((thiscall)) * orig_status_win_redraw)(void *win);
 static struct hook_stats stats_status_win_redraw = {"(quiet StatusWin_redraw)"};
@@ -599,6 +609,7 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x46aef0, draw_radius, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x8b, 0x5d, 0x10),  // push ebx; mov ebx, [ebp+16]
     QUIET_HOOK(0x46af40, draw_tile, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x8b, 0x5d, 0x0c),
     QUIET_HOOK(0x46b190, draw_map, PUSH_EBP_MOV_EBP_ESP, 0x56, 0x57),                   // push esi; push edi
+    QUIET_HOOK(0x46fb90, map_win_clear_alt, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x41, 0x04, 0x57),  // mov eax, [ecx+4]; push edi
     QUIET_HOOK(0x46fd90, map_win_clear_terrain, 0x8b, 0x41, 0x04, 0x53, 0x56),          // mov eax, [ecx+4]; push ebx; push esi
     QUIET_HOOK(0x48c650, popb, SEH_PROLOGUE),
     QUIET_HOOK(0x48c0a0, popp, SEH_PROLOGUE),

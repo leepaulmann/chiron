@@ -5149,6 +5149,44 @@ void comm_check(int A, int B) {
     game_communicate(A, B, 0);
 }
 
+// The base `A` could ask `B` to attack with it, or -1: one of a faction at
+// war with them both that A has seen, that A's own target if it has (the
+// first such is taken at once), otherwise the one with the lowest score: the
+// distance from A's target square (twice the rings out, 0x200 more across
+// regions), A's nearest base's distance (counted twice with a target; 0x400
+// more when none is in the base's region) and B's (0x100 more).
+int suggest_plan(int A, int B) {
+    int best = 9999, best_base = -1;
+    *game_diplo_second = B;
+    struct faction_data *fa = F(A);
+    for (int i = 0; i < *game_base_count; i++) {
+        struct base *bs = &game_bases[i];
+        int owner = bs->faction;
+        if (owner == A || owner == B) continue;
+        if (!(status(A, owner) & TREATY_VENDETTA) || !(status(B, owner) & TREATY_VENDETTA)) continue;
+        if (!(bs->visibility & (1 << A))) continue;
+        int dist = 0;
+        int region = tile_at(bs->x, bs->y)->region;
+        if (fa->target_x >= 0) {
+            dist = 2 * vector_dist_offset(x_dist(fa->target_x, bs->x), fa->target_y - bs->y);
+            if (region != tile_at(fa->target_x, fa->target_y)->region) dist += 0x200;
+        }
+        if (base_find_3(bs->x, bs->y, A, region, -1, -1) < 0) {
+            game_base_find2(bs->x, bs->y, A);
+            *game_base_find_dist += 0x400;
+        }
+        dist += ((fa->target_x >= 0) + 1) * *game_base_find_dist;
+        if (base_find_3(bs->x, bs->y, B, region, -1, -1) < 0) {
+            game_base_find2(bs->x, bs->y, B);
+            *game_base_find_dist += 0x100;
+        }
+        int total = dist + *game_base_find_dist;
+        if (fa->attack_target_base == i) return i;
+        if (total < best) best = total, best_base = i;
+    }
+    return best_base;
+}
+
 // ---- Shadow mode -----------------------------------------------------------------------
 //
 // The game calls these only in the player's talks, where every line is a
@@ -5238,6 +5276,7 @@ __asm__(".text\n"
     }
 
 TALK_CHECK(void, comm_check, (int a, int b), (a, b), "%d, %d", a, b)
+SHADOW_WRITER(DIPLO, int, suggest_plan, (int a, int b), (a, b), WRITES(game_diplo_second, 4); WRITES(game_base_find_dist, 4), "%d, %d", a, b)
 TALK_CHECK(void, threaten, (int a, int b), (a, b), "%d, %d", a, b)
 TALK_CHECK(int, energy_trade, (int a, int b), (a, b), "%d, %d", a, b)
 TALK_CHECK(int, propose_pact, (int a, int b), (a, b), "%d, %d", a, b)
@@ -6084,7 +6123,6 @@ static void sweep_pact_ending(int faction) {
     F(faction)->diplo_status[other] |= TREATY_TREATY, F(other)->diplo_status[faction] |= TREATY_TREATY;
     if (!rnd(4)) *game_difficulty = rnd(4);
     int32_t net = *game_net_multiplayer;
-    if (!rnd(6)) *game_net_multiplayer = 1;
     answers();
     check_pact_of_brotherhood(faction, other);
     *game_net_multiplayer = net;
@@ -6094,7 +6132,6 @@ static void sweep_treaty_ending(int faction) {
     if (!other) return;
     if (!rnd(4)) *game_difficulty = rnd(4);
     int32_t net = *game_net_multiplayer;
-    if (!rnd(6)) *game_net_multiplayer = 1;
     answers();
     check_make_treaty(faction, other);
     *game_net_multiplayer = net;
@@ -6130,7 +6167,6 @@ static void sweep_demand(int faction) {
     if (!rnd(4)) ai->diplo_friction[faction] = rnd(25) - 2;
     if (!rnd(5)) *game_sunspot_duration = 3;
     int32_t net = *game_net_multiplayer;
-    if (!rnd(8)) *game_net_multiplayer = 1;
     if (rnd(2)) crowd_territory(faction, other);
     answers();
     check_demand_withdrawal(faction, other);
@@ -6158,7 +6194,7 @@ static void sweep_comm_check(int faction) {
     me->diplo_spoke[other] = rnd(3) ? -1 + rnd(*game_turn + 2) : *game_turn - rnd(20);
     int32_t net = *game_net_multiplayer, pbem = *game_pbem;
     int r = rnd(3);
-    if (r == 1) *game_net_multiplayer = 1;
+    if (r == 1) *game_net_multiplayer = 1, *game_current_faction = other;  // (the console's player is not sent to: that would send)
     if (r == 2) *game_pbem = 1;
     if (rnd(3) == 0) *game_current_faction = other;
     if (rnd(4) == 0) *game_human_factions |= (uint8_t)(1u << other);
@@ -6167,6 +6203,28 @@ static void sweep_comm_check(int faction) {
     answers();
     check_comm_check(faction, other);
     *game_net_multiplayer = net, *game_pbem = pbem;
+}
+
+static void sweep_suggest_plan(int faction) {
+    int other = talks(faction);
+    if (!other) return;
+    struct faction_data *me = F(faction);
+    for (int f = 1; f < FACTION_COUNT; f++) {
+        if (!alive(f) || f == faction || f == other) continue;
+        if (rnd(2)) me->diplo_status[f] |= TREATY_VENDETTA, F(other)->diplo_status[f] |= TREATY_VENDETTA;
+        if (!rnd(4)) F(other)->diplo_status[f] &= ~(uint32_t)TREATY_VENDETTA;
+    }
+    for (int i = 0; i < *game_base_count; i++)
+        if (rnd(3)) game_bases[i].visibility = (uint8_t)(game_bases[i].visibility ^ (1u << faction));
+    if (rnd(3)) {
+        int b = rnd(*game_base_count);
+        me->target_x = game_bases[b].x + rnd(5) - 2, me->target_y = game_bases[b].y + rnd(5) - 2;
+        if (!on_map(me->target_x, me->target_y)) me->target_x = me->target_y = -1;
+    } else {
+        me->target_x = me->target_y = -1;
+    }
+    me->attack_target_base = rnd(3) ? -1 : rnd(*game_base_count);
+    check_suggest_plan(faction, other);
 }
 
 // Once a turn, cases on protected copies of the game, each for a faction
@@ -6178,7 +6236,7 @@ static void diplomacy_sweep(void) {
                                                  sweep_give_a_base, sweep_base_swap, sweep_menus,
                                                  sweep_battle_plans, sweep_tech_trade, sweep_introduce, sweep_communicate,
                                                  sweep_pact_ending, sweep_treaty_ending, sweep_demand,
-                                                 sweep_withdrawal, sweep_comm_check};
+                                                 sweep_withdrawal, sweep_comm_check, sweep_suggest_plan};
     enum { N_CASES = sizeof(cases) / sizeof(cases[0]) };
     if (!*game_map || *game_base_count <= 0 || *game_net_multiplayer || *game_pbem) return;
     // Not while the player is in talks: the diplomacy window is open, and
@@ -6223,6 +6281,7 @@ static const struct hook diplomacy_hooks[] = {
     HOOK(0x53ce10, make_treaty, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x50),  // sub esp, 0x50
     HOOK(0x549270, demand_withdrawal, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53, 0x56, 0x8b, 0x75, 0x08),  // push ecx; push ebx; push esi
     HOOK(0x55c430, comm_check, PUSH_EBP_MOV_EBP_ESP, 0x51, 0xa1, 0xe8, 0x64, 0x9a, 0x00),  // push ecx; mov eax, [humans]
+    HOOK(0x54acc0, suggest_plan, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x18),  // sub esp, 0x18
     HOOK(0x548f80, do_withdrawal, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x18),  // sub esp, 0x18
 };
 struct hook_module diplomacy_module = {"diplomacy", diplomacy_hooks, HOOK_COUNT(diplomacy_hooks), diplomacy_sweep, NULL,

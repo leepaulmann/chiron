@@ -203,6 +203,7 @@ int (*game_stack_fix)(int veh);
 int (*game_veh_kill)(int veh);
 int (*game_veh_init)(int unit, int faction, int x, int y);
 void(__attribute__((thiscall)) * game_map_win_clear_terrain)(void *win);
+void(__attribute__((thiscall)) * game_map_win_clear_alt)(void *win, int x, int y, int unk);
 void(__attribute__((thiscall)) * game_map_win_draw_map)(void *win, int unk);
 void(__attribute__((thiscall)) * game_world_win_clear_terrain)(void *win);
 void (*game_draw_map)(int unk);
@@ -823,6 +824,7 @@ void game_bind(struct pe_image *exe) {
     game_veh_kill = (void *)code_at(exe, 0x5c08c0);
     game_veh_init = (void *)code_at(exe, 0x5c03d0);
     game_map_win_clear_terrain = (void *)code_at(exe, 0x46fd90);
+    game_map_win_clear_alt = (void *)code_at(exe, 0x46fb90);
     game_map_win_draw_map = (void *)code_at(exe, 0x46a550);
     game_world_win_clear_terrain = (void *)code_at(exe, 0x4c45e0);
     game_draw_map = (void *)code_at(exe, 0x46b190);

@@ -29,3 +29,7 @@ void social_select(int faction);
 // The player's landing at the start of the game: the pod's fall onto the
 // faction's first base (or unit), and the base's naming.
 void crash_landing(int faction);
+
+// A pod on a square of the Unity landmark that is lit: what the crash site
+// holds (a unit, energy or sight of the bases); 1 when it did, else 0.
+int do_unity_crash(int x, int y, int faction);

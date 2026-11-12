@@ -593,6 +593,31 @@ static void test_landing(void) {
     faction_defs[1].rule_flags = 0, current_faction = 1, base_count = veh_count = 0, turn = 0;
 }
 
+// The Unity crash site (do_unity_crash): a unit with morale 2 on two squares,
+// energy on another (more early in the game), the bases shown on the last,
+// nothing on the rest or a square switched off.
+static void test_unity(void) {
+    struct map_tile *t = &tiles[1 + 2 * (W / 2)];  // (2, 2)
+    base_count = veh_count = 0, turn = 60, current_faction = 2;
+    t->bits2 = 0;
+    EXPECT(do_unity_crash(2, 2, 1), 0);
+    t->bits2 = 0x4000u | 5u << 24;
+    EXPECT(do_unity_crash(2, 2, 1), 0);
+    t->bits2 = 0x4000u | 0x80000000u;
+    EXPECT(do_unity_crash(2, 2, 1), 0);
+    // (The units, squares 0 and 8, go through veh_init(), which the spotters need the game for.)
+    t->bits2 = 0x4000u | 10u << 24;
+    factions[1].energy_credits = 100;
+    EXPECT(do_unity_crash(2, 2, 1), 1);
+    EXPECT(factions[1].energy_credits, 400);
+    turn = 20;
+    EXPECT(do_unity_crash(2, 2, 1), 1);
+    EXPECT(factions[1].energy_credits, 806);
+    t->bits2 = 0x4000u | 0x13u << 24;
+    EXPECT(do_unity_crash(2, 2, 1), 1);
+    t->bits2 = 0, veh_count = 0, turn = 0, current_faction = 1;
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     static uint8_t image[0x300000];  // the game's strings, from 0x400000: all empty here
@@ -634,6 +659,7 @@ int main(void) {
     protos[1].weapon = 0, protos[7].weapon = 0, protos[7].plan = 12;
     for (int i = 0; i < SP_COUNT; i++) projects[i] = -1;
     for (int i = 0; i < TECH_COUNT; i++) techs[i].preq1 = techs[i].preq2 = TECH_DISABLED;
+    test_unity();
     test_energy();
     test_resource();
     test_fungus();

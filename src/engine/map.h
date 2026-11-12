@@ -67,6 +67,8 @@ void quick_zoc(int x, int y, int faction, int dest_x, int dest_y, int *zx, int *
 // Changing squares.
 void temp_set(int x, int y, int temperature);
 void climate_set(int x, int y, int rainfall);
+void rain_up(int x, int y);
+void delete_landmark(int x, int y);
 void alt_put_detail(int x, int y, int contour);
 void owner_set(int x, int y, int faction);
 void site_set(int x, int y, int site);

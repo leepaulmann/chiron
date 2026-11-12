@@ -882,6 +882,73 @@ static int pod_resource(struct pod *p) {
     return POD_NEXT;
 }
 
+// The Unity crash site: a pod on a square of the Unity landmark that is lit
+// (0x4000 and not switched off, 0x80000000) hands out what the square's
+// place in the landmark holds. Square 0 and 8 each give a unit (prototypes
+// 12 and 20) at once, with morale 2, 10 gives 300 energy (406 before turn
+// 50), and 19 shows every base of a faction that has a headquarters-class
+// facility (facility 1) and is not the one named in the game's text (and not
+// alien): the factions' file names are compared in capitals. The faction at
+// the console is told in a message with a sound; the others are not.
+// Returns 1 when it did, 0 for another square. The original also calls the
+// info window's redraw, which does nothing.
+int do_unity_crash(int x, int y, int faction) {
+    uint32_t bits2 = tile(x, y)->bits2;
+    if ((bits2 & 0x80004000u) != 0x4000) return 0;
+    uint32_t lm = (uint32_t)((int32_t)bits2 >> 24);
+    if (lm > 0x13) return 0;
+    static const uint8_t kind[] = {0, 3, 3, 3, 3, 3, 3, 3, 0, 3, 1, 3, 3, 3, 3, 3, 3, 3, 3, 2};
+    switch (kind[lm]) {
+    case 0: {
+        int first = lm == 0;
+        if (faction == cur_faction()) {
+            game_fx_play(game_fx, 0x16);
+            game_netmsg_pop(game_netmsg, text(first ? 0x691c0c : 0x691c30), -5000, 0, text(first ? 0x691bf8 : 0x691c1c));
+            game_fx_fade(game_fx, 0x16);
+        }
+        int v = veh_init(first ? 0xc : 0x14, faction, x, y);
+        game_vehs[v].morale = 2;
+        return 1;
+    }
+    case 1: {
+        int energy = 0x12c + (*game_turn >= 0x32 ? 0 : 0x6a);
+        game_factions[faction].energy_credits += energy;
+        game_parse_num(0, energy);
+        if (faction == cur_faction()) {
+            game_fx_play(game_fx, 0x16);
+            game_netmsg_pop(game_netmsg, text(0x691c4c), -5000, 0, text(0x691c3c));
+            game_fx_fade(game_fx, 0x16);
+        }
+        return 1;
+    }
+    case 2: {
+        for (int i = 0; i < *game_base_count; i++) {
+            const struct base *b = &game_bases[i];
+            game_str_buffer[0] = 0;
+            strcat(game_str_buffer, game_faction_defs[b->faction].filename);
+            (*game_char_upper)(game_str_buffer);
+            int offset;
+            uint32_t mask;
+            bitmask(1, &offset, &mask);
+            if (!(b->facilities_built[offset] & mask)) continue;
+            if (game_faction_defs[b->faction].rule_flags & 0x80) continue;
+            if (!strcmp(game_str_buffer, text(0x691c58))) continue;
+            spot_loc(b->x, b->y, faction);
+        }
+        if (faction == cur_faction()) {
+            game_draw_map(1);
+            *game_draw_state |= DRAW_LANDMARKS;
+            game_graphic_win_redraw(game_world_win);
+            game_fx_play(game_fx, 0x16);
+            game_netmsg_pop(game_netmsg, text(0x691c74), -5000, 0, text(0x691c60));
+            game_fx_fade(game_fx, 0x16);
+        }
+        return 1;
+    }
+    }
+    return 0;
+}
+
 // The unit opens the pod on its square. A unity pod around the landing site
 // gives a rover (or what follows from one) or a tech; else an outcome is
 // rolled, more widely next to the faction's bases and for formers and
@@ -1910,6 +1977,9 @@ static int pod_asks(int veh) {
         SHADOW_TAIL_##ret(check_##name(veh));                  \
     }
 SHADOW_WRITER_CHECK(int, goody_box, (int a), (a), orig_goody_box(a), hooks_writes_game(&w_), "%d", a)
+SHADOW_WRITER(EVENTS, int, do_unity_crash, (int a, int b, int c), (a, b, c),
+              hooks_writes_game(&w_); WRITES(*game_map, (size_t)*game_map_half_width * *game_map_height * sizeof(struct map_tile)),
+              "%d, %d, %d", a, b, c)
 SHADOW_WRITER_CHECK(void, monolith, (int a), (a), orig_monolith(a), hooks_writes_game(&w_), "%d", a)
 SHADOW_ASKING(int, goody_box, pod_asks)
 SHADOW_ASKING(void, monolith, monolith_asks)
@@ -2431,6 +2501,33 @@ static void sweep_social(int turn) {
 // Once a turn, on a protected copy of the game. A base the faction put out
 // of the game may found is named first, as naming opens the faction's file
 // (see shadow_eliminate_player).
+// The Unity crash sites: squares of the landmark at each of its places (the
+// ones that give a unit or energy, show the bases, or nothing), lit or
+// switched off, for the faction at the console and another.
+static void sweep_unity(int turn) {
+    static const int places[] = {0, 8, 10, 0x13, 1, 5, 0x14, 0x7f};
+    int w = *game_map_width, h = *game_map_height;
+    uint32_t seed = (uint32_t)turn * 2654435761u + 12345u;
+    int current = *game_current_faction;
+    for (int k = 0; k < 24; k++) {
+        seed = seed * 1103515245u + 12345u;
+        int y = (int)((seed >> 8) % (uint32_t)h), x = (int)(((seed >> 4) % (uint32_t)w & ~1) | (y & 1));
+        if (x >= w) continue;
+        struct map_tile *t = tile(x, y);
+        uint32_t saved = t->bits2;
+        t->bits2 = (saved & 0x00ffffffu & ~0x80004000u) | (uint32_t)places[k % 8] << 24 | (k % 6 == 5 ? 0x80000000u : 0) |
+                   (k % 7 == 6 ? 0 : 0x4000);
+        int faction = (k & 1) ? current : 1 + (int)((seed >> 12) % 7);
+        if (!(*game_factions_alive >> faction & 1)) faction = current;
+        // The unit lands on a square: any, but with a base nearby it is the owner's.
+        if (k % 3 == 0) game_factions[faction].energy_credits = (int)((seed >> 16) & 255);
+        if (k % 4 == 0) *game_turn = turn < 50 ? 60 : 20;
+        check_do_unity_crash(x, y, faction);
+        *game_turn = turn;
+        t->bits2 = saved;
+    }
+}
+
 static void events_sweep(void) {
     if (!*game_map || *game_veh_count <= 0) return;
     int sweeping = hooks_sweeping, turn = *game_turn, doomed = pick_doomed(turn);
@@ -2441,6 +2538,7 @@ static void events_sweep(void) {
     hooks_writes_begin(&outer);
     sweep_pods(turn);
     sweep_monoliths(turn);
+    sweep_unity(turn);
     sweep_artifacts(turn);
     sweep_random_events(turn);
     if (doomed) sweep_eliminate(turn, doomed);
@@ -2453,6 +2551,7 @@ static void events_sweep(void) {
 #define PUSH_EBP_MOV_EBP_ESP 0x55, 0x8b, 0xec
 static const struct hook events_hooks[] = {
     HOOK(0x57a660, goody_box, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x34),       // sub esp, 0x34
+    HOOK(0x5bed20, do_unity_crash, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0xf0, 0xfa, 0x68, 0x00),  // mov eax, [half_width]
     HOOK(0x57a050, monolith, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x5c),        // sub esp, 0x5c
     HOOK(0x57cfa0, study_artifact, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x60),  // sub esp, 0x60
     HOOK(0x51f2e0, random_events, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x20),   // sub esp, 0x20

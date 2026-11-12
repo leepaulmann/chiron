@@ -1097,6 +1097,7 @@ extern int (*game_stack_fix)(int veh);
 extern int (*game_veh_kill)(int veh);
 extern int (*game_veh_init)(int unit, int faction, int x, int y);
 extern void(__attribute__((thiscall)) * game_map_win_clear_terrain)(void *win);
+extern void(__attribute__((thiscall)) * game_map_win_clear_alt)(void *win, int x, int y, int unk);
 extern void(__attribute__((thiscall)) * game_map_win_draw_map)(void *win, int unk);  // redraws the whole map
 extern void(__attribute__((thiscall)) * game_world_win_clear_terrain)(void *win);
 extern void (*game_draw_map)(int unk);

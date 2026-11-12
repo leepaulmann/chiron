@@ -127,6 +127,8 @@ static int tut_stub(int bit) { return tut_on; }
 static int pop2_stub(char *label, char *picture, int unk) { return notes_shown++; }
 static int32_t netmsg_calls;
 static void __attribute__((thiscall)) dnetmsg_stub(void *n, char *label, int delay, int unk, char *sound) { netmsg_calls++; }
+static int comm_calls;
+static void comm_stub(int f, int o, int unk) { comm_calls++; }
 int main(void) {
     static uint8_t image[0x600000];  // strings, from 0x400000
     game_test_image = image;
@@ -779,6 +781,34 @@ int main(void) {
         make_treaty(1, 2);
         EXPECT(notes_shown, 1);  // difficulty 3 and the tutorial not asking
         EXPECT(netmsg_calls, 1);
+
+        // The contact with an AI (comm_check): only a player's talk is opened,
+        // and not again within 16 turns with a commlink unless it has something
+        // to say.
+        static int32_t pbem_;
+        game_communicate = comm_stub, game_pbem = &pbem_;
+        reset();
+        comm_calls = 0, humans = 0;
+        comm_check(1, 2);
+        EXPECT(comm_calls, 0);
+        humans = 1 << 1;
+        comm_check(1, 2);  // no commlink yet
+        EXPECT(comm_calls, 1);
+        factions[1].diplo_status[2] = TREATY_COMMLINK, factions[1].diplo_spoke[2] = turn - 5;
+        comm_check(1, 2);
+        EXPECT(comm_calls, 1);
+        factions[1].diplo_status[2] |= TREATY_WANT_TO_TALK;
+        comm_check(1, 2);
+        EXPECT(comm_calls, 2);
+        factions[1].diplo_status[2] = TREATY_COMMLINK, factions[1].diplo_spoke[2] = turn - 16;
+        comm_check(1, 2);
+        EXPECT(comm_calls, 3);
+        humans = 0;
+        // The base to attack with an ally: none where no one is at war with both.
+        reset();
+        second = 0;
+        EXPECT(suggest_plan(1, 2), -1);
+        EXPECT(second, 2);
 
     }
     if (failures) printf("%d failures\n", failures);

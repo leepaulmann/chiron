@@ -67,6 +67,8 @@ static void put(int x, int y, int alt, int region) {
     t->region = (uint8_t)region;
 }
 
+static int clear_alts;
+static void __attribute__((thiscall)) clear_alt_stub(void *win, int x, int y, int unk) { clear_alts++; }
 int main(void) {
     game_map = &tiles_ptr;
     game_map_width = &width, game_map_height = &height, game_map_half_width = &half_width;
@@ -359,6 +361,44 @@ int main(void) {
     EXPECT(at(0, 0)->climate >> 3 & 3, 2);
     EXPECT(at(0, 0)->bits2 & MAP2_CHANGED, MAP2_CHANGED);
     EXPECT(draw_state, DRAW_TERRAIN);
+    // Rainfall raised a step, to rainy at most (world_UNK1, never called).
+    for (int r = 0; r < 4; r++) {
+        at(2, 0)->climate = (uint8_t)(r << 3 | 0x60);
+        rain_up(2, 0);
+        EXPECT(at(2, 0)->climate >> 3 & 3, r + 1 > 2 ? 2 : r + 1);
+        EXPECT(at(2, 0)->climate & 0xe7, 0x60);
+    }
+    // A landmark's square is cleared of its marks as the altitude changes.
+    {
+        static uint8_t image[0x600000];
+        static char win_on[0x1dd80], win_off[0x1dd80];
+        game_test_image = image;
+        *(char **)game_at(0x7d3c3c) = win_on, *(char **)game_at(0x7d3c40) = win_off;
+        for (uint32_t a = 0x7d3c44; a < 0x7d3c5c; a += 4) *(char **)game_at(a) = win_off;
+        *(int32_t *)(win_on + 0x1dd74) = 1;
+        game_map_win_clear_alt = (void *)clear_alt_stub;
+        for (int k = 0; k < 5; k++) {
+            *(uint8_t *)game_at(0x685684 + 25 + k) = (uint8_t)(10 + k);
+            *(uint8_t *)game_at(0x7f65d0 + 10 + k) = 0xff;
+            *(uint8_t *)game_at(0x7d3a78 + 10 + k) = 0xff;
+            *(uint8_t *)game_at(0x7d3b74 + 10 + k) = 0xff;
+        }
+        at(4, 0)->bits2 = 0x05000000u | 0x80 | 0x1 | 0x100;
+        delete_landmark(4, 0);
+        EXPECT(at(4, 0)->bits2, (0xfau << 24) | 0x1 | 0x100);
+        EXPECT(*(uint8_t *)game_at(0x7f65d0 + 12), 0);
+        EXPECT(*(uint8_t *)game_at(0x7d3a78 + 14), 0);
+        EXPECT(*(uint8_t *)game_at(0x7d3b74 + 12), 0xff);  // flag 2 was not set
+        EXPECT(clear_alts, 1);
+        EXPECT(*(int32_t *)(win_on + 8), 0x98967f);
+        EXPECT(*(uint32_t *)game_at(0x90d91c) & 4, 4);
+        // Already deleted (the sequence negative), or none: nothing more.
+        delete_landmark(4, 0);
+        EXPECT(clear_alts, 1);
+        at(6, 0)->bits2 = 0;
+        delete_landmark(6, 0);
+        EXPECT(at(6, 0)->bits2, 0);
+    }
     alt_put_detail(0, 0, 0x1ff);
     EXPECT(alt_detail_at(0, 0), 0xff);
     owner_set(0, 0, 0x13);
