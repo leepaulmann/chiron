@@ -18,9 +18,16 @@
 // What is left to the original: the Font constructors that create GDI fonts
 // (Font_init, Font_init_2, Font_ctor_2), Font_close and the destructor, the
 // font class's init and close (a device context, GDI objects and the game's
-// heap), the Text file class (files and heap), and every function that
-// draws text (it drives the Buffer's device context and DirectDraw surface
-// through the object's methods).
+// heap), the Text file class (files and heap), $LINK< hyperlinks in drawn
+// text (they keep targets on the game's heap), and the functions that
+// draw strings from the game's string lists (write_strings, the "flying"
+// wraps).
+//
+// Drawing text (write_raw_l and the write_ and wrap_ functions around it)
+// gets the Buffer's device context, then selects the font, sets the colour
+// and calls TextOut, as the original does, through the game's imports. A
+// Buffer with a DirectDraw surface is not checked in shadow mode (the
+// original runs alone there).
 #include "text.h"
 
 #include <stdio.h>
@@ -301,6 +308,556 @@ int TEXT_THIS buffer_wrap_height(buffer_t *b, const char *str, int width) {
     return total;
 }
 
+// ---- Buffer: the device context ----------------------------------------------------------
+
+// Where the Buffer keeps what drawing text needs.
+enum {
+    DRAW_HOOK = 0x8,       // a function that may draw the text itself: cdecl (text, x, y, length), non-zero if it did
+    BUF_FLAGS = 0x1c,         // bit 2: colours are indexes into the Buffer's own palette
+    DC_NOW = 0x60,           // the device context in use, 0 when none
+    MEM_DC = 0x64,        // the memory device context of a Buffer with a DIB
+    DC_COUNT = 0x68,      // how many users the device context has
+    PALETTE = 0xa4,       // 256 entries of 4 bytes (the first three are the colour)
+    DRAW_MODE = 0x510,    // the font mode text is drawn in
+    TILDE_LINKS = 0x524,  // non-zero: the text has ~N link~ markers
+    TILDE_LINK = 0x528,   // the link a call ended in the middle of, or -1
+    COLORS = 0x53c,       // colour slot 0 of mode 0; slots are 0x10 apart, modes 4
+    SHADOW_COLOR = 0x54c,
+    SHADOW_DX = 0x55c,
+    SHADOW_DY = 0x56c,
+};
+
+typedef void(THISCALL *buffer_method)(void *);
+typedef int(__attribute__((stdcall)) * dd_get_dc)(void *surface, void **dc);
+typedef int(__attribute__((stdcall)) * dd_release_dc)(void *surface, void *dc);
+
+static void *dd_method(buffer_t *b, int offset) { return (*(void ***)b->dd)[offset / 4]; }
+
+// The Buffer's second virtual method, which the original calls to let go of the pixels before
+// it asks for a device context, and after a DirectDraw call that failed.
+static void buffer_unlock(buffer_t *b) { ((buffer_method)b->vtable[1])(b); }
+
+// The device context to draw in: a Buffer with a DIB has its memory device context, one with a
+// DirectDraw surface asks the surface (the first time) for its own. Counts a user.
+void *TEXT_THIS buffer_get_hdc(buffer_t *b) {
+    if (b->base) buffer_unlock(b);
+    if (!b->dd) {
+        *at(b, DC_NOW) = *at(b, MEM_DC);
+        ++*at(b, DC_COUNT);
+        return (void *)(intptr_t)*at(b, MEM_DC);
+    }
+    if (!*at(b, DC_NOW)) {
+        if (((dd_get_dc)dd_method(b, 0x44))(b->dd, (void **)at(b, DC_NOW))) buffer_unlock(b);
+    }
+    ++*at(b, DC_COUNT);
+    return (void *)(intptr_t)*at(b, DC_NOW);
+}
+
+// Lets go of n users of it; the last gives the device context back.
+void TEXT_THIS buffer_release_hdc(buffer_t *b, int n) {
+    int left = *at(b, DC_COUNT) - n;
+    *at(b, DC_COUNT) = left;
+    if (!b->dd) {
+        if (left <= 0) *at(b, DC_NOW) = 0, *at(b, DC_COUNT) = 0;
+        return;
+    }
+    int dc = *at(b, DC_NOW);
+    if (!dc || left > 0) return;
+    if (((dd_release_dc)dd_method(b, 0x68))(b->dd, (void *)(intptr_t)dc)) buffer_unlock(b);
+    *at(b, DC_COUNT) = 0;
+    *at(b, DC_NOW) = 0;
+}
+
+// ---- Buffer: one run of text ------------------------------------------------------------------
+
+static void *cur_dc(buffer_t *b) { return (void *)(intptr_t)*at(b, DC_NOW); }
+
+// The colour handed to Windows for a colour slot: an entry of the Buffer's palette (its first
+// byte ends up as the red of a COLORREF's blue, which the original does not mind), or the
+// low 16 bits of the slot in a form no real palette has.
+static uint32_t text_colorref(buffer_t *b, int32_t slot) {
+    if (*(uint8_t *)at(b, BUF_FLAGS) & 4) {
+        const uint8_t *e = (uint8_t *)b + PALETTE + (intptr_t)slot * 4;
+        return (uint32_t)e[0] << 16 | (uint32_t)e[1] << 8 | e[2];
+    }
+    return (uint16_t)slot | 0x10ff0000u;
+}
+
+static int32_t color_slot(buffer_t *b, int base, int mode) { return *at(b, base + 4 * mode); }
+
+// What ends a run of text: the system font back, and the device context let go.
+static void end_draw(buffer_t *b) {
+    game_select_object(cur_dc(b), game_get_stock_object(13));  // SYSTEM_FONT
+    buffer_release_hdc(b, 1);
+}
+
+typedef int(__attribute__((cdecl)) * text_callback)(const char *s, int x, int y, int n);
+
+// Draws n characters of s in the current mode's font and colours (shadow first, if the mode has
+// one) at x, and at y plus the height of the font (the tallest of the first three when there is
+// markup). Returns the x the text ends at, or what the callback in the Buffer says if it draws
+// the text instead and answers non-zero. If the Buffer's link flag is set, text may hold
+// ~N link~ markers: the linked part is drawn in link N's colour, and the rectangle it took is
+// saved for the game to find. A link not ended by the call is remembered for the next. The
+// original reads its rectangle's bottom from a stack slot it only sets when there is markup, so
+// that is where links are only drawn. Differences from OpenSMACX: none known (the function is
+// not in it).
+int TEXT_THIS buffer_write_raw_l(buffer_t *b, const char *s, int x, int y, int n) {
+    text_callback cb = *(text_callback *)at(b, DRAW_HOOK);
+    if (cb) {
+        int r = cb(s, x, y, n);
+        if (r) return r;
+    }
+    if (!n) return x;
+    if (!buffer_get_hdc(b)) return x;
+    game_set_bk_mode(cur_dc(b), 1);
+    int fidx = 0, cidx = 0, maxh = 0;
+    if (!*at(b, MULTI)) {
+        y += fonts(b)[0]->height;
+    } else {
+        int mode = *at(b, DRAW_MODE);
+        fidx = fonts(b)[mode] ? mode : 0;
+        cidx = color_slot(b, COLORS, mode) != -1 ? mode : 0;
+        for (int k = 0; k < 3; k++)
+            if (fonts(b)[k] && fonts(b)[k]->height > maxh) maxh = fonts(b)[k]->height;
+        y += maxh;
+    }
+    game_select_object(cur_dc(b), fonts(b)[fidx]->hfont);
+    int32_t shadow = color_slot(b, SHADOW_COLOR, cidx);
+    if (shadow != -1) {
+        game_set_text_color(cur_dc(b), text_colorref(b, shadow));
+        game_text_out(cur_dc(b), color_slot(b, SHADOW_DX, cidx) + x, color_slot(b, SHADOW_DY, cidx) + y, s, n);
+    }
+    int32_t color = color_slot(b, COLORS, cidx);
+    if (!*at(b, TILDE_LINKS)) {
+        game_set_text_color(cur_dc(b), text_colorref(b, color));
+        game_text_out(cur_dc(b), x, y, s, n);
+        end_draw(b);
+        return font_width_2(fonts(b)[fidx], s, n) + x;
+    }
+    const char *p = s;
+    int left = n, cur_x = x, flag = 0, link, len;
+    const char *tilde;
+    uint8_t *table = (uint8_t *)game_link_rects;  // per link: three rectangles of 16 bytes, then a colour
+    if (*at(b, TILDE_LINK) >= 0) {
+        link = *at(b, TILDE_LINK);
+        *at(b, TILDE_LINK) = -1;
+        flag = 1;  // stays set for the links after it in this call too
+        goto in_link;
+    }
+    for (;;) {
+        tilde = strchr(p, '~');
+        len = tilde ? (int)(tilde - p) : left;
+        game_set_text_color(cur_dc(b), text_colorref(b, color));
+        game_text_out(cur_dc(b), cur_x, y, p, len);
+        if (!tilde) {
+            end_draw(b);
+            return font_width_2(fonts(b)[fidx], s, n) + cur_x;  // the width of all of it, as the original does
+        }
+        link = atoi(tilde + 1);
+        cur_x += font_width_2(fonts(b)[fidx], p, len);
+        p += len + 2;  // the ~ and the digit
+        left -= len + 2;
+    in_link:
+        tilde = strchr(p, '~');
+        if (tilde) len = (int)(tilde - p);
+        else len = left, *at(b, TILDE_LINK) = link;
+        game_set_text_color(cur_dc(b), *(uint16_t *)(table + link * 0x30 + 0x2c) | 0x10ff0000u);
+        game_text_out(cur_dc(b), cur_x, y, p, len);
+        int w = font_width_2(fonts(b)[fidx], p, len);
+        int32_t *r = (int32_t *)(table + (3 * link + flag) * 16);
+        r[0] = cur_x, r[1] = y, r[2] = cur_x + w, r[3] = maxh + y;
+        cur_x += w;
+        p += len + 1;  // the ~
+        left -= len + 1;
+        if (*at(b, TILDE_LINK) >= 0) break;
+    }
+    end_draw(b);
+    return font_width_2(fonts(b)[fidx], s, n) + cur_x;
+}
+
+// Text the original has to draw itself: $LINK<text=target> hyperlinks keep a copy of the target
+// on the game's heap and put up a warning when there are too many, and a call can end in the
+// middle of one.
+static int link_text(buffer_t *b, const char *s) {
+    if (!*at(b, MULTI)) return 0;
+    return *at(b, DRAW_MODE) == 3 || *at(b, STATE) || (s && strstr(s, "$LINK<"));
+}
+
+SHADOW_DECLARE_T(int, buffer_write_multi_font_raw_l, (buffer_t * b, const char *s, int x, int y, int n))
+
+// Draws text with markup: {...}, [...] switch the font mode, and a doubled bracket is the
+// bracket (one is drawn, the other skipped; a lone $ is skipped). Each run between markers is
+// drawn by write_raw_l in the mode it is in, and the x the last ends at is returned. Hyperlinks
+// ($LINK<...) are left to the original.
+int TEXT_THIS buffer_write_multi_font_raw_l(buffer_t *b, const char *s, int x, int y, int n) {
+    if (!*at(b, MULTI)) return buffer_write_raw_l(b, s, x, y, n);
+    if (link_text(b, s)) return orig_buffer_write_multi_font_raw_l(b, s, x, y, n);
+    const char *seg = s, *p;
+    for (;;) {
+        p = seg;
+        while (n != 0 && !is_special(*p, 0)) p++, n--;
+        if (n == 0) break;
+        int mode = *at(b, DRAW_MODE), next = mode, escaped = 0;
+        switch (*p) {
+        case '{': if (p[1] == '{') escaped = 1; else next = 1; break;
+        case '}': if (p[1] == '}') escaped = 1; else next = 0; break;
+        case '[': if (p[1] == '[') escaped = 1; else next = 2; break;
+        case ']': if (p[1] == ']') escaped = 1; else next = 0; break;
+        }
+        if (escaped) p++, n--;
+        x = buffer_write_raw_l(b, seg, x, y, (int)(p - seg));
+        seg = ++p;
+        *at(b, DRAW_MODE) = next;
+        n--;
+    }
+    return buffer_write_raw_l(b, seg, x, y, (int)(p - seg));
+}
+
+// ---- Buffer: lines of text in a font, centred, right-aligned ------------------------------------
+
+static int half(int v) { return v / 2; }  // towards zero: the original's cdq, sub, sar
+
+static int has_font(buffer_t *b) { return fonts(b)[0] && fonts(b)[0]->hfont; }
+
+// How many characters to draw: n or the length of s, whichever is less; 0 for nothing.
+static int draw_length(const char *s, int n) {
+    int len = (int)strlen(s), m = len < n ? len : n;
+    return m < 0 ? 0 : m;
+}
+
+// The first three fonts are kept while one is set for a call, and put back after. A font with
+// no GDI font is not set. Setting a font clears the other two.
+struct saved_fonts {
+    struct font *f[3];
+};
+static void font_push(buffer_t *b, struct font *f, struct saved_fonts *s) {
+    for (int i = 0; i < 3; i++) s->f[i] = fonts(b)[i];
+    if (f && f->hfont) fonts(b)[0] = f, fonts(b)[1] = NULL, fonts(b)[2] = NULL;
+}
+static void font_pop(buffer_t *b, const struct saved_fonts *s) {
+    for (int i = 0; i < 3; i++) fonts(b)[i] = s->f[i];
+}
+
+// The functions that give back x when there is nothing to draw, 3 when there is no font, and
+// draw the text where they are told.
+int TEXT_THIS buffer_write_l_3(buffer_t *b, const char *s, int x, int y, int n) {
+    if (!s) return x;
+    if (!has_font(b)) return 3;
+    int m = draw_length(s, n);
+    if (!m) return x;
+    return buffer_write_multi_font_raw_l(b, s, x, y, m);
+}
+
+int TEXT_THIS buffer_write_l(buffer_t *b, struct font *font, const char *s, int x, int y, int n) {
+    struct saved_fonts sv;
+    font_push(b, font, &sv);
+    int r = buffer_write_l_3(b, s, x, y, n);
+    font_pop(b, &sv);
+    return r;
+}
+
+// Centred vertically in a rectangle (left, top, right, bottom). Gives back 0 for nothing to draw.
+int TEXT_THIS buffer_write_l_4(buffer_t *b, const char *s, const int32_t *rect, int n) {
+    if (!s || !rect || !has_font(b)) return 0;
+    int m = draw_length(s, n);
+    if (!m) return 0;
+    int top = rect[1];
+    int y = top + half(rect[3] - fonts(b)[0]->height - top);
+    return buffer_write_multi_font_raw_l(b, s, rect[0], y, m);
+}
+
+int TEXT_THIS buffer_write_l_2(buffer_t *b, struct font *font, const char *s, const int32_t *rect, int n) {
+    struct saved_fonts sv;
+    font_push(b, font, &sv);
+    int r = buffer_write_l_4(b, s, rect, n);
+    font_pop(b, &sv);
+    return r;
+}
+
+// Centred on a width of w from x.
+int TEXT_THIS buffer_write_cent_l_5(buffer_t *b, const char *s, int x, int y, int w, int n) {
+    if (!s) return x;
+    if (!has_font(b)) return 3;
+    int m = draw_length(s, n);
+    if (!m) return x;
+    int tw = buffer_text_width_2(b, s, m);
+    return buffer_write_multi_font_raw_l(b, s, x + half(w - tw), y, m);
+}
+
+// Centred in a rectangle both ways. The width is that of the whole string, not of the n drawn.
+int TEXT_THIS buffer_write_cent_l_7(buffer_t *b, const char *s, const int32_t *rect, int n) {
+    if (!s || !rect) return 0;
+    int left = rect[0], top = rect[1], right = rect[2], bottom = rect[3];
+    if (!has_font(b)) return 3;
+    int m = draw_length(s, n);
+    if (!m) return 0;
+    int tw = buffer_text_width_2(b, s, (int)strlen(s));
+    int x = left + half(right - tw - left);
+    int y = top + half(bottom - fonts(b)[0]->height - top);
+    return buffer_write_multi_font_raw_l(b, s, x, y, m);
+}
+
+// Centred on x.
+int TEXT_THIS buffer_write_cent_l_8(buffer_t *b, const char *s, int x, int y, int n) {
+    if (!s) return x;
+    if (!has_font(b)) return 3;
+    int m = draw_length(s, n);
+    if (!m) return x;
+    int tw = buffer_text_width_2(b, s, m);
+    return buffer_write_multi_font_raw_l(b, s, x - (tw >> 1), y, m);
+}
+
+// The rectangle's own corners are x, y and x + w, y + h.
+int TEXT_THIS buffer_write_cent_l_6(buffer_t *b, const char *s, int x, int y, int w, int h, int n) {
+    int32_t rect[4] = {x, y, x + w, y + h};
+    return buffer_write_cent_l_7(b, s, rect, n);
+}
+
+int TEXT_THIS buffer_write_cent_l(buffer_t *b, struct font *font, const char *s, int x, int y, int w, int n) {
+    struct saved_fonts sv;
+    font_push(b, font, &sv);
+    int r = buffer_write_cent_l_5(b, s, x, y, w, n);
+    font_pop(b, &sv);
+    return r;
+}
+
+int TEXT_THIS buffer_write_cent_l_2(buffer_t *b, struct font *font, const char *s, const int32_t *rect, int n) {
+    struct saved_fonts sv;
+    font_push(b, font, &sv);
+    int r = buffer_write_cent_l_7(b, s, rect, n);
+    font_pop(b, &sv);
+    return r;
+}
+
+int TEXT_THIS buffer_write_cent_l_3(buffer_t *b, struct font *font, const char *s, int x, int y, int w, int h, int n) {
+    struct saved_fonts sv;
+    font_push(b, font, &sv);
+    int32_t rect[4] = {x, y, x + w, y + h};
+    int r = buffer_write_cent_l_7(b, s, rect, n);
+    font_pop(b, &sv);
+    return r;
+}
+
+int TEXT_THIS buffer_write_cent_l_4(buffer_t *b, struct font *font, const char *s, int x, int y, int n) {
+    struct saved_fonts sv;
+    font_push(b, font, &sv);
+    int r = buffer_write_cent_l_8(b, s, x, y, n);
+    font_pop(b, &sv);
+    return r;
+}
+
+// Right-aligned in a width of w from x.
+int TEXT_THIS buffer_write_right_l_4(buffer_t *b, const char *s, int x, int y, int w, int n) {
+    if (!s) return x;
+    if (!has_font(b)) return 3;
+    int m = draw_length(s, n);
+    if (!m) return x;
+    int tw = buffer_text_width_2(b, s, m);
+    return buffer_write_multi_font_raw_l(b, s, x + (w - tw), y, m);
+}
+
+// Ending at x.
+int TEXT_THIS buffer_write_right_l_5(buffer_t *b, const char *s, int x, int y, int n) {
+    if (!s) return x;
+    if (!has_font(b)) return 3;
+    int m = draw_length(s, n);
+    if (!m) return x;
+    int tw = buffer_text_width_2(b, s, m);
+    return buffer_write_multi_font_raw_l(b, s, x - tw, y, m);
+}
+
+// Ending at the right of a rectangle, centred vertically in it.
+int TEXT_THIS buffer_write_right_l_6(buffer_t *b, const char *s, const int32_t *rect, int n) {
+    if (!s || !rect) return 0;
+    if (!has_font(b)) return 3;
+    int m = draw_length(s, n);
+    if (!m) return 0;
+    int tw = buffer_text_width_2(b, s, m);
+    int x = rect[2] - tw;
+    int top = rect[1];
+    int y = top + half(rect[3] - fonts(b)[0]->height - top);
+    return buffer_write_multi_font_raw_l(b, s, x, y, m);
+}
+
+int TEXT_THIS buffer_write_right_l(buffer_t *b, struct font *font, const char *s, int x, int y, int w, int n) {
+    struct saved_fonts sv;
+    font_push(b, font, &sv);
+    int r = buffer_write_right_l_4(b, s, x, y, w, n);
+    font_pop(b, &sv);
+    return r;
+}
+
+int TEXT_THIS buffer_write_right_l_2(buffer_t *b, struct font *font, const char *s, int x, int y, int n) {
+    struct saved_fonts sv;
+    font_push(b, font, &sv);
+    int r = buffer_write_right_l_5(b, s, x, y, n);
+    font_pop(b, &sv);
+    return r;
+}
+
+int TEXT_THIS buffer_write_right_l_3(buffer_t *b, struct font *font, const char *s, const int32_t *rect, int n) {
+    struct saved_fonts sv;
+    font_push(b, font, &sv);
+    int r = buffer_write_right_l_6(b, s, rect, n);
+    font_pop(b, &sv);
+    return r;
+}
+
+// ---- Buffer: wrapped text ----------------------------------------------------------------------
+//
+// Text drawn line by line (the breaks are buffer_find_line_break's), each line a run of
+// write_l; the Buffer counts the lines, and the functions give back the y below the last.
+
+// Left-aligned in a width of w from x; the first line may be indented (the Buffer's indent,
+// which makes the following lines wider). The x each line ends at is left in a global, and a
+// line that could not be drawn leaves 3 there (no font) or its start x (nothing to draw).
+static int wrap_left(buffer_t *b, const char *s, int x, int y, int w) {
+    *game_font_slack = 0;
+    *at(b, LINES) = 0;
+    *at(b, INDENT_LEFT) = *at(b, INDENT);
+    do {
+        int left = w;
+        *game_font_slack = 0;
+        const char *next = buffer_find_line_break(b, s, &left, (int)strlen(s));
+        int len = next ? (int)(next - s) : (int)strlen(s), r;
+        if (!has_font(b)) {
+            r = 3;
+        } else {
+            int m = draw_length(s, len);
+            r = m ? buffer_write_multi_font_raw_l(b, s, x, y, m) : x;
+        }
+        *game_text_end_x = r;
+        y += buffer_text_line_height(b);
+        ++*at(b, LINES);
+        if (*at(b, INDENT_LEFT)) {
+            int il = *at(b, INDENT_LEFT);
+            *at(b, INDENT_LEFT) = 0;
+            w -= il, x += il;
+        }
+        s = next;
+    } while (s);
+    return y;
+}
+
+int TEXT_THIS buffer_wrap_2(buffer_t *b, const char *s, const int32_t *rect) {
+    if (!s || !rect) return rect ? rect[1] : 0;
+    return wrap_left(b, s, rect[0], rect[1], rect[2] - rect[0]);
+}
+
+int TEXT_THIS buffer_wrap_3(buffer_t *b, const char *s, int x, int y, int w) {
+    if (!s || !w) return y;
+    return wrap_left(b, s, x, y, w);
+}
+
+int TEXT_THIS buffer_wrap(buffer_t *b, struct font *font, const char *s, const int32_t *rect) {
+    struct saved_fonts sv;
+    font_push(b, font, &sv);
+    int r = buffer_wrap_2(b, s, rect);
+    font_pop(b, &sv);
+    return r;
+}
+
+// Centred lines, each step below the last, or a line's height below it if height is set.
+static int wrap_centered(buffer_t *b, const char *s, int x, int y, int w, int height, int step) {
+    *game_font_slack = 0;
+    *at(b, LINES) = 0;
+    do {
+        int left = w;
+        *game_font_slack = 0;
+        const char *next = buffer_find_line_break(b, s, &left, (int)strlen(s));
+        buffer_write_cent_l_5(b, s, x, y, w, next ? (int)(next - s) : (int)strlen(s));
+        ++*at(b, LINES);
+        y += height ? buffer_text_line_height(b) : step;
+        s = next;
+    } while (s);
+    return y;
+}
+
+int TEXT_THIS buffer_wrap_cent_4(buffer_t *b, const char *s, int x, int y, int w) {
+    return s ? wrap_centered(b, s, x, y, w, 1, 0) : y;
+}
+
+int TEXT_THIS buffer_wrap_cent_5(buffer_t *b, const char *s, int x, int y, int w, int step) {
+    return s ? wrap_centered(b, s, x, y, w, 0, step) : y;
+}
+
+int TEXT_THIS buffer_wrap_cent_6(buffer_t *b, const char *s, const int32_t *rect) {
+    if (!s || !rect) return rect ? rect[1] : 0;
+    return wrap_centered(b, s, rect[0], rect[1], rect[2] - rect[0], 1, 0);
+}
+
+int TEXT_THIS buffer_wrap_cent(buffer_t *b, struct font *font, const char *s, int x, int y, int w) {
+    struct saved_fonts sv;
+    font_push(b, font, &sv);
+    int r = buffer_wrap_cent_4(b, s, x, y, w);
+    font_pop(b, &sv);
+    return r;
+}
+
+int TEXT_THIS buffer_wrap_cent_2(buffer_t *b, struct font *font, const char *s, int x, int y, int w, int step) {
+    struct saved_fonts sv;
+    font_push(b, font, &sv);
+    int r = buffer_wrap_cent_5(b, s, x, y, w, step);
+    font_pop(b, &sv);
+    return r;
+}
+
+int TEXT_THIS buffer_wrap_cent_3(buffer_t *b, struct font *font, const char *s, const int32_t *rect) {
+    struct saved_fonts sv;
+    font_push(b, font, &sv);
+    int r = buffer_wrap_cent_6(b, s, rect);
+    font_pop(b, &sv);
+    return r;
+}
+
+// Right-aligned lines, ending at x, in a width of w; the indent works as in wrap_left.
+static int wrap_right(buffer_t *b, const char *s, int x, int y, int w) {
+    *game_font_slack = 0;
+    *at(b, LINES) = 0;
+    *at(b, INDENT_LEFT) = *at(b, INDENT);
+    do {
+        int left = w;
+        *game_font_slack = 0;
+        const char *next = buffer_find_line_break(b, s, &left, (int)strlen(s));
+        buffer_write_right_l_5(b, s, x, y, next ? (int)(next - s) : (int)strlen(s));
+        ++*at(b, LINES);
+        y += buffer_text_line_height(b);
+        if (*at(b, INDENT_LEFT)) {
+            w -= *at(b, INDENT_LEFT);
+            *at(b, INDENT_LEFT) = 0;
+        }
+        s = next;
+    } while (s);
+    return y;
+}
+
+int TEXT_THIS buffer_wrap_right_3(buffer_t *b, const char *s, int x, int y, int w) {
+    return s ? wrap_right(b, s, x, y, w) : y;
+}
+
+// The original draws each line ending at the rectangle's left, not its right.
+int TEXT_THIS buffer_wrap_right_4(buffer_t *b, const char *s, const int32_t *rect) {
+    if (!s || !rect) return rect ? rect[1] : 0;
+    return wrap_right(b, s, rect[0], rect[1], rect[2] - rect[0]);
+}
+
+int TEXT_THIS buffer_wrap_right(buffer_t *b, struct font *font, const char *s, int x, int y, int w) {
+    struct saved_fonts sv;
+    font_push(b, font, &sv);
+    int r = buffer_wrap_right_3(b, s, x, y, w);
+    font_pop(b, &sv);
+    return r;
+}
+
+int TEXT_THIS buffer_wrap_right_2(buffer_t *b, struct font *font, const char *s, const int32_t *rect) {
+    struct saved_fonts sv;
+    font_push(b, font, &sv);
+    int r = buffer_wrap_right_4(b, s, rect);
+    font_pop(b, &sv);
+    return r;
+}
+
 // ---- Shadow checks ---------------------------------------------------------------------
 //
 // The measuring calls make GDI calls on the game's device context; those leave
@@ -346,6 +903,168 @@ SHADOW_WRITER_T(TEXT, charp, buffer_find_line_break, (buffer_t * b, const char *
 SHADOW_WRITER_T(TEXT, int, buffer_wrap_height, (buffer_t * b, const char *s, int width), (b, s, width), BUFFER_WRITES,
                 "%s, %d", s ? s : "(null)", width)
 
+// ---- Shadow checks: drawing text ----------------------------------------------------------------
+//
+// Drawing changes the Buffer's object (the device context in use and its count), the pixels of
+// the rows the text can reach, the device context itself (its text colour, mode and font live in
+// Chiron's GDI), and a few globals (the hyperlink rectangles, the slack and the x a wrapped line
+// ended at). A call is only checked for a Buffer with a DIB: the original's use of a DirectDraw
+// surface can't be put back.
+
+static int abs_int(int v) { return v < 0 ? -v : v; }
+
+static int64_t font_extent(const struct font *f) {
+    return f ? (int64_t)abs_int(f->height) + abs_int(f->ascent) + abs_int(f->first) : 0;
+}
+
+// The pixel rows from y0 to y1 and what the text can reach around and below them: lines more of
+// them, each a line of the tallest font and a step. Whole rows, so the width does not matter.
+static void writes_text(struct hook_writes *w, buffer_t *b, int y0, int y1, int lines, int step) {
+    hooks_writes_add(w, b, sizeof *b);
+    hooks_writes_add(w, game_link_rects, (size_t)((uint8_t *)game_font_slack + 4 - (uint8_t *)game_link_rects));
+    hooks_writes_dc(w, (void *)(intptr_t)*at(b, MEM_DC));
+    if (*at(b, DC_NOW) != *at(b, MEM_DC)) hooks_writes_dc(w, (void *)(intptr_t)*at(b, DC_NOW));
+    if (game_font_dc) hooks_writes_dc(w, *game_font_dc);
+    if (!b->bits || b->dd) return;
+    int64_t h = font_extent(game_font_default ? *game_font_default : NULL), dy = 0;
+    for (int k = 0; k < 4; k++)
+        if (font_extent(fonts(b)[k]) > h) h = font_extent(fonts(b)[k]);
+    for (int mode = 0; mode < 4; mode++)
+        if (abs_int(color_slot(b, SHADOW_DY, mode)) > dy) dy = abs_int(color_slot(b, SHADOW_DY, mode));
+    int64_t margin = 2 * h + dy + 16;
+    int64_t lo = y0 - margin, hi = (int64_t)y1 + margin + (int64_t)lines * (2 * h + dy + abs_int(step));
+    int64_t rows = -(int64_t)b->neg_height;
+    if (lo < 0) lo = 0;
+    if (hi > rows - 1) hi = rows - 1;
+    if (lo > hi) return;
+    int64_t pitch = b->pitch;
+    uint8_t *a = b->bits + pitch * lo, *c = b->bits + pitch * hi;
+    uint8_t *start = a < c ? a : c;
+    hooks_writes_add(w, start, (size_t)((pitch < 0 ? -pitch : pitch) * (hi - lo + 1)));
+}
+
+// The rows of a call, as a pair in parentheses (a macro argument can't carry a bare comma on).
+#define UNPACK(...) __VA_ARGS__
+#define Y(y) ((y), (y))
+#define YH(y, h) ((y), (y) + (h))
+#define RT(r) (((r) ? (r)[1] : 0), ((r) ? (r)[3] : 0))
+#define LN(s) ((s) ? (int)strlen(s) + 1 : 1)
+
+// A check of a function that draws, for the buffer b and the text s: not for text the original
+// draws itself, and not for a DirectDraw surface.
+#define TEXT_CHECKED(name, params, args, rows, lines, step, fmt, ...)                                        \
+    SHADOW_WRITER_BODY(int, name, params, args, writes_text(&w_, b, UNPACK rows, lines, step), fmt, __VA_ARGS__)    \
+    static int THISCALL shadow_##name params {                                                               \
+        if (hooks_nested || b->dd || link_text(b, s)) return orig_##name args;                               \
+        if (shadow_bypass()) return name args;                                                               \
+        stats_##name.calls++;                                                                                \
+        shadow_tick(TEXT);                                                                                   \
+        return check_##name args;                                                                            \
+    }
+#define TEXT_WRITER(name, params, args, rows, lines, step, fmt, ...) \
+    SHADOW_DECLARE_T(int, name, params)                              \
+    TEXT_CHECKED(name, params, args, rows, lines, step, fmt, __VA_ARGS__)
+
+#define P_S "%s, %d"
+#define STR(s) (s) ? (s) : "(null)"
+
+SHADOW_DECLARE_T(void, buffer_release_hdc, (buffer_t * b, int n))
+SHADOW_DECLARE_T(voidp, buffer_get_hdc, (buffer_t * b))
+
+#define HDC_WRITES (WRITES(b, sizeof *b), hooks_writes_dc(&w_, (void *)(intptr_t)*at(b, MEM_DC)))
+SHADOW_WRITER_BODY(voidp, buffer_get_hdc, (buffer_t * b), (b), HDC_WRITES, "%d", 0)
+static void *THISCALL shadow_buffer_get_hdc(buffer_t *b) {
+    if (hooks_nested || b->dd) return orig_buffer_get_hdc(b);
+    if (shadow_bypass()) return buffer_get_hdc(b);
+    stats_buffer_get_hdc.calls++;
+    shadow_tick(TEXT);
+    return check_buffer_get_hdc(b);
+}
+SHADOW_WRITER_BODY(void, buffer_release_hdc, (buffer_t * b, int n), (b, n), HDC_WRITES, "%d", n)
+static void THISCALL shadow_buffer_release_hdc(buffer_t *b, int n) {
+    if (hooks_nested || b->dd) {
+        orig_buffer_release_hdc(b, n);
+        return;
+    }
+    if (shadow_bypass()) {
+        buffer_release_hdc(b, n);
+        return;
+    }
+    stats_buffer_release_hdc.calls++;
+    shadow_tick(TEXT);
+    check_buffer_release_hdc(b, n);
+}
+
+TEXT_WRITER(buffer_write_raw_l, (buffer_t * b, const char *s, int x, int y, int n), (b, s, x, y, n), Y(y), 1, 0,
+            "%s, %d, %d, %d", STR(s), x, y, n)
+TEXT_CHECKED(buffer_write_multi_font_raw_l, (buffer_t * b, const char *s, int x, int y, int n), (b, s, x, y, n), Y(y), 1, 0,
+             "%s, %d, %d, %d", STR(s), x, y, n)
+
+TEXT_WRITER(buffer_write_l, (buffer_t * b, struct font * font, const char *s, int x, int y, int n), (b, font, s, x, y, n),
+            Y(y), 1, 0, "%s, %d, %d, %d", STR(s), x, y, n)
+TEXT_WRITER(buffer_write_l_2, (buffer_t * b, struct font * font, const char *s, const int32_t *rect, int n), (b, font, s, rect, n),
+            RT(rect), 1, 0, "%s, %d", STR(s), n)
+TEXT_WRITER(buffer_write_l_3, (buffer_t * b, const char *s, int x, int y, int n), (b, s, x, y, n), Y(y), 1, 0,
+            "%s, %d, %d, %d", STR(s), x, y, n)
+TEXT_WRITER(buffer_write_l_4, (buffer_t * b, const char *s, const int32_t *rect, int n), (b, s, rect, n), RT(rect), 1, 0,
+            "%s, %d", STR(s), n)
+
+TEXT_WRITER(buffer_write_cent_l, (buffer_t * b, struct font * font, const char *s, int x, int y, int w, int n),
+            (b, font, s, x, y, w, n), Y(y), 1, 0, "%s, %d, %d, %d, %d", STR(s), x, y, w, n)
+TEXT_WRITER(buffer_write_cent_l_2, (buffer_t * b, struct font * font, const char *s, const int32_t *rect, int n),
+            (b, font, s, rect, n), RT(rect), 1, 0, "%s, %d", STR(s), n)
+TEXT_WRITER(buffer_write_cent_l_3, (buffer_t * b, struct font * font, const char *s, int x, int y, int w, int h, int n),
+            (b, font, s, x, y, w, h, n), YH(y, h), 1, 0, "%s, %d, %d, %d, %d, %d", STR(s), x, y, w, h, n)
+TEXT_WRITER(buffer_write_cent_l_4, (buffer_t * b, struct font * font, const char *s, int x, int y, int n),
+            (b, font, s, x, y, n), Y(y), 1, 0, "%s, %d, %d, %d", STR(s), x, y, n)
+TEXT_WRITER(buffer_write_cent_l_5, (buffer_t * b, const char *s, int x, int y, int w, int n), (b, s, x, y, w, n), Y(y), 1, 0,
+            "%s, %d, %d, %d, %d", STR(s), x, y, w, n)
+TEXT_WRITER(buffer_write_cent_l_6, (buffer_t * b, const char *s, int x, int y, int w, int h, int n), (b, s, x, y, w, h, n),
+            YH(y, h), 1, 0, "%s, %d, %d, %d, %d, %d", STR(s), x, y, w, h, n)
+TEXT_WRITER(buffer_write_cent_l_7, (buffer_t * b, const char *s, const int32_t *rect, int n), (b, s, rect, n), RT(rect), 1,
+            0, "%s, %d", STR(s), n)
+TEXT_WRITER(buffer_write_cent_l_8, (buffer_t * b, const char *s, int x, int y, int n), (b, s, x, y, n), Y(y), 1, 0,
+            "%s, %d, %d, %d", STR(s), x, y, n)
+
+TEXT_WRITER(buffer_write_right_l, (buffer_t * b, struct font * font, const char *s, int x, int y, int w, int n),
+            (b, font, s, x, y, w, n), Y(y), 1, 0, "%s, %d, %d, %d, %d", STR(s), x, y, w, n)
+TEXT_WRITER(buffer_write_right_l_2, (buffer_t * b, struct font * font, const char *s, int x, int y, int n),
+            (b, font, s, x, y, n), Y(y), 1, 0, "%s, %d, %d, %d", STR(s), x, y, n)
+TEXT_WRITER(buffer_write_right_l_3, (buffer_t * b, struct font * font, const char *s, const int32_t *rect, int n),
+            (b, font, s, rect, n), RT(rect), 1, 0, "%s, %d", STR(s), n)
+TEXT_WRITER(buffer_write_right_l_4, (buffer_t * b, const char *s, int x, int y, int w, int n), (b, s, x, y, w, n), Y(y), 1, 0,
+            "%s, %d, %d, %d, %d", STR(s), x, y, w, n)
+TEXT_WRITER(buffer_write_right_l_5, (buffer_t * b, const char *s, int x, int y, int n), (b, s, x, y, n), Y(y), 1, 0,
+            "%s, %d, %d, %d", STR(s), x, y, n)
+TEXT_WRITER(buffer_write_right_l_6, (buffer_t * b, const char *s, const int32_t *rect, int n), (b, s, rect, n), RT(rect), 1,
+            0, "%s, %d", STR(s), n)
+
+TEXT_WRITER(buffer_wrap, (buffer_t * b, struct font * font, const char *s, const int32_t *rect), (b, font, s, rect), RT(rect),
+            LN(s), 0, "%s", STR(s))
+TEXT_WRITER(buffer_wrap_2, (buffer_t * b, const char *s, const int32_t *rect), (b, s, rect), RT(rect), LN(s), 0, "%s", STR(s))
+TEXT_WRITER(buffer_wrap_3, (buffer_t * b, const char *s, int x, int y, int w), (b, s, x, y, w), Y(y), LN(s), 0,
+            "%s, %d, %d, %d", STR(s), x, y, w)
+TEXT_WRITER(buffer_wrap_cent, (buffer_t * b, struct font * font, const char *s, int x, int y, int w), (b, font, s, x, y, w),
+            Y(y), LN(s), 0, "%s, %d, %d, %d", STR(s), x, y, w)
+TEXT_WRITER(buffer_wrap_cent_2, (buffer_t * b, struct font * font, const char *s, int x, int y, int w, int step),
+            (b, font, s, x, y, w, step), Y(y), LN(s), step, "%s, %d, %d, %d, %d", STR(s), x, y, w, step)
+TEXT_WRITER(buffer_wrap_cent_3, (buffer_t * b, struct font * font, const char *s, const int32_t *rect), (b, font, s, rect),
+            RT(rect), LN(s), 0, "%s", STR(s))
+TEXT_WRITER(buffer_wrap_cent_4, (buffer_t * b, const char *s, int x, int y, int w), (b, s, x, y, w), Y(y), LN(s), 0,
+            "%s, %d, %d, %d", STR(s), x, y, w)
+TEXT_WRITER(buffer_wrap_cent_5, (buffer_t * b, const char *s, int x, int y, int w, int step), (b, s, x, y, w, step), Y(y),
+            LN(s), step, "%s, %d, %d, %d, %d", STR(s), x, y, w, step)
+TEXT_WRITER(buffer_wrap_cent_6, (buffer_t * b, const char *s, const int32_t *rect), (b, s, rect), RT(rect), LN(s), 0, "%s",
+            STR(s))
+TEXT_WRITER(buffer_wrap_right, (buffer_t * b, struct font * font, const char *s, int x, int y, int w), (b, font, s, x, y, w),
+            Y(y), LN(s), 0, "%s, %d, %d, %d", STR(s), x, y, w)
+TEXT_WRITER(buffer_wrap_right_2, (buffer_t * b, struct font * font, const char *s, const int32_t *rect), (b, font, s, rect),
+            RT(rect), LN(s), 0, "%s", STR(s))
+TEXT_WRITER(buffer_wrap_right_3, (buffer_t * b, const char *s, int x, int y, int w), (b, s, x, y, w), Y(y), LN(s), 0,
+            "%s, %d, %d, %d", STR(s), x, y, w)
+TEXT_WRITER(buffer_wrap_right_4, (buffer_t * b, const char *s, const int32_t *rect), (b, s, rect), RT(rect), LN(s), 0, "%s",
+            STR(s))
+
 // ---- Sweep ---------------------------------------------------------------------------------
 
 static uint32_t rng_state = 1;
@@ -387,6 +1106,149 @@ static void reset_buffer(buffer_t *b, struct font *font) {
     *at(b, INDENT) = rnd_to(3) ? 0 : rnd_to(40);
     *at(b, INDENT_LEFT) = rnd_to(3) ? 0 : rnd_to(40);
     *at(b, LINES) = rnd_to(5);
+}
+
+// ---- Sweep: drawing text ------------------------------------------------------------------------
+
+// Text made of words and well-formed markup, and ~N link~ markers if links: no $LINK< (the
+// original draws those itself), and the first word always starts it.
+static void make_draw_text(char *out, int words, int links) {
+    static const char *const bits[] = {"a", "word", "Mind", "x y", "  ", "WWW", "i", "{{", "}}", "[[", "]]", "q$", "q=", ">", "<", "Hello", "mmm mmm mmm"};
+    char *o = out;
+    *o++ = 'A';
+    for (int i = 0; i < words; i++) {
+        switch (rnd_to(links ? 8 : 6)) {
+        case 0: o += sprintf(o, "{%s}", bits[rnd_to(6)]); break;
+        case 1: o += sprintf(o, "[%s]", bits[rnd_to(6)]); break;
+        case 6: o += sprintf(o, "~%d%s~", rnd_to(9), bits[rnd_to(6)]); break;
+        case 7: o += sprintf(o, "~%dlink ", rnd_to(9)); break;  // a link left open
+        default: o += sprintf(o, "%s", bits[rnd_to((int)(sizeof bits / sizeof *bits))]); break;
+        }
+        if (rnd_to(2)) *o++ = ' ';
+    }
+    *o = 0;
+}
+
+// A Buffer with a DIB of its own, made once by the game's own code (it only allocates the
+// DIB and a device context, which stay for good).
+static buffer_t *draw_buffer(void) {
+    static buffer_t db;
+    static int state;
+    if (!state) {
+        state = -1;
+        game_buffer_ctor(&db);
+        game_buffer_init(&db, 160, 64, 0, 0);
+        if (db.bits && !db.dd && *at(&db, MEM_DC) && db.neg_height != 0) state = 1;
+    }
+    return state > 0 ? &db : NULL;
+}
+
+static void reset_draw(buffer_t *b, struct font *font, struct font *nogdi, int round) {
+    for (int i = 0; i < 4; i++) fonts(b)[i] = rnd_to(4) ? font : NULL;
+    fonts(b)[0] = round % 9 == 8 ? nogdi : (round % 9 == 7 ? NULL : font);
+    int palette = rnd_to(3) == 0;
+    *(uint8_t *)at(b, BUF_FLAGS) = (uint8_t)((*(uint8_t *)at(b, BUF_FLAGS) & ~4) | (palette ? 4 : 0));
+    for (int i = 0; i < 256; i++) *(uint32_t *)((uint8_t *)b + PALETTE + 4 * i) = (uint32_t)rnd();
+    for (int mode = 0; mode < 4; mode++) {
+        *at(b, COLORS + 4 * mode) = rnd_to(5) ? (palette ? rnd_to(256) : (int)(rnd() & 0xffff) - rnd_to(2) * 0x8000) : -1;
+        *at(b, SHADOW_COLOR + 4 * mode) = rnd_to(2) ? -1 : (palette ? rnd_to(256) : (int)(rnd() & 0xffff));
+        *at(b, SHADOW_DX + 4 * mode) = rnd_to(5) - 2;
+        *at(b, SHADOW_DY + 4 * mode) = rnd_to(5) - 2;
+    }
+    int multi = rnd_to(3) != 0;
+    *at(b, MULTI) = multi;
+    *at(b, TILDE_LINKS) = multi && rnd_to(3) == 0;
+    *at(b, TILDE_LINK) = multi && rnd_to(4) == 0 ? rnd_to(9) : -1;
+    *at(b, DRAW_MODE) = rnd_to(3);  // not 3, the hyperlink mode
+    *at(b, STATE) = 0;
+    *at(b, MODE_LINES) = rnd_to(3), *at(b, MODE_WIDTH) = rnd_to(3);
+    *at(b, INDENT) = rnd_to(3) ? 0 : rnd_to(30);
+    *at(b, INDENT_LEFT) = rnd_to(3) ? 0 : rnd_to(30);
+    *at(b, LINES) = rnd_to(5);
+    *at(b, DRAW_HOOK) = 0;
+    *at(b, DC_COUNT) = rnd_to(3);
+    *at(b, DC_NOW) = rnd_to(2) ? 0 : *at(b, MEM_DC);
+    *game_text_end_x = (int32_t)rnd();
+    // The colours of the links.
+    for (int link = 0; link < 10; link++) *(uint16_t *)((uint8_t *)game_link_rects + link * 0x30 + 0x2c) = (uint16_t)rnd();
+}
+
+static void draw_sweep(struct font *font) {
+    buffer_t *b = draw_buffer();
+    if (!b) return;
+    static struct font nogdi, tall;
+    static char text[900];
+    uint8_t links[10 * 0x30];
+    memcpy(links, game_link_rects, sizeof links);
+    int32_t saved_end = *game_text_end_x;
+    tall = *font, tall.first = 2, tall.height += 3;
+    nogdi = *font, nogdi.hfont = NULL;
+    for (int round = 0; round < 45; round++) {
+        reset_draw(b, round & 4 ? &tall : font, &nogdi, round);
+        for (int k = 0; k < 6; k++) {
+            make_draw_text(text, rnd_to(round & 1 ? 40 : 10), *at(b, TILDE_LINKS));
+            const char *s = text;
+            int len = (int)strlen(s);
+            int x = rnd_to(220) - 30, y = rnd_to(90) - 20, w = rnd_to(150) - (rnd_to(8) == 0 ? 20 : 0);
+            // Half the time cut short, but not between the two halves of a doubled bracket: the
+            // original counts on its length covering both and runs on past the end of the text.
+            int n = len;
+            if (rnd_to(3) == 0) {
+                n = rnd_to(len + 1);
+                while (n > 0 && strchr("{}[]$", s[n - 1])) n--;
+            } else if (rnd_to(8) == 0) {
+                n = rnd_to(4) - 3;
+            }
+            int32_t rect[4] = {x, y, x + w, y + rnd_to(60) - 5};
+            struct font *f = rnd_to(4) ? (rnd_to(2) ? font : &tall) : (rnd_to(2) ? &nogdi : NULL);
+            int step = rnd_to(20) - 3;
+            *game_font_slack = rnd_to(4) ? 0 : rnd_to(20);
+            check_buffer_get_hdc(b);
+            check_buffer_release_hdc(b, 1 + rnd_to(2));
+            int raw_n = n < 0 ? 0 : (n > len ? len : n);  // the original reads on to a marker otherwise
+            if (fonts(b)[0]) check_buffer_write_raw_l(b, s, x, y, raw_n);
+            if (fonts(b)[0]) check_buffer_write_multi_font_raw_l(b, s, x, y, raw_n);
+            check_buffer_write_l(b, f, s, x, y, n);
+            check_buffer_write_l_2(b, f, s, rect, n);
+            check_buffer_write_l_3(b, s, x, y, n);
+            check_buffer_write_l_4(b, s, rect, n);
+            check_buffer_write_cent_l(b, f, s, x, y, w, n);
+            check_buffer_write_cent_l_2(b, f, s, rect, n);
+            check_buffer_write_cent_l_3(b, f, s, x, y, w, rnd_to(40), n);
+            check_buffer_write_cent_l_4(b, f, s, x, y, n);
+            check_buffer_write_cent_l_5(b, s, x, y, w, n);
+            check_buffer_write_cent_l_6(b, s, x, y, w, rnd_to(40), n);
+            check_buffer_write_cent_l_7(b, s, rect, n);
+            check_buffer_write_cent_l_8(b, s, x, y, n);
+            check_buffer_write_right_l(b, f, s, x, y, w, n);
+            check_buffer_write_right_l_2(b, f, s, x, y, n);
+            check_buffer_write_right_l_3(b, f, s, rect, n);
+            check_buffer_write_right_l_4(b, s, x, y, w, n);
+            check_buffer_write_right_l_5(b, s, x, y, n);
+            check_buffer_write_right_l_6(b, s, rect, n);
+            check_buffer_wrap(b, f, s, rect);
+            check_buffer_wrap_2(b, s, rect);
+            check_buffer_wrap_3(b, s, x, y, w);
+            check_buffer_wrap_cent(b, f, s, x, y, w);
+            check_buffer_wrap_cent_2(b, f, s, x, y, w, step);
+            check_buffer_wrap_cent_3(b, f, s, rect);
+            check_buffer_wrap_cent_4(b, s, x, y, w);
+            check_buffer_wrap_cent_5(b, s, x, y, w, step);
+            check_buffer_wrap_cent_6(b, s, rect);
+            check_buffer_wrap_right(b, f, s, x, y, w);
+            check_buffer_wrap_right_2(b, f, s, rect);
+            check_buffer_wrap_right_3(b, s, x, y, w);
+            check_buffer_wrap_right_4(b, s, rect);
+        }
+        // Nothing to draw, and no text at all.
+        if (fonts(b)[0]) check_buffer_write_raw_l(b, "abc", 5, 5, 0);
+        check_buffer_write_l_3(b, NULL, 5, 5, 3);
+        check_buffer_write_l_4(b, "abc", NULL, 3);
+        check_buffer_wrap_2(b, NULL, (int32_t[4]){3, 4, 50, 60});  // (a rectangle is needed: the original reads it)
+        check_buffer_wrap_cent_5(b, NULL, 3, 4, 50, 9);
+    }
+    memcpy(game_link_rects, links, sizeof links);
+    *game_text_end_x = saved_end;
 }
 
 static void text_sweep(void) {
@@ -458,6 +1320,7 @@ static void text_sweep(void) {
         check_buffer_find_line_break(&b, text, &left, 0);
         check_buffer_wrap_height(&b, NULL, 50);
     }
+    draw_sweep(font);
     hooks_sweeping = sweeping;
 }
 
@@ -478,5 +1341,40 @@ static const struct hook text_hooks[] = {
     HOOK(0x5dcab0, buffer_text_line_height, 0x8b, 0x81, 0x2c, 0x05, 0x00, 0x00, 0x85, 0xc0),
     HOOK(0x5dc410, buffer_find_line_break, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x0c, 0x53, 0x56, 0x57, 0x8b, 0xf9),
     HOOK(0x5dc360, buffer_wrap_height, 0x53, 0x56, 0x57, 0x8b, 0x7c, 0x24, 0x10, 0x33, 0xdb),
+    HOOK(0x5e3503, buffer_get_hdc, 0x56, 0x8b, 0xf1, 0x57, 0x8b, 0x46, 0x50),
+    HOOK(0x5e3563, buffer_release_hdc, 0x56, 0x8b, 0xf1, 0x57, 0x33, 0xff),
+    HOOK(0x5dbd00, buffer_write_raw_l, 0x83, 0xec, 0x14, 0x53, 0x55, 0x56),
+    HOOK(0x5dcae0, buffer_write_multi_font_raw_l, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x08),
+    HOOK(0x5db580, buffer_write_l, 0x83, 0xec, 0x0c, 0x53, 0x55, 0x56),
+    HOOK(0x5db660, buffer_write_l_2, 0x53, 0x55, 0x56, 0x8d, 0xb1, 0x2c, 0x05, 0x00, 0x00),
+    HOOK(0x5dcea0, buffer_write_l_3, 0x53, 0x56, 0x57, 0x8b, 0x7c, 0x24, 0x10),
+    HOOK(0x5dcf40, buffer_write_l_4, 0x83, 0xec, 0x10, 0x53, 0x8b, 0x5c, 0x24, 0x18),
+    HOOK(0x5db6c0, buffer_write_cent_l, 0x53, 0x55, 0x56, 0x8d, 0xb1, 0x2c, 0x05, 0x00, 0x00),
+    HOOK(0x5db720, buffer_write_cent_l_2, 0x53, 0x55, 0x56, 0x8d, 0xb1, 0x2c, 0x05, 0x00, 0x00),
+    HOOK(0x5db780, buffer_write_cent_l_3, 0x83, 0xec, 0x1c, 0x53, 0x55, 0x56),
+    HOOK(0x5db810, buffer_write_cent_l_4, 0x53, 0x55, 0x56, 0x8d, 0xb1, 0x2c, 0x05, 0x00, 0x00),
+    HOOK(0x5dd020, buffer_write_cent_l_5, 0x53, 0x56, 0x57, 0x8b, 0x7c, 0x24, 0x10),
+    HOOK(0x5dd0e0, buffer_write_cent_l_6, 0x83, 0xec, 0x10, 0x8b, 0x44, 0x24, 0x18),
+    HOOK(0x5dd130, buffer_write_cent_l_7, 0x83, 0xec, 0x10, 0x53, 0x55, 0x56),
+    HOOK(0x5dd250, buffer_write_cent_l_8, 0x53, 0x56, 0x57, 0x8b, 0x7c, 0x24, 0x10),
+    HOOK(0x5db870, buffer_write_right_l, 0x53, 0x55, 0x56, 0x8d, 0xb1, 0x2c, 0x05, 0x00, 0x00),
+    HOOK(0x5db8d0, buffer_write_right_l_2, 0x53, 0x55, 0x56, 0x8d, 0xb1, 0x2c, 0x05, 0x00, 0x00),
+    HOOK(0x5db930, buffer_write_right_l_3, 0x53, 0x55, 0x56, 0x8d, 0xb1, 0x2c, 0x05, 0x00, 0x00),
+    HOOK(0x5dd300, buffer_write_right_l_4, 0x53, 0x56, 0x57, 0x8b, 0x7c, 0x24, 0x10),
+    HOOK(0x5dd3b0, buffer_write_right_l_5, 0x53, 0x56, 0x57, 0x8b, 0x7c, 0x24, 0x10),
+    HOOK(0x5dd450, buffer_write_right_l_6, 0x53, 0x55, 0x8b, 0x6c, 0x24, 0x0c),
+    HOOK(0x5db990, buffer_wrap, 0x53, 0x55, 0x56, 0x8d, 0xb1, 0x2c, 0x05, 0x00, 0x00),
+    HOOK(0x5dd530, buffer_wrap_2, 0x51, 0x8b, 0x44, 0x24, 0x0c, 0x53),
+    HOOK(0x5dd730, buffer_wrap_3, 0x53, 0x56, 0x8b, 0x74, 0x24, 0x0c),
+    HOOK(0x5db9e0, buffer_wrap_cent, 0x83, 0xec, 0x0c, 0x55, 0x56, 0x57),
+    HOOK(0x5dbb00, buffer_wrap_cent_2, 0x83, 0xec, 0x10, 0x55, 0x56, 0x57),
+    HOOK(0x5dbc00, buffer_wrap_cent_3, 0x53, 0x55, 0x56, 0x8d, 0xb1, 0x2c, 0x05, 0x00, 0x00),
+    HOOK(0x5dd920, buffer_wrap_cent_4, 0x56, 0x8b, 0x74, 0x24, 0x08, 0x33, 0xd2),
+    HOOK(0x5dda00, buffer_wrap_cent_5, 0x56, 0x8b, 0x74, 0x24, 0x08, 0x33, 0xc0),
+    HOOK(0x5ddab0, buffer_wrap_cent_6, 0x51, 0x8b, 0x44, 0x24, 0x0c, 0x56),
+    HOOK(0x5dbc50, buffer_wrap_right, 0x53, 0x55, 0x56, 0x8d, 0xb1, 0x2c, 0x05, 0x00, 0x00),
+    HOOK(0x5dbcb0, buffer_wrap_right_2, 0x53, 0x55, 0x56, 0x8d, 0xb1, 0x2c, 0x05, 0x00, 0x00),
+    HOOK(0x5ddbb0, buffer_wrap_right_3, 0x56, 0x57, 0x8b, 0x7c, 0x24, 0x0c),
+    HOOK(0x5ddc90, buffer_wrap_right_4, 0x51, 0x8b, 0x44, 0x24, 0x0c, 0x56),
 };
 struct hook_module text_module = {"text", text_hooks, HOOK_COUNT(text_hooks), text_sweep, NULL, -1};
