@@ -528,9 +528,20 @@ void WINAPI Sleep(DWORD ms) {
     while (nanosleep(&ts, &ts) && errno == EINTR) {}
 }
 
+// CHIRON_FIXED_TIME=N stops the calendar clock at N seconds after 1970 (UTC,
+// and shown as UTC), so the game's random seed, taken from the date, is the
+// same on every run: scripted scenes then start from the same map. Tick
+// counts still run.
 static void fill_systemtime(WORD *st, int local) {
     struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
+    static const char *fixed;
+    if (!fixed) fixed = getenv("CHIRON_FIXED_TIME") ? getenv("CHIRON_FIXED_TIME") : "";
+    if (*fixed) {
+        ts = (struct timespec){strtoll(fixed, NULL, 10), 0};
+        local = 0;
+    } else {
+        clock_gettime(CLOCK_REALTIME, &ts);
+    }
     struct tm tm;
     if (local) localtime_r(&ts.tv_sec, &tm);
     else gmtime_r(&ts.tv_sec, &tm);

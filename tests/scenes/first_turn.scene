@@ -1,0 +1,18 @@
+# Quick Start, found the first base, then open the F2, F3 and F4 screens
+30 click 835 362
+40 key Return            # PLANETFALL
+44 key b                 # build a base with the colony pod
+48 snap name-base
+51 key Return            # accept the name
+56 snap after-base
+59 key F2
+63 snap f2
+66 key Escape
+68 key F3
+72 snap f3
+75 key Escape
+77 key F4
+81 snap f4
+84 key Escape
+86 snap map
+89 close

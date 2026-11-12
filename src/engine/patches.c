@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 // Patches target terranx.exe 2.0 at its preferred base. Addresses follow the
@@ -83,9 +84,32 @@ struct patch {
     int (*apply)(struct pe_image *exe);
 };
 
+// For scripted scenes (tools/snapcheck.py) every run must play out the same.
+// With CHIRON_FIXED_TIME set, the four places that seed the game's random
+// numbers from the millisecond timer (timeGetTime) at startup, around map
+// generation and after a game is set up get a constant instead, so Quick
+// Start builds the same map in the original's run and in Chiron's.
+static int patch_fixed_seeds(struct pe_image *exe) {
+    if (!getenv("CHIRON_FIXED_TIME")) return 0;
+    static const uint8_t call_esi[] = {0xff, 0xd6};                                // call esi
+    static const uint8_t call_tgt[] = {0xff, 0x15, 0x68, 0x93, 0x66, 0x00};        // call [timeGetTime]
+    static const uint8_t xor_eax[] = {0x31, 0xc0};                                 // xor eax, eax
+    static const uint8_t mov_eax[] = {0xb8, 0x2a, 0x00, 0x00, 0x00, 0x90};         // mov eax, 42; nop
+    static const uint32_t short_sites[] = {0x58f304, 0x58f30f};
+    static const uint32_t long_sites[] = {0x5a0040, 0x5a0607, 0x5c5a7b};
+    for (size_t i = 0; i < 2; i++)
+        if (!code_matches(exe, short_sites[i], call_esi, sizeof(call_esi))) return -1;
+    for (size_t i = 0; i < 3; i++)
+        if (!code_matches(exe, long_sites[i], call_tgt, sizeof(call_tgt))) return -1;
+    for (size_t i = 0; i < 2; i++) memcpy(code_at(exe, short_sites[i]), xor_eax, sizeof(xor_eax));
+    for (size_t i = 0; i < 3; i++) memcpy(code_at(exe, long_sites[i]), mov_eax, sizeof(mov_eax));
+    return 0;
+}
+
 static const struct patch patches[] = {
     {"initialise save header in game_data", patch_game_data_header},
     {"clear base counts in wants_to_attack", patch_wants_to_attack_counts},
+    {"fixed random seeds (CHIRON_FIXED_TIME)", patch_fixed_seeds},
 };
 
 void patches_apply(struct pe_image *exe) {

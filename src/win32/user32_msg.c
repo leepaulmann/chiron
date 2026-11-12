@@ -434,7 +434,8 @@ void user32_present_if_due(void) {
 // "click X Y" (left click in screen coordinates), "dblclick X Y",
 // "move X Y", "key NAME" (an SDL key name such as Return or Escape,
 // optionally "Ctrl+NAME"), "type TEXT" (typed characters, up to the next
-// ';') or "close" (the window's close button).
+// ';'), "snap FILE" (save the frame on screen as a BMP) or "close" (the
+// window's close button).
 // "<seconds> every <interval> <action>" repeats an action from then on:
 //   CHIRON_SCRIPT="25 click 835 362; 40 every 0.5 key Return; 600 close"
 // Keys stay down for 150 ms, like a real press, so code that polls
@@ -492,6 +493,12 @@ static void run_action(const char *step) {
             push_key(k, 1);
             held_key = k;
             release_at = SDL_GetTicks() + 150;
+        }
+    } else if (!strncmp(step, " snap ", 6)) {
+        char path[512];
+        if (sscanf(step, " snap %511[^;]", path) == 1) {
+            for (char *e = path + strlen(path); e > path && e[-1] == ' ';) *--e = 0;
+            sdl_host_save_frame(path);
         }
     } else if (!strncmp(step, " close", 6)) {
         SDL_Event e = {.type = SDL_QUIT};

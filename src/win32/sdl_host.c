@@ -43,17 +43,28 @@ static SDL_Surface *snap;
 static int snap_pending;
 static Uint32 last_snapshot;
 
+static int keep_frames = -1;
+
 static void snapshot_frame(const struct surface *fb) {
     if (!snapshot) snapshot = getenv("CHIRON_SNAPSHOT") ? getenv("CHIRON_SNAPSHOT") : "";
-    if (!*snapshot) return;
+    // A script's "snap" steps save the frame on screen, so it is kept too.
+    if (keep_frames < 0) keep_frames = *snapshot || (getenv("CHIRON_SCRIPT") && strstr(getenv("CHIRON_SCRIPT"), "snap"));
+    if (!keep_frames) return;
     if (!snap || snap->w != fb->width || snap->h != fb->height) {
         SDL_FreeSurface(snap);
         snap = SDL_CreateRGBSurfaceWithFormat(0, fb->width, fb->height, 32, SDL_PIXELFORMAT_XRGB8888);
     }
     for (int y = 0; y < fb->height; y++)
         memcpy((Uint8 *)snap->pixels + y * snap->pitch, fb->bits + y * fb->stride, fb->width * 4);
-    snap_pending = 1;
-    sdl_host_snapshot_tick();
+    if (*snapshot) {
+        snap_pending = 1;
+        sdl_host_snapshot_tick();
+    }
+}
+
+// Save the frame on screen now (a script's "snap FILE" step).
+void sdl_host_save_frame(const char *path) {
+    if (!snap || SDL_SaveBMP(snap, path)) fprintf(stderr, "chiron: snap %s: no frame\n", path);
 }
 
 void sdl_host_snapshot_tick(void) {

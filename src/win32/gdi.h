@@ -76,6 +76,7 @@ void sdl_host_init(void);
 // Show the framebuffer in the window, creating the window on first use.
 void sdl_host_present(struct surface *fb, const char *title);
 void sdl_host_snapshot_tick(void);  // write a held-back CHIRON_SNAPSHOT frame
+void sdl_host_save_frame(const char *path);  // a script's "snap FILE"
 void sdl_host_wake(void);  // wake a blocked GetMessage from another thread
 void sdl_host_warp_mouse(int x, int y);  // framebuffer coordinates
 void sdl_host_set_cursor(void *sdl_cursor, int visible);
