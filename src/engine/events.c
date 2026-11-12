@@ -884,8 +884,8 @@ static int pod_resource(struct pod *p) {
 
 // The Unity crash site: a pod on a square of the Unity landmark that is lit
 // (0x4000 and not switched off, 0x80000000) hands out what the square's
-// place in the landmark holds. Square 0 and 8 each give a unit (prototypes
-// 12 and 20) at once, with morale 2, 10 gives 300 energy (406 before turn
+// place in the landmark holds. Square 8 gives a unit (prototype 12) and 0 one (20)
+// at once, with morale 2, 10 gives 300 energy (150 before turn
 // 50), and 19 shows every base of a faction that has a headquarters-class
 // facility (facility 1) and is not the one named in the game's text (and not
 // alien): the factions' file names are compared in capitals. The faction at
@@ -900,7 +900,7 @@ int do_unity_crash(int x, int y, int faction) {
     static const uint8_t kind[] = {0, 3, 3, 3, 3, 3, 3, 3, 0, 3, 1, 3, 3, 3, 3, 3, 3, 3, 3, 2};
     switch (kind[lm]) {
     case 0: {
-        int first = lm == 0;
+        int first = lm != 0;  // (square 0 takes the second, the others the first)
         if (faction == cur_faction()) {
             game_fx_play(game_fx, 0x16);
             game_netmsg_pop(game_netmsg, text(first ? 0x691c0c : 0x691c30), -5000, 0, text(first ? 0x691bf8 : 0x691c1c));
@@ -911,7 +911,7 @@ int do_unity_crash(int x, int y, int faction) {
         return 1;
     }
     case 1: {
-        int energy = 0x12c + (*game_turn >= 0x32 ? 0 : 0x6a);
+        int energy = *game_turn >= 0x32 ? 0x12c : 0x96;  // (early: 300 less 150, as the original's byte-wide mask of -1 leaves it)
         game_factions[faction].energy_credits += energy;
         game_parse_num(0, energy);
         if (faction == cur_faction()) {

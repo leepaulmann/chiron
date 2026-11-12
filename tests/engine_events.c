@@ -612,7 +612,7 @@ static void test_unity(void) {
     EXPECT(factions[1].energy_credits, 400);
     turn = 20;
     EXPECT(do_unity_crash(2, 2, 1), 1);
-    EXPECT(factions[1].energy_credits, 806);
+    EXPECT(factions[1].energy_credits, 550);
     t->bits2 = 0x4000u | 0x13u << 24;
     EXPECT(do_unity_crash(2, 2, 1), 1);
     t->bits2 = 0, veh_count = 0, turn = 0, current_faction = 1;
