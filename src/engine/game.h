@@ -1793,6 +1793,17 @@ extern int32_t *game_fill_gap;
 // gaps to the next row of the buffer read and the buffer written.
 extern int32_t *game_copy_rem, *game_mask_units, *game_mask_gap_a, *game_mask_gap_b;
 
+// ---- Drawing: fonts and text (text.c) ----
+// The Windows calls the game's Font class makes, as imported (stdcall): the
+// device context all fonts measure in, the font the game starts with, and
+// the line-break slack the original leaves in a global.
+extern void *(__attribute__((stdcall)) * game_select_object)(void *dc, void *obj);
+extern int(__attribute__((stdcall)) * game_get_text_extent)(void *dc, const char *s, int n, int32_t *size);
+extern void *(__attribute__((stdcall)) * game_get_stock_object)(int which);
+extern int(__attribute__((thiscall)) * game_font_init)(void *font, const char *face, int size, int flags);
+extern void **game_font_dc, **game_font_default;
+extern int32_t *game_font_slack;
+
 // Point the variables above at a loaded terranx.exe.
 void game_bind(struct pe_image *exe);
 
