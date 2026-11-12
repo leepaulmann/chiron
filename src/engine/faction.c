@@ -7,6 +7,7 @@
 
 #include "base.h"
 #include "council.h"
+#include "diplomacy.h"
 #include "faction.h"
 #include "game.h"
 #include "map.h"
@@ -17,7 +18,7 @@
 #include "veh.h"
 
 enum {
-    TREATY_SURRENDERED = 0x2000000,
+    TREATY_SURRENDERED = 0x2000000, RULES_SCN_NO_TECH_TRADING_ = 0x2000000,
     STACK_PLAN = 2, STACK_ABILITY = 6, ABL_POLY_ENCRYPTION = 0x1000, BASE_STATE_RIOTS_ = 0x2,
 };
 
@@ -1826,6 +1827,111 @@ static inline int holds_project(int project, int faction) {
     return b >= 0 && game_bases[b].faction == faction;
 }
 
+// ---- enemies_war and enemies_trade_tech --------------------------------------------------
+
+// Two AIs (`a` and `b`) go to war (a vendetta both ways), the player being
+// told if it is in a pact with either, or the Empath Guild, an infiltrator
+// or the governor's seat lets it see, or in an omniscient game. They trade
+// maps (unless they have), and a mood of wanting revenge (0x20) is turned
+// into a betrayal's (0x40, held for 50 turns) when the difficulty's roll
+// allows it (a roll of 1 to the difficulty less 1), for each side in turn
+// (the second by set_treaty(), which also reaches the faction's records).
+static int sees_war(int cur, int a, int b) {
+    uint32_t sa = game_factions[cur].diplo_status[a], sb = game_factions[cur].diplo_status[b];
+    if (sa & 0x1000) return 1;
+    if (holds_project(4, cur)) return 1;
+    if (cur == *game_governor_faction && !(game_faction_defs[a].rule_flags & 0x80)) return 1;
+    if (sb & 0x1000) return 1;
+    if (holds_project(4, cur)) return 1;
+    if (cur == *game_governor_faction && !(game_faction_defs[b].rule_flags & 0x80)) return 1;
+    return (*game_state & GAME_STATE_OMNISCIENT) != 0;
+}
+void enemies_war(int a, int b) {
+    struct faction_data *F1 = &game_factions[a], *F2 = &game_factions[b];
+    if (F1->diplo_status[b] & TREATY_VENDETTA) return;
+    int cur = *game_current_faction;
+    if (game_factions[cur].diplo_status[a] & TREATY_PACT) news_pact(a, b, 0x68e5d4, 0);
+    else if (game_factions[cur].diplo_status[b] & TREATY_PACT) news_pact(b, a, 0x68e5d4, 0);
+    else if (sees_war(cur, a, b)) news_other(a, b, 0x68e5e0);
+    treaty_on(a, b, TREATY_VENDETTA);
+    if (!(F1->diplo_status[b] & 0x40000000)) trade_maps(a, b);
+    uint32_t s = F1->diplo_status[b];
+    if ((s & 0x20) && !(s & 0x40000) && *game_difficulty - 1 > 0 && game_rand() % *game_difficulty != 0) {
+        F1->diplo_agenda[b] &= ~0xc00u;
+        F2->diplo_agenda[a] &= ~0xc00u;
+        F1->diplo_status[b] &= ~0x20u;
+        F2->diplo_status[a] &= ~0x20u;
+        F1->diplo_status[b] |= 0x40;
+        F1->diplo_merc[b] = 50;
+    }
+    s = F2->diplo_status[a];
+    if ((s & 0x20) && !(s & 0x40000) && *game_difficulty - 1 > 0 && game_rand() % *game_difficulty != 0) {
+        F2->diplo_agenda[a] &= ~0xc00u;
+        F1->diplo_agenda[b] &= ~0xc00u;
+        F1->diplo_status[b] &= ~0x20u;
+        F2->diplo_status[a] &= ~0x20u;
+        set_treaty(b, a, 0x40, 1);
+    }
+}
+
+// The techs a faction learned from another (a byte a tech, at 0x36c: who it
+// had it from, or 0), which the AI weighs before trading it on.
+static inline int tech_source(const struct faction_data *f, int tech) { return ((const int8_t *)f)[0x36c + tech]; }
+
+// Two AIs (`a` and `b`) in a pact, or at least talking, swap one tech
+// each: of the techs one has and the other lacks (none, in a game with
+// tech trading off), the one with the highest roll (0 to the tech's value
+// less 1) is picked for each way, skipping a tech whose source is the
+// giver's pact partner, or (from a source it has a treaty with) the giver's
+// friction with it is still below 6 (16 unless the two are in a pact). If
+// only one way has a tech, and they are in a pact and the great satan is
+// the faction in the rankings' lead, the tech passes to the lacking one
+// only when the faction ranked after the lead stands at least as high as
+// the giver's partner. The original's second way takes the giver's
+// friction from the lacking faction's own source of the tech (a slip it
+// has: the giver's source is the one read for the pact and treaty), which
+// is followed here.
+void enemies_trade_tech(int a, int b) {
+    struct faction_data *F1 = &game_factions[a], *F2 = &game_factions[b];
+    int tech_a = -1, tech_b = -1, best_a = -9999, best_b = -9999;
+    if (*game_rules & RULES_SCN_NO_TECH_TRADING_) return;
+    for (int t = 0; t < 0x59; t++) {
+        if (!has_tech(t, a) && has_tech(t, b)) {
+            int src = tech_source(F2, t);
+            if (src && (F2->diplo_status[src] & TREATY_PACT)) continue;
+            if (F2->diplo_status[src] & TREATY_TREATY) {
+                int need = (F1->diplo_status[b] & TREATY_PACT) ? 6 : 16;
+                if (F2->diplo_friction[src] < need) continue;
+            }
+            int v = tech_val(t, a, 0);
+            int r = v - 1 > 0 ? game_rand() % v : 0;
+            if (r > best_a) best_a = r, tech_a = t;
+        } else if (has_tech(t, a) && !has_tech(t, b)) {
+            int src = tech_source(F1, t);
+            if (src && (F1->diplo_status[src] & TREATY_PACT)) continue;
+            if (F1->diplo_status[src] & TREATY_TREATY) {
+                int need = (F1->diplo_status[b] & TREATY_PACT) ? 6 : 16;
+                if (F2->diplo_friction[tech_source(F2, t)] < need) continue;
+            }
+            int v = tech_val(t, b, 0);
+            int r = v - 1 > 0 ? game_rand() % v : 0;
+            if (r > best_b) best_b = r, tech_b = t;
+        }
+    }
+    if (tech_a >= 0 && tech_b >= 0) {
+        game_tech_achieve(a, tech_a, b, 0);
+        game_tech_achieve(b, tech_b, a, 0);
+        return;
+    }
+    if (!(F1->diplo_status[b] & TREATY_PACT) || !great_satan(game_faction_rankings[7], 0)) return;
+    int ranked = *game_ranked_faction;
+    if (tech_a >= 0 && game_factions[ranked].tech_ranking >= F2->tech_ranking) {
+        game_tech_achieve(a, tech_a, b, 0);
+        ranked = *game_ranked_faction;
+    }
+    if (tech_b >= 0 && game_factions[ranked].tech_ranking >= F1->tech_ranking) game_tech_achieve(b, tech_b, a, 0);
+}
+
 // The AI talking to another AI: trading techs in a pact, meeting when
 // they have reason to (the Empath Guild, a treaty late in the game), or
 // noting why it might attack. Each pair is visited from the higher
@@ -2247,6 +2353,10 @@ SHADOW_TALK(void, major_atrocity, (int a, int b), (a, b), is_human(a), "%d, %d",
 // Between AIs, with a message for the player; a human involved may be put
 // a question by the techs traded.
 SHADOW_TALK(void, enemies_treaty, (int a, int b, int c), (a, b, c), is_human(a) || is_human(b), "%d, %d, %d", a, b, c)
+// War between AIs: the news and the maps traded ask no one. The techs
+// traded may put a question to a human.
+SHADOW_TALK(void, enemies_war, (int a, int b), (a, b), 0, "%d, %d", a, b)
+SHADOW_TALK(void, enemies_trade_tech, (int a, int b), (a, b), is_human(a) || is_human(b), "%d, %d", a, b)
 
 // territory() also answers in its caller's variables, which are compared
 // apart from the game's state.
@@ -2614,6 +2724,27 @@ static void sweep_talks(int full) {
         if (!rnd(4)) F2->major_atrocities = rnd(2);
         int p = bystander(f, o);
         if (p && rnd(4)) *game_current_faction = p;
+        // Techs for trade, with who each had them from and the friction,
+        // and a war (the revenge to turn into a betrayal).
+        for (int k = 0; k < 6; k++) {
+            int t = rnd(0x59);
+            game_tech_achieved[t] = (uint8_t)((game_tech_achieved[t] & ~(1u << f) & ~(1u << o)) | (rnd(2) << f) | (rnd(2) << o));
+            ((int8_t *)F1)[0x36c + t] = (int8_t)(rnd(2) ? 0 : rnd(FACTION_COUNT));
+            ((int8_t *)F2)[0x36c + t] = (int8_t)(rnd(2) ? 0 : rnd(FACTION_COUNT));
+        }
+        for (int t = 1; t < FACTION_COUNT; t++) {
+            if (rnd(3) == 0) F1->diplo_friction[t] = rnd(20), F2->diplo_friction[t] = rnd(20);
+            if (rnd(4) == 0) F1->diplo_status[t] ^= TREATY_PACT | TREATY_TREATY;
+        }
+        check_enemies_trade_tech(f, o);
+        for (int k = 0; k < 2; k++) {
+            if (rnd(2)) F1->diplo_status[o] ^= 0x20, F1->diplo_status[o] ^= rnd(2) ? 0x40000 : 0;
+            if (rnd(2)) F2->diplo_status[f] ^= 0x20, F2->diplo_status[f] ^= rnd(2) ? 0x40000 : 0;
+            if (rnd(2)) F1->diplo_status[o] ^= 0x40000000;
+            if (rnd(2)) F1->diplo_status[o] &= ~(uint32_t)TREATY_VENDETTA;
+        }
+        if (rnd(2)) *game_current_faction = rnd(FACTION_COUNT - 1) + 1;
+        check_enemies_war(f, o);
         check_enemies_treaty(f, o, rnd(4) == 0);
     }
     {
@@ -2742,6 +2873,8 @@ static const struct hook faction_hooks[] = {
     HOOK(0x55eee0, atrocity, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x0c),                    // sub esp, 12
     HOOK(0x55f450, major_atrocity, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x58),              // sub esp, 0x58
     HOOK(0x55d760, enemies_treaty, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x14),              // sub esp, 0x14
+    HOOK(0x55c840, enemies_war, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56, 0x57),                 // push ebx; push esi; push edi
+    HOOK(0x55d430, enemies_trade_tech, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10),          // sub esp, 0x10
 };
 // The diplomacy talks (diplomacy.c) are swept with it: the game calls them
 // only when a human player talks.

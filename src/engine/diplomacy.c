@@ -4879,6 +4879,276 @@ __asm__(".text\n"
         "    popl %ebp\n"
         "    ret\n");
 
+// ---- The talks' endings: a pact, a treaty, a withdrawal --------------------------------
+//
+// The originals of these keep no locals that they read before setting them:
+// the stack slots read stale in shadow mode (and scrubbed there, see
+// quiet.c) belong to their callees.
+
+// The tutorial's notes (a window) are shown only past the first levels
+// when the tutorial asks, and never in a network game.
+static int tutorial_note(void) {
+    if (*game_difficulty > 1 && !game_tut_check2(0x1000)) return 0;
+    return !*game_net_multiplayer;
+}
+
+// The pact of brotherhood is made: the talk's patience is spent and the
+// moods weighed anew, the pact announced (in a network game sent on
+// instead of maps traded), the maps traded and the designs scanned, and a
+// tutorial's note shown.
+void pact_of_brotherhood(int A, int B) {
+    *game_diplo_second = B;
+    wtreaty_on(B, A, 0x1000001, 0);
+    F(B)->diplo_patience[A] = 0;
+    F(A)->diplo_spoke[B] = *game_turn;
+    game_diplomacy_check(A, B, 0);
+    *game_diplo_can_betray = 0;
+    F(A)->diplo_reputation++;
+    F(B)->diplo_reputation++;
+    game_diplomacy_caption(A, B);
+    say_title(0, B), say_name(1, B), say_noun(2, B);
+    game_parse_says(3, game_get_pact(A), -1, -1);
+    game_parse_says(4, game_get_phrase(A, 0), -1, -1);
+    game_parse_says(5, game_get_phrase(B, 0), -1, -1);
+    answer(text(0x68d5d4), B);
+    if (*game_net_multiplayer) net_send(0x68d4dc, A, B, 0, 0x448, A, B, 0, 0);
+    else trade_maps(A, B);
+    game_parse_says(0, game_get_pact(A), -1, -1);
+    answer(text(0x68d5e0), B);
+    scan_prototypes(A, B);
+    mention_prototypes(A, B);
+    if (!tutorial_note()) return;
+    say_noun(0, B), say_title(1, B), say_name(2, B);
+    game_parse_says(3, game_faction_defs[B].adjective, -1, -1);
+    game_x_pop2(*(char **)game_at(0x691b14), text(0x68d5ec), 0);
+}
+
+// The treaty is made: the same, with a line picked at random, and a
+// tutorial's note when the AI's territory presses on the player's.
+void make_treaty(int A, int B) {
+    *game_diplo_second = B;
+    wtreaty_on(B, A, 0x1000202, 1);
+    F(B)->diplo_patience[A] = 0;
+    F(A)->diplo_spoke[B] = *game_turn;
+    game_diplomacy_check(A, B, 0);
+    F(A)->diplo_reputation++;
+    F(B)->diplo_reputation++;
+    game_diplomacy_caption(A, B);
+    say_title(0, A), say_name(1, A), say_noun(2, A);
+    say_title(3, B), say_name(4, B), say_noun(5, B);
+    game_parse_says(6, game_get_noun_phrase(A, 9), -1, -1);
+    game_parse_says(7, game_get_noun_phrase(B, 9), -1, -1);
+    answer(label_random(0x68d5f4), B);
+    if ((*game_difficulty <= 1 || game_tut_check2(0x800)) && !*game_net_multiplayer) {
+        say_noun(0, B);
+        game_x_pop2(*(char **)game_at(0x691b14), text(0x68d600), 0);
+    }
+    if (game_territory(B, A, 2, NULL, NULL)) {
+        say_noun(0, B);
+        game_parse_says(1, game_faction_defs[B].adjective, -1, -1);
+        game_netmsg_pop(game_netmsg, text(0x68d60c), 5000, 0, NULL);
+    }
+}
+
+// `B`'s units in `A`'s territory are sent away: a land unit that carries
+// units (veh_cargo(), whatever that tells of a land one), to a square beside
+// it that is `B`'s own land or holds a ship of its with room, and is not
+// held by another faction's units or base; any other, or one that found no
+// such square, to B's nearest base (base_find2()). Returns how many moved,
+// and then the two are at war.
+// The original's search of the eight squares goes on after a unit is moved,
+// from its old square, and may move it again; it does so here too.
+// (do_withdrawal() of OpenSMACX does not break out of it either.)
+int do_withdrawal(int A, int B) {
+    int moved = 0;
+    for (int i = 0; i < *game_veh_count; i++) {
+        struct veh *V = &game_vehs[i];
+        if (V->faction != B || game_protos[V->proto].plan == 11) continue;
+        int x = V->x, y = V->y;
+        const struct map_tile *t = tile_at(x, y);
+        if ((t->climate & 0xe0) < 0x60 || t->territory != A) continue;
+        if (game_chassis[game_protos[V->proto].chassis].triad == TRIAD_LAND && veh_cargo(i)) {
+            for (int d = 0; d < 8; d++) {
+                int nx = xrange(x + game_radius_near_x[d]), ny = y + game_radius_near_y[d];
+                if (!on_map(nx, ny)) continue;
+                const struct map_tile *n = tile_at(nx, ny);
+                if ((n->climate & 0xe0) >= 0x60) {
+                    if (n->territory != B) continue;
+                } else if (stack_check(stack_fix(veh_at(nx, ny)), 8, B, -1, -1) <= 0) {
+                    continue;
+                }
+                if (n->bits & 3) {
+                    int owner = n->owner_site & 0xf;
+                    if (owner < 8 && owner != B) continue;
+                }
+                veh_drop(veh_lift(i), nx, ny);
+                V->visibility = 0;
+                V->order = 0;
+                V->state &= 0xfcffbdffu;
+                game_draw_tiles(x, y, 2);
+                moved++;
+            }
+        }
+        int base = game_base_find2(x, y, B);
+        if (base < 0) continue;
+        veh_drop(veh_lift(i), game_bases[base].x, game_bases[base].y);
+        V->visibility = 0;
+        V->order = 0;
+        V->state &= 0xfcffbdffu;
+        game_draw_tile_fixup(x, y, has_abil(V->proto, 2), 2);
+        moved++;
+    }
+    if (!moved) return 0;
+    game_set_agenda(B, A, 2, 1);
+    game_set_treaty(B, A, 0x100000, 1);
+    return moved;
+}
+
+// The player (`A`) demands that the AI (`B`) withdraw its units from the
+// player's territory. Returns 2 when the AI went to war over it, 1 when it
+// refused or the talk is cut short (the sunspots), else 0. The AI declares
+// a vendetta, whatever it says, when it means to betray the player or
+// attack it anyway, or when the friction is past 5 (15 if it is at war
+// otherwise) and it has no fear; towards a faction in a pact it may pick a
+// third (dont_withdrawal()) and cross it instead. Otherwise it complies if
+// its reputation is low enough against its fear (and it has no
+// territory pressing on the player, which it asks about); a unit moved is
+// told in the AI's line. The original keeps one local, set to 0 at the
+// start and never changed (OpenSMACX shows it as a flag of a branch).
+int demand_withdrawal(int A, int B) {
+    int skip = 0;
+    *game_diplo_second = B;
+    game_diplomacy_caption(A, B);
+    int fear = *game_diplo_fear;
+    uint32_t s = status(B, A);
+    int refuse = 1;
+    if (!(s & TREATY_UNK_200) && !(s & TREATY_PACT)) {
+        refuse = !*game_diplo_can_betray && !*game_diplo_attack_chance &&
+                 (*game_diplo_friction <= (*game_diplo_prev_hostility ? 5 : 15) || fear);
+    }
+    if (!refuse) {
+        wtreaty_on(B, A, TREATY_VENDETTA, 1);
+        F(A)->diplo_spoke[B] = *game_turn;
+        if (*game_sunspot_duration > 0) return 2;
+        game_diplomacy_caption(A, B);
+        say_title(0, A), say_name(1, A);
+        bclear(), bsays(text(0x68dc28));
+        answer(game_str_buffer, B);
+        return 2;
+    }
+    if (!(status(A, B) & TREATY_PACT)) {
+        int x = game_dont_withdrawal(A, B);
+        if (x && (status(A, B) & TREATY_TREATY)) {
+            net_double_cross(B, A, -1);
+            if (*game_sunspot_duration > 0) return 2;
+            say_title(0, A), say_name(1, A), say_title(2, x), say_name(3, x);
+            answer(text(0x68dc30), B);
+            *game_diplo_can_betray = 0;
+            F(A)->diplo_spoke[B] = *game_turn;
+            return 2;
+        }
+        fear = *game_diplo_fear;
+    }
+    if (!(status(A, B) & TREATY_TREATY)) {
+        int f = F(B)->diplo_friction[A] + 1;
+        F(B)->diplo_friction[A] = f < 0 ? 0 : f > 20 ? 20 : f;
+        if (*game_diplo_friction_faction == B && *game_diplo_friction_with == A) ++*game_diplo_friction;
+        if ((status(B, A) & 0x20) || *game_diplo_can_betray || *game_diplo_attack_chance ||
+            *game_diplo_reputation > fear + 3 || (*game_diplo_prev_hostility && !fear)) {
+            if (*game_sunspot_duration > 0) return 1;
+            say_title(0, A), say_name(1, A);
+            answer(text(0x68dc3c), B);
+            return 1;
+        }
+        if (game_territory(B, A, 0, NULL, NULL)) {
+            if (*game_sunspot_duration > 0) return 1;
+            skip = 1;
+            say_title(0, A);
+            if (answer(text(0x68dc48), B)) {
+                if (*game_net_multiplayer) net_post(0x68d514, B, A, 0, 0x44a, B, A, 0, 0);
+                else game_do_withdrawal(B, A);
+            }
+        }
+    }
+    int moved;
+    if (*game_net_multiplayer) {
+        net_send(0x68d514, A, B, 0, 0x44a, A, B, 0, 0);
+        moved = 1;
+    } else {
+        moved = game_do_withdrawal(A, B);
+    }
+    if (skip || *game_sunspot_duration > 0) return 0;
+    {
+        struct faction_def *d = &game_faction_defs[A];
+        *game_parse_plural = 0, *game_parse_gender = d->leader_female;
+        game_parse_says(0, d->leader_name, -1, -1);
+        game_parse_says(1, d->adj_leader, -1, -1);
+    }
+    if (!moved) {
+        answer(text(0x68dc80), B);
+        return 0;
+    }
+    s = status(A, B);
+    if (s & TREATY_PACT) {
+        game_parse_says(2, game_get_pact(A), -1, -1);
+        answer(text(0x68dc54), B);
+    } else if (!(s & TREATY_TREATY)) {
+        answer(text(0x68dc64), B);
+    } else {
+        answer(text(0x68dc74), B);
+    }
+    return 0;
+}
+
+// An AI faction `B` has made contact with `A` (or has something to say):
+// if `A` is a player, the talk is opened (communicate()), unless it spoke
+// to B in the last 16 turns with a commlink and nothing to say. In a
+// network game the call is sent on (the player at the console is told in a
+// message that it has been contacted, or called, by the other); in a
+// hotseat or play-by-email game a player who is not at the console is
+// recorded to be called (the state bits 1 and 2) and the treaty (a
+// commlink, 0x10004) made at once.
+void comm_check(int A, int B) {
+    uint8_t humans = *game_human_factions;
+    if (!(humans >> A & 1)) return;
+    uint32_t s = status(A, B);
+    int comm = (s & TREATY_COMMLINK) != 0;
+    if (comm && !(s & TREATY_WANT_TO_TALK) && F(A)->diplo_spoke[B] >= 0 && *game_turn - F(A)->diplo_spoke[B] < 16) return;
+    if (*game_net_multiplayer) {
+        if (A == *game_current_faction && !(humans >> B & 1)) {
+            game_diplo_state[B] |= 1;
+            if (comm) return;
+            game_diplo_state[B] |= 2;
+            game_net_treaty_on(A, B, 0x10004, 0);
+            return;
+        }
+        if ((humans >> B & 1) && !comm) treaty_on(A, B, 0x10004);
+        if (A == *game_current_faction && !(status(A, B) & 0x8000000)) {
+            say_title(0, B), say_name(1, B), say_noun(2, B);
+            game_netmsg_pop(game_netmsg, text(0x68e5c4), 5000, 0, NULL);
+        }
+        if (B == *game_current_faction && !(status(A, B) & 0x8000000)) {
+            say_title(0, A), say_name(1, A), say_noun(2, A);
+            game_netmsg_pop(game_netmsg, text(0x68e5cc), 5000, 0, NULL);
+        }
+        return;
+    }
+    if (*game_pbem) {
+        if (humans >> B & 1) {
+            if (!comm) treaty_on(A, B, 0x10004);
+            return;
+        }
+        if (A != *game_current_faction) {
+            game_diplo_state_with[A][B] |= 1;
+            if (comm) return;
+            game_diplo_state_with[A][B] |= 2;
+            treaty_on(A, B, 0x10004);
+            return;
+        }
+    }
+    game_communicate(A, B, 0);
+}
+
 // ---- Shadow mode -----------------------------------------------------------------------
 //
 // The game calls these only in the player's talks, where every line is a
@@ -4967,6 +5237,7 @@ __asm__(".text\n"
         return talk_call(orig_##name, faction, other, c_);                                             \
     }
 
+TALK_CHECK(void, comm_check, (int a, int b), (a, b), "%d, %d", a, b)
 TALK_CHECK(void, threaten, (int a, int b), (a, b), "%d, %d", a, b)
 TALK_CHECK(int, energy_trade, (int a, int b), (a, b), "%d, %d", a, b)
 TALK_CHECK(int, propose_pact, (int a, int b), (a, b), "%d, %d", a, b)
@@ -4978,6 +5249,68 @@ TALK_CHECK_POP(propose_attack, 1)
 TALK_CHECK_POP(proposal_menu, 1)
 TALK_CHECK_POP(make_a_proposal, 0)
 TALK_CHECK_POP(battle_plans, 0)
+
+// The endings of the talks (pact_of_brotherhood(), make_treaty(),
+// demand_withdrawal(), do_withdrawal()) call game code that reads stack
+// slots it never set, which differ between the original's frame and ours
+// (the calls are made from different depths of communicate()'s). Both runs
+// of a check, and the game's own call in shadow mode, are therefore made on
+// a stack cleared below the call, as the original's talks were when
+// quiet.c kept these originals (SCRUBBED); in normal mode nothing is
+// cleared, as the originals' callees read whatever is there as well.
+int talk_call_scrub(void *fn, int a, int b);
+__asm__(".text\n"
+        "talk_call_scrub:\n"
+        "    pushl %ebp\n"
+        "    movl %esp, %ebp\n"
+        "    pushl %edi\n"
+        "    pushl %ecx\n"
+        "    pushl %eax\n"
+        "    leal -0x400(%esp), %edi\n"
+        "    movl $0x100, %ecx\n"
+        "    xorl %eax, %eax\n"
+        "    cld\n"
+        "    rep stosl\n"
+        "    popl %eax\n"
+        "    popl %ecx\n"
+        "    popl %edi\n"
+        "    pushl 16(%ebp)\n"
+        "    pushl 12(%ebp)\n"
+        "    call *8(%ebp)\n"
+        "    movl %ebp, %esp\n"
+        "    popl %ebp\n"
+        "    ret\n");
+#define TALK_CHECK_SCRUB(name, has_result)                                                           \
+    static struct hook_stats stats_##name = {#name};                                                 \
+    static void *orig_##name;                                                                        \
+    static int check_##name(int faction, int other) {                                                \
+        struct hook_writes w_ = {0};                                                                 \
+        writes_paths(&w_, game_path);                                                                \
+        hooks_writes_begin(&w_);                                                                     \
+        quiet_talk_next = quiet_menu_next = 0;                                                       \
+        hooks_nested++;                                                                              \
+        int want = talk_call_scrub(orig_##name, faction, other);                                     \
+        hooks_nested--;                                                                              \
+        hooks_writes_middle(&w_);                                                                    \
+        quiet_talk_next = quiet_menu_next = 0;                                                       \
+        int got = talk_call_scrub((void *)name, faction, other);                                     \
+        if (!(has_result)) want = got = 0;                                                           \
+        const char *diff_ = hooks_writes_end(&w_, got, want);                                        \
+        if (diff_) hooks_mismatch(&stats_##name, "(%d, %d) %s", faction, other, diff_);              \
+        hooks_ui_release();                                                                          \
+        return want;                                                                                 \
+    }                                                                                                \
+    static int shadow_##name(int faction, int other) {                                               \
+        if (hooks_nested) return talk_call_scrub(orig_##name, faction, other);                       \
+        if (shadow_bypass()) return talk_call_scrub((void *)name, faction, other);                   \
+        stats_##name.calls++;                                                                        \
+        shadow_tick(DIPLO);                                                                          \
+        return talk_call_scrub(orig_##name, faction, other);                                         \
+    }
+TALK_CHECK_SCRUB(pact_of_brotherhood, 0)
+TALK_CHECK_SCRUB(make_treaty, 0)
+TALK_CHECK_SCRUB(demand_withdrawal, 1)
+TALK_CHECK_SCRUB(do_withdrawal, 1)
 
 // communicate() itself. Game calls run the original unchecked: they involve the
 // player's talks and the diplomacy window. Another module's sweep drops them
@@ -5740,6 +6073,102 @@ static void sweep_communicate(int faction) {
     quiet_text = 0, quiet_talk_pops = 0, quiet_menu_count = 0;
 }
 
+// The endings of the talks: the pact and the treaty (made in a network
+// game now and then), the demand for a withdrawal with the talk's findings
+// varied, and the AI's units placed in the player's territory (some on
+// land squares beside it, and a land unit made to carry, which only the
+// native ones do).
+static void sweep_pact_ending(int faction) {
+    int other = talks(faction);
+    if (!other) return;
+    F(faction)->diplo_status[other] |= TREATY_TREATY, F(other)->diplo_status[faction] |= TREATY_TREATY;
+    if (!rnd(4)) *game_difficulty = rnd(4);
+    int32_t net = *game_net_multiplayer;
+    if (!rnd(6)) *game_net_multiplayer = 1;
+    answers();
+    check_pact_of_brotherhood(faction, other);
+    *game_net_multiplayer = net;
+}
+static void sweep_treaty_ending(int faction) {
+    int other = talks(faction);
+    if (!other) return;
+    if (!rnd(4)) *game_difficulty = rnd(4);
+    int32_t net = *game_net_multiplayer;
+    if (!rnd(6)) *game_net_multiplayer = 1;
+    answers();
+    check_make_treaty(faction, other);
+    *game_net_multiplayer = net;
+}
+static void crowd_territory(int faction, int other) {
+    for (int v = 0; v < *game_veh_count; v++) {
+        struct veh *V = &game_vehs[v];
+        if (V->faction != other || rnd(3)) continue;
+        tile_at(V->x, V->y)->territory = (int8_t)faction;
+        if (!rnd(3)) game_protos[V->proto].carry = 1;
+        for (int d = 0; d < 8; d++) {
+            int nx = xrange(V->x + game_radius_near_x[d]), ny = V->y + game_radius_near_y[d];
+            if (!on_map(nx, ny)) continue;
+            struct map_tile *n = tile_at(nx, ny);
+            if (rnd(2)) n->territory = (int8_t)(rnd(3) ? other : faction);
+            if (!rnd(4)) n->bits ^= 3, n->owner_site = (uint8_t)((n->owner_site & 0xf0) | (rnd(2) ? other : rnd(8)));
+        }
+    }
+}
+static void sweep_demand(int faction) {
+    int other = talks(faction);
+    if (!other) return;
+    struct faction_data *me = F(faction), *ai = F(other);
+    *game_diplo_can_betray = !rnd(4), *game_diplo_attack_chance = !rnd(4);
+    *game_diplo_friction = rnd(25), *game_diplo_prev_hostility = rnd(2);
+    *game_diplo_fear = rnd(2) ? 0 : 1 + rnd(5);
+    *game_diplo_reputation = rnd(8);
+    if (rnd(2)) *game_diplo_friction_faction = other, *game_diplo_friction_with = faction;
+    if (!rnd(3)) ai->diplo_status[faction] ^= TREATY_UNK_200;
+    if (!rnd(3)) ai->diplo_status[faction] ^= 0x20;
+    if (!rnd(3)) me->diplo_status[other] ^= TREATY_PACT;
+    if (!rnd(3)) me->diplo_status[other] ^= TREATY_TREATY;
+    if (!rnd(4)) ai->diplo_friction[faction] = rnd(25) - 2;
+    if (!rnd(5)) *game_sunspot_duration = 3;
+    int32_t net = *game_net_multiplayer;
+    if (!rnd(8)) *game_net_multiplayer = 1;
+    if (rnd(2)) crowd_territory(faction, other);
+    answers();
+    check_demand_withdrawal(faction, other);
+    *game_net_multiplayer = net;
+}
+static void sweep_withdrawal(int faction) {
+    int other = talks(faction);
+    if (!other) return;
+    crowd_territory(faction, other);
+    if (!rnd(3)) {
+        for (int v = 0; v < *game_veh_count; v++)
+            if (game_vehs[v].faction == other && !rnd(5)) game_vehs[v].faction = (uint8_t)faction;
+    }
+    check_do_withdrawal(faction, other);
+}
+// A faction's contact with the player: in a hotseat game, a network game
+// or neither; the call (communicate()) is dropped in a sweep.
+static void sweep_comm_check(int faction) {
+    int other = talks(faction);
+    if (!other) return;
+    struct faction_data *me = F(faction);
+    if (rnd(2)) me->diplo_status[other] ^= TREATY_COMMLINK;
+    if (rnd(2)) me->diplo_status[other] ^= TREATY_WANT_TO_TALK;
+    if (rnd(2)) me->diplo_status[other] ^= 0x8000000;
+    me->diplo_spoke[other] = rnd(3) ? -1 + rnd(*game_turn + 2) : *game_turn - rnd(20);
+    int32_t net = *game_net_multiplayer, pbem = *game_pbem;
+    int r = rnd(3);
+    if (r == 1) *game_net_multiplayer = 1;
+    if (r == 2) *game_pbem = 1;
+    if (rnd(3) == 0) *game_current_faction = other;
+    if (rnd(4) == 0) *game_human_factions |= (uint8_t)(1u << other);
+    if (rnd(2)) game_diplo_state[other] = rnd(4);
+    if (rnd(2)) game_diplo_state_with[faction][other] = rnd(4);
+    answers();
+    check_comm_check(faction, other);
+    *game_net_multiplayer = net, *game_pbem = pbem;
+}
+
 // Once a turn, cases on protected copies of the game, each for a faction
 // with bases made the player.
 static void diplomacy_sweep(void) {
@@ -5747,7 +6176,9 @@ static void diplomacy_sweep(void) {
                                                  sweep_propose_treaty, sweep_make_gift,
                                                  sweep_propose_attack, sweep_buy_tech, sweep_trade_maps,
                                                  sweep_give_a_base, sweep_base_swap, sweep_menus,
-                                                 sweep_battle_plans, sweep_tech_trade, sweep_introduce, sweep_communicate};
+                                                 sweep_battle_plans, sweep_tech_trade, sweep_introduce, sweep_communicate,
+                                                 sweep_pact_ending, sweep_treaty_ending, sweep_demand,
+                                                 sweep_withdrawal, sweep_comm_check};
     enum { N_CASES = sizeof(cases) / sizeof(cases[0]) };
     if (!*game_map || *game_base_count <= 0 || *game_net_multiplayer || *game_pbem) return;
     // Not while the player is in talks: the diplomacy window is open, and
@@ -5788,6 +6219,11 @@ static const struct hook diplomacy_hooks[] = {
     HOOK(0x54ffd0, communicate, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),
     HOOK(0x541100, tech_trade, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),
     HOOK(0x53d360, introduce, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),
+    HOOK(0x53caf0, pact_of_brotherhood, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0x60, 0xf6, 0x93, 0x00),  // mov eax, [net_multiplayer]
+    HOOK(0x53ce10, make_treaty, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x50),  // sub esp, 0x50
+    HOOK(0x549270, demand_withdrawal, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53, 0x56, 0x8b, 0x75, 0x08),  // push ecx; push ebx; push esi
+    HOOK(0x55c430, comm_check, PUSH_EBP_MOV_EBP_ESP, 0x51, 0xa1, 0xe8, 0x64, 0x9a, 0x00),  // push ecx; mov eax, [humans]
+    HOOK(0x548f80, do_withdrawal, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x18),  // sub esp, 0x18
 };
 struct hook_module diplomacy_module = {"diplomacy", diplomacy_hooks, HOOK_COUNT(diplomacy_hooks), diplomacy_sweep, NULL,
                                        -1};

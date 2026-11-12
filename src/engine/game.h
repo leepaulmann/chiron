@@ -1397,9 +1397,10 @@ extern int (*game_has_agenda)(int faction, int other, uint32_t agenda);
 extern int (*game_auto_contact)(void);
 extern void (*game_net_loan)(int faction, int other, int total, int payment);
 extern void (*game_pledge_truce)(int faction, int other);
-extern void (*game_do_withdrawal)(int faction, int other);
+extern int (*game_do_withdrawal)(int faction, int other);
 extern int (*game_diplomacy_menu)(int faction, int other);  // the player's menu of what to ask
-extern void (*game_demand_withdrawal)(int faction, int other);
+extern int (*game_demand_withdrawal)(int faction, int other);
+extern int (*game_dont_withdrawal)(int faction, int other);  // a faction to cross over the demand, or 0
 extern void (*game_call_off_vendetta)(int faction, int other);
 extern void (*game_diplomacy_ends)(int faction, int other);
 extern void(__attribute__((thiscall)) * game_map_win_focus)(void *win, int x, int y);

@@ -764,6 +764,84 @@ static void talks_tests(void) {
     base_count = 3;
 }
 
+// Two AIs going to war (enemies_war): the news, and a wish for revenge turned
+// into a betrayal's mood by the roll.
+static int32_t governor_faction;
+static void war_tests(void) {
+    talk_setup();
+    strcpy((char *)game_at(0x68e5d4), "WARPACT"), strcpy((char *)game_at(0x68e5e0), "WARPUBLIC");
+    static char buffer[64];
+    game_str_buffer = buffer, game_get_he_she = he_she_stub, game_governor_faction = &governor_faction;
+    game_netmsg_pop = news_stub, game_faction_rankings = rankings, game_state = &game_state_;
+    game_difficulty = &difficulty, game_parse_says = says_stub, game_parse_gender = &gender, game_parse_plural = &plural;
+    netmsgs = 0, rand_value = 1, current = 7, difficulty = 3, game_state_ = 0, governor_faction = 0;
+    // (The maps trade is skipped by the status bit that says it was.)
+    factions[1].diplo_status[2] = factions[2].diplo_status[1] = TREATY_TREATY | 0x40000000;
+    // Already at war: nothing.
+    factions[1].diplo_status[2] = TREATY_VENDETTA;
+    enemies_war(1, 2);
+    EXPECT(netmsgs, 0);
+    EXPECT(factions[1].diplo_status[2], TREATY_VENDETTA);
+    // The player in a pact with the first hears of it; the pair are at war,
+    // and the first's revenge becomes a betrayal for 50 turns (roll 1 of 3).
+    factions[1].diplo_status[2] = factions[2].diplo_status[1] = TREATY_TREATY | 0x40000000 | 0x20;
+    factions[1].diplo_agenda[2] = factions[2].diplo_agenda[1] = 0xc00 | 0x1;
+    factions[7].diplo_status[1] = TREATY_PACT;
+    enemies_war(1, 2);
+    EXPECT(netmsgs, 1);
+    EXPECT(strcmp(last_news, "WARPACT"), 0);
+    EXPECT(factions[1].diplo_status[2] & TREATY_VENDETTA, TREATY_VENDETTA);
+    EXPECT(factions[2].diplo_status[1] & TREATY_VENDETTA, TREATY_VENDETTA);
+    EXPECT(factions[1].diplo_status[2] & 0x60, 0x40);
+    EXPECT(factions[1].diplo_merc[2], 50);
+    EXPECT(factions[1].diplo_agenda[2], 0x1);
+    EXPECT(factions[2].diplo_agenda[1], 0x1);
+    // A roll of 0 (3 of 3): the mood is kept. The second's pact partner is
+    // told, with its own wording; the player with no pact but the Empath
+    // Guild's sight (an omniscient game) hears the public one.
+    factions[1].diplo_status[2] = factions[2].diplo_status[1] = TREATY_TREATY | 0x40000000 | 0x20;
+    factions[7].diplo_status[1] = 0, factions[7].diplo_status[2] = TREATY_PACT;
+    rand_value = 3, netmsgs = 0;
+    enemies_war(1, 2);
+    EXPECT(netmsgs, 1);
+    EXPECT(factions[1].diplo_status[2] & 0x60, 0x20);
+    EXPECT(factions[1].diplo_merc[2], 50);
+    factions[7].diplo_status[2] = 0, factions[1].diplo_status[2] = factions[2].diplo_status[1] = TREATY_TREATY | 0x40000000;
+    game_state_ = GAME_STATE_OMNISCIENT, netmsgs = 0;
+    enemies_war(1, 2);
+    EXPECT(strcmp(last_news, "WARPUBLIC"), 0);
+    game_state_ = 0, netmsgs = 0;
+    factions[1].diplo_status[2] = factions[2].diplo_status[1] = TREATY_TREATY | 0x40000000;
+    enemies_war(1, 2);
+    EXPECT(netmsgs, 0);
+    // The second's revenge goes through set_treaty() and clears both's.
+    factions[1].diplo_status[2] = factions[2].diplo_status[1] = TREATY_TREATY | 0x40000000;
+    factions[2].diplo_status[1] |= 0x20;
+    rand_value = 2;
+    enemies_war(1, 2);
+    EXPECT(factions[2].diplo_status[1] & 0x20, 0);
+    EXPECT(factions[2].diplo_status[1] & 0x40, 0x40);
+}
+
+// Two AIs trading techs (enemies_trade_tech): none in a game that bars it, and
+// a pact with nothing to give.
+static int achieved_calls;
+static void achieve_stub(int f, int tech, int from, int steal) { achieved_calls++; }
+static void trade_tech_tests(void) {
+    talk_setup();
+    static struct rules_tech techs[TECH_COUNT];
+    static uint8_t known[TECH_COUNT];
+    game_tech = techs, game_tech_achieved = known, game_tech_achieve = achieve_stub;
+    for (int t = 0; t < TECH_COUNT; t++) techs[t].preq1 = techs[t].preq2 = TECH_NONE;
+    achieved_calls = 0, rules = 0x2000000;
+    factions[1].diplo_status[2] = factions[2].diplo_status[1] = TREATY_PACT;
+    enemies_trade_tech(1, 2);
+    EXPECT(achieved_calls, 0);
+    rules = 0;
+    enemies_trade_tech(1, 2);
+    EXPECT(achieved_calls, 0);
+}
+
 int main(void) {
     game_factions = factions, game_bases = bases, game_base_count = &base_count;
     game_map_width = &width, game_map_half_width = &half_width, game_map_flat = &flat;
@@ -838,6 +916,8 @@ int main(void) {
     attack_tests();
     talks_tests();
     enemies_tests();
+    war_tests();
+    trade_tech_tests();
     if (failures) return 1;
     printf("engine_faction: all tests passed\n");
     return 0;

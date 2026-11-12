@@ -56,6 +56,10 @@ int wants_to_speak(int faction, int other);
 // Two AIs that have met make peace, step by step: truce, treaty, pact, or
 // back down (see faction.c); with `trade` they trade techs first.
 void enemies_treaty(int faction, int other, int trade);
+// Two AIs go to war (see faction.c), and trade a tech each (in a game with
+// tech trading).
+void enemies_war(int faction, int other);
+void enemies_trade_tech(int faction, int other);
 // Units each side has in the other's bases or territory go home when a
 // pact ends; returns how many of `faction`'s moved.
 int pact_withdraw(int faction, int other);

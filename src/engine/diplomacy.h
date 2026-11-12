@@ -39,6 +39,14 @@ int tech_trade(int faction, int other, int ai, int counter, int proposal);
 // that the player called (`unk`): the AI's proposals and demands, its answers
 // to the player's menus, and the greeting.
 void communicate(int faction, int other, int unk);
+// The pact of brotherhood and the treaty are made in the talks; the player
+// demands that the AI withdraw (2: it declared war, 1: it refused, else 0);
+// `second`'s units leave `first`'s territory (returns how many).
+void comm_check(int faction, int other);
+void pact_of_brotherhood(int faction, int other);
+void make_treaty(int faction, int other);
+int demand_withdrawal(int faction, int other);
+int do_withdrawal(int faction, int other);
 // The AI brings the player battle plans.
 void battle_plans(int faction, int other);
 

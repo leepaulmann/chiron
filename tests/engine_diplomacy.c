@@ -117,6 +117,16 @@ static void reset(void) {
 
 static int zero_stub(void) { return 0; }
 static int x_pops_13_stub(char *file, char *label, int flags, void *sprite, void *fn) { return n_shown++, answer_with; }
+static int wd_calls, dont_result, territory_pressing;
+static int wd_stub(int f, int o) { return wd_calls++, 1; }
+static int dont_stub(int f, int o) { return dont_result; }
+static int pressing_stub(int f, int o, int flags, int *base, int *count) { return territory_pressing; }
+static int checks_made, notes_shown, tut_on;
+static void dcheck_stub(int f, int o, int unk) { checks_made++; }
+static int tut_stub(int bit) { return tut_on; }
+static int pop2_stub(char *label, char *picture, int unk) { return notes_shown++; }
+static int32_t netmsg_calls;
+static void __attribute__((thiscall)) dnetmsg_stub(void *n, char *label, int delay, int unk, char *sound) { netmsg_calls++; }
 int main(void) {
     static uint8_t image[0x600000];  // strings, from 0x400000
     game_test_image = image;
@@ -697,6 +707,78 @@ int main(void) {
         EXPECT(factions[1].diplo_spoke[2], turn);
         EXPECT(factions[2].diplo_status[1] & TREATY_WANT_TO_TALK, 0);
         EXPECT(n_shown, 0);
+
+        // The demand for a withdrawal (demand_withdrawal): an AI set on betrayal
+        // goes to war over it (2) and says so; with the sunspots up it says nothing.
+        static int32_t sunspots;
+        game_sunspot_duration = &sunspots, game_do_withdrawal = wd_stub, game_dont_withdrawal = dont_stub;
+        game_territory = pressing_stub;
+        reset();
+        can_betray = 1;
+        EXPECT(demand_withdrawal(1, 2), 2);
+        EXPECT(factions[2].diplo_status[1] & TREATY_VENDETTA, TREATY_VENDETTA);
+        EXPECT(factions[1].diplo_spoke[2], turn);
+        EXPECT(n_shown, 1);
+        EXPECT(second, 2);
+        reset();
+        can_betray = 1, sunspots = 3;
+        EXPECT(demand_withdrawal(1, 2), 2);
+        EXPECT(n_shown, 0);
+        sunspots = 0;
+        // No betrayal, friction 1, no fear: the friction grows, and the AI
+        // withdraws its units itself (do_withdrawal) with a word of it.
+        reset();
+        wd_calls = 0, friction = 1, factions[2].diplo_friction[1] = 20;
+        EXPECT(demand_withdrawal(1, 2), 0);
+        EXPECT(factions[2].diplo_friction[1], 20);
+        EXPECT(wd_calls, 1);
+        EXPECT(n_shown, 1);
+        // The friction counted in the talk grows when it is the AI's with the player.
+        reset();
+        friction = 1, friction_faction = 2, friction_with = 1;
+        demand_withdrawal(1, 2);
+        EXPECT(friction, 2);
+        EXPECT(factions[2].diplo_friction[1], 1);
+        // Too much reputation for its fear: refused (1), nothing withdrawn.
+        reset();
+        wd_calls = 0, talk_rep = 9;
+        EXPECT(demand_withdrawal(1, 2), 1);
+        EXPECT(wd_calls, 0);
+        // Territory pressing on the player's: it asks, and the player (answering
+        // 1) is to withdraw too; the AI's own go first.
+        reset();
+        wd_calls = 0, territory_pressing = 1, answer_with = 1;
+        EXPECT(demand_withdrawal(1, 2), 0);
+        EXPECT(wd_calls, 2);
+        territory_pressing = 0;
+        // The tutorial's note is shown only when it asks.
+        reset();
+        EXPECT(factions[1].diplo_reputation, 0);
+
+        // The treaty is made: both sides' reputations grow, the talk's patience is
+        // spent, the line is the AI's, and a tutorial's note and the territory
+        // news follow when they apply.
+        game_diplomacy_check = dcheck_stub, game_tut_check2 = tut_stub, game_x_pop2 = pop2_stub;
+        game_netmsg_pop = dnetmsg_stub, game_territory = pressing_stub;
+        game_diplo_can_betray = &can_betray;
+        reset();
+        factions[2].diplo_patience[1] = 4, checks_made = notes_shown = 0, netmsg_calls = 0;
+        d_diff = 1, tut_on = 0, territory_pressing = 0;
+        make_treaty(1, 2);
+        EXPECT(factions[2].diplo_patience[1], 0);
+        EXPECT(factions[1].diplo_spoke[2], turn);
+        EXPECT(factions[1].diplo_reputation, 1);
+        EXPECT(factions[2].diplo_reputation, 1);
+        EXPECT(factions[1].diplo_status[2] & TREATY_TREATY, TREATY_TREATY);
+        EXPECT(second, 2);
+        EXPECT(checks_made, 1);
+        EXPECT(n_shown, 1);
+        EXPECT(notes_shown, 1);
+        EXPECT(netmsg_calls, 0);
+        d_diff = 3, territory_pressing = 1;
+        make_treaty(1, 2);
+        EXPECT(notes_shown, 1);  // difficulty 3 and the tutorial not asking
+        EXPECT(netmsg_calls, 1);
 
     }
     if (failures) printf("%d failures\n", failures);
