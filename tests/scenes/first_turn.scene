@@ -1,18 +1,17 @@
-# Quick Start, found the first base, then open the F2, F3 and F4 screens
-30 click 835 362
-40 key Return            # PLANETFALL
-44 key b                 # build a base with the colony pod
-48 snap name-base
-51 key Return            # accept the name
-56 snap after-base
-59 key F2
-63 snap f2
-66 key Escape
-68 key F3
-72 snap f3
-75 key Escape
-77 key F4
-81 snap f4
-84 key Escape
-86 snap map
-89 close
+# The first turn, loaded from the game's autosave: the map with the tutorial
+# note, the map, the lab summary (F2), the game menu and the quit dialog. Leave time after each
+# step: the map scrolls smoothly to the active unit, and a key that arrives
+# mid-scroll leaves the view elsewhere.
+25 load
+42 snap note
+45 click 362 734         # the note's Close
+49 snap map
+52 key F2
+56 snap lab
+59 click 636 520         # the lab summary's Close
+63 snap map-again
+66 click 63 538          # MENU
+70 snap menu
+73 key Escape            # closes the menu, then asks to quit
+77 snap quit-dialog
+80 close

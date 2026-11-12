@@ -89,6 +89,22 @@ struct patch {
 // numbers from the millisecond timer (timeGetTime) at startup, around map
 // generation and after a game is set up get a constant instead, so Quick
 // Start builds the same map in the original's run and in Chiron's.
+// The palette's colour cycling (0x5ff930 and 0x5ffb10, run from a timer)
+// draws from the game's random numbers too, as many times as the timer has
+// fired, so everything random after it would depend on timing. In fixed mode
+// those two calls get a generator of their own.
+static uint32_t *random_state, cycle_state = 1;
+static int(__attribute__((cdecl)) * game_random_fn)(int lo, int hi);
+
+static int __attribute__((cdecl)) cycle_random(int lo, int hi) {
+    uint32_t saved = *random_state;
+    *random_state = cycle_state;
+    int r = game_random_fn(lo, hi);
+    cycle_state = *random_state;
+    *random_state = saved;
+    return r;
+}
+
 static int patch_fixed_seeds(struct pe_image *exe) {
     if (!getenv("CHIRON_FIXED_TIME")) return 0;
     static const uint8_t call_esi[] = {0xff, 0xd6};                                // call esi
@@ -101,8 +117,26 @@ static int patch_fixed_seeds(struct pe_image *exe) {
         if (!code_matches(exe, short_sites[i], call_esi, sizeof(call_esi))) return -1;
     for (size_t i = 0; i < 3; i++)
         if (!code_matches(exe, long_sites[i], call_tgt, sizeof(call_tgt))) return -1;
+    // The map seed itself is drawn from the game's random numbers, which the
+    // title screen's animations also use, so it depends on how many frames
+    // were drawn first: the four places that draw it get a constant too.
+    static const uint32_t seed_sites[] = {0x4e119d, 0x4e1217, 0x59105c, 0x592bae};
+    for (size_t i = 0; i < 4; i++) {
+        uint8_t *p = code_at(exe, seed_sites[i]);
+        if (p[0] != 0xe8 || p + 5 + *(int32_t *)(p + 1) != code_at(exe, 0x625810)) return -1;  // call random
+    }
     for (size_t i = 0; i < 2; i++) memcpy(code_at(exe, short_sites[i]), xor_eax, sizeof(xor_eax));
     for (size_t i = 0; i < 3; i++) memcpy(code_at(exe, long_sites[i]), mov_eax, sizeof(mov_eax));
+    static const uint32_t cycle_sites[] = {0x5ffaec, 0x5ffd61};
+    for (size_t i = 0; i < 2; i++) {
+        uint8_t *p = code_at(exe, cycle_sites[i]);
+        if (p[0] != 0xe8 || p + 5 + *(int32_t *)(p + 1) != code_at(exe, 0x625810)) return -1;
+    }
+    random_state = (uint32_t *)code_at(exe, 0x9bb568);
+    game_random_fn = (int(__attribute__((cdecl)) *)(int, int))code_at(exe, 0x625810);
+    for (size_t i = 0; i < 2; i++) code_put_rel32(code_at(exe, cycle_sites[i]), 0xe8, (uint32_t)cycle_random);
+    for (size_t i = 0; i < 4; i++)  // mov eax, 0x1234 (the caller adds one)
+        memcpy(code_at(exe, seed_sites[i]), (uint8_t[]){0xb8, 0x34, 0x12, 0x00, 0x00}, 5);
     return 0;
 }
 

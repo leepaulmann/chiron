@@ -18,6 +18,15 @@ that changes within either run's burst is left out of the comparison (and
 counted as animated); every other pixel must match exactly. Leave at least 2.5
 seconds after a snap before the next step.
 
+A scene whose first step is "<seconds> load" starts from a saved game instead
+of a new one: the tool first runs Quick Start once with the original's code to
+get the game's turn-one autosave, copies it into each run's user folder as
+saves/scene.SAV, and the step opens it from the title screen (taking 7 s;
+start it at 25 s, once the title screen is up). The rest of the
+game's randomness while a map is built depends on timing, so a scene that
+builds its own map can come out slightly different between runs; a loaded
+game doesn't.
+
 Exit status: 0 when every snap matches, 1 when any differ or are missing.
 Needs the game set up (see README). Nothing it writes belongs in the repo.
 """
@@ -113,16 +122,38 @@ def compare(a_paths, b_paths, diff_path):
     return f"{count} pixels differ in ({box[0]},{box[1]})-({box[2]},{box[3]}), see {diff_path}", note
 
 
-def run(mode, steps, out, binary, timeout):
+LOAD_GAME = (835, 512)       # title screen: Load Game
+SCENE_SAVE = (417, 269)      # Load dialog: the second file under saves/
+AUTOSAVE = os.path.join("saves", "auto", "Alpha Centauri Autosave 1.SAV")
+
+
+def make_save(out, binary):
+    """Quick Start once with the original's code; return its first autosave."""
+    run("prepare", ["30 click 835 362", "40 key Return", "50 key b", "58 key Return", "68 close"], out, binary, 100)
+    path = os.path.join(out, "user-prepare", AUTOSAVE)
+    if not os.path.exists(path):
+        sys.exit(f"no autosave at {path}; see {out}/prepare.log")
+    return path
+
+
+def run(mode, steps, out, binary, timeout, save=None):
     user = os.path.join(out, f"user-{mode}")
     shutil.rmtree(user, ignore_errors=True)
     os.makedirs(user)
+    if save:
+        os.makedirs(os.path.join(user, "saves"))
+        shutil.copy(save, os.path.join(user, "saves", "scene.SAV"))
     for f in os.listdir(out):
         if f.startswith(mode + "-") and f.endswith(".bmp"):
             os.remove(os.path.join(out, f))
     script = []
     for s in steps:
         at, _, action = s.partition(" ")
+        if action == "load":
+            script.append((float(at), "click %d %d" % LOAD_GAME))
+            script.append((float(at) + 3, "dblclick %d %d" % SCENE_SAVE))
+            script.append((float(at) + 7, "key Return"))  # the faction and difficulty note
+            continue
         if action.startswith("snap "):
             name = action[5:].strip()
             for k, dt in enumerate(BURST):
@@ -135,7 +166,7 @@ def run(mode, steps, out, binary, timeout):
                CHIRON_SCRIPT="; ".join(script))
     env.pop("CHIRON_REIMPL", None)
     env.pop("CHIRON_SNAPSHOT", None)
-    args = [binary] + (["--original"] if mode.startswith("original") else [])
+    args = [binary] + (["--original"] if mode.startswith(("original", "prepare")) else [])
     with open(os.path.join(out, f"{mode}.log"), "w") as log:
         try:
             r = subprocess.run(["timeout", "-s", "INT", str(timeout)] + args, cwd=ROOT, env=env,
@@ -157,8 +188,9 @@ def main():
     snaps = [s.split("snap", 1)[1].strip() for s in steps if s.partition(" ")[2].startswith("snap ")]
     os.makedirs(a.out, exist_ok=True)
     modes = a.modes.split(",")
+    save = make_save(a.out, a.bin) if steps and steps[0].split()[1:] == ["load"] else None
     for m in modes:
-        status = run(m, steps, a.out, a.bin, a.timeout)
+        status = run(m, steps, a.out, a.bin, a.timeout, save)
         print(f"{m}: exit status {status}")
     bad = 0
     for name in snaps:

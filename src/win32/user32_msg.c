@@ -481,9 +481,11 @@ static void run_action(const char *step) {
         push_click(x, y, 1);
         push_click(x, y, 2);
     } else if (sscanf(step, " type %31[^;]", name) == 1) {
+        // Handled here rather than pushed: sdl2-compat crashes pushing a
+        // text event built by the caller (SDL3 keeps the text elsewhere).
         SDL_Event e = {.type = SDL_TEXTINPUT};
         snprintf(e.text.text, sizeof(e.text.text), "%.31s", name);
-        SDL_PushEvent(&e);
+        handle_sdl_event(&e);
     } else if (sscanf(step, " key %63[^;]", name) == 1) {
         int ctrl = !strncasecmp(name, "Ctrl+", 5);
         SDL_Keycode k = SDL_GetKeyFromName(name + (ctrl ? 5 : 0));
