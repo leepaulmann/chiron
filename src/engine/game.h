@@ -1914,6 +1914,9 @@ GAME_AT(struct game_texture, ready, 0x6c);
 // (0x6972cc and 0x6972d0, -256 and 256).
 extern uint8_t *game_tex_scratch;
 extern int32_t *game_tex_tbl;
+// The scratch the flat polygon fills (buffer.c) keep their working values in, from
+// 0x9bc000 (they use 0x9bc008 to 0x9bc04c).
+extern uint8_t *game_poly_scratch;
 
 // Point the variables above at a loaded terranx.exe.
 void game_bind(struct pe_image *exe);

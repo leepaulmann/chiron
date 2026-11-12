@@ -506,6 +506,234 @@ int __attribute__((thiscall)) buffer_copy_mask(buffer_t *d, buffer_t *s, int x, 
     return 0;
 }
 
+// ---- Recolouring ---------------------------------------------------------------------
+//
+// These work on the pixels of this buffer in place. For a surface the original
+// runs (it locks through the surface's methods).
+
+SHADOW_DECLARE_T(int, buffer_map_colors, (buffer_t * b, int l, int t, int r, int bt, const uint8_t *table))
+SHADOW_DECLARE_T(int, buffer_map_colors_2, (buffer_t * b, const int32_t *rect, const uint8_t *table))
+SHADOW_DECLARE_T(int, buffer_change_color, (buffer_t * b, int from, int to))
+SHADOW_DECLARE_T(int, buffer_change_color_2, (buffer_t * b, const int32_t *rect, int from, int to))
+SHADOW_DECLARE_T(int, buffer_change_color_3, (buffer_t * b, int x, int y, int w, int h, int from, int to))
+SHADOW_DECLARE(int, buffer_polygon, (buffer_t * b, const int32_t *pts, int n, int color))
+SHADOW_DECLARE(int, buffer_polygon_dest, (buffer_t * b, const int32_t *pts, int n, const uint8_t *table))
+
+// Replaces every pixel of the rectangle (left, top, right, bottom; right and
+// bottom excluded), cut to the clip rectangle, by its entry in the table.
+// 7 if the cut rectangle starts outside the buffer or the buffer has no pixels,
+// else 0.
+static int map_rect(buffer_t *b, const int32_t *rc, const uint8_t *table) {
+    int32_t r[4];
+    if (!intersect(r, rc, b->clip)) return 0;
+    uint8_t *at = lock_at(b, r[0], r[1]);
+    if (!at) return 7;
+    for (int y = r[1]; y < r[3]; y++, at += b->pitch)
+        for (int x = 0; x < r[2] - r[0]; x++) at[x] = table[at[x]];
+    unlock_dib(b);
+    return 0;
+}
+
+// A rectangle by its edges. 0x10 if there is no table.
+int __attribute__((thiscall)) buffer_map_colors(buffer_t *b, int l, int t, int r, int bt, const uint8_t *table) {
+    if (b->dd) return orig_buffer_map_colors(b, l, t, r, bt, table);
+    if (!table) return 0x10;
+    int32_t rc[4] = {l, t, r, bt};
+    return map_rect(b, rc, table);
+}
+
+// The same for a rectangle structure, of which the original takes the right and
+// bottom edges one less (so the last column and row of the rectangle are left
+// as they are). 0x10 if either argument is missing.
+int __attribute__((thiscall)) buffer_map_colors_2(buffer_t *b, const int32_t *rect, const uint8_t *table) {
+    if (b->dd) return orig_buffer_map_colors_2(b, rect, table);
+    if (!rect || !table) return 0x10;
+    int32_t rc[4] = {rect[0], rect[1], rect[2] - 1, rect[3] - 1};
+    return map_rect(b, rc, table);
+}
+
+// Replaces the pixels of colour `from` (its low byte) by `to` in the rectangle
+// given, cut to the clip rectangle.
+static int recolor(buffer_t *b, const int32_t *rc, int from, int to) {
+    int32_t r[4];
+    if (!intersect(r, rc, b->clip)) return 0;
+    uint8_t *at = lock_at(b, r[0], r[1]);
+    if (!at) return 7;
+    for (int y = r[1]; y < r[3]; y++, at += b->pitch)
+        for (int x = 0; x < r[2] - r[0]; x++)
+            if (at[x] == (uint8_t)from) at[x] = (uint8_t)to;
+    unlock_dib(b);
+    return 0;
+}
+
+int __attribute__((thiscall)) buffer_change_color(buffer_t *b, int from, int to) {
+    if (b->dd) return orig_buffer_change_color(b, from, to);
+    if (!b->bits) return 7;
+    int32_t rc[4] = {0, 0, b->width, -b->neg_height};
+    return recolor(b, rc, from, to);
+}
+
+// 3 if there is no rectangle.
+int __attribute__((thiscall)) buffer_change_color_2(buffer_t *b, const int32_t *rect, int from, int to) {
+    if (b->dd) return orig_buffer_change_color_2(b, rect, from, to);
+    if (!rect) return 3;
+    if (!b->bits) return 7;
+    return recolor(b, rect, from, to);
+}
+
+int __attribute__((thiscall)) buffer_change_color_3(buffer_t *b, int x, int y, int w, int h, int from, int to) {
+    if (b->dd) return orig_buffer_change_color_3(b, x, y, w, h, from, to);
+    if (!b->bits) return 7;
+    int32_t rc[4] = {x, y, x + w, y + h};
+    return recolor(b, rc, from, to);
+}
+
+// ---- Flat polygons -------------------------------------------------------------------
+//
+// A polygon of n corners (pairs of x and y) filled one row at a time, in a
+// colour (polygon) or by looking each pixel up in a table (polygon_dest). The
+// polygon is walked down from its first highest corner by two edges, the left
+// one (direction -1) and the right one (+1), each stepped like a line: x moves
+// a whole step a row and an error term says when it moves one more. A row is
+// the span between the two edges, whichever is on the left, from its left end
+// up to but not including its right end. The original's clip bounds are the
+// clip rectangle's right and bottom edges less one, and the span and the rows
+// both stop short of them, so the last column and the last row of the clip
+// rectangle are never drawn. An edge that goes up ends the polygon, so a
+// polygon that is not convex is drawn only as far as its first such corner.
+// The originals keep their working values in globals, which are left behind
+// (named by offset from 0x9bc000 below).
+//   08 colour   0c pixels   10 index of the lowest corner (the one the edges stop at)
+//   18 corners  1c clip left   20 clip top   30 table   38 corner count
+//   3c current row   40 pitch   44 clip right less 1   48 clip bottom less 1
+#define PS(off) (*(uint32_t *)(game_poly_scratch + (off)))
+#define PSI(off) (*(int32_t *)(game_poly_scratch + (off)))
+
+// An edge: its direction, rows left, the corner it ends at, x and what it
+// moves by each row (a whole step, the extra step's sign, the error term, what
+// it grows by and what it falls by when the extra step is taken).
+struct pedge {
+    int32_t dir, rows, next, x, dxq, xstep, err, rem, den;
+};
+
+// Sets the edge up from corner `idx`: walks on round the polygon in its direction
+// past corners at the same height, to the first corner below. 0 if it reaches the
+// lowest corner first, or if the next corner is above (not an edge).
+static int poly_edge(struct pedge *e, int idx) {
+    if (idx == PSI(0x10)) return 0;
+    const int32_t *pts = (const int32_t *)(uintptr_t)PS(0x18);
+    int next, dy;
+    for (;;) {
+        int last = PSI(0x38) - 1;
+        next = idx + e->dir;
+        if (next > last) next = 0;
+        else if (next < 0) next = last;
+        dy = pts[next * 2 + 1] - pts[idx * 2 + 1];
+        e->rows = dy;
+        if (dy != 0) break;
+        idx = next;
+        if (next == PSI(0x10)) return 0;
+    }
+    if (dy < 0) return 0;
+    e->next = next;
+    e->x = pts[idx * 2];
+    int32_t dx = pts[next * 2] - pts[idx * 2];
+    if (dx < 0) {
+        dx = -dx;
+        e->xstep = -1, e->err = 1 - dy;
+        e->dxq = -(dx / dy);
+    } else {
+        e->xstep = 1, e->err = 0;
+        e->dxq = dx / dy;
+    }
+    e->rem = dx % dy;
+    e->den = dy;
+    return 1;
+}
+
+// One row down an edge.
+static inline void poly_step(struct pedge *e) {
+    e->x = (int32_t)((uint32_t)e->x + (uint32_t)e->dxq);
+    e->err = (int32_t)((uint32_t)e->err + (uint32_t)e->rem);
+    if (e->err > 0) {
+        e->x = (int32_t)((uint32_t)e->x + (uint32_t)e->xstep);
+        e->err = (int32_t)((uint32_t)e->err - (uint32_t)e->den);
+    }
+}
+
+// The fill. `table` is set for polygon_dest, which keeps its table (not a colour) in 0x30.
+// A buffer with no pixels is unlocked without having been locked, as the original does.
+static int poly_fill(buffer_t *b, const int32_t *pts, int n, uint32_t arg, int table) {
+    if (!pts || !b) return 0x10;
+    b->base = b->bits;
+    PS(0x0c) = (uint32_t)(uintptr_t)b->base;
+    if (!b->base) goto unlock;
+    b->locks++;
+    PS(0x18) = (uint32_t)(uintptr_t)pts;
+    PS(table ? 0x30 : 0x08) = arg;
+    PSI(0x38) = n;
+    PSI(0x40) = b->pitch;
+    PSI(0x44) = b->clip[2] - 1;
+    PSI(0x1c) = b->clip[0];
+    PSI(0x48) = b->clip[3] - 1;
+    PSI(0x20) = b->clip[1];
+    if (n <= 0) goto unlock;
+    int32_t low_y = 0x7fff, high_y = -0x7ffd, first = 0;
+    for (int i = 0; i < n; i++) {
+        int32_t y = pts[i * 2 + 1];
+        if (y < low_y) low_y = y, first = i;
+        if (y > high_y) high_y = y, PSI(0x10) = i;
+    }
+    if (low_y >= high_y) goto unlock;
+    PSI(0x3c) = low_y;
+    struct pedge left = {.dir = -1}, right = {.dir = 1};
+    if (!poly_edge(&left, first) || !poly_edge(&right, first)) goto unlock;
+    if (PSI(0x3c) >= PSI(0x48)) goto unlock;
+    for (;;) {
+        int32_t y = PSI(0x3c);
+        if (y >= PSI(0x20)) {
+            int32_t lo = left.x < right.x ? left.x : right.x, hi = left.x < right.x ? right.x : left.x;
+            if (hi > PSI(0x1c) && lo < PSI(0x44) && hi - lo > 0) {
+                if (hi >= PSI(0x44)) hi = PSI(0x44);
+                if (lo < PSI(0x1c)) lo = PSI(0x1c);
+                if (hi - lo > 0) {
+                    uint8_t *at = b->base + (intptr_t)y * PSI(0x40) + lo;
+                    if (table) {
+                        const uint8_t *tbl = (const uint8_t *)(uintptr_t)PS(0x30);
+                        for (int32_t i = hi - lo; i > 0; i--, at++) *at = tbl[*at];
+                    } else {
+                        memset(at, (uint8_t)PS(0x08), (size_t)(hi - lo));
+                    }
+                }
+            }
+        }
+        if (--left.rows == 0) {
+            if (!poly_edge(&left, left.next)) break;
+        } else {
+            poly_step(&left);
+        }
+        if (--right.rows == 0) {
+            if (!poly_edge(&right, right.next)) break;
+        } else {
+            poly_step(&right);
+        }
+        PSI(0x3c) = y + 1;
+        if (y + 1 >= PSI(0x48)) break;
+    }
+unlock:
+    if (--b->locks <= 0) b->base = NULL, b->locks = 0;
+    return 0;
+}
+
+int buffer_polygon(buffer_t *b, const int32_t *pts, int n, int color) {
+    if (b && b->dd) return orig_buffer_polygon(b, pts, n, color);
+    return poly_fill(b, pts, n, (uint32_t)color, 0);
+}
+int buffer_polygon_dest(buffer_t *b, const int32_t *pts, int n, const uint8_t *table) {
+    if (b && b->dd) return orig_buffer_polygon_dest(b, pts, n, table);
+    return poly_fill(b, pts, n, (uint32_t)(uintptr_t)table, 1);
+}
+
 // ---- Shadow checks -----------------------------------------------------------
 //
 // A check puts back what a call may write: the object (its lock fields) and
@@ -649,6 +877,47 @@ BUF2_WRITER(int, buffer_copy_mask, (buffer_t * d, buffer_t *s, int x, int y, int
             (d, s, x, y, sx, sy, w, h, key), writes_mask(&w_, d, s, x, y, sx, sy, w, h), 0, "%d, %d, %d, %d, %d, %d, %d", x,
             y, sx, sy, w, h, key)
 
+// The recolouring writes within the rectangle it is given (cut to the clip), and the
+// polygons within the box round their corners, and the polygons' scratch (0x9bc008 to
+// 0x9bc04c).
+BUF_WRITER(int, buffer_map_colors, (buffer_t * b, int l, int t, int r, int bt, const uint8_t *table), (b, l, t, r, bt, table),
+           writes_rect(&w_, b, l, t, r, bt), "%d, %d, %d, %d, %d", l, t, r, bt, table != NULL)
+BUF_WRITER(int, buffer_map_colors_2, (buffer_t * b, const int32_t *rect, const uint8_t *table), (b, rect, table),
+           (rect ? writes_rect(&w_, b, rect[0], rect[1], rect[2], rect[3]) : writes_rect(&w_, b, 0, 0, 0, 0)), "%d, %d",
+           rect != NULL, table != NULL)
+BUF_WRITER(int, buffer_change_color, (buffer_t * b, int from, int to), (b, from, to),
+           writes_rect(&w_, b, b->clip[0], b->clip[1], b->clip[2], b->clip[3]), "%d, %d", from, to)
+BUF_WRITER(int, buffer_change_color_2, (buffer_t * b, const int32_t *rect, int from, int to), (b, rect, from, to),
+           (rect ? writes_rect(&w_, b, rect[0], rect[1], rect[2], rect[3]) : writes_rect(&w_, b, 0, 0, 0, 0)), "%d, %d, %d",
+           rect != NULL, from, to)
+BUF_WRITER(int, buffer_change_color_3, (buffer_t * b, int x, int y, int w, int h, int from, int to), (b, x, y, w, h, from, to),
+           writes_rect(&w_, b, x, y, x + w, y + h), "%d, %d, %d, %d, %d, %d", x, y, w, h, from, to)
+
+static void writes_poly(struct hook_writes *w, buffer_t *b, const int32_t *pts, int n) {
+    int l = 0x7fffffff, t = 0x7fffffff, r = -0x7fffffff, bt = -0x7fffffff;
+    for (int i = 0; pts && i < n && i < 64; i++) {
+        l = imin(l, pts[i * 2]), r = imax(r, pts[i * 2] + 1);
+        t = imin(t, pts[i * 2 + 1]), bt = imax(bt, pts[i * 2 + 1] + 1);
+    }
+    if (!b) return;
+    writes_rect(w, b, l, t, r, bt);
+    hooks_writes_add(w, (void *)(game_poly_scratch + 8), 0x44);
+}
+
+// The same entry as the buffer methods have, for plain C calls.
+#define POLY_WRITER(name, params, args, fmt, ...)                                                    \
+    SHADOW_WRITER_BODY(int, name, params, args, writes_poly(&w_, b, pts, n), fmt, __VA_ARGS__)          \
+    static int shadow_##name params {                                                                \
+        if (hooks_nested || (b && b->dd)) return orig_##name args;                                   \
+        if (shadow_bypass()) return name args;                                                       \
+        stats_##name.calls++;                                                                        \
+        shadow_tick(BUFFER);                                                                         \
+        return check_##name args;                                                                    \
+    }
+POLY_WRITER(buffer_polygon, (buffer_t * b, const int32_t *pts, int n, int color), (b, pts, n, color), "%d, %d", n, color)
+POLY_WRITER(buffer_polygon_dest, (buffer_t * b, const int32_t *pts, int n, const uint8_t *table), (b, pts, n, table), "%d, %d",
+            n, table != NULL)
+
 // ---- Sweep -------------------------------------------------------------------
 
 enum { SW = 61, SH = 40, SPITCH = 64 };  // not a multiple of 4 wide, so the ragged ends are used
@@ -714,10 +983,56 @@ static void sweep_lines(buffer_t *b, int color, int k) {
     }
 }
 
+// Recolouring, through a table and by colour, over rectangles in and partly outside the buffer.
+static void sweep_recolor(buffer_t *b, int k) {
+    static uint8_t table[256];
+    for (int i = 0; i < 256; i++) table[i] = (uint8_t)(rnd_to(3) ? rnd() : i);
+    int32_t r[4] = {coord(SW), coord(SH), coord(SW), coord(SH)};
+    if (k & 1) r[2] = r[0] + rnd_to(SW), r[3] = r[1] + rnd_to(SH);
+    // A pixel that is there, so that the colour is found; the upper bits are not looked at.
+    int from = (b->bits ? b->bits[rnd_to(SPITCH * SH)] : 1) | (rnd_to(2) ? (int)rnd() & ~0xff : 0), to = (int)rnd();
+    check_buffer_map_colors(b, r[0], r[1], r[2], r[3], table);
+    check_buffer_map_colors(b, r[0], r[1], r[2], r[3], NULL);
+    check_buffer_map_colors_2(b, r, table);
+    check_buffer_map_colors_2(b, NULL, table);
+    check_buffer_map_colors_2(b, r, NULL);
+    check_buffer_change_color(b, from, to);
+    check_buffer_change_color_2(b, r, from, to);
+    check_buffer_change_color_2(b, NULL, from, to);
+    check_buffer_change_color_3(b, r[0], r[1], r[2] - r[0], r[3] - r[1], from, to);
+    check_buffer_change_color_3(b, coord(SW), coord(SH), rnd_to(SW + 8) - 4, rnd_to(SH + 8) - 4, from, to);
+}
+
+// Flat polygons: three to seven corners anywhere near the buffer, convex or not,
+// sometimes with corners level or repeated; and some with no corners at all.
+static void sweep_polygons(buffer_t *b, int k, int color) {
+    static int32_t pts[16];
+    static uint8_t table[256];
+    for (int i = 0; i < 256; i++) table[i] = (uint8_t)(rnd_to(3) ? rnd() : i);
+    int n = k == 5 ? rnd_to(2) : 3 + rnd_to(5);
+    for (int i = 0; i < n; i++) {
+        pts[i * 2] = coord(SW), pts[i * 2 + 1] = coord(SH);
+        if (i && rnd_to(5) == 0) pts[i * 2 + 1] = pts[i * 2 - 1];  // level with the one before
+        if (i && rnd_to(8) == 0) pts[i * 2] = pts[i * 2 - 2], pts[i * 2 + 1] = pts[i * 2 - 1];
+    }
+    check_buffer_polygon(b, pts, n, color);
+    check_buffer_polygon_dest(b, pts, n, table);
+    if (k == 4) {  // a convex one for sure: a diamond that fills a good part of the buffer
+        int cx = rnd_to(SW), cy = rnd_to(SH), rx = 3 + rnd_to(SW), ry = 3 + rnd_to(SH);
+        int32_t d[8] = {cx, cy - ry, cx + rx, cy, cx, cy + ry, cx - rx, cy};
+        check_buffer_polygon(b, d, 4, color);
+        check_buffer_polygon_dest(b, d, 4, table);
+    }
+    check_buffer_polygon(b, NULL, n, color);
+    check_buffer_polygon_dest(b, pts, 0, table);
+}
+
 static void buffer_sweep(void) {
     static buffer_t b, sb;
     static uint8_t pixels[SPITCH * SH + 8], spixels[SBPITCH * SBH + 8];
     int sweeping = hooks_sweeping;
+    uint8_t saved_poly[0x50];
+    memcpy(saved_poly, game_poly_scratch, sizeof saved_poly);
     hooks_sweeping = 1;
     sweep_everything = 1;
     rng_state = 0x2545f491u ^ (uint32_t)*game_turn * 2654435761u;
@@ -743,6 +1058,8 @@ static void buffer_sweep(void) {
             if (k & 1) r[2] = r[0] + rnd_to(SW), r[3] = r[1] + rnd_to(SH);
             check_buffer_fill_rect(&b, r, color);
             check_buffer_fill(&b, coord(SW), coord(SH), rnd_to(SW + 8) - 4, rnd_to(SH + 8) - 4, color);
+            sweep_recolor(&b, k);
+            sweep_polygons(&b, k, color);
         }
         // Copies from another buffer, of another size and pitch.
         reset_sized(&sb, spixels, SBW, SBH, SBPITCH);
@@ -776,8 +1093,11 @@ static void buffer_sweep(void) {
         check_buffer_put_pixel(&b, 1, 1, 1);
         check_buffer_fill_rect(&b, b.full, 1);
         check_buffer_fill_all(&b, 1);
+        sweep_recolor(&b, 1);
+        sweep_polygons(&b, 1, 1);
     }
     sweep_everything = 0;
+    memcpy(game_poly_scratch, saved_poly, sizeof saved_poly);
     hooks_sweeping = sweeping;
 }
 
@@ -802,6 +1122,19 @@ static const struct hook buffer_hooks[] = {
     HOOK(0x5e3203, buffer_box_rect, 0x8b, 0x44, 0x24, 0x04, 0x53, 0x85, 0xc0, 0x8b, 0xd9),
     HOOK(0x5e3283, buffer_dotted_box, 0x8b, 0x44, 0x24, 0x04, 0x53, 0x8b, 0x5c, 0x24, 0x0c),
     HOOK(0x5e32f3, buffer_dotted_box_rect, 0x8b, 0x44, 0x24, 0x04, 0x53, 0x85, 0xc0, 0x8b, 0xd9),
+    // push ebp; mov ebp, esp; sub esp, 0x80; mov eax, [ebp+0x18]
+    HOOK(0x5da330, buffer_map_colors, 0x55, 0x8b, 0xec, 0x81, 0xec, 0x80, 0x00, 0x00, 0x00, 0x8b, 0x45, 0x18),
+    // sub esp, 0x8c; mov eax, [ebp+8]
+    HOOK(0x5da4d0, buffer_map_colors_2, 0x55, 0x8b, 0xec, 0x81, 0xec, 0x8c, 0x00, 0x00, 0x00, 0x8b, 0x45, 0x08),
+    // sub esp, 0x90; push ebx; push esi; mov esi, ecx
+    HOOK(0x5de580, buffer_change_color, 0x55, 0x8b, 0xec, 0x81, 0xec, 0x90, 0x00, 0x00, 0x00, 0x53, 0x56, 0x8b, 0xf1),
+    // sub esp, 0x8c; mov eax, [ebp+8]
+    HOOK(0x5de730, buffer_change_color_2, 0x55, 0x8b, 0xec, 0x81, 0xec, 0x8c, 0x00, 0x00, 0x00, 0x8b, 0x45, 0x08),
+    // sub esp, 0x80; push ebx; push esi; mov esi, ecx
+    HOOK(0x5e2070, buffer_change_color_3, 0x55, 0x8b, 0xec, 0x81, 0xec, 0x80, 0x00, 0x00, 0x00, 0x53, 0x56, 0x8b, 0xf1),
+    // sub esp, 0x48; push ebx; push esi; mov esi, [ebp+0xc]
+    HOOK(0x626620, buffer_polygon, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x48, 0x53, 0x56, 0x8b, 0x75, 0x0c),
+    HOOK(0x626e10, buffer_polygon_dest, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x48, 0x53, 0x56, 0x8b, 0x75, 0x0c),
 };
 // The palette's sweep runs with this one: the game seldom calls its functions.
 extern struct hook_module palette_module;

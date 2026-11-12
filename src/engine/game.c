@@ -107,6 +107,7 @@ float *game_sprite_ratio;
 double *game_sprite_max_ratio;
 uint8_t *game_tex_scratch;
 int32_t *game_tex_tbl;
+uint8_t *game_poly_scratch;
 int32_t *game_fill_gap, *game_copy_rem, *game_mask_units, *game_mask_gap_a, *game_mask_gap_b;
 int32_t *game_base_workers, *game_base_reserved, *game_base_food_ok, *game_current_turn;
 int32_t *game_base_square_flags;
@@ -1338,4 +1339,5 @@ void game_bind(struct pe_image *exe) {
     game_sprite_min_size = (int32_t *)code_at(exe, 0x9b661c);
     game_tex_scratch = code_at(exe, 0x9bb490);
     game_tex_tbl = (int32_t *)code_at(exe, 0x6972c4);
+    game_poly_scratch = code_at(exe, 0x9bc000);
 }

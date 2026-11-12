@@ -10,6 +10,8 @@ enum { W = 10, H = 6, PITCH = 12 };  // 12 bytes a row: wider than the buffer
 static uint8_t pixels[PITCH * H + 4];
 static struct game_buffer b;
 static int32_t gap;
+static uint8_t poly_scratch[0x50];
+#define POLY(off) (*(int32_t *)(poly_scratch + (off)))
 static int failures;
 
 static void check_(const char *what, int got, int want) {
@@ -37,6 +39,7 @@ static int count(int color) {
 
 int main(void) {
     game_fill_gap = &gap;
+    game_poly_scratch = poly_scratch;
     static int32_t scratch[4];
     game_copy_rem = &scratch[0], game_mask_units = &scratch[1], game_mask_gap_a = &scratch[2], game_mask_gap_b = &scratch[3];
     reset();
@@ -198,6 +201,88 @@ int main(void) {
     EXPECT(buffer_copy_mask(&b, &sb, 2, 1, 2, 1, 3, 2, 7), 0);
     EXPECT(spix[1 * 8 + 2], 100), EXPECT(spix[1 * 8 + 3], 100), EXPECT(spix[1 * 8 + 4], 1 * 8 + 4 + 1), EXPECT(px(2, 1), 100);
     EXPECT(b.locks, 0), EXPECT(sb.locks, 0);
+
+    // Recolouring through a table: the rectangle, cut to the clip rectangle.
+    uint8_t table[256];
+    for (int i = 0; i < 256; i++) table[i] = (uint8_t)i;
+    table[3] = 9;
+    reset();
+    memset(pixels, 3, sizeof pixels);
+    EXPECT(buffer_map_colors(&b, 1, 1, 4, 3, table), 0);
+    EXPECT(count(9), 3 * 2), EXPECT(px(1, 1), 9), EXPECT(px(3, 2), 9), EXPECT(px(4, 2), 3), EXPECT(px(0, 1), 3), EXPECT(b.locks, 0);
+    EXPECT(buffer_map_colors(&b, 1, 1, 4, 3, NULL), 0x10);
+    b.clip[0] = 0, b.clip[1] = 0, b.clip[2] = 2, b.clip[3] = 2;
+    EXPECT(buffer_map_colors(&b, -5, -5, 20, 20, table), 0);
+    EXPECT(count(9), 3 * 2 + 3);  // the 2 by 2 corner, 1 of which was done before
+    EXPECT(buffer_map_colors(&b, 7, 7, 9, 9, table), 0);
+    EXPECT(buffer_map_colors(&b, W, 0, W + 3, 3, table), 0);  // empty after the cut: nothing
+    // The rectangle form takes one less off the right and bottom.
+    reset();
+    memset(pixels, 3, sizeof pixels);
+    int32_t mr[4] = {1, 1, 5, 4};
+    EXPECT(buffer_map_colors_2(&b, mr, table), 0);
+    EXPECT(count(9), 3 * 2), EXPECT(px(3, 2), 9), EXPECT(px(4, 2), 3), EXPECT(px(3, 3), 3);
+    EXPECT(buffer_map_colors_2(&b, NULL, table), 0x10), EXPECT(buffer_map_colors_2(&b, mr, NULL), 0x10);
+    b.bits = NULL;
+    EXPECT(buffer_map_colors_2(&b, mr, table), 7);
+    EXPECT(buffer_map_colors(&b, 1, 1, 4, 3, table), 7);
+
+    // Changing a colour: the whole buffer, or a rectangle, cut to the clip rectangle.
+    reset();
+    memset(pixels, 4, sizeof pixels);
+    b.clip[0] = 3, b.clip[1] = 2, b.clip[2] = 5, b.clip[3] = 4;
+    EXPECT(buffer_change_color(&b, 4, 6), 0);
+    EXPECT(count(6), 2 * 2), EXPECT(px(3, 2), 6), EXPECT(px(2, 2), 4), EXPECT(px(5, 3), 4), EXPECT(b.locks, 0);
+    reset();
+    memset(pixels, 4, sizeof pixels);
+    int32_t cr[4] = {1, 1, 4, 3};
+    EXPECT(buffer_change_color_2(&b, cr, 0x104, 7), 0);  // only the low byte of the colour counts
+    EXPECT(count(7), 3 * 2), EXPECT(px(1, 1), 7), EXPECT(px(3, 2), 7), EXPECT(px(4, 2), 4);
+    EXPECT(buffer_change_color_2(&b, NULL, 4, 7), 3);
+    EXPECT(buffer_change_color_3(&b, 2, 2, 3, 2, 4, 8), 0);
+    EXPECT(count(8), 3 * 2 - 2), EXPECT(px(2, 2), 7), EXPECT(px(4, 3), 8);  // (2,2), (3,2) were already 7
+    b.clip[0] = 0, b.clip[1] = 0, b.clip[2] = 3, b.clip[3] = 3;
+    EXPECT(buffer_change_color_3(&b, 0, 0, 20, 20, 0, 5), 0);
+    EXPECT(count(5), 0);  // no pixel was 0
+    EXPECT(buffer_change_color_3(&b, 0, 0, 20, 20, 4, 5), 0);
+    EXPECT(count(5) > 0, 1), EXPECT(px(5, 5), 4), EXPECT(px(2, 2), 7);
+    b.bits = NULL;
+    EXPECT(buffer_change_color(&b, 1, 2), 7), EXPECT(buffer_change_color_3(&b, 0, 0, 1, 1, 1, 2), 7);
+    EXPECT(buffer_change_color_2(&b, cr, 1, 2), 7), EXPECT(buffer_change_color_2(&b, NULL, 1, 2), 3);
+
+    // A flat polygon: a square (2,1)-(8,5), the rows from the top to the one before the
+    // clip bottom less one, the columns from the left up to the one before the right.
+    reset();
+    const int32_t sq[8] = {2, 1, 8, 1, 8, 5, 2, 5};
+    EXPECT(buffer_polygon(&b, sq, 4, 5), 0);
+    EXPECT(count(5), 6 * 4), EXPECT(px(2, 1), 5), EXPECT(px(7, 4), 5), EXPECT(px(8, 1), 0), EXPECT(px(2, 5), 0), EXPECT(px(1, 1), 0);
+    EXPECT(b.locks, 0), EXPECT(b.base == NULL, 1);
+    EXPECT(POLY(0x38), 4), EXPECT(POLY(0x08), 5), EXPECT(POLY(0x40), PITCH), EXPECT(POLY(0x44), W - 1), EXPECT(POLY(0x48), H - 1);
+    EXPECT(POLY(0x10), 2), EXPECT(POLY(0x3c), 4), EXPECT(POLY(0x0c) != 0, 1);
+    // The last column and the last row of the clip rectangle are not drawn.
+    reset();
+    b.clip[0] = 3, b.clip[1] = 2, b.clip[2] = 6, b.clip[3] = 5;
+    buffer_polygon(&b, sq, 4, 5);
+    EXPECT(count(5), 2 * 2), EXPECT(px(3, 2), 5), EXPECT(px(4, 3), 5), EXPECT(px(5, 2), 0), EXPECT(px(3, 4), 0), EXPECT(px(2, 2), 0);
+    // A triangle with a sloping edge.
+    reset();
+    const int32_t tri[6] = {2, 0, 9, 0, 2, 5};
+    buffer_polygon(&b, tri, 3, 6);
+    EXPECT(count(6) > 6, 1), EXPECT(px(2, 0), 6), EXPECT(px(8, 0), 6), EXPECT(px(9, 0), 0), EXPECT(px(2, 4), 6), EXPECT(px(8, 2), 0);
+    // Through a table, a pixel at a time.
+    reset();
+    memset(pixels, 7, sizeof pixels);
+    uint8_t t2[256];
+    for (int i = 0; i < 256; i++) t2[i] = (uint8_t)(i == 7 ? 8 : i);
+    EXPECT(buffer_polygon_dest(&b, sq, 4, t2), 0);
+    EXPECT(count(8), 6 * 4), EXPECT(px(2, 1), 8), EXPECT(px(8, 1), 7), EXPECT(POLY(0x30) != 0, 1);
+    // Too few corners, no corners, no polygon, and a buffer with no pixels.
+    reset();
+    const int32_t line[4] = {1, 1, 9, 1};
+    EXPECT(buffer_polygon(&b, line, 2, 5), 0), EXPECT(buffer_polygon(&b, sq, 0, 5), 0), EXPECT(count(5), 0);
+    EXPECT(buffer_polygon(&b, NULL, 4, 5), 0x10), EXPECT(buffer_polygon_dest(&b, NULL, 4, t2), 0x10);
+    b.bits = NULL;
+    EXPECT(buffer_polygon(&b, sq, 4, 5), 0), EXPECT(b.locks, 0), EXPECT(POLY(0x0c), 0);
 
     printf(failures ? "buffer: %d failures\n" : "buffer: all passed\n", failures);
     return failures != 0;
