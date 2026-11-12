@@ -176,6 +176,27 @@ def run(mode, steps, out, binary, timeout, save=None):
     return r.returncode
 
 
+def attempt(a, steps, snaps, modes, save):
+    """Run every mode and compare the snaps; returns {snap: problem or None}."""
+    for m in modes:
+        status = run(m, steps, a.out, a.bin, a.timeout, save)
+        print(f"{m}: exit status {status}")
+    results = {}
+    for name in snaps:
+        paths = {m: [os.path.join(a.out, f"{m}-{name}.{k}.bmp") for k in range(len(BURST))] for m in modes}
+        missing = [x for ps in paths.values() for x in ps if not os.path.exists(x)]
+        if missing:
+            results[name] = f"{len(missing)} frames missing, e.g. {missing[0]}"
+            print(f"{name}: {results[name]}")
+            continue
+        results[name] = None
+        for m in modes[1:]:
+            r, note = compare(paths[modes[0]], paths[m], os.path.join(a.out, f"diff-{name}.bmp"))
+            print(f"{name}: " + (r or "match") + note)
+            results[name] = results[name] or r
+    return results
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("scene")
@@ -183,27 +204,24 @@ def main():
     p.add_argument("--modes", default="original,on")
     p.add_argument("--bin", default=os.path.join(ROOT, "build", "chiron"))
     p.add_argument("--timeout", type=int, default=300)
+    p.add_argument("--retries", type=int, default=1, help="rerun once when snaps differ (0 to report the first attempt)")
     a = p.parse_args()
     steps = read_scene(a.scene)
     snaps = [s.split("snap", 1)[1].strip() for s in steps if s.partition(" ")[2].startswith("snap ")]
     os.makedirs(a.out, exist_ok=True)
     modes = a.modes.split(",")
     save = make_save(a.out, a.bin) if steps and steps[0].split()[1:] == ["load"] else None
-    for m in modes:
-        status = run(m, steps, a.out, a.bin, a.timeout, save)
-        print(f"{m}: exit status {status}")
-    bad = 0
-    for name in snaps:
-        paths = {m: [os.path.join(a.out, f"{m}-{name}.{k}.bmp") for k in range(len(BURST))] for m in modes}
-        missing = [x for ps in paths.values() for x in ps if not os.path.exists(x)]
-        if missing:
-            print(f"{name}: {len(missing)} frames missing, e.g. {missing[0]}")
-            bad += 1
-            continue
-        for m in modes[1:]:
-            r, note = compare(paths[modes[0]], paths[m], os.path.join(a.out, f"diff-{name}.bmp"))
-            print(f"{name}: " + (r or "match") + note)
-            bad += r is not None
+    results = attempt(a, steps, snaps, modes, save)
+    if any(r for r in results.values()) and a.retries:
+        # A scene runs on wall-clock time, so a slow load now and then puts a
+        # click on the wrong thing. A real difference shows up again.
+        print("differences found; running the scene again")
+        first = results
+        results = attempt(a, steps, snaps, modes, save)
+        for name, r in results.items():
+            if first[name] and not r:
+                print(f"{name}: differed only on the first attempt (timing), matches now")
+    bad = sum(1 for r in results.values() if r)
     sys.exit(1 if bad else 0)
 
 

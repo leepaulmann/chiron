@@ -39,7 +39,7 @@ enum hook_mode hooks_mode_from_env(void) {
     return HOOKS_ON;
 }
 
-static int install(struct pe_image *exe, const struct hook *h, enum hook_mode mode) {
+static int install(struct pe_image *exe, const struct hook *h, enum hook_mode mode, int skip) {
     if (h->prologue_len < 5 || !code_matches(exe, h->addr, h->prologue, h->prologue_len)) return -1;
     uint8_t *t = code_stub_alloc(h->prologue_len + 5);
     if (!t) return -1;
@@ -53,8 +53,17 @@ static int install(struct pe_image *exe, const struct hook *h, enum hook_mode mo
     }
     code_put_rel32(t + h->prologue_len, 0xe9, (uint32_t)(uintptr_t)code_at(exe, h->addr + h->prologue_len));
     *h->original = t;
+    if (skip) return 1;
     void *target = mode == HOOKS_SHADOW ? h->shadow : h->ours;
     code_put_rel32(code_at(exe, h->addr), 0xe9, (uint32_t)(uintptr_t)target);
+    return 0;
+}
+
+// Whether a comma-separated list holds a word.
+static int listed(const char *list, const char *word) {
+    size_t n = strlen(word);
+    for (const char *p = list; (p = strstr(p, word)); p += n)
+        if ((p == list || p[-1] == ',') && (p[n] == 0 || p[n] == ',')) return 1;
     return 0;
 }
 
@@ -68,15 +77,27 @@ void hooks_apply(struct pe_image *exe, enum hook_mode mode) {
     hooks_mode = mode;
     if (mode == HOOKS_OFF) return;
     game_bind(exe);
-    int installed = 0, total = 0;
+    // CHIRON_SKIP lists modules (by name) and functions (by name or
+    // address) to leave with the original's code, for bisecting: a skipped
+    // function's trampoline is still made, so Chiron's own calls to the
+    // original keep working, but the game's calls aren't redirected.
+    const char *skip = getenv("CHIRON_SKIP");
+    int installed = 0, total = 0, skipped = 0;
     for (size_t m = 0; m < N_MODULES; m++)
         for (int i = 0; i < modules[m]->count; i++) {
             const struct hook *h = &modules[m]->hooks[i];
             if (h->shadow_only && mode != HOOKS_SHADOW) continue;
             if (!h->shadow_only) total++;
-            if (install(exe, h, mode) == 0) installed += !h->shadow_only;
+            char addr[16];
+            snprintf(addr, sizeof(addr), "0x%x", h->addr);
+            int off = !h->shadow_only && skip &&
+                      (listed(skip, modules[m]->name) || listed(skip, h->stats->name) || listed(skip, addr));
+            int r = install(exe, h, mode, off);
+            if (r == 0) installed += !h->shadow_only;
+            else if (r > 0) skipped++;
             else fprintf(stderr, "chiron: %s (0x%x) not replaced: unexpected code\n", h->stats->name, h->addr);
         }
+    if (skipped) fprintf(stderr, "chiron: %d functions left with the original (CHIRON_SKIP)\n", skipped);
     fprintf(stderr, "chiron: %d of %d game functions reimplemented%s\n", installed, total,
             mode == HOOKS_SHADOW ? ", shadowing the originals" : "");
     if (mode == HOOKS_SHADOW) {

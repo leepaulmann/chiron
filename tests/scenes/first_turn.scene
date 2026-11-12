@@ -4,7 +4,7 @@
 # mid-scroll leaves the view elsewhere.
 25 load
 42 snap note
-45 click 362 734         # the note's Close
+48 click 362 734         # the note's Close
 49 snap map
 52 key F2
 56 snap lab
