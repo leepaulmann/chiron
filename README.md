@@ -105,7 +105,11 @@ module at a time. So far:
   valuation of techs, and the bonuses techs give; which facilities,
   projects and terraforming a faction may build, the projects that make a
   facility redundant, the free tech's message, and the AI's choice of
-  research;
+  research; what happens when a faction gains a tech (the books kept, its
+  rank in the race, new reactors and designs, free facilities and
+  abilities, social choices and terraforming unlocked, the maps a tech
+  reveals, commlinks, the Datalinks and the techs shared, and the news of
+  it);
 - the map: coordinates and distances, what a square holds (altitude,
   region, units and bases, resources, pods, elevation), territory, zones of
   control, sensors, landmarks, where units can reach and how bases, coasts
@@ -261,7 +265,8 @@ module at a time. So far:
   (first contact, the AI's demands, pleas, bribes and offers, loans,
   truces asked or given, and how its patience runs out); pacts and
   treaties sealed, withdrawals demanded and carried out, and the plans the
-  AI suggests; the wars and tech trades the AI arranges with others; and
+  AI suggests, and vendettas called off at the player's request; the wars
+  and tech trades the AI arranges with others; and
   two AIs making peace step by step (truce, treaty, pact), with the news
   of it;
 - events: the turn's random events (perihelion and the base and world
