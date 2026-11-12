@@ -90,7 +90,7 @@ static void __attribute__((thiscall)) shadow_status_win_redraw(void *win) {
     }
 
 // Originals the talks call that read stack slots they never set (the player's
-// menu, a withdrawal demanded, a vendetta called off): called from communicate()'s
+// menu, a pledge, the endings of the talks): called from communicate()'s
 // frame by the original and from ours by the sweep's check, they would see
 // different leftovers. In shadow mode they run on a cleared stack, so that
 // both runs see the same.
@@ -113,7 +113,6 @@ static void __attribute__((thiscall)) shadow_status_win_redraw(void *win) {
             "    popl %ecx\n"                                         \
             "    popl %edi\n"                                         \
             "    jmp *orig_" #name "\n")
-SCRUBBED(call_off_vendetta);
 SCRUBBED(diplomacy_menu);
 SCRUBBED(pledge_truce);
 SCRUBBED(diplomacy_ends);
@@ -616,7 +615,6 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x5bf330, x_pop2, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x10),  // mov eax, [ebp+16]
     QUIET_HOOK(0x5bf310, x_pop, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x0c),   // mov eax, [ebp+12]
     QUIET_HOOK(0x5bf5d0, x_pops, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x10),  // mov eax, [ebp+16]
-    QUIET_HOOK(0x54bec0, call_off_vendetta, SEH_PROLOGUE),
     QUIET_HOOK(0x54c560, diplomacy_menu, SEH_PROLOGUE),
     QUIET_HOOK(0x53d160, pledge_truce, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0x60, 0xf6, 0x93, 0x00),
     QUIET_HOOK(0x53e470, diplomacy_ends, PUSH_EBP_MOV_EBP_ESP, 0x33, 0xc0),

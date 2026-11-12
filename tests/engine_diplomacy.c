@@ -128,6 +128,10 @@ static int pop2_stub(char *label, char *picture, int unk) { return notes_shown++
 static int32_t netmsg_calls;
 static void __attribute__((thiscall)) dnetmsg_stub(void *n, char *label, int delay, int unk, char *sound) { netmsg_calls++; }
 static int comm_calls;
+static int attack_wanted, wants_calls, enemies_calls, text_miss = -1, text_opens, enemies_a, enemies_b;
+static int wants_stub(int f, int o, int odds) { return wants_calls++, attack_wanted; }
+static void enemies_stub(int f, int o, int trade) { enemies_calls++, enemies_a = f, enemies_b = o; }
+static int open_count_stub(char *file, char *label) { return text_opens++ == text_miss; }
 static void comm_stub(int f, int o, int unk) { comm_calls++; }
 int main(void) {
     static uint8_t image[0x600000];  // strings, from 0x400000
@@ -753,6 +757,97 @@ int main(void) {
         EXPECT(demand_withdrawal(1, 2), 0);
         EXPECT(wd_calls, 2);
         territory_pressing = 0;
+
+        // ---- call_off_vendetta: the menu lists the factions the AI has a vendetta
+        // against and the player a link and some contact with (3 and 4 here).
+        game_wants_to_attack = wants_stub, game_enemies_treaty = enemies_stub, game_x_text_open = open_count_stub;
+        #define VENDETTA_SETUP()                                                                  \
+            do {                                                                                  \
+                reset();                                                                          \
+                factions[2].diplo_status[1] |= TREATY_UNK_80;                                     \
+                for (int f = 3; f <= 5; f++) factions[2].diplo_status[f] = TREATY_VENDETTA;       \
+                factions[2].diplo_status[7] = TREATY_VENDETTA;                                    \
+                factions[1].diplo_status[3] = TREATY_COMMLINK | TREATY_TREATY;                    \
+                factions[1].diplo_status[4] = TREATY_COMMLINK | TREATY_PACT;                      \
+                factions[1].diplo_status[5] = TREATY_COMMLINK;                                    \
+                factions[1].diplo_status[7] = TREATY_TREATY;                                      \
+                attack_wanted = 0, wants_calls = enemies_calls = 0, text_opens = 0, text_miss = -1; \
+                menu_answer = -1;                                                                 \
+            } while (0)
+        VENDETTA_SETUP();
+        call_off_vendetta(1, 2);
+        EXPECT(second, 2);
+        EXPECT(popups, 1);
+        EXPECT(n_items, 2);
+        EXPECT(items[0], 3);
+        EXPECT(items[1], 4);
+        EXPECT(text_opens, 2);
+        EXPECT(n_shown, 0);
+        EXPECT(wants_calls, 0);
+        // The first label missing ends the list: no menu, nothing happens.
+        VENDETTA_SETUP();
+        text_miss = 0, menu_count = 1, menu_answers[0] = 3;
+        call_off_vendetta(1, 2);
+        EXPECT(n_items, 0);
+        EXPECT(menu_next, 0);
+        EXPECT(n_shown, 0);
+        // The second label missing: only the first is listed.
+        VENDETTA_SETUP();
+        text_miss = 1;
+        call_off_vendetta(1, 2);
+        EXPECT(n_items, 1);
+        // Agreed: the bit 0x4000000 is made and 0x40 dropped, and the treaty is made
+        // (enemies_treaty) unless the faction would attack the AI anyway.
+        VENDETTA_SETUP();
+        factions[2].diplo_status[3] |= TREATY_UNK_40;
+        menu_answer = 3;
+        call_off_vendetta(1, 2);
+        EXPECT(factions[2].diplo_status[3] & TREATY_UNK_4000000, TREATY_UNK_4000000);
+        EXPECT(factions[2].diplo_status[3] & TREATY_UNK_40, 0);
+        EXPECT(wants_calls, 1);
+        EXPECT(n_shown, 1);
+        EXPECT(shown[0], 0x68ddcc);
+        EXPECT(enemies_calls, 1);
+        EXPECT(enemies_a, 2);
+        EXPECT(enemies_b, 3);
+        VENDETTA_SETUP();
+        attack_wanted = 1, menu_answer = 4;
+        call_off_vendetta(1, 2);
+        EXPECT(n_shown, 1);
+        EXPECT(shown[0], 0x68ddc0);
+        EXPECT(enemies_calls, 0);
+        EXPECT(factions[2].diplo_status[4] & TREATY_UNK_4000000, TREATY_UNK_4000000);
+        // Refused when the AI wants revenge on it.
+        VENDETTA_SETUP();
+        factions[2].diplo_status[3] |= TREATY_WANT_REVENGE, menu_answer = 3;
+        call_off_vendetta(1, 2);
+        EXPECT(shown[0], 0x68dda8);
+        EXPECT(factions[2].diplo_status[3] & TREATY_UNK_4000000, 0);
+        EXPECT(wants_calls, 0);
+        // Or when the faction has atrocities and the AI none (and not otherwise).
+        VENDETTA_SETUP();
+        factions[3].major_atrocities = 1, menu_answer = 3;
+        call_off_vendetta(1, 2);
+        EXPECT(shown[0], 0x68dda8);
+        VENDETTA_SETUP();
+        factions[3].major_atrocities = 1, factions[2].major_atrocities = 2, menu_answer = 3;
+        call_off_vendetta(1, 2);
+        EXPECT(shown[0], 0x68ddcc);
+        // The 0x40 bit without the AI's 0x80 bit towards the player: refused in its own words.
+        VENDETTA_SETUP();
+        factions[2].diplo_status[3] |= TREATY_UNK_40, factions[2].diplo_status[1] &= ~(uint32_t)TREATY_UNK_80;
+        menu_answer = 3;
+        call_off_vendetta(1, 2);
+        EXPECT(shown[0], 0x68ddb4);
+        EXPECT(factions[2].diplo_status[3] & TREATY_UNK_40, TREATY_UNK_40);
+        // Nothing to list: no menu.
+        VENDETTA_SETUP();
+        factions[1].diplo_status[3] = factions[1].diplo_status[4] = TREATY_COMMLINK;
+        menu_count = 1, menu_answers[0] = 3;
+        call_off_vendetta(1, 2);
+        EXPECT(menu_next, 0);
+        EXPECT(n_shown, 0);
+        game_x_text_open = text_open_stub;
         // The tutorial's note is shown only when it asks.
         reset();
         EXPECT(factions[1].diplo_reputation, 0);

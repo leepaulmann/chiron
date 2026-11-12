@@ -49,6 +49,7 @@ void pact_of_brotherhood(int faction, int other);
 void make_treaty(int faction, int other);
 int demand_withdrawal(int faction, int other);
 int do_withdrawal(int faction, int other);
+void call_off_vendetta(int faction, int other);
 // The AI brings the player battle plans.
 void battle_plans(int faction, int other);
 

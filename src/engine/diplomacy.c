@@ -5100,6 +5100,88 @@ int demand_withdrawal(int A, int B) {
     return 0;
 }
 
+// ---- call_off_vendetta ---------------------------------------------------------------
+
+// The player (`A`) asks the AI (`B`) to call off its vendetta against a faction
+// the player has a commlink and some contact with (the menu lists them, from
+// the CALLOFF label of the script). The AI refuses when it wants revenge on
+// that faction (the 0x20 bit), or when that faction has atrocities to its
+// name and the AI has none, and when it holds the 0x40 bit towards it and
+// the player's standing with the AI lacks the 0x80 bit (each with its line).
+// Otherwise it makes the treaty bit 0x4000000 and drops 0x40 towards it,
+// and, if that faction wants to attack the AI anyway
+// (wants_to_attack()), says so; if not, it says it agrees and makes
+// the treaty (enemies_treaty() in a game of its own, a plain treaty bit 2 to
+// the other players in a network game). The original's dialogs here are shown with
+// no wait function, where the other talks pass the wait of the popups.
+static void call_off_vendetta_body(uint8_t *pop, int A, int B) {
+    *game_diplo_second = B;
+    game_popup_start(pop, game_pop_file, text(0x68dd90), -1, 0, 0x100042, 0);
+    void *portrait = game_faction_portraits[B];
+    *(void **)(pop + POP_ICON) = *(int32_t *)(pop + POP_HAS_ICON) ? NULL : portrait;
+    game_sprite_box_sprite(pop + POP_SPRITE_BOX, portrait, 0, B);
+    int listed = 0;
+    for (int f = 1; f < FACTION_COUNT; f++) {
+        if (!(*game_factions_alive >> f & 1) || f == A || f == B) continue;
+        if (!(status(B, f) & TREATY_VENDETTA)) continue;
+        uint32_t s = status(A, f);
+        if (!(s & TREATY_COMMLINK) || !(s & 7)) continue;
+        // The label is looked up for each faction listed, and the first miss ends the list.
+        if (game_x_text_open(*game_script_file, text(0x68dd98))) break;
+        game_text_get();
+        say_title(0, f), say_name(1, f), say_noun(2, f);
+        game_str_buffer[0] = 0;
+        game_parse_string(*game_text_line, game_str_buffer);
+        item(pop, game_str_buffer, f);
+        listed++;
+    }
+    if (!listed) return;
+    int target = menu(pop);
+    if (target < 0) return;
+    say_title(0, target), say_name(1, target);
+    game_parse_says(2, game_faction_defs[target].adj_insult_faction, -1, -1);
+    say_noun(3, target);
+    uint32_t s = status(B, target);
+    if ((s & TREATY_WANT_REVENGE) || (F(target)->major_atrocities && !F(B)->major_atrocities)) {
+        game_x_pops_11(text(0x68dda8), 0x100000, portrait, NULL);
+        return;
+    }
+    if ((s & TREATY_UNK_40) && !(status(B, A) & TREATY_UNK_80)) {
+        game_x_pops_11(text(0x68ddb4), 0x100000, portrait, NULL);
+        return;
+    }
+    wset_treaty(B, target, TREATY_UNK_4000000, 1, 0);
+    wset_treaty(B, target, TREATY_UNK_40, 0, 0);
+    if (game_wants_to_attack(target, B, 0)) {
+        game_x_pops_11(text(0x68ddc0), 0x100000, portrait, NULL);
+        return;
+    }
+    game_x_pops_11(text(0x68ddcc), 0x100000, portrait, NULL);
+    if (*game_net_multiplayer) net_send(0x68d444, B, target, 2, 0x441, B, target, 2, 0);
+    else game_enemies_treaty(B, target, 0);
+}
+void call_off_vendetta_in(uint8_t *pop, int A, int B);
+void call_off_vendetta_in(uint8_t *pop, int A, int B) {
+    game_popup_ctor(pop);
+    call_off_vendetta_body(pop, A, B);
+    pop_end(pop);
+}
+// The popup where the original's frame keeps it.
+__asm__(".text\n"
+        ".globl call_off_vendetta\n"
+        "call_off_vendetta:\n"
+        "    pushl %ebp\n"
+        "    movl %esp, %ebp\n"
+        "    subl $0x5394, %esp\n"
+        "    pushl 12(%ebp)\n"
+        "    pushl 8(%ebp)\n"
+        "    leal -0x5388(%ebp), %eax\n"
+        "    pushl %eax\n"
+        "    call call_off_vendetta_in\n"
+        "    movl %ebp, %esp\n"
+        "    popl %ebp\n"
+        "    ret\n");
+
 // An AI faction `B` has made contact with `A` (or has something to say):
 // if `A` is a player, the talk is opened (communicate()), unless it spoke
 // to B in the last 16 turns with a commlink and nothing to say. In a
@@ -5290,7 +5372,7 @@ TALK_CHECK_POP(make_a_proposal, 0)
 TALK_CHECK_POP(battle_plans, 0)
 
 // The endings of the talks (pact_of_brotherhood(), make_treaty(),
-// demand_withdrawal(), do_withdrawal()) call game code that reads stack
+// demand_withdrawal(), do_withdrawal(), call_off_vendetta()) call game code that reads stack
 // slots it never set, which differ between the original's frame and ours
 // (the calls are made from different depths of communicate()'s). Both runs
 // of a check, and the game's own call in shadow mode, are therefore made on
@@ -5350,6 +5432,7 @@ TALK_CHECK_SCRUB(pact_of_brotherhood, 0)
 TALK_CHECK_SCRUB(make_treaty, 0)
 TALK_CHECK_SCRUB(demand_withdrawal, 1)
 TALK_CHECK_SCRUB(do_withdrawal, 1)
+TALK_CHECK_SCRUB(call_off_vendetta, 0)
 
 // communicate() itself. Game calls run the original unchecked: they involve the
 // player's talks and the diplomacy window. Another module's sweep drops them
@@ -6182,6 +6265,54 @@ static void sweep_withdrawal(int faction) {
     }
     check_do_withdrawal(faction, other);
 }
+// The player asks the AI to call off a vendetta: the AI has vendettas against
+// some third factions, which the player has a commlink and some contact with
+// or not; the AI's standing with the one picked (wanting revenge, the 0x40
+// bit with or without the 0x80 bit towards the player, atrocities) and the
+// player's answer are varied. The menu is answered with a faction it lists
+// or declines. (The branch of a network game is left out: a sweep must not
+// set net_multiplayer.)
+static void sweep_call_off_vendetta(int faction) {
+    int other = talks(faction);
+    if (!other) return;
+    struct faction_data *me = F(faction), *ai = F(other);
+    int listed[FACTION_COUNT], n = 0;
+    for (int f = 1; f < FACTION_COUNT; f++) {
+        if (!alive(f) || f == faction || f == other) continue;
+        if (rnd(4)) ai->diplo_status[f] |= TREATY_VENDETTA;
+        else ai->diplo_status[f] &= ~(uint32_t)TREATY_VENDETTA;
+        if (rnd(4)) me->diplo_status[f] |= TREATY_COMMLINK;
+        else me->diplo_status[f] &= ~(uint32_t)TREATY_COMMLINK;
+        if (rnd(5)) me->diplo_status[f] = (me->diplo_status[f] & ~7u) | (uint32_t)rnd(8);
+        if (!rnd(6)) ai->diplo_status[f] |= TREATY_WANT_REVENGE;
+        else if (rnd(2)) ai->diplo_status[f] &= ~(uint32_t)TREATY_WANT_REVENGE;
+        if (rnd(2)) ai->diplo_status[f] |= TREATY_UNK_40;
+        else ai->diplo_status[f] &= ~(uint32_t)TREATY_UNK_40;
+        if (!rnd(3)) F(f)->major_atrocities = 1 + rnd(3);
+        else if (rnd(2)) F(f)->major_atrocities = 0;
+        // What wants_to_attack() weighs: the third faction's moods towards the AI.
+        if (!rnd(3)) F(f)->diplo_status[other] ^= TREATY_VENDETTA;
+        if (!rnd(3)) F(f)->diplo_status[other] ^= TREATY_WANT_REVENGE;
+        if (!rnd(3)) F(f)->diplo_status[other] ^= TREATY_PACT;
+        if (!rnd(3)) F(f)->diplo_friction[other] = rnd(25);
+        if (!rnd(3)) F(f)->diplo_patience[other] = rnd(20);
+        if (!rnd(3)) F(f)->mil_strength = rnd(5000);
+        if (!rnd(3)) ai->mil_strength = rnd(5000);
+    }
+    if (rnd(2)) ai->diplo_status[faction] |= TREATY_UNK_80;
+    else ai->diplo_status[faction] &= ~(uint32_t)TREATY_UNK_80;
+    if (!rnd(4)) ai->major_atrocities = 1 + rnd(3);
+    else if (rnd(2)) ai->major_atrocities = 0;
+    for (int f = 1; f < FACTION_COUNT; f++) {
+        if (!alive(f) || f == faction || f == other || !(status(other, f) & TREATY_VENDETTA)) continue;
+        uint32_t s = status(faction, f);
+        if ((s & TREATY_COMMLINK) && (s & 7)) listed[n++] = f;
+    }
+    quiet_answer = n && rnd(5) ? listed[rnd(n)] : -1;
+    quiet_text = 1;
+    check_call_off_vendetta(faction, other);
+    quiet_text = 0, quiet_answer = 0;
+}
 // A faction's contact with the player: in a hotseat game, a network game
 // or neither; the call (communicate()) is dropped in a sweep.
 static void sweep_comm_check(int faction) {
@@ -6236,7 +6367,8 @@ static void diplomacy_sweep(void) {
                                                  sweep_give_a_base, sweep_base_swap, sweep_menus,
                                                  sweep_battle_plans, sweep_tech_trade, sweep_introduce, sweep_communicate,
                                                  sweep_pact_ending, sweep_treaty_ending, sweep_demand,
-                                                 sweep_withdrawal, sweep_comm_check, sweep_suggest_plan};
+                                                 sweep_withdrawal, sweep_comm_check, sweep_suggest_plan,
+                                                 sweep_call_off_vendetta};
     enum { N_CASES = sizeof(cases) / sizeof(cases[0]) };
     if (!*game_map || *game_base_count <= 0 || *game_net_multiplayer || *game_pbem) return;
     // Not while the player is in talks: the diplomacy window is open, and
@@ -6282,6 +6414,7 @@ static const struct hook diplomacy_hooks[] = {
     HOOK(0x549270, demand_withdrawal, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53, 0x56, 0x8b, 0x75, 0x08),  // push ecx; push ebx; push esi
     HOOK(0x55c430, comm_check, PUSH_EBP_MOV_EBP_ESP, 0x51, 0xa1, 0xe8, 0x64, 0x9a, 0x00),  // push ecx; mov eax, [humans]
     HOOK(0x54acc0, suggest_plan, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x18),  // sub esp, 0x18
+    HOOK(0x54bec0, call_off_vendetta, PUSH_EBP_MOV_EBP_ESP, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00),
     HOOK(0x548f80, do_withdrawal, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x18),  // sub esp, 0x18
 };
 struct hook_module diplomacy_module = {"diplomacy", diplomacy_hooks, HOOK_COUNT(diplomacy_hooks), diplomacy_sweep, NULL,
