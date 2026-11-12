@@ -85,7 +85,7 @@ struct patch {
 };
 
 // For scripted scenes (tools/snapcheck.py) every run must play out the same.
-// With CHIRON_FIXED_TIME set, the four places that seed the game's random
+// With CHIRON_FIXED_TIME set, the five places that seed the game's random
 // numbers from the millisecond timer (timeGetTime) at startup, around map
 // generation and after a game is set up get a constant instead, so Quick
 // Start builds the same map in the original's run and in Chiron's.
