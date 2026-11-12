@@ -1880,6 +1880,37 @@ extern float *game_sprite_ratio;
 extern double *game_sprite_max_ratio;
 extern int32_t *game_sprite_min_size;
 
+// ---- Textures (texture.c) -------------------------------------------------------
+
+// The game's Texture class (OpenSMACX calls it so): the picture the map's
+// terrain is drawn from, which the polygon fills map onto a buffer. `data`
+// is `pitch` bytes a row (256 for the fills that wrap), `uv4` the corner
+// coordinates of a 4-point polygon and `uv8` those of an 8-point one, each a
+// pair of ints (u then v, in pixels). `ready` is set by extract and, for the
+// two fills that wrap, must be non-zero.
+struct game_texture {
+    uint8_t *data;
+    int32_t pitch;
+    int32_t height;
+    int32_t uv4[8];
+    int32_t uv8[16];
+    int32_t ready;
+};
+_Static_assert(sizeof(struct game_texture) == 0x70, "layout of the game's Texture");
+GAME_AT(struct game_texture, pitch, 4);
+GAME_AT(struct game_texture, height, 8);
+GAME_AT(struct game_texture, uv4, 0xc);
+GAME_AT(struct game_texture, uv8, 0x2c);
+GAME_AT(struct game_texture, ready, 0x6c);
+
+// The scratch the polygon fills work in (0x9bb490 to 0x9bb570): the
+// originals keep their working values in globals and leave them behind. Named
+// by address in texture.c. And the little table the fills' inner loops add
+// from (0x6972c4, 0x6972c8) with the limits for the shading values
+// (0x6972cc and 0x6972d0, -256 and 256).
+extern uint8_t *game_tex_scratch;
+extern int32_t *game_tex_tbl;
+
 // Point the variables above at a loaded terranx.exe.
 void game_bind(struct pe_image *exe);
 
