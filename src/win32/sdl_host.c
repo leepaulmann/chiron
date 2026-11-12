@@ -11,12 +11,28 @@ static SDL_Window *window;
 static SDL_Renderer *renderer;
 static SDL_Texture *texture;
 static int tex_w, tex_h;
+
+// How the frame is stretched to the window, from CHIRON_SCALE:
+//   sharp (default): blown up by the largest whole number that fits, with
+//     hard pixel edges, then smoothly stretched the rest of the way. Pixels
+//     stay crisp without some rows and columns coming out wider than others.
+//   nearest: hard edges all the way (uneven pixel sizes at fractional scales).
+//   smooth: one smooth stretch (soft at large scales).
+enum { SCALE_SHARP, SCALE_NEAREST, SCALE_SMOOTH };
+static int scale_mode;
+static SDL_Texture *scaled;  // sharp: the frame at a whole-number scale
+static int scaled_k;
 static Uint32 wake_event;
 
 void sdl_host_init(void) {
     static int done;
     if (done) return;
     done = 1;
+    const char *mode = getenv("CHIRON_SCALE");
+    if (mode && !strcmp(mode, "nearest")) scale_mode = SCALE_NEAREST;
+    else if (mode && !strcmp(mode, "smooth")) scale_mode = SCALE_SMOOTH;
+    else if (mode && *mode && strcmp(mode, "sharp"))
+        fprintf(stderr, "chiron: CHIRON_SCALE=%s: expected sharp, nearest or smooth; using sharp\n", mode);
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");  // let SIGINT/SIGTERM end the process
     SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
@@ -74,6 +90,40 @@ void sdl_host_snapshot_tick(void) {
     SDL_SaveBMP(snap, snapshot);
 }
 
+// For sharp scaling, draw the frame into `scaled` at the largest whole-number
+// scale that fits the window's real pixels (which differ from its size on a
+// high-DPI screen), with hard edges; the caller then stretches `scaled` the
+// rest of the way smoothly. Returns 0 to draw the frame directly instead: at
+// 1x, or if the renderer has no target textures.
+static int sharp_scale(void) {
+    if (scale_mode != SCALE_SHARP) return 0;
+    int ow, oh;
+    if (SDL_GetRendererOutputSize(renderer, &ow, &oh)) return 0;
+    int k = ow / tex_w < oh / tex_h ? ow / tex_w : oh / tex_h;
+    if (k <= 1) {
+        // No whole-number step fits; just stretch smoothly.
+        SDL_SetTextureScaleMode(texture, SDL_ScaleModeLinear);
+        return 0;
+    }
+    if (!scaled || scaled_k != k) {
+        if (scaled) SDL_DestroyTexture(scaled);
+        scaled = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_TARGET, tex_w * k,
+                                   tex_h * k);
+        scaled_k = k;
+        if (!scaled) {
+            scale_mode = SCALE_NEAREST;  // stay with the plain copy from now on
+            SDL_SetTextureScaleMode(texture, SDL_ScaleModeNearest);
+            return 0;
+        }
+        SDL_SetTextureScaleMode(scaled, SDL_ScaleModeLinear);
+    }
+    SDL_SetTextureScaleMode(texture, SDL_ScaleModeNearest);
+    SDL_SetRenderTarget(renderer, scaled);
+    SDL_RenderCopy(renderer, texture, NULL, NULL);
+    SDL_SetRenderTarget(renderer, NULL);
+    return 1;
+}
+
 void sdl_host_present(struct surface *fb, const char *title) {
     sdl_host_init();
     if (!window) {
@@ -92,6 +142,8 @@ void sdl_host_present(struct surface *fb, const char *title) {
     }
     if (!texture || tex_w != fb->width || tex_h != fb->height) {
         if (texture) SDL_DestroyTexture(texture);
+        if (scaled) SDL_DestroyTexture(scaled);
+        scaled = NULL;
         texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_STREAMING,
                                     fb->width, fb->height);
         tex_w = fb->width;
@@ -99,12 +151,13 @@ void sdl_host_present(struct surface *fb, const char *title) {
         // Letterbox and scale; SDL also maps mouse events back to these
         // logical coordinates.
         SDL_RenderSetLogicalSize(renderer, fb->width, fb->height);
+        SDL_SetTextureScaleMode(texture, scale_mode == SCALE_SMOOTH ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
     }
     snapshot_frame(fb);
     SDL_UpdateTexture(texture, NULL, fb->bits, fb->stride);
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     SDL_RenderClear(renderer);
-    SDL_RenderCopy(renderer, texture, NULL, NULL);
+    SDL_RenderCopy(renderer, sharp_scale() ? scaled : texture, NULL, NULL);
     SDL_RenderPresent(renderer);
 }
 

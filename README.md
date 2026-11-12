@@ -79,7 +79,11 @@ DirectSound. It plays the game's movies (decoded by the game itself) through Chi
 Multiplayer is not implemented yet.
 
 Options: `--screen WxH` sets the screen size the game sees and
-`--volume 0-100` scales the sound.
+`--volume 0-100` scales the sound. `CHIRON_SCALE` picks how the picture is
+stretched to the window: `sharp` (the default) enlarges it by the largest
+whole number that fits with crisp pixels and then smooths the rest of the way,
+`nearest` keeps hard pixel edges throughout (at fractional sizes some pixels
+come out wider than others), and `smooth` is a single smooth stretch.
 
 For debugging, `--trace` logs Windows calls, `CHIRON_SNAPSHOT=file.bmp`
 saves the screen as it is presented (`tools/bmp2png.py` converts it),
