@@ -62,7 +62,7 @@ CHIRON_REIMPL=shadow ...       # check reimplementations against the original; s
 - Names come from OpenSMACX and Thinker. Their signatures and logic are often wrong in details, and OpenSMACX's map generation is marked untested, so trust the disassembly and shadow mode over the reference.
 - Reimplementations call each other directly, and call game code through the `game_*` pointers. Code adapted from either reference keeps its copyright notice.
 - Add a unit test in `tests/engine_<module>.c`. These run on a small made-up map with stand-ins for the game functions.
-- Verify with a shadow soak (0 mismatches) and a normal-mode soak. A planted bug that shadow mode catches is a good check that the sweep reaches the code.
+- Verify with a shadow soak (0 mismatches) and a normal-mode soak. A planted bug that shadow mode catches is a good check that the sweep reaches the code. For a writer, also plant one that writes nothing: a check whose saved spans miss the memory the function really writes compares the wrong bytes and passes anyway (a buffer copy written in the wrong direction passed 134,000 game calls this way).
 - Write comments in plain prose describing behaviour, and note where the original differs from OpenSMACX.
 
 ## Commits
