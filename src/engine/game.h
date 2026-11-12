@@ -1807,12 +1807,8 @@ extern int(__attribute__((stdcall)) * game_text_out)(void *dc, int x, int y, con
 extern int(__attribute__((thiscall)) * game_font_init)(void *font, const char *face, int size, int flags);
 extern void **game_font_dc, **game_font_default;
 extern int32_t *game_font_slack;
-// What drawing text calls (stdcall imports), and the globals it leaves behind: the table
-// of hyperlink rectangles (three of 16 bytes and a colour for each link number), and the x
+// The globals text drawing leaves behind: the table of hyperlink rectangles (three of 16 bytes and a colour for each link number), and the x
 // the last wrapped line ended at.
-extern int(__attribute__((stdcall)) * game_set_bk_mode)(void *dc, int mode);
-extern uint32_t(__attribute__((stdcall)) * game_set_text_color)(void *dc, uint32_t color);
-extern int(__attribute__((stdcall)) * game_text_out)(void *dc, int x, int y, const char *s, int n);
 extern int32_t *game_link_rects, *game_text_end_x;
 // ---- Sprites (sprite.c) ---------------------------------------------------------
 
