@@ -4364,16 +4364,22 @@ at_577361:
             l24 += 99;
         }
         {
-            int score_type = 1;
+            // A land square in another region than the unit's, when its
+            // own region has bases (0x577bf7): only a colony pod with no
+            // site to take there (or, for a unit with a weapon, a scout, or
+            // a faction with plans for the region and no flag against it)
+            // weighs it; every other kind drops the square. (Squares of
+            // another region beside land are the polar caps' and a few
+            // more: ours kept weighing them, without the extras, and so
+            // gave the move to another square than the original.)
             if (!at_sea && !l88 && region != l6c && F->region_total_bases[region]) {
-                score_type = 0;
                 if (!game_weapons[proto_of(V->proto)->weapon].offense) {
-                    if (plan == PLAN_COLONIZATION && !F->region_best_site[region]) score_type = 1;
-                } else if (plan == PLAN_RECONNAISSANCE || (region_plan > 2 && !(F->region_flags[region] & 0x20))) {
-                    score_type = 1;
+                    if (plan != PLAN_COLONIZATION || F->region_best_site[region]) continue;
+                } else if (plan != PLAN_RECONNAISSANCE && (region_plan <= 2 || (F->region_flags[region] & 0x20))) {
+                    continue;
                 }
             }
-            if (score_type && (!st4 || !exploring)) {
+            if (!st4 || !exploring) {
                 lbc = st6 ? 2 : plan;
                 const struct veh *S = game_vehs + l20;
                 int friendly = !(l20 < 0 || (S->faction != faction && !(F->diplo_status[S->faction] & TREATY_PACT)));
@@ -5740,6 +5746,19 @@ static void sweep_enemy_move(void) {
             near_square(B->x, B->y, rnd(4), &x, &y);
             if (!occupied(tile(x, y), MAP_BASE) || tile(x, y)->owner_site % 16 == f) put(v, x, y);
         }
+        // Now and then on one of the map's edge rows, where the squares two
+        // rings away are off the map.
+        if (rnd(4) == 0) {
+            static const int rows[] = {0, 1, 2, -3, -2, -1};
+            for (int j = 0; j < 40; j++) {
+                int y = rows[rnd(6)], x = rnd(*game_map_width);
+                if (y < 0) y += *game_map_height;
+                if ((x ^ y) & 1) continue;
+                if (occupied(tile(x, y), MAP_BASE)) continue;
+                put(v, x, y);
+                break;
+            }
+        }
         // Each kind in turn: formers (automated ones too), convoys,
         // artifacts, probe teams, colony pods, scouts, combat units,
         // defenders, warships; or any.
@@ -5852,6 +5871,13 @@ static void sweep_enemy_move(void) {
             }
         }
         vary_squares(V->x, V->y);
+        if (rnd(3) == 0) {
+            // A square next to it in another region (a continent beside the
+            // polar cap, say), which the original weighs differently.
+            int sx, sy;
+            near_square(V->x, V->y, 1, &sx, &sy);
+            tile(sx, sy)->region = tile(rnd(*game_map_width), rnd(*game_map_height))->region;
+        }
         if (rival_on_square(v)) {
             hooks_writes_abandon(&w);
             continue;
