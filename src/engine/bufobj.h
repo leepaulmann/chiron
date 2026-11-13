@@ -21,3 +21,8 @@ int __attribute__((thiscall)) buffer_tile(struct game_buffer *b, struct game_buf
 int __attribute__((thiscall)) buffer_tile_2(struct game_buffer *b, struct game_sprite *spr, int sx, int sy, int x, int y, int w, int h);
 void __attribute__((thiscall)) buffer_box_sprite(struct game_buffer *b, const int32_t *rect, const struct game_box_frame *f);
 void __attribute__((thiscall)) buffer_clear_links(struct game_buffer *b);
+
+// The comparison of two twin Buffers a check makes (see bufobj.c): NULL if every field matches (handles and heap pointers by whether
+// they are set, the two device contexts by content, the results `got` and `want`), else what differs; and the pixels of the two.
+const char *buffer_twin_diff(struct game_buffer *a, struct game_buffer *b, int got, int want);
+const char *buffer_pixels_diff(struct game_buffer *a, struct game_buffer *b);

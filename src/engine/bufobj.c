@@ -459,7 +459,7 @@ static int is_handle(int o) {
 }
 
 // The twins after the original ran on `a` and Chiron's code on `b`: NULL if they match.
-static const char *twin_diff(buffer_t *a, buffer_t *b, int got, int want) {
+const char *buffer_twin_diff(buffer_t *a, buffer_t *b, int got, int want) {
     static char diff[160];
     for (int o = 0; o < (int)sizeof(buffer_t); o += 4) {
         int32_t x = *at(a, o), y = *at(b, o);
@@ -482,7 +482,7 @@ static const char *twin_diff(buffer_t *a, buffer_t *b, int got, int want) {
 // After a difference the twins are built again alike with the original, so each check that
 // follows is of its own function rather than of the first difference.
 static void twin_check(struct hook_stats *s, buffer_t *a, buffer_t *b, int got, int want, const char *what) {
-    const char *d = twin_diff(a, b, got, want);
+    const char *d = buffer_twin_diff(a, b, got, want);
     if (!d) return;
     hooks_mismatch(s, " (%s): %s", what, d);
     int w = a->width, h = -a->neg_height, flags = *at(a, FLAGS) & 3;
@@ -510,7 +510,7 @@ static void random_rect(int32_t *r, int w, int h) {
 // ---- The tiles' sweep ------------------------------------------------------------------------
 
 // The pixels of two Buffers, which the twin check of a drawing function compares as well.
-static const char *pixels_diff(buffer_t *a, buffer_t *b) {
+const char *buffer_pixels_diff(buffer_t *a, buffer_t *b) {
     if (!a->bits || !b->bits) return a->bits == b->bits ? NULL : "pixels (one has none)";
     size_t n = (size_t)a->pitch * (size_t)-a->neg_height;
     return memcmp(a->bits, b->bits, n) ? "pixels" : NULL;
@@ -538,9 +538,9 @@ static void make_tile_pairs(int w, int h, int sw, int sh) {
 
 // Compare the twins after one call of each; after a difference, build them again alike.
 static void tile_check(struct hook_stats *s, int got, int want, const char *what) {
-    const char *d = twin_diff(&td_a, &td_b, got, want);
-    if (!d) d = pixels_diff(&td_a, &td_b);
-    if (!d && (d = twin_diff(&ts_a, &ts_b, 0, 0))) {
+    const char *d = buffer_twin_diff(&td_a, &td_b, got, want);
+    if (!d) d = buffer_pixels_diff(&td_a, &td_b);
+    if (!d && (d = buffer_twin_diff(&ts_a, &ts_b, 0, 0))) {
         static char msg[200];
         snprintf(msg, sizeof msg, "pattern: %s", d);
         d = msg;

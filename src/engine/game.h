@@ -1841,6 +1841,33 @@ extern void(__attribute__((thiscall)) * game_spot_ctor)(void *spot);
 extern void(__attribute__((thiscall)) * game_spot_dtor)(void *spot);
 extern void(__attribute__((thiscall)) * game_spot_init)(void *spot, int n);
 extern void (*game_exit)(int code);
+// ---- Image files and Sprite files (bufimg.c) ----------------------------------------------------
+// The game's file-mapping object (16 bytes: the view, the file handle, the mapping handle and the size): made empty,
+// closed, opened for reading (a view of the whole file, or 0) or for reading and writing, made new with a size
+// (zero-filled), closed with the file cut at an end pointer, or let go without cutting. Then the C runtime's search
+// backwards for a character (cdecl: from `end` down to just after `start`; 0 if none), the Windows calls the image
+// functions make, as imported, the palette the Buffers take their colours from when they are copied, the video
+// mode number that picks the extension of the picture files, and the strings in the game's data (file extensions, the
+// prefix of a scrambled picture file, the mode and signature of a bitmap file).
+struct game_mfile {
+    void *view, *handle, *mapping;
+    uint32_t size;
+};
+extern void *(__attribute__((thiscall)) * game_mfile_ctor)(struct game_mfile *f);
+extern void(__attribute__((thiscall)) * game_mfile_close)(struct game_mfile *f);
+extern uint8_t *(__attribute__((thiscall)) * game_mfile_open)(struct game_mfile *f, const char *name, int flag);
+extern uint8_t *(__attribute__((thiscall)) * game_mfile_open_rw)(struct game_mfile *f, const char *name, int flag);
+extern uint8_t *(__attribute__((thiscall)) * game_mfile_create)(struct game_mfile *f, const char *name, int size, int flag);
+extern void(__attribute__((thiscall)) * game_mfile_release)(struct game_mfile *f);
+extern void(__attribute__((thiscall)) * game_mfile_finish)(struct game_mfile *f, const uint8_t *end);
+extern const char *(*game_rfind_char)(const char *start, const char *end, int c);
+extern uint32_t(__attribute__((stdcall)) * game_get_file_size)(void *file, uint32_t *high);
+extern int(__attribute__((stdcall)) * game_set_dib_color_table)(void *dc, unsigned start, unsigned n, const void *colors);
+extern int(__attribute__((stdcall)) * game_stretch_blt)(void *dst, int x, int y, int w, int h, void *src, int sx, int sy, int sw, int sh, unsigned rop);
+extern struct palette **game_palette_copy;
+extern int32_t *game_video_mode;
+extern const char *game_pcx_prefix, *game_pcx_ext, *game_pcx_write_ext, *game_bmp_write_ext, *game_bmp_mode, *game_bmp_signature;
+extern const char *game_tga_ext[3], *game_bmp_ext[3];
 // The queue "flying" text is laid out in: the x and y the line being filled goes at, the width left for it, the text queued so far (a
 // C string, 1 KB or so) and the strings the original adds to it and to the widths (a gap between pieces, and one measured as the
 // space a piece takes in each of the three layouts).
