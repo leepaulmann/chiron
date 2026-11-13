@@ -86,3 +86,16 @@ void WIN_THIS win_resize_event(struct game_win *w, int cw, int ch);
 int WIN_THIS win_resize(struct game_win *w, int cx, int cy, int client);
 void *WIN_THIS win_redraw_nc_buffer(struct game_win *w, unsigned which);
 int WIN_THIS win_update_nc_buffer(struct game_win *w, int what);
+
+// The mouse and the screen's drawing (see win.c).
+struct game_win *win_get_mouse_window(int32_t *px, int32_t *py);
+void win_update_screen(const int32_t *rect, struct game_win *win);
+void WIN_THIS win_update_window(struct game_win *w, const int32_t *rect);
+void win_redraw(void);
+void win_update(void);
+
+// The nonclient area (see win.c); the game's calls of these run the original in shadow mode.
+void WIN_THIS win_set_rects(struct game_win *w);
+void WIN_THIS win_on_redraw_nc(struct game_win *w, const int32_t *rect, int which);
+void WIN_THIS win_draw_nc_to(struct game_win *w, struct game_buffer *dest, int x, int y);
+void WIN_THIS win_on_nc_paint(struct game_win *w, const int32_t *rect, int which);

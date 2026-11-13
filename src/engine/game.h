@@ -2073,14 +2073,19 @@ struct game_win {
     struct game_win_node *dlg_cur;   // 0xd0
     int32_t dlg_count;               // 0xd4
     int32_t dlg_index;               // 0xd8: where dlg_cur is in the ring
-    GAME_PAD(0xdc, 0xe4);
+    GAME_PAD(0xdc, 0xe0);
+    const char *title;  // 0xe0: drawn in the caption
     struct game_win_btn *btn_e4, *btn_e8, *btn_ec;  // 0xe4: the caption buttons (the last is the rightmost)
     struct game_win *nc_owner;  // 0xf0: the window whose NC_HEIGHT slot adds to a nonclient position
-    GAME_PAD(0xf4, 0x114);
+    GAME_PAD(0xf4, 0xf8);
+    void *nc_font;                  // 0xf8: the Font the title is written in
+    struct game_buffer *nc_tile;    // 0xfc: the picture the frame is tiled from, or NULL for a plain colour
+    int32_t nc_color;               // 0x100: that colour
+    int32_t text_color[4];          // 0x104: the title's colours (see buffer_set_text_color)
     int32_t caption_h;  // 0x114
     int32_t border;     // 0x118
     int32_t bottom;     // 0x11c: the bottom border, or -1 for the same as `border`
-    GAME_PAD(0x120, 0x128);
+    int32_t box_color[2];  // 0x120: the frame's lines, light and dark
     int32_t cap_btn;  // 0x128: the size of a caption button
     GAME_PAD(0x12c, 0x13c);
     int32_t inner[4];  // 0x13c
@@ -2131,6 +2136,12 @@ GAME_AT(struct game_win, dlg_index, 0xd8);
 GAME_AT(struct game_win, btn_e4, 0xe4);
 GAME_AT(struct game_win, btn_ec, 0xec);
 GAME_AT(struct game_win, nc_owner, 0xf0);
+GAME_AT(struct game_win, title, 0xe0);
+GAME_AT(struct game_win, nc_font, 0xf8);
+GAME_AT(struct game_win, nc_tile, 0xfc);
+GAME_AT(struct game_win, nc_color, 0x100);
+GAME_AT(struct game_win, text_color, 0x104);
+GAME_AT(struct game_win, box_color, 0x120);
 GAME_AT(struct game_win, caption_h, 0x114);
 GAME_AT(struct game_win, border, 0x118);
 GAME_AT(struct game_win, bottom, 0x11c);
@@ -2184,12 +2195,24 @@ extern struct game_win **game_win_prev_focus; // the dialog focus before the las
 extern uint32_t *game_win_hwnd;               // the game's one HWND
 extern int32_t *game_win_screen_w, *game_win_screen_h;
 extern int32_t *game_win_pic_normal, *game_win_pic_zoomed;  // the caption button's picture, window normal or maximized
+extern int32_t *game_win_mouse_pos;           // [2] (0x9b6628): where the mouse was when the window under it was looked for
+extern int32_t *game_win_hit_nc;              // 0x9b7aa4: set when the last hit was on a window's frame
+// The Buffers the screen is drawn through. These are objects, not pointers: the back buffer the
+// windows are drawn into (0x9b7490) and the one that keeps what is under the overlay (0x9b6f08,
+// the overlay: a cursor or the like), where the overlay is on. `back_alt` (0x9b7a68), when set, is another
+// Buffer a draw is sent to, with its offset (0x9b7a70, 0x9b7a74).
+extern struct game_buffer *game_win_back, *game_win_overlay;
+extern struct game_buffer **game_win_back_alt;
+extern int32_t *game_win_back_off;            // [2]: x and y (0x9b7a70, 0x9b7a74)
+extern int32_t *game_win_overlay_on;          // 0x9b7a2c
+extern int32_t *game_win_overlay_pos, *game_win_overlay_size;  // [2] each: where it lies and how big (0x9b7a30, 0x9b7a40)
 // Windows calls Win makes (through the import table, so a shadow check's journal sees them).
 extern int(__attribute__((stdcall)) * game_set_cursor_pos)(int x, int y);
 extern int(__attribute__((stdcall)) * game_get_cursor_pos)(int32_t *point);
 extern int(__attribute__((stdcall)) * game_show_window)(uint32_t hwnd, int cmd);
 extern int(__attribute__((stdcall)) * game_get_system_metrics)(int index);
 extern int(__attribute__((stdcall)) * game_is_zoomed)(uint32_t hwnd);
+extern int(__attribute__((stdcall)) * game_get_window_rect)(uint32_t hwnd, int32_t *rect);
 
 // Point the variables above at a loaded terranx.exe.
 void game_bind(struct pe_image *exe);

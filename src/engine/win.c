@@ -21,14 +21,37 @@
 // at random with random flags, sizes and rectangles, and a stand-in vtable whose NC_HEIGHT slot
 // returns a number worth adding, then runs every function over them and over the game's own
 // windows (the z-order and parent lists' entries) with read-only queries.
+//
+// Drawing. The functions that paint a window into Buffers are here too: which window is under
+// the mouse (win_get_mouse_window, with its hit test on the frame strips' pixels), the screen's
+// redraw into the back buffer (win_update_screen and friends, which call the virtual functions of
+// the game's own windows), and the nonclient area (win_set_rects, win_on_redraw_nc,
+// win_draw_nc_to, win_on_nc_paint). The last two groups use Buffer set-up and clip regions, which
+// make and free Windows objects, so in shadow mode the game's calls of them run the original and
+// the sweep checks Chiron's code (the screen's redraw over stand-in windows with the back buffer's
+// pixels put back; the frame on twin windows, compared Buffer by Buffer). The mouse's window only
+// writes a few globals and is checked in the game as well. Differences from OpenSMACX: it has none
+// of these; the names are the inventory's, and the Buffer copies go the way the original has
+// them (out of the Buffer called on, into the other).
+//
+// Left with the original: Win_on_paint (paints the window's background into the game's window
+// through GDI and its DC), Win_flip, Win_update_back_to_window and
+// Win_update_window_to_buffer (they blit to the window or make Buffers), Win_window_line_raw
+// (draws into the window's DC), the large frame-overlay function at 0x5f3b80, and do_caption_buttons
+// (frees the caption buttons).
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "buffer.h"
+#include "bufdraw.h"
+#include "bufimg.h"
+#include "bufobj.h"
 #include "game.h"
 #include "hooks.h"
 #include "shadow.h"
+#include "text.h"
 #include "win.h"
 
 #define WIN (&win_module)
@@ -825,6 +848,468 @@ void *WIN_THIS win_redraw_nc_buffer(struct game_win *w, unsigned which) {
 
 int WIN_THIS win_update_nc_buffer(struct game_win *w, int what) { return vcall2(w, VT_NC_UPDATE, 0, what); }
 
+// ---- Which window is under the mouse -------------------------------------------------------
+
+// What a window's flags mean to the hit test: it draws its frame from the nonclient buffers
+// (WIN_F_NC_BUFFERS) so a point on the frame is its own only where those hold a picture (not
+// the transparent colour), and one without a frame may let its own pixels decide
+// (WIN_F_HIT_PIXELS) unless it takes every point (WIN_F_HIT_ALL).
+enum { WIN_F_BIT1 = 0x2, WIN_F_HIT_ALL = 0x100, WIN_F_HIT_PIXELS = 0x1000000, WIN_F_NC_BUFFERS = 0x10000000, WIN_F_THIN = 0x400000 };
+enum { VT_HAS_NC = 0xf4, VT_FLUSH = 0xfc, VT_DRAW = 0x124 };
+
+static int in_box(int x, int y, const int32_t *r) { return x >= r[0] && x < r[2] && y >= r[1] && y < r[3]; }
+
+// The Buffer a window of the game's own classes keeps after the Win part (at 0x444): the picture
+// whose pixels decide where a window without a frame is hit.
+static struct game_buffer *hit_buffer(struct game_win *w) { return (struct game_buffer *)((uint8_t *)w + 0x444); }
+
+// The mouse's place counted from a window's client area: less its place, and in its parent's
+// coordinates if it is a child (an inner-positioned child counts from the parent's inner corner).
+static void to_client(struct game_win *w, int32_t *px, int32_t *py) {
+    *px -= w->outer[0] + w->inner[0];
+    *py -= w->outer[1] + w->inner[1];
+    if ((w->flags & WIN_F_CHILD) && w->parent) {
+        win_screen_to_client_2(w->parent, px, py);
+        if (w->flags & WIN_F_PARENT_INNER) {
+            *px += w->parent->inner[0];
+            *py += w->parent->inner[1];
+        }
+    }
+}
+
+// What the modal stack's last column holds for the top entry: the window the stack held before it
+// (a 32-bit pointer kept as a number).
+static struct game_win *modal_prev(void) { return (struct game_win *)(uintptr_t)(uint32_t)*game_win_modal_prev; }
+
+// The window (or the one inside it) a point falls in, or none. The point is in the window's
+// parent's coordinates for a child; a window that isn't a child is looked for where the mouse
+// first was (game_win_mouse_pos) and the point put back when nothing is found. A hit on a frame
+// sets game_win_hit_nc. Children come first, then the window's own frame (its nonclient
+// buffers decide where a window that draws them is solid), then its client area.
+static struct game_win *hit_window(struct game_win *w, int32_t *px, int32_t *py) {
+    if (!(w->flags2 & WIN_F2_VISIBLE)) return NULL;
+    if (w->parent && !win_is_visible(w->parent)) return NULL;
+    int32_t sx = 0, sy = 0;
+    int top_level = !(w->flags & WIN_F_CHILD);
+    if (top_level) {
+        sx = *px, *px = game_win_mouse_pos[0];
+        sy = *py, *py = game_win_mouse_pos[1];
+    }
+    struct game_win *r;
+    for (int i = 0; i < w->n_children; i++)
+        if (!(w->children[i]->flags & WIN_F_CHILD) && (r = hit_window(w->children[i], px, py))) return r;
+    if (w->flags2 & WIN_F2_FRAME) {
+        if (!in_box(*px, *py, w->outer)) goto none;
+        *px -= w->outer[0];
+        *py -= w->outer[1];
+        if (w->root == w)
+            for (int i = 0; i < w->n_children; i++) {
+                struct game_win *c = w->children[i];
+                if ((c->flags & WIN_F_PARENT_INNER) && (c->flags & WIN_F_CHILD) && (r = hit_window(c, px, py))) return r;
+            }
+        if (!in_box(*px, *py, w->inner)) {
+            // On the frame: its own, unless it draws the frame from buffers and the point is on a transparent pixel.
+            if (!vcall0(w, VT_HAS_NC) || !(w->flags & WIN_F_NC_BUFFERS)) goto frame;
+            int top = (w->flags & WIN_F_CAPTION) && !(w->flags & WIN_F_THIN) ? w->caption_h : w->border;
+            int bottom = w->bottom == -1 ? w->border : w->bottom;
+            int h = w->outer[3] - w->outer[1];
+            int px_ = *px, py_ = *py, c;
+            if (py_ < top) c = buffer_get_pixel(w->nc_buf_b4, px_, py_);
+            else if (py_ > h - bottom) c = buffer_get_pixel(w->nc_buf_c0, px_, py_ - h + bottom);
+            else if (px_ < w->border) c = buffer_get_pixel(w->nc_buf_bc, px_, py_ - top);
+            else c = buffer_get_pixel(w->nc_buf_b8, px_ - (w->outer[2] - w->outer[0]) + w->border, py_ - top);
+            if (c != *game_default_key) goto frame;
+            *px += w->outer[0];
+            *py += w->outer[1];
+            goto none;
+        frame:
+            *game_win_hit_nc = 1;
+            return w;
+        }
+        *px -= w->inner[0];
+        *py -= w->inner[1];
+    } else {
+        if (!in_box(*px, *py, w->inner)) goto none;
+        *px -= w->inner[0];
+        *py -= w->inner[1];
+    }
+    *game_win_hit_nc = 0;
+    if (w->root == w)
+        for (int i = 0; i < w->n_children; i++) {
+            struct game_win *c = w->children[i];
+            if (!(c->flags & WIN_F_PARENT_INNER) && (c->flags & WIN_F_CHILD) && (r = hit_window(c, px, py))) return r;
+        }
+    if (w->flags & WIN_F_BIT1) goto none;
+    if (!vcall0(w, VT_HAS_NC)) return w;
+    if (!(w->flags & WIN_F_HIT_PIXELS) || (w->flags & WIN_F_HIT_ALL)) return w;
+    {
+        int c = buffer_get_pixel(hit_buffer(w), *px, *py);
+        if ((uint8_t)c == *game_default_key) goto none;
+        if (*(int32_t *)((uint8_t *)w + 0xa0) == 0 || (uint8_t)c != 0) return w;
+    }
+none:
+    if (top_level) *px = sx, *py = sy;
+    return NULL;
+}
+
+// The window under the mouse at (*px, *py), put in the coordinates of the window found. One
+// that has the mouse pressed or captured, or is hovered over (in that order, forgotten if it
+// is no longer shown) is it wherever the mouse is; otherwise the topmost modal window, or the
+// first of the top-level windows, that the point falls in. The answer is the window's root
+// unless the hit was on a frame.
+struct game_win *win_get_mouse_window(int32_t *px, int32_t *py) {
+    game_win_mouse_pos[0] = *px;
+    game_win_mouse_pos[1] = *py;
+    struct game_win *found = NULL;
+    for (;;) {
+        struct game_win *w;
+        if ((w = *game_win_press1)) {
+            if (!(w->flags2 & WIN_F2_VISIBLE)) {
+                *game_win_press1 = NULL;
+                continue;
+            }
+            to_client(w, px, py);
+            *game_win_hit_nc = 0;
+            return w;
+        }
+        if ((w = *game_win_press2)) {
+            if (!(w->flags2 & WIN_F2_VISIBLE)) {
+                *game_win_press2 = NULL;
+                continue;
+            }
+            win_screen_to_client_2(w, px, py);
+            *px += w->inner[0];
+            *py += w->inner[1];
+            *game_win_hit_nc = 1;
+            return w;
+        }
+        if ((w = *game_win_capture)) {
+            if (!(w->flags2 & WIN_F2_VISIBLE)) {
+                *game_win_capture = NULL;
+                continue;
+            }
+            to_client(w, px, py);
+            *game_win_hit_nc = 0;
+            return w;
+        }
+        if ((w = *game_win_hover)) {
+            if (!(w->flags2 & WIN_F2_VISIBLE)) {
+                *game_win_hover = NULL;
+                continue;
+            }
+            win_screen_to_client_2(w, px, py);
+            *px += w->inner[0];
+            *py += w->inner[1];
+            *game_win_hit_nc = 1;
+            return w;
+        }
+        break;
+    }
+    struct game_win *modal = *game_win_modal;
+    if (modal) {
+        to_client(modal, px, py);
+        *px += modal->inner[0];
+        *py += modal->inner[1];
+        found = hit_window(modal, px, py);
+        if (!found && modal_prev()) {
+            struct game_win *prev = modal_prev();
+            *px = game_win_mouse_pos[0];
+            *py = game_win_mouse_pos[1];
+            win_screen_to_client_2(prev, px, py);
+            *px += prev->inner[0];
+            *py += prev->inner[1];
+            found = hit_window(modal_prev(), px, py);
+        }
+        if (!found) {
+            *px = game_win_mouse_pos[0];
+            *py = game_win_mouse_pos[1];
+            to_client(modal, px, py);
+            found = modal;
+            *game_win_hit_nc = 0;
+        }
+    } else {
+        for (int i = 0; i < *game_win_parent_n && !found; i++) found = hit_window(game_win_parents[i], px, py);
+    }
+    if (found && !*game_win_hit_nc) found = found->root;
+    return found;
+}
+
+// ---- Drawing the windows into the back buffer ------------------------------------------------
+
+static int rect_empty(const int32_t *r) { return r[0] >= r[2] || r[1] >= r[3]; }
+
+// What the Windows call IntersectRect does (the original calls it): the overlap of two
+// rectangles into `out`, which may be one of them; an empty one is stored as all zeros.
+static int intersect(int32_t *out, const int32_t *a, const int32_t *b) {
+    int32_t r[4] = {a[0] > b[0] ? a[0] : b[0], a[1] > b[1] ? a[1] : b[1], a[2] < b[2] ? a[2] : b[2], a[3] < b[3] ? a[3] : b[3]};
+    if (rect_empty(r)) {
+        memset(out, 0, 16);
+        return 0;
+    }
+    memcpy(out, r, 16);
+    return 1;
+}
+
+// Draw the shown windows, back to front, into the back buffer: from the one given (and everything
+// behind it, when that is a window that hides all those under it: the `opaque` one) or all of
+// them, the area `rect` (or all of the screen). With nothing drawn through another Buffer
+// (back_alt) the area is first cleared. Each window with a frame has its frame redrawn (slot
+// 0x128) and its root drawn (0x124), unless the one given isn't a root. Then, where the overlay
+// is on, the part of the back buffer it lies over (cut to `rect`) is copied into the overlay
+// Buffer, which keeps what is under it (Buffer_copy_full copies out of the Buffer it is called on).
+void win_update_screen(const int32_t *rect, struct game_win *win) {
+    int n = *game_win_z_n;
+    if (!n) return;
+    if (!*game_win_opaque) win = NULL;
+    int start = n - 1;
+    if (win) {
+        start = 0;
+        while (start < n && game_win_zorder[start] != win) start++;
+        if (start == n) return;
+    } else if (!*game_win_back_alt) {
+        if (rect) buffer_fill_rect(game_win_back, rect, 0);
+        else buffer_fill_all(game_win_back, 0);
+    }
+    for (int i = start; i >= 0; i--) {
+        struct game_win *w = game_win_zorder[i];
+        if (!(w->flags2 & WIN_F2_VISIBLE)) continue;
+        if (w->parent && !win_is_visible(w->parent)) continue;
+        if (w->flags2 & WIN_F2_FRAME) vcall2(w, VT_NC_UPDATE, (int)(uintptr_t)rect, -1);
+        if (win && win != win->root) continue;
+        vcall1(w->root, VT_DRAW, (int)(uintptr_t)rect);
+    }
+    if (!*game_win_overlay_on) return;
+    int x0 = game_win_overlay_pos[0], y0 = game_win_overlay_pos[1];
+    int32_t r[4] = {x0, y0, x0 + game_win_overlay_size[0], y0 + game_win_overlay_size[1]};
+    if (rect && !intersect(r, r, rect)) return;
+    buffer_copy_full(game_win_back, game_win_overlay, r[0], r[1], r[0] - x0, r[1] - y0, r[2] - r[0], r[3] - r[1]);
+}
+
+// Draw one window's area (all of the screen with no rectangle): the rectangle, which is in
+// the window's client coordinates, is taken to the screen's first.
+void WIN_THIS win_update_window(struct game_win *w, const int32_t *rect) {
+    if (!rect) {
+        win_update_screen(NULL, w);
+        return;
+    }
+    int32_t x = w->outer[0] + w->inner[0], y = w->outer[1] + w->inner[1];
+    if ((w->flags & WIN_F_CHILD) && w->parent) {
+        win_client_to_screen_2(w->parent, &x, &y);
+        if (w->flags & WIN_F_PARENT_INNER) {
+            x -= w->parent->inner[0];
+            y -= w->parent->inner[1];
+        }
+    }
+    int32_t r[4] = {rect[0] + x, rect[1] + y, rect[2] + x, rect[3] + y};
+    win_update_screen(r, w);
+}
+
+// Tell every shown window to redraw (slot 0xf8), front to back.
+void win_redraw(void) {
+    for (int i = 0; i < *game_win_z_n; i++) vcall0(game_win_zorder[i], VT_SCROLL_CHANGED);
+}
+
+// Rebuild every shown window's nonclient area (0x128), and flush those that keep one (0xfc).
+void win_update(void) {
+    for (int i = 0; i < *game_win_z_n; i++) {
+        struct game_win *w = game_win_zorder[i];
+        vcall2(w, VT_NC_UPDATE, 0, -1);
+        w = game_win_zorder[i];
+        if (vcall0(w, VT_HAS_NC)) vcall0(game_win_zorder[i], VT_FLUSH);
+    }
+}
+
+// ---- The nonclient area ------------------------------------------------------------------------
+//
+// A window with a frame keeps its frame in four Buffers: the top (caption) strip at 0xb4, the
+// bottom one at 0xc0, the left one at 0xbc and the right one at 0xb8, which fit round the client
+// area. They are made by win_set_rects, drawn by win_on_redraw_nc and, as the window is drawn
+// on the screen, copied into the back buffer by win_on_nc_paint. All of these make and free
+// Windows objects (a Buffer's DIB, its clip region) or use their results, so their game calls
+// run the original in shadow mode and the sweep checks Chiron's code on twin windows.
+
+typedef struct game_buffer buffer_t;
+enum { WIN_F_TITLE_LEFT = 0x10000, WIN_F_TITLE_RIGHT = 0x40000, VT_NC_DONE = 0xf0 };
+
+// The height of the top strip (the caption's, unless the window is thin or has none) and the bottom one.
+static int nc_top(const struct game_win *w) {
+    return (w->flags & WIN_F_CAPTION) && !(w->flags & WIN_F_THIN) ? w->caption_h : w->border;
+}
+static int nc_bottom(const struct game_win *w) { return w->bottom == -1 ? w->border : w->bottom; }
+
+// Make the four buffers the size the frame needs (the strips along the top and bottom as wide
+// as the window, those at the sides as wide as the border and what is left of the height), clear
+// them to the transparent colour, and have the window draw its frame into them (slot 0x10c).
+void WIN_THIS win_set_rects(struct game_win *w) {
+    if (!(w->flags2 & WIN_F2_FRAME)) return;
+    int top = nc_top(w), bottom = nc_bottom(w);
+    int width = w->outer[2] - w->outer[0], height = w->outer[3] - w->outer[1];
+    buffer_t *bufs[4] = {w->nc_buf_b4, w->nc_buf_c0, w->nc_buf_bc, w->nc_buf_b8};
+    int bw[4] = {width, width, w->border, w->border};
+    int bh[4] = {top, bottom, height - bottom - top, height - bottom - top};
+    for (int i = 0; i < 4; i++) {
+        buffer_init(bufs[i], bw[i], bh[i], 0, NULL);
+        buffer_sync_to_palette(bufs[i], (struct palette *)*game_palette_copy);
+        buffer_fill_all(bufs[i], *game_default_key);
+    }
+    vcall2(w, VT_NC_REBUILD, 0, -1);
+}
+
+// Draw the lines of a frame in a strip: a rectangle (cut to the strip), shrunk by a pixel on each
+// side (`inward`) or grown by one, as many times as the window's line count, the colours in the
+// order given.
+static void nc_lines(struct game_win *w, buffer_t *b, int32_t r[4], int c1, int c2, int inward) {
+    for (int i = 0; i < w->cap_btn; i++) {
+        buffer_box_rect(b, r, c1, c2);
+        int d = inward ? 1 : -1;
+        r[0] += d, r[1] += d, r[2] -= d, r[3] -= d;
+    }
+}
+
+// Redraw one strip of the frame (`which`: top 0, right 1, bottom 2, left 3): the part of the
+// area `clip` (in the strip's own coordinates) that the strip covers is filled from the window's
+// tile picture (from (tx, ty) in it) or its colour, framed with two sets of lines (`r1`, then `r2`
+// with the colours the other way round), and for the top strip the title written; then the
+// window is told (slot 0xf0).
+static void nc_strip(struct game_win *w, buffer_t *b, int which, int32_t clip[4], int tx, int ty, int32_t r1[4], int32_t r2[4],
+                     int width, int height, int top) {
+    if (intersect(clip, clip, b->full)) {
+        buffer_set_clip(b, clip);
+        if (w->nc_tile) buffer_tile(b, w->nc_tile, tx, ty, 0, 0, width, height);
+        else buffer_fill_all(b, w->nc_color);
+        nc_lines(w, b, r1, w->box_color[0], w->box_color[1], 1);
+        nc_lines(w, b, r2, w->box_color[1], w->box_color[0], 0);
+        if (which == 0 && w->title) {
+            int cap = w->cap_btn;
+            int32_t tr[4] = {cap, cap, width - cap, top - cap};
+            buffer_set_text_color(b, w->text_color[0], w->text_color[1], w->text_color[2], w->text_color[3]);
+            buffer_set_font(b, (struct font *)w->nc_font, NULL, NULL, NULL);
+            buffer_set_clip(b, tr);
+            if (w->flags & WIN_F_TITLE_LEFT) buffer_write_l_4(b, w->title, tr, (int)strlen(w->title));
+            else if (w->flags & WIN_F_TITLE_RIGHT) buffer_write_right_l_6(b, w->title, tr, (int)strlen(w->title));
+            else buffer_write_cent_l_7(b, w->title, tr, (int)strlen(w->title));
+        }
+        buffer_set_clip(b, b->full);
+    }
+    vcall2(w, VT_NC_DONE, (int)(uintptr_t)b, which);
+}
+
+// Draw the frame of a window into its four buffers: every one, or the strip `which` (top 0,
+// right 1, bottom 2, left 3), and (if `rect` is given, which is in screen coordinates and means
+// every strip) just the part of them inside it. Needs a window with a frame and a caption or
+// bit 0. The strips' lines count from where the window's rectangle puts them (width and height
+// its size, top and bot the strips' heights): the top one is a frame of the whole window, the
+// bottom one the same seen from its bottom edge and so on, and the title is written in the top
+// one, in the window's font and colours, left, right or centred by the flags.
+void WIN_THIS win_on_redraw_nc(struct game_win *w, const int32_t *rect, int which) {
+    if (!(w->flags2 & WIN_F2_FRAME) || !(w->flags & (WIN_F_CAPTION | 1))) return;
+    int ox = 0, oy = 0;
+    if (rect) which = -1, ox = w->outer[0], oy = w->outer[1];
+    int top = nc_top(w), bot = nc_bottom(w);
+    int width = w->outer[2] - w->outer[0], height = w->outer[3] - w->outer[1];
+    int border = w->border, inner_w = w->inner[2] - w->inner[0];
+    int side = height - bot;  // where the bottom strip starts
+    // The ends of the second frame lines.
+    int e_l = border - 1, e_t = top - 1, e_r = inner_w + border + 1, e_b = side + 1;
+    int32_t clip[4], r1[4], r2[4];
+    // A strip's clip area: the whole strip, or the rectangle asked for moved by (dx, dy).
+#define STRIP_CLIP(buf, dx, dy)                                                                           \
+    do {                                                                                                  \
+        if (rect) clip[0] = rect[0] + (dx), clip[1] = rect[1] + (dy), clip[2] = rect[2] + (dx), clip[3] = rect[3] + (dy); \
+        else memcpy(clip, (buf)->full, 16);                                                               \
+    } while (0)
+    if (w->nc_buf_b4 && (which == -1 || which == 0)) {
+        STRIP_CLIP((buffer_t *)w->nc_buf_b4, -ox, -oy);
+        r1[0] = 0, r1[1] = 0, r1[2] = width, r1[3] = height;
+        r2[0] = e_l, r2[1] = e_t, r2[2] = e_r, r2[3] = e_b;
+        nc_strip(w, w->nc_buf_b4, 0, clip, 0, 0, r1, r2, width, height, top);
+    }
+    if (w->nc_buf_c0 && (which == -1 || which == 2)) {
+        STRIP_CLIP((buffer_t *)w->nc_buf_c0, -ox, side - oy);
+        r1[0] = 0, r1[1] = bot - height, r1[2] = width, r1[3] = bot;
+        r2[0] = e_l, r2[1] = e_t + bot - height, r2[2] = e_r, r2[3] = e_b + bot - height;
+        nc_strip(w, w->nc_buf_c0, 2, clip, 0, side, r1, r2, width, height, top);
+    }
+    if (w->nc_buf_bc && (which == -1 || which == 3)) {
+        STRIP_CLIP((buffer_t *)w->nc_buf_bc, -ox, top - oy);
+        r1[0] = 0, r1[1] = -top, r1[2] = width, r1[3] = height - top;
+        r2[0] = e_l, r2[1] = -1, r2[2] = e_r, r2[3] = e_b - top;
+        nc_strip(w, w->nc_buf_bc, 3, clip, 0, top, r1, r2, width, height, top);
+    }
+    if (w->nc_buf_b8 && (which == -1 || which == 1)) {
+        STRIP_CLIP((buffer_t *)w->nc_buf_b8, width - border - ox, top - oy);
+        r1[0] = border - width, r1[1] = -top, r1[2] = border, r1[3] = height - top;
+        r2[0] = border + e_l - width, r2[1] = -1, r2[2] = border + e_r - width, r2[3] = e_b - top;
+        nc_strip(w, w->nc_buf_b8, 1, clip, width - border, top, r1, r2, width, height, top);
+    }
+#undef STRIP_CLIP
+}
+
+// Copy the window's frame strips into `dest`, a Buffer whose top left corner is at (x, y) on the
+// screen, each where it lies (cut to dest, which the screen position of each decides), so it
+// can be shown or saved; and for a window that draws its frame itself (slot 0xf4), its own picture
+// (its Buffer at 0x444) where the game's window is. Buffer_copy_full copies out of the Buffer
+// it is called on into the other one.
+void WIN_THIS win_draw_nc_to(struct game_win *w, buffer_t *dest, int x, int y) {
+    if (!dest) return;
+    int32_t R[4] = {x, y, x + dest->width, y - dest->neg_height};
+    if (rect_empty(R)) return;
+    int32_t cr[4], I[4];
+#define GRAB(buf, dy_expr, dx_expr)                                                                                    \
+    do {                                                                                                               \
+        buffer_t *b_ = (buf);                                                                                          \
+        int dx_ = (dx_expr), dy_ = (dy_expr);                                                                          \
+        cr[0] = b_->full[0] + dx_, cr[1] = b_->full[1] + dy_, cr[2] = b_->full[2] + dx_, cr[3] = b_->full[3] + dy_;  \
+        if (intersect(I, cr, R))                                                                                       \
+            buffer_copy_full(b_, dest, I[0] - cr[0], I[1] - cr[1], I[0] - R[0], I[1] - R[1], I[2] - I[0], I[3] - I[1]); \
+    } while (0)
+    if (w->flags2 & WIN_F2_FRAME) {
+        int ox = w->outer[0], oy = w->outer[1];
+        buffer_t *b4 = w->nc_buf_b4;
+        GRAB(b4, oy, ox);
+        GRAB(w->nc_buf_bc, oy - b4->neg_height, ox);
+        GRAB(w->nc_buf_c0, w->outer[3] + ((buffer_t *)w->nc_buf_c0)->neg_height, ox);
+        GRAB(w->nc_buf_b8, oy - b4->neg_height, w->outer[2] - ((buffer_t *)w->nc_buf_b8)->width);
+    }
+#undef GRAB
+    if (vcall0(w, VT_HAS_NC)) {
+        int32_t WR[4] = {0, 0, 0, 0};
+        game_get_window_rect(*game_win_hwnd, WR);
+        if (intersect(I, WR, R))
+            buffer_copy_full(hit_buffer(w), dest, I[0] - WR[0], I[1] - WR[1], I[0] - R[0], I[1] - R[1], I[2] - I[0], I[3] - I[1]);
+    }
+}
+
+// Copy a window's frame strips (all of them, or the one `which` names) into the back buffer, or
+// into the other Buffer a draw is going to (back_alt, with the offset it is at), at the window's
+// place on the screen. `rect` (screen coordinates) cuts the back buffer's drawing to it, and
+// means every strip. Nothing happens for a window that isn't shown (or has no caption and no bit
+// 0); the back buffer is left clipped to all of it.
+void WIN_THIS win_on_nc_paint(struct game_win *w, const int32_t *rect, int which) {
+    if (!(w->flags & (WIN_F_CAPTION | 1)) || !(w->flags2 & WIN_F2_VISIBLE)) return;
+    if (w->parent && !win_is_visible(w->parent)) return;
+    int32_t x = 0, y = 0;
+    win_client_to_screen_2(w, &x, &y);
+    x -= w->inner[0], y -= w->inner[1];
+    if (rect) which = -1, buffer_set_clip(game_win_back, rect);
+    int top = nc_top(w), border = w->border;
+    int width = w->outer[2] - w->outer[0], height = w->outer[3] - w->outer[1];
+    int key = *game_default_key;
+    // Where the strip goes: its offset from the window's corner, less where the other Buffer is.
+#define DRAW(buf, ex, ey)                                                                                              \
+    do {                                                                                                               \
+        struct game_buffer *alt_ = *game_win_back_alt;                                                                 \
+        if (alt_) buffer_draw_2((buf), alt_, key, (ex)-game_win_back_off[0] + x, (ey)-game_win_back_off[1] + y, 1, 1);  \
+        else buffer_draw_2((buf), game_win_back, key, (ex) + x, (ey) + y, 1, 1);                                       \
+    } while (0)
+    if (w->nc_buf_b4 && (which == -1 || which == 0)) DRAW(w->nc_buf_b4, 0, 0);
+    if (w->nc_buf_c0 && (which == -1 || which == 2)) DRAW(w->nc_buf_c0, 0, height - nc_bottom(w));
+    if (w->nc_buf_bc && (which == -1 || which == 3)) DRAW(w->nc_buf_bc, 0, top);
+    if (w->nc_buf_b8 && (which == -1 || which == 1)) DRAW(w->nc_buf_b8, width - border, top);
+#undef DRAW
+    buffer_set_clip(game_win_back, game_win_back->full);
+}
+
 // ---- Shadow checks -------------------------------------------------------------------------
 
 typedef struct game_win *winp;
@@ -1024,6 +1509,91 @@ SHADOW_WRITER_T(WIN, voidp, win_redraw_nc_buffer, (struct game_win * w, unsigned
 SHADOW_WRITER_T(WIN, int, win_update_nc_buffer, (struct game_win * w, int what), (w, what), writes_vlog(&w_), "%d, %d", P(w),
                 what)
 
+
+// ---- Drawing: checks -----------------------------------------------------------------------
+//
+// The mouse's window writes only a few globals (the buffers it reads pixels from are left as they
+// were), so it is checked in the game too. The functions that draw the screen call the virtual
+// functions of the game's own windows, which draw with Buffers' clip regions, so in shadow mode
+// the game's calls run the original, and the sweep checks Chiron's code over stand-in windows: the
+// back buffer's pixels it can reach and the Buffers' fields are put back and compared. The frame's
+// functions (win_set_rects and the rest) make and free Windows objects and are checked on twins.
+
+SHADOW_WRITER(WIN, winp, win_get_mouse_window, (int32_t * px, int32_t *py), (px, py),
+              (writes_ints(&w_, px, 4), writes_ints(&w_, py, 4), WRITES(game_win_mouse_pos, 8), WRITES(game_win_hit_nc, 4),
+               WRITES(game_win_capture, 4), WRITES(game_win_hover, 4), WRITES(game_win_press1, 4), WRITES(game_win_press2, 4)),
+              "%d, %d", px ? *px : 0, py ? *py : 0)
+
+// The rows of the back buffer from `t` to `bt`, whole (cut to the buffer): what a draw into an area can write.
+static void writes_back_rows(struct hook_writes *w, int t, int bt) {
+    struct game_buffer *b = game_win_back;
+    if (!b->bits || b->dd) return;
+    int rows = -b->neg_height;
+    if (t < 0) t = 0;
+    if (bt > rows) bt = rows;
+    if (t >= bt) return;
+    uint8_t *a = b->bits + (intptr_t)b->pitch * t, *c = b->bits + (intptr_t)b->pitch * (bt - 1);
+    size_t n = (size_t)(b->pitch < 0 ? -b->pitch : b->pitch) * (size_t)(bt - t);
+    hooks_writes_add(w, a < c ? a : c, n);
+}
+// What drawing the screen writes: the back buffer's rows for the area, the overlay's pixels (what it
+// keeps of what is under it), both Buffers' objects, the scratch the fills and copies leave, and what the
+// stand-in virtual functions record.
+static void writes_screen(struct hook_writes *w, const int32_t *rect) {
+    writes_vlog(w);
+    hooks_writes_add(w, game_win_back, sizeof *game_win_back);
+    hooks_writes_add(w, game_win_overlay, sizeof *game_win_overlay);
+    if (game_win_overlay->bits && !game_win_overlay->dd && game_win_overlay->neg_height < 0)  // the overlay's own pixels: what it keeps
+        hooks_writes_add(w, (uint8_t *)game_win_overlay->bits - (game_win_overlay->pitch < 0 ? (intptr_t)-game_win_overlay->pitch * (-game_win_overlay->neg_height - 1) : 0),
+                         (size_t)(game_win_overlay->pitch < 0 ? -game_win_overlay->pitch : game_win_overlay->pitch) * (size_t)-game_win_overlay->neg_height);
+    hooks_writes_add(w, game_fill_gap, 4);
+    hooks_writes_add(w, game_copy_rem, 4);
+    hooks_writes_add(w, game_mask_units, 4);
+    hooks_writes_add(w, game_mask_gap_a, 4);
+    hooks_writes_add(w, game_mask_gap_b, 4);
+    int rows = -game_win_back->neg_height;
+    writes_back_rows(w, rect ? rect[1] : 0, rect ? rect[3] : rows);
+}
+
+SHADOW_DECLARE(void, win_update_screen, (const int32_t *rect, struct game_win *win))
+SHADOW_WRITER_BODY(void, win_update_screen, (const int32_t *rect, struct game_win *win), (rect, win), writes_screen(&w_, rect),
+                   "%d", P(win))
+static void shadow_win_update_screen(const int32_t *rect, struct game_win *win) {
+    if (!hooks_nested && !shadow_bypass()) stats_win_update_screen.calls++, shadow_tick(WIN);
+    orig_win_update_screen(rect, win);
+}
+SHADOW_DECLARE_T(void, win_update_window, (struct game_win * w, const int32_t *rect))
+SHADOW_WRITER_BODY(void, win_update_window, (struct game_win * w, const int32_t *rect), (w, rect), writes_screen(&w_, NULL), "%d",
+                   P(w))
+static void THISCALL shadow_win_update_window(struct game_win *w, const int32_t *rect) {
+    if (!hooks_nested && !shadow_bypass()) stats_win_update_window.calls++, shadow_tick(WIN);
+    orig_win_update_window(w, rect);
+}
+SHADOW_DECLARE(void, win_redraw, (void))
+SHADOW_WRITER_BODY(void, win_redraw, (void), (), writes_vlog(&w_), "%d", 0)
+static void shadow_win_redraw(void) {
+    if (!hooks_nested && !shadow_bypass()) stats_win_redraw.calls++, shadow_tick(WIN);
+    orig_win_redraw();
+}
+SHADOW_DECLARE(void, win_update, (void))
+SHADOW_WRITER_BODY(void, win_update, (void), (), writes_vlog(&w_), "%d", 0)
+static void shadow_win_update(void) {
+    if (!hooks_nested && !shadow_bypass()) stats_win_update.calls++, shadow_tick(WIN);
+    orig_win_update();
+}
+
+// The frame's functions: the game's calls run the original.
+#define PASS_T(ret, name, params, args)                                                   \
+    SHADOW_DECLARE_T(ret, name, params)                                                    \
+    static ret THISCALL shadow_##name params {                                             \
+        if (!hooks_nested && !shadow_bypass()) stats_##name.calls++, shadow_tick(WIN);     \
+        return orig_##name args;                                                           \
+    }
+PASS_T(void, win_set_rects, (struct game_win * w), (w))
+PASS_T(void, win_on_redraw_nc, (struct game_win * w, const int32_t *rect, int which), (w, rect, which))
+PASS_T(void, win_draw_nc_to, (struct game_win * w, struct game_buffer *dest, int x, int y), (w, dest, x, y))
+PASS_T(void, win_on_nc_paint, (struct game_win * w, const int32_t *rect, int which), (w, rect, which))
+
 // ---- Sweep ---------------------------------------------------------------------------------
 
 static uint32_t rng_state;
@@ -1034,7 +1604,13 @@ static uint32_t rnd(void) {
 static int rnd_to(int n) { return (int)(rnd() % (uint32_t)n); }
 
 enum { POOL = 14, REAL = 24 };
-static struct game_win pool[POOL];
+// Each scratch window has room behind it for the Buffer a window of the game's own classes keeps
+// at 0x444 (the picture that decides where one without a frame is hit).
+static struct pool_win {
+    struct game_win w;
+    struct game_buffer hit;
+} pool_ex[POOL];
+#define PW(i) (&pool_ex[i].w)
 static struct game_win_node nodes[POOL];
 static struct game_win_scroll scrolls[2];
 static struct game_win_btn btns[4];
@@ -1046,8 +1622,9 @@ static int THISCALL stub_nc_height(struct game_win *w) { return w->title_h * 3 +
 // The stand-ins for the other slots the functions call: each only logs the call (see vlog) and
 // returns a number of its own. The vtable slots are filled in with them, and the callback a
 // window may have at 0x400 is one too, so what a function calls, and with what, is compared.
+static int vlog_twin_on;  // the windows are twins: their addresses differ, so they are left out of the record
 static void vrec(int slot, const void *w, int a, int b, int c) {
-    vlog.hash = (((vlog.hash * 31u + (uint32_t)slot) * 31u + (uint32_t)(uintptr_t)w) * 31u + (uint32_t)a) * 31u +
+    vlog.hash = (((vlog.hash * 31u + (uint32_t)slot) * 31u + (vlog_twin_on ? 0u : (uint32_t)(uintptr_t)w)) * 31u + (uint32_t)a) * 31u +
                 (uint32_t)b * 7u + (uint32_t)c * 13u;
     vlog.n++;
 }
@@ -1059,7 +1636,20 @@ static void vrec(int slot, const void *w, int a, int b, int c) {
     static int THISCALL stub_##slot(struct game_win *w, int a, int b) { return vrec(slot, w, a, b, 0), slot + 1; }
 #define STUB3(slot) \
     static int THISCALL stub_##slot(struct game_win *w, int a, int b, int c) { return vrec(slot, w, a, b, c), slot + 1; }
-STUB0(0x8) STUB3(0xc) STUB0(0x10) STUB0(0x30) STUB2(0x34) STUB1(0xcc) STUB0(0xf8) STUB0(0x108) STUB2(0x10c) STUB2(0x128)
+// A rectangle a call is given as a pointer is recorded by what it holds (the callee may be handed
+// a copy on its own stack), a small number as itself.
+static int rect_sig(int a) {
+    if ((unsigned)a < 0x1000u) return a;
+    const int32_t *r = (const int32_t *)(uintptr_t)a;
+    return r[0] * 3 + r[1] * 5 + r[2] * 7 + r[3] * 11;
+}
+STUB0(0x8) STUB3(0xc) STUB0(0x10) STUB0(0x30) STUB2(0x34) STUB1(0xcc) STUB0(0xf8) STUB0(0x108) STUB2(0x10c) STUB0(0xfc)
+static int THISCALL stub_0x128(struct game_win *w, int a, int b) { return vrec(0x128, w, rect_sig(a), b, 0), 0x129; }
+static int THISCALL stub_0x124(struct game_win *w, int a) { return vrec(0x124, w, rect_sig(a), 0, 0), 0x125; }
+// Told a strip of the frame is drawn: which one (the Buffer is another window's own).
+static int THISCALL stub_0xf0(struct game_win *w, int buf, int which) { return vrec(0xf0, NULL, which, 0, 0), 0xf1; }
+// Whether the window draws its frame itself: a plain question, from a flag the sweep sets at random.
+static int THISCALL stub_0xf4(struct game_win *w) { return (w->flags >> 7) & 1; }
 static void stub_callback(int a, int b) { vrec(0x400, NULL, a, b, 0); }
 static void fill_stub_vtable(void) {
     stub_vtable[WIN_VT_NC_HEIGHT / 4] = (void *)stub_nc_height;
@@ -1073,20 +1663,30 @@ static void fill_stub_vtable(void) {
     stub_vtable[0x108 / 4] = (void *)stub_0x108;
     stub_vtable[0x10c / 4] = (void *)stub_0x10c;
     stub_vtable[0x128 / 4] = (void *)stub_0x128;
+    stub_vtable[0x124 / 4] = (void *)stub_0x124;
+    stub_vtable[0xf0 / 4] = (void *)stub_0xf0;
+    stub_vtable[0xf4 / 4] = (void *)stub_0xf4;
+    stub_vtable[0xfc / 4] = (void *)stub_0xfc;
 }
 
+enum { NBUF = 40 };
+static buffer_t nbuf[NBUF], scratch_overlay;
+static int nbuf_state;  // 0 not made yet, 1 made, -1 could not be
+
 static const uint32_t FLAG_BITS[] = {WIN_F_MARGIN_H, WIN_F_MARGIN_W, WIN_F_CAPTION, WIN_F_CHILD, WIN_F_THICK, WIN_F_DIALOG,
-                                     WIN_F_PARENT_INNER, WIN_F_ALWAYS_TOP, WIN_F_DISABLED, 0x1, 0x4000000};
+                                     WIN_F_PARENT_INNER, WIN_F_ALWAYS_TOP, WIN_F_DISABLED, 0x1, 0x4000000,
+                                     WIN_F_BIT1, WIN_F_HIT_ALL, WIN_F_HIT_PIXELS, WIN_F_NC_BUFFERS, WIN_F_THIN, WIN_F_TITLE_LEFT,
+                                     WIN_F_TITLE_RIGHT, 0x80};
 static const uint32_t FLAG2_BITS[] = {WIN_F2_VISIBLE, WIN_F2_VISIBLE, WIN_F2_VISIBLE, WIN_F2_FRAME, WIN_F2_BUSY};
 
 // A forest of scratch windows: a window hangs from a lower-numbered one or from none, and
 // has random flags, rectangles and borders.
 static void build_forest(void) {
     for (int i = 0; i < POOL; i++) {
-        struct game_win *w = &pool[i];
+        struct game_win *w = PW(i);
         memset(w, 0, sizeof *w);
         w->vtable = stub_vtable;
-        w->root = rnd_to(4) ? w : &pool[rnd_to(POOL)];
+        w->root = rnd_to(4) ? w : PW(rnd_to(POOL));
         for (unsigned b = 0; b < sizeof FLAG_BITS / sizeof *FLAG_BITS; b++)
             if (rnd_to(3) == 0) w->flags |= FLAG_BITS[b];
         for (unsigned b = 0; b < sizeof FLAG2_BITS / sizeof *FLAG2_BITS; b++)
@@ -1098,7 +1698,7 @@ static void build_forest(void) {
         w->resize_border = rnd_to(14);
         for (int k = 0; k < 4; k++) w->inner[k] = rnd_to(300) - 40, w->outer[k] = rnd_to(300) - 40;
         if (rnd_to(2)) w->outer[2] = w->outer[0] + rnd_to(120), w->outer[3] = w->outer[1] + rnd_to(120);
-        w->nc_owner = rnd_to(3) == 0 ? &pool[rnd_to(POOL)] : NULL;
+        w->nc_owner = rnd_to(3) == 0 ? PW(rnd_to(POOL)) : NULL;
         w->scroll_v = rnd_to(3) ? &scrolls[0] : NULL;
         w->scroll_h = rnd_to(3) ? &scrolls[1] : NULL;
         w->btn_ec = rnd_to(4) ? &btns[0] : NULL;
@@ -1108,15 +1708,16 @@ static void build_forest(void) {
         w->flags &= ~0x40u;
         if (rnd_to(4) == 0) w->flags |= 0x40;
         w->resize_cb = rnd_to(2) ? (void *)stub_callback : NULL;
-        for (int k = 0; k < 4; k++) (&w->nc_buf_b4)[k] = (void *)(uintptr_t)(0x1000 + i * 16 + k);
+        for (int k = 0; k < 4; k++)
+            (&w->nc_buf_b4)[k] = nbuf_state > 0 ? (void *)&nbuf[rnd_to(NBUF)] : (void *)(uintptr_t)(0x1000 + i * 16 + k);
         w->dlg_index = rnd_to(5);
-        nodes[i].win = rnd_to(8) ? &pool[rnd_to(POOL)] : NULL;
+        nodes[i].win = rnd_to(8) ? PW(rnd_to(POOL)) : NULL;
         nodes[i].next = &nodes[rnd_to(POOL)];
         w->dlg_head = rnd_to(2) ? &nodes[rnd_to(POOL)] : NULL;
         w->dlg_cur = &nodes[rnd_to(POOL)];
         w->dlg_count = rnd_to(4);
         if (i > 0 && rnd_to(5)) {
-            struct game_win *p = &pool[rnd_to(i)];
+            struct game_win *p = PW(rnd_to(i));
             w->parent = p;
             if (rnd_to(2)) p->children[p->n_children++] = w;
             else {
@@ -1130,7 +1731,7 @@ static void build_forest(void) {
         memset(w, 0, sizeof *w);
         w->vtable = stub_vtable;
         w->root = w;
-        w->parent = rnd_to(4) ? &pool[rnd_to(POOL)] : NULL;
+        w->parent = rnd_to(4) ? PW(rnd_to(POOL)) : NULL;
         w->flags2 = rnd_to(2) ? WIN_F2_FRAME : 0;
         for (int k = 0; k < 4; k++) w->inner[k] = rnd_to(100), w->outer[k] = rnd_to(100);
         scrolls[s].width = rnd_to(30), scrolls[s].height = rnd_to(30) - 5;
@@ -1160,6 +1761,8 @@ struct win_globals {
     int32_t screen_w, screen_h, pic_normal, pic_zoomed;
     uint32_t vlog_hash;
     int32_t vlog_n;
+    int32_t mouse_pos[2], hit_nc, back_off[2], overlay_on, overlay_pos[2], overlay_size[2];
+    struct game_buffer *back_alt;
 };
 
 static void globals_save(struct win_globals *g) {
@@ -1176,6 +1779,9 @@ static void globals_save(struct win_globals *g) {
     g->hwnd = *game_win_hwnd, g->screen_w = *game_win_screen_w, g->screen_h = *game_win_screen_h;
     g->pic_normal = *game_win_pic_normal, g->pic_zoomed = *game_win_pic_zoomed;
     g->vlog_hash = vlog.hash, g->vlog_n = vlog.n;
+    memcpy(g->mouse_pos, game_win_mouse_pos, 8), g->hit_nc = *game_win_hit_nc, memcpy(g->back_off, game_win_back_off, 8);
+    g->overlay_on = *game_win_overlay_on, memcpy(g->overlay_pos, game_win_overlay_pos, 8), memcpy(g->overlay_size, game_win_overlay_size, 8);
+    g->back_alt = *game_win_back_alt;
 }
 
 static void globals_restore(const struct win_globals *g) {
@@ -1192,18 +1798,21 @@ static void globals_restore(const struct win_globals *g) {
     *game_win_hwnd = g->hwnd, *game_win_screen_w = g->screen_w, *game_win_screen_h = g->screen_h;
     *game_win_pic_normal = g->pic_normal, *game_win_pic_zoomed = g->pic_zoomed;
     vlog.hash = g->vlog_hash, vlog.n = g->vlog_n;
+    memcpy(game_win_mouse_pos, g->mouse_pos, 8), *game_win_hit_nc = g->hit_nc, memcpy(game_win_back_off, g->back_off, 8);
+    *game_win_overlay_on = g->overlay_on, memcpy(game_win_overlay_pos, g->overlay_pos, 8), memcpy(game_win_overlay_size, g->overlay_size, 8);
+    *game_win_back_alt = g->back_alt;
 }
 
-static struct game_win *any_pool(void) { return rnd_to(8) == 0 ? NULL : &pool[rnd_to(POOL)]; }
+static struct game_win *any_pool(void) { return rnd_to(8) == 0 ? NULL : PW(rnd_to(POOL)); }
 
 // Random lists and focus windows over the scratch windows.
 static void random_globals(void) {
     *game_win_nc_margin = rnd_to(10);
     int n = rnd_to(8);
     *game_win_parent_n = n;
-    for (int i = 0; i < n; i++) game_win_parents[i] = &pool[rnd_to(POOL)];
+    for (int i = 0; i < n; i++) game_win_parents[i] = PW(rnd_to(POOL));
     *game_win_z_n = rnd_to(4);
-    for (int i = 0; i < *game_win_z_n; i++) game_win_zorder[i] = &pool[rnd_to(POOL)];
+    for (int i = 0; i < *game_win_z_n; i++) game_win_zorder[i] = PW(rnd_to(POOL));
     *game_win_opaque = rnd_to(3) ? any_pool() : NULL;
     *game_win_opaque_flag = rnd_to(2);
     *game_win_modal_n = n = rnd_to(6);
@@ -1328,6 +1937,226 @@ static void sweep_virtual(struct game_win *w) {
     check_win_show_maximize(w);
 }
 
+// ---- Sweep: drawing and the mouse's window ---------------------------------------------------
+
+// Real Buffers (made once by the game's own code, which only allocates DIBs and device contexts
+// that stay for good): the scratch windows' frame strips, and the picture a window may hit-test
+// by, filled again with pixels some of which are the transparent colour each round.
+
+static int make_buffer(buffer_t *b, int w, int h) {
+    memset(b, 0, sizeof *b);
+    game_buffer_ctor(b);
+    game_buffer_init(b, w, h, 0, 0);
+    return b->bits && !b->dd && b->neg_height;
+}
+// Pixels at random, a good share of them the transparent colour.
+static void scatter(buffer_t *b) {
+    if (!b->bits || b->dd) return;
+    for (int y = 0; y < -b->neg_height; y++)
+        for (int x = 0; x < b->width; x++)
+            b->bits[(intptr_t)b->pitch * y + x] = (uint8_t)(rnd_to(2) ? *game_default_key : rnd_to(3) ? (uint8_t)rnd_to(256) : 0);
+}
+static int scratch_buffers(void) {
+    if (!nbuf_state) {
+        nbuf_state = 1;
+        for (int i = 0; i < NBUF; i++)
+            if (!make_buffer(&nbuf[i], 12 + (i * 7) % 30, 10 + (i * 5) % 25)) nbuf_state = -1;
+        for (int i = 0; i < POOL; i++)
+            if (!make_buffer(&pool_ex[i].hit, 14 + i, 12 + i % 5)) nbuf_state = -1;
+        if (!make_buffer(&scratch_overlay, 24, 14)) nbuf_state = -1;
+    }
+    if (nbuf_state > 0) {
+        for (int i = 0; i < NBUF; i++) scatter(&nbuf[i]);
+        for (int i = 0; i < POOL; i++) scatter(&pool_ex[i].hit);
+        scatter(&scratch_overlay);
+    }
+    return nbuf_state > 0;
+}
+
+// Which window is under a point, over the scratch windows: with the mouse pressed, captured and
+// hovered over on windows (shown or not), with a modal window, a window before it, and without.
+static void sweep_mouse(void) {
+    for (int k = 0; k < 30; k++) {
+        *game_win_press1 = rnd_to(6) == 0 ? any_pool() : NULL;
+        *game_win_press2 = rnd_to(6) == 0 ? any_pool() : NULL;
+        *game_win_capture = rnd_to(6) == 0 ? any_pool() : NULL;
+        *game_win_hover = rnd_to(6) == 0 ? any_pool() : NULL;
+        *game_win_modal = rnd_to(3) == 0 ? any_pool() : NULL;
+        *game_win_modal_prev = (int32_t)(uintptr_t)(rnd_to(2) ? any_pool() : NULL);
+        *game_win_parent_n = rnd_to(9);
+        for (int i = 0; i < *game_win_parent_n; i++) game_win_parents[i] = PW(rnd_to(POOL));
+        int32_t x = rnd_to(340) - 30, y = rnd_to(300) - 30;
+        check_win_get_mouse_window(&x, &y);
+    }
+}
+
+// Drawing the screen over the scratch windows and the game's back buffer (put back after each
+// check): the whole screen and an area, from a window, with the back buffer or another one,
+// with the overlay on and off.
+static void sweep_screen(void) {
+    struct game_buffer *back = game_win_back;
+    if (!back->bits || back->dd || back->width <= 0 || back->neg_height >= 0) return;
+    int w = back->width, h = -back->neg_height;
+    // The overlay Buffer may not have pixels yet: one that has is put in its place for the sweep.
+    struct game_buffer saved_overlay = *game_win_overlay;
+    *game_win_overlay = scratch_overlay;
+    for (int k = 0; k < 14; k++) {
+        *game_win_z_n = rnd_to(7);
+        for (int i = 0; i < *game_win_z_n; i++) game_win_zorder[i] = PW(rnd_to(POOL));
+        *game_win_back_alt = rnd_to(2) ? (struct game_buffer *)(uintptr_t)1 : NULL;
+        *game_win_opaque = rnd_to(2) && *game_win_z_n ? game_win_zorder[rnd_to(*game_win_z_n)] : any_pool();
+        *game_win_overlay_on = rnd_to(2);
+        game_win_overlay_pos[0] = rnd_to(w + 40) - 20, game_win_overlay_pos[1] = rnd_to(h + 40) - 20;
+        game_win_overlay_size[0] = rnd_to(80), game_win_overlay_size[1] = rnd_to(60);
+        int32_t rect[4] = {rnd_to(w) - 10, rnd_to(h) - 10, 0, 0};
+        rect[2] = rect[0] + rnd_to(120), rect[3] = rect[1] + rnd_to(90);
+        struct game_win *win = rnd_to(3) ? (*game_win_z_n ? game_win_zorder[rnd_to(*game_win_z_n)] : NULL) : any_pool();
+        check_win_update_screen(rnd_to(2) ? rect : NULL, win);
+        check_win_update_screen(rect, NULL);
+        check_win_update_window(PW(rnd_to(POOL)), rnd_to(3) ? rect : NULL);
+        check_win_update_window(PW(rnd_to(POOL)), NULL);
+        check_win_redraw();
+        check_win_update();
+    }
+    *game_win_overlay = saved_overlay;
+}
+
+// ---- Sweep: the frame, on twins ----
+//
+// Two windows built alike, each with its four frame strips, a tile picture (or none) and a Buffer
+// to draw to or copy from. The original runs on the first and Chiron's code on the second, and
+// both windows' Buffers (every field, with handles compared by whether they are set, the device
+// contexts by content, and the pixels) and the virtual calls made are compared.
+
+struct twin {
+    struct game_win w;
+    buffer_t hit;  // at 0x444, where a window of the game's classes keeps its picture
+    buffer_t nc[4], tile, dest;
+};
+static struct twin tw[2];
+static int tw_built[2][7];
+
+static void twin_buf(int which, int slot, buffer_t *b, int w, int h) {
+    if (tw_built[which][slot]) game_buffer_dtor(b);
+    memset(b, 0, sizeof *b);
+    game_buffer_ctor(b);
+    tw_built[which][slot] = 1;
+    if (w > 0 && h > 0) game_buffer_init(b, w, h, 0, 0), scatter(b);
+}
+
+static const char *const titles[] = {"Hi", "A caption", "Datalinks and the planet", "", "x", "Mind Worm Boil Gate"};
+
+// A window built from `seed`, so the two are alike.
+static void twin_make(int which, uint32_t seed, struct font *font) {
+    uint32_t keep = rng_state;
+    rng_state = seed ? seed : 1;
+    struct twin *t = &tw[which];
+    struct game_win *w = &t->w;
+    memset(w, 0, sizeof *w);
+    w->vtable = stub_vtable;
+    w->root = w;
+    for (unsigned b = 0; b < sizeof FLAG_BITS / sizeof *FLAG_BITS; b++)
+        if (rnd_to(2) == 0) w->flags |= FLAG_BITS[b];
+    w->flags2 = WIN_F2_VISIBLE | (rnd_to(8) ? WIN_F2_FRAME : 0);
+    w->flags &= ~(uint32_t)WIN_F_CHILD;
+    w->border = 1 + rnd_to(6);
+    w->bottom = rnd_to(3) == 0 ? -1 : rnd_to(8);
+    w->caption_h = 4 + rnd_to(20);
+    w->cap_btn = rnd_to(2) ? rnd_to(3) : rnd_to(5);
+    w->outer[0] = rnd_to(60) - 10, w->outer[1] = rnd_to(60) - 10;
+    w->outer[2] = w->outer[0] + 20 + rnd_to(70), w->outer[3] = w->outer[1] + 20 + rnd_to(60);
+    w->inner[0] = rnd_to(8), w->inner[1] = rnd_to(8), w->inner[2] = w->inner[0] + 5 + rnd_to(70), w->inner[3] = w->inner[1] + 5 + rnd_to(50);
+    w->nc_color = rnd_to(256), w->box_color[0] = rnd_to(256), w->box_color[1] = rnd_to(256);
+    for (int k = 0; k < 4; k++) w->text_color[k] = rnd_to(4) ? rnd_to(256) : -1;
+    w->title = font && rnd_to(3) ? titles[rnd_to((int)(sizeof titles / sizeof *titles))] : NULL;
+    w->nc_font = font && rnd_to(5) ? font : NULL;
+    int width = w->outer[2] - w->outer[0], height = w->outer[3] - w->outer[1];
+    int top = nc_top(w), bot = nc_bottom(w);
+    int exact = rnd_to(4) != 0;
+    int sw[4] = {width, width, w->border, w->border}, sh[4] = {top, bot, height - bot - top, height - bot - top};
+    twin_buf(which, 0, &t->hit, 16 + rnd_to(20), 10 + rnd_to(20));
+    for (int i = 0; i < 4; i++)
+        twin_buf(which, 1 + i, &t->nc[i], exact ? sw[i] : 4 + rnd_to(60), exact ? sh[i] : 4 + rnd_to(40));
+    twin_buf(which, 5, &t->tile, 3 + rnd_to(30), 3 + rnd_to(25));
+    twin_buf(which, 6, &t->dest, 20 + rnd_to(100), 20 + rnd_to(80));
+    w->nc_tile = rnd_to(3) ? &t->tile : NULL;
+    w->nc_buf_b4 = &t->nc[0], w->nc_buf_c0 = &t->nc[1], w->nc_buf_bc = &t->nc[2], w->nc_buf_b8 = &t->nc[3];
+    rng_state = keep;
+}
+
+// Compare the twins after one call each; after a difference, build them again alike.
+static void twin_compare(struct hook_stats *s, const char *what, uint32_t ha, int32_t na, struct font *font) {
+    const char *d = NULL;
+    static char msg[200];
+    if (ha != vlog.hash || na != vlog.n) d = "calls through the vtable";
+    for (int i = 0; i < 7 && !d; i++) {
+        buffer_t *a = i == 0 ? &tw[0].hit : i < 5 ? &tw[0].nc[i - 1] : i == 5 ? &tw[0].tile : &tw[0].dest;
+        buffer_t *b = i == 0 ? &tw[1].hit : i < 5 ? &tw[1].nc[i - 1] : i == 5 ? &tw[1].tile : &tw[1].dest;
+        d = buffer_twin_diff(a, b, 0, 0);
+        if (!d) d = buffer_pixels_diff(a, b);
+        if (d) snprintf(msg, sizeof msg, "buffer %d: %s", i, d), d = msg;
+    }
+    if (!d) return;
+    hooks_mismatch(s, " (%s): %s", what, d);
+    uint32_t seed = rnd() | 1;
+    twin_make(0, seed, font), twin_make(1, seed, font);
+}
+
+#define TWIN_STEP(stats, what, font, run_a, run_b)                         \
+    do {                                                                   \
+        vlog.hash = 0, vlog.n = 0, vlog_twin_on = 1;                        \
+        run_a;                                                             \
+        uint32_t ha_ = vlog.hash;                                          \
+        int32_t na_ = vlog.n;                                              \
+        vlog.hash = 0, vlog.n = 0;                                         \
+        run_b;                                                             \
+        twin_compare(&(stats), what, ha_, na_, font);                      \
+        vlog_twin_on = 0;                                                  \
+    } while (0)
+
+static void twin_sweep(struct font *font, uint32_t hwnd) {
+    if (!*game_palette_copy) return;
+    static const int32_t none[4] = {0, 0, 0, 0};
+    (void)none;
+    for (int round = 0; round < 16; round++) {
+        uint32_t seed = rnd() | 1;
+        twin_make(0, seed, font), twin_make(1, seed, font);
+        TWIN_STEP(stats_win_set_rects, "set_rects", font, orig_win_set_rects(&tw[0].w), win_set_rects(&tw[1].w));
+        for (int k = 0; k < 10; k++) {
+            struct game_win *w = &tw[0].w;
+            int32_t r[4] = {w->outer[0] + rnd_to(60) - 20, w->outer[1] + rnd_to(50) - 15, 0, 0};
+            r[2] = r[0] + rnd_to(90), r[3] = r[1] + rnd_to(70);
+            const int32_t *rp = rnd_to(3) ? r : NULL;
+            int which = rnd_to(6) - 1;
+            TWIN_STEP(stats_win_on_redraw_nc, "on_redraw_nc", font, orig_win_on_redraw_nc(&tw[0].w, rp, which),
+                      win_on_redraw_nc(&tw[1].w, rp, which));
+            // On the screen: to another Buffer (the back buffer is never drawn on, and its clip is left as it was).
+            game_win_back_off[0] = rnd_to(20) - 5, game_win_back_off[1] = rnd_to(20) - 5;
+            *game_win_back_alt = &tw[0].dest;
+            struct game_buffer *alt_b = &tw[1].dest;
+            vlog.hash = 0, vlog.n = 0, vlog_twin_on = 1;
+            orig_win_on_nc_paint(&tw[0].w, rp, which);
+            uint32_t ha = vlog.hash;
+            int32_t na = vlog.n;
+            vlog.hash = 0, vlog.n = 0;
+            *game_win_back_alt = alt_b;
+            win_on_nc_paint(&tw[1].w, rp, which);
+            *game_win_back_alt = NULL;
+            twin_compare(&stats_win_on_nc_paint, "on_nc_paint", ha, na, font);
+            vlog_twin_on = 0;
+            if (hwnd) {
+                int x = rnd_to(100) - 30, y = rnd_to(80) - 30;
+                *game_win_hwnd = hwnd;
+                TWIN_STEP(stats_win_draw_nc_to, "draw_nc_to", font,
+                          orig_win_draw_nc_to(&tw[0].w, &tw[0].dest, x, y), win_draw_nc_to(&tw[1].w, &tw[1].dest, x, y));
+                *game_win_hwnd = 0x1;
+                orig_win_draw_nc_to(&tw[0].w, NULL, x, y);
+                win_draw_nc_to(&tw[1].w, NULL, x, y);
+            }
+        }
+    }
+}
+
 static void win_sweep(void) {
     static struct win_globals saved;
     static struct game_win *real[REAL];
@@ -1379,21 +2208,36 @@ static void win_sweep(void) {
         }
     }
 
+    // The Buffers the scratch windows draw into and are hit-tested by (made on the first sweep), and a font for titles.
+    scratch_buffers();
+    static struct font mine;
+    static int mine_made;
+    struct font *font = NULL;
+    if (*game_font_default && *game_font_dc) {
+        if (!mine_made) font_ctor(&mine), game_font_init(&mine, "Arial", 12, 0), mine_made = 1;
+        if (mine.hfont) font = &mine;
+    }
+
     // Scratch windows.
     for (int round = 0; round < 40; round++) {
         fill_stub_vtable();
+        scratch_buffers();
         build_forest();
         random_globals();
-        for (int k = 0; k < 3 * POOL; k++) sweep_window(&pool[k % POOL], any_pool());
+        if (nbuf_state > 0) sweep_mouse();
+        random_globals();
+        sweep_screen();
+        random_globals();
+        for (int k = 0; k < 3 * POOL; k++) sweep_window(PW(k % POOL), any_pool());
         // Lists and focus.
         check_win_get_key_window();
-        for (int k = 0; k < 6; k++) check_win_get_key_window(), check_win_in_modal(&pool[rnd_to(POOL)]);
+        for (int k = 0; k < 6; k++) check_win_get_key_window(), check_win_in_modal(PW(rnd_to(POOL)));
         check_win_set_def_focus(any_pool());
         check_win_update_zorder();
-        for (int k = 0; k < 6; k++) check_win_recurse_zorder(&pool[rnd_to(POOL)]);
+        for (int k = 0; k < 6; k++) check_win_recurse_zorder(PW(rnd_to(POOL)));
         for (int k = 0; k < 6; k++) {
-            check_win_bring_to_top(&pool[rnd_to(POOL)]);
-            struct game_win *p = &pool[rnd_to(POOL)];
+            check_win_bring_to_top(PW(rnd_to(POOL)));
+            struct game_win *p = PW(rnd_to(POOL));
             check_win_bring_child_to_top(p, p->n_children && rnd_to(5) ? p->children[rnd_to(p->n_children)] : any_pool());
             check_win_bring_parent_to_top(*game_win_parent_n && rnd_to(5) ? game_win_parents[rnd_to(*game_win_parent_n)] : any_pool());
         }
@@ -1401,13 +2245,13 @@ static void win_sweep(void) {
         for (int k = 0; k < 4; k++) {
             if (*game_win_parent_n) *game_win_opaque = game_win_parents[rnd_to(*game_win_parent_n)];
             check_win_update_zorder();
-            check_win_recurse_zorder(&pool[rnd_to(POOL)]);
-            check_win_bring_to_top(&pool[rnd_to(POOL)]);
+            check_win_recurse_zorder(PW(rnd_to(POOL)));
+            check_win_bring_to_top(PW(rnd_to(POOL)));
         }
         for (int k = 0; k < 4; k++) {
-            check_win_add_parent(&pool[rnd_to(POOL)]);
+            check_win_add_parent(PW(rnd_to(POOL)));
             check_win_add_parent(NULL);
-            struct game_win *p = &pool[rnd_to(POOL)];
+            struct game_win *p = PW(rnd_to(POOL));
             if (p->n_children < 140) check_win_add_child(p, any_pool());
         }
         // The modal stack: a window in it at each depth, one not in it, and an empty stack.
@@ -1422,7 +2266,7 @@ static void win_sweep(void) {
         check_win_release_modal(any_pool());
         // Scroll bars and the move.
         for (int k = 0; k < POOL; k++) {
-            struct game_win *w = &pool[k];
+            struct game_win *w = PW(k);
             check_win_set_vert_paging(w, rnd_to(1000));
             check_win_set_horz_paging(w, rnd_to(1000));
             check_win_unk8(w, rnd_to(1000));
@@ -1431,15 +2275,20 @@ static void win_sweep(void) {
             check_win_move(w, w->inner[0], w->outer[1]);
         }
         // The functions that call through the vtable and Windows, on windows of every shape.
-        for (int k = 0; k < 2 * POOL; k++) sweep_virtual(&pool[k % POOL]);
+        for (int k = 0; k < 2 * POOL; k++) sweep_virtual(PW(k % POOL));
         // The lists a window leaves: one in them, one not, and the same twice over.
         for (int k = 0; k < 6; k++) {
             check_win_remove_parent(*game_win_parent_n && rnd_to(4) ? game_win_parents[rnd_to(*game_win_parent_n)] : any_pool());
-            struct game_win *p = &pool[rnd_to(POOL)];
+            struct game_win *p = PW(rnd_to(POOL));
             check_win_remove_child(p, p->n_children && rnd_to(4) ? p->children[rnd_to(p->n_children)] : any_pool());
         }
         check_win_remove_parent(NULL);
-        check_win_remove_child(&pool[0], NULL);
+        check_win_remove_child(PW(0), NULL);
+    }
+    // The frame's functions, on twin windows.
+    if (nbuf_state > 0) {
+        fill_stub_vtable();
+        twin_sweep(font, saved.hwnd);
     }
     globals_restore(&saved);
     hooks_sweeping = sweeping;
@@ -1508,5 +2357,24 @@ static const struct hook win_hooks[] = {
     HOOK(0x5ed880, win_resize, 0x8b, 0x44, 0x24, 0x0c, 0x56, 0x57, 0x8b, 0xf9, 0x85, 0xc0),
     HOOK(0x5f4c30, win_redraw_nc_buffer, 0x56, 0x57, 0x8b, 0x7c, 0x24, 0x0c, 0x8b, 0xf1, 0x57, 0x6a, 0x00, 0x8b, 0x06),
     HOOK(0x5f4ca0, win_update_nc_buffer, 0x8b, 0x54, 0x24, 0x04, 0x8b, 0x01, 0x52, 0x6a, 0x00),
+    // push ebx; push ebp; push esi; mov esi, [esp+0x10]; mov ebp, [0x9b7ad0]; mov edx, [0x9b7ac0]
+    HOOK(0x5f6f10, win_get_mouse_window, 0x53, 0x55, 0x56, 0x8b, 0x74, 0x24, 0x10, 0x8b, 0x2d, 0xd0, 0x7a, 0x9b, 0x00, 0x8b, 0x15,
+         0xc0, 0x7a, 0x9b, 0x00),
+    // mov eax, [0x9b7b30]; sub esp, 0x10; test eax, eax; push ebx; push ebp; push esi; push edi
+    HOOK(0x5f7320, win_update_screen, 0xa1, 0x30, 0x7b, 0x9b, 0x00, 0x83, 0xec, 0x10, 0x85, 0xc0, 0x53, 0x55, 0x56, 0x57),
+    // sub esp, 0x14; push esi; push edi; mov edi, [esp+0x20]; mov esi, ecx
+    HOOK(0x5f74a0, win_update_window, 0x83, 0xec, 0x14, 0x56, 0x57, 0x8b, 0x7c, 0x24, 0x20, 0x8b, 0xf1),
+    // mov eax, [0x9b7b30]; push esi; xor esi, esi; test eax, eax
+    HOOK(0x5f4cc0, win_redraw, 0xa1, 0x30, 0x7b, 0x9b, 0x00, 0x56, 0x33, 0xf6, 0x85, 0xc0),
+    // mov eax, [0x9b7b30]; push edi; xor edi, edi; test eax, eax
+    HOOK(0x5f4d00, win_update, 0xa1, 0x30, 0x7b, 0x9b, 0x00, 0x57, 0x33, 0xff, 0x85, 0xc0),
+    // push esi; mov esi, ecx; test BYTE PTR [esi+0x9c], 0x2
+    HOOK(0x5f2940, win_set_rects, 0x56, 0x8b, 0xf1, 0xf6, 0x86, 0x9c, 0x00, 0x00, 0x00, 0x02),
+    // sub esp, 0x64; push ebx; push ebp; push esi; mov esi, ecx
+    HOOK(0x5f2cf0, win_on_redraw_nc, 0x83, 0xec, 0x64, 0x53, 0x55, 0x56, 0x8b, 0xf1),
+    // sub esp, 0x40; push ebx; push ebp; push esi; push edi
+    HOOK(0x5f37c0, win_draw_nc_to, 0x83, 0xec, 0x40, 0x53, 0x55, 0x56, 0x57),
+    // sub esp, 8; push ebx; push esi; mov esi, ecx; test BYTE PTR [esi+0x98], 0x11
+    HOOK(0x5f5810, win_on_nc_paint, 0x83, 0xec, 0x08, 0x53, 0x56, 0x8b, 0xf1, 0xf6, 0x86, 0x98, 0x00, 0x00, 0x00, 0x11),
 };
 struct hook_module win_module = {"win", win_hooks, HOOK_COUNT(win_hooks), win_sweep, NULL, -1};
