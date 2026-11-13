@@ -19,6 +19,7 @@
 DWORD WINAPI GetTickCount(void);
 BOOL WINAPI SetEvent(HANDLE h);
 BOOL WINAPI ResetEvent(HANDLE h);
+UINT WINAPI timeKillEvent(UINT id);
 
 DWORD WINAPI timeGetTime(void) { return GetTickCount(); }
 
@@ -98,6 +99,28 @@ UINT WINAPI timeSetEvent(UINT delay, UINT resolution, void *target, DWORD user, 
     pthread_mutex_unlock(&mmtimer_lock);
     if (pthread_create(&t->thread, NULL, mmtimer_thread, t)) return 0;
     return t->id;
+}
+
+unsigned winmm_timer_mark(void) {
+    pthread_mutex_lock(&mmtimer_lock);
+    unsigned id = next_timer_id;
+    pthread_mutex_unlock(&mmtimer_lock);
+    return id;
+}
+
+void winmm_timers_kill_from(unsigned mark) {
+    for (;;) {
+        pthread_mutex_lock(&mmtimer_lock);
+        UINT id = 0;
+        for (struct mmtimer *t = mmtimers; t; t = t->next)
+            if (t->id >= mark) {
+                id = t->id;
+                break;
+            }
+        pthread_mutex_unlock(&mmtimer_lock);
+        if (!id) return;
+        timeKillEvent(id);
+    }
 }
 
 UINT WINAPI timeKillEvent(UINT id) {

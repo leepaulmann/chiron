@@ -86,6 +86,8 @@ add_executable(chiron
   src/engine/scroll.c
   src/engine/menu.c
   src/engine/dialog.c
+  src/engine/strings.c
+  src/engine/edit.c
   src/engine/bufdraw.c
   src/engine/move.c
   src/engine/events.c

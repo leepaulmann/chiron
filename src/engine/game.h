@@ -2470,6 +2470,145 @@ GAME_AT(struct game_listbox, visible, 0x1c);
 GAME_AT(struct game_listbox, on_select, 0x3c);
 GAME_AT(struct game_listbox, on_double, 0x40);
 
+// ---- The EditBox, EditGroup, StringStruct, StringList, Strings and Time classes (edit.c, strings.c) ----
+// A Time object (OpenSMACX's Time): a repeating or one-shot timer a window or button owns. `flags` bit 0
+// says a pulse made with SetTimer (see time_pulse_3), bit 1 that it has fired once; `id` is what
+// timeSetEvent or SetTimer gave back (0 for none). A delay below 0x32 ms uses a multimedia timer, a longer
+// one SetTimer with the object as the id; either way the game's own procedures post message 0x401 to the
+// window, whose handler calls `cb` (with `arg`) and `cb2` (with `arg` and `arg2`).
+struct game_time {
+    uint32_t flags;                                          // 0x0
+    uint32_t id;                                             // 0x4
+    void(__attribute__((cdecl)) * cb)(void *arg);            // 0x8
+    void(__attribute__((cdecl)) * cb2)(void *arg, int arg2);  // 0xc
+    int32_t arg2;                                            // 0x10
+    void *arg;                                               // 0x14
+    uint32_t delay;                                          // 0x18
+    int32_t fired;                                           // 0x1c: the message is posted and not yet handled
+    int32_t resolution;                                      // 0x20: timeSetEvent's resolution (5 by default)
+    int32_t f24;                                             // 0x24
+};
+_Static_assert(sizeof(struct game_time) == 0x28, "layout of the game's Time");
+GAME_AT(struct game_time, id, 0x4);
+GAME_AT(struct game_time, cb, 0x8);
+GAME_AT(struct game_time, cb2, 0xc);
+GAME_AT(struct game_time, arg2, 0x10);
+GAME_AT(struct game_time, arg, 0x14);
+GAME_AT(struct game_time, delay, 0x18);
+GAME_AT(struct game_time, fired, 0x1c);
+GAME_AT(struct game_time, resolution, 0x20);
+// The function that takes and dispatches the game's own 0x401 messages (0x5fd370), the flag it sets
+// (0x9b7b9c), and the two procedures a timer calls (0x616820 for a multimedia timer, 0x6167e0 for SetTimer).
+extern void(__attribute__((cdecl)) * game_time_flush)(void);
+extern uint32_t *game_time_flush_flag;
+extern void *game_time_mm_proc, *game_time_timer_proc;
+extern uint32_t(__attribute__((stdcall)) * game_time_set_event)(uint32_t delay, uint32_t res, void *proc, void *user, uint32_t flags);
+extern uint32_t(__attribute__((stdcall)) * game_time_kill_event)(uint32_t id);
+extern uint32_t(__attribute__((stdcall)) * game_set_timer)(uint32_t hwnd, uint32_t id, uint32_t ms, void *proc);
+extern int(__attribute__((stdcall)) * game_kill_timer)(uint32_t hwnd, uint32_t id);
+extern int(__attribute__((stdcall)) * game_message_beep)(unsigned type);
+
+// An EditBox: a Win with a Buffer behind it (a GraphicWin, up to 0xa14), a line of text, and a caret.
+// `anchor` and `caret` are positions in the text; text between them is selected. `first` is the
+// first character shown. `mods` is which of Shift (1) and Ctrl (2) the last key had, `flags` bit 0
+// says the box passes the dialog focus on to the parent's next and bit 1 that it shows asterisks.
+struct game_editbox {
+    struct game_win win;
+    struct game_buffer buf;  // 0x444
+    GAME_PAD(0x9cc, 0xa14);
+    char text[0x100];            // 0xa14
+    uint32_t max_len;            // 0xb14
+    int32_t first;               // 0xb18
+    int32_t color;               // 0xb1c: the text's colour, and the frame's
+    int32_t sel_text;            // 0xb20: the selected text's colour (-1 for `color`)
+    int32_t sel_back;            // 0xb24: the selection's background (-1 for the Buffer's own)
+    int32_t border_a, border_b;  // 0xb28, 0xb2c: the lines of the frame
+    int32_t border_w;            // 0xb30: how many
+    int32_t pad;                 // 0xb34: space inside the frame
+    int32_t mods;                // 0xb38
+    int32_t flags;               // 0xb3c
+    int32_t anchor;              // 0xb40
+    int32_t caret;               // 0xb44
+    int32_t blink;               // 0xb48: the caret is drawn
+    struct game_time timer;      // 0xb4c: the caret's blink
+};
+_Static_assert(sizeof(struct game_editbox) == 0xb74, "layout of the game's EditBox");
+GAME_AT(struct game_editbox, buf, 0x444);
+GAME_AT(struct game_editbox, text, 0xa14);
+GAME_AT(struct game_editbox, max_len, 0xb14);
+GAME_AT(struct game_editbox, first, 0xb18);
+GAME_AT(struct game_editbox, color, 0xb1c);
+GAME_AT(struct game_editbox, sel_text, 0xb20);
+GAME_AT(struct game_editbox, sel_back, 0xb24);
+GAME_AT(struct game_editbox, border_a, 0xb28);
+GAME_AT(struct game_editbox, border_w, 0xb30);
+GAME_AT(struct game_editbox, pad, 0xb34);
+GAME_AT(struct game_editbox, mods, 0xb38);
+GAME_AT(struct game_editbox, flags, 0xb3c);
+GAME_AT(struct game_editbox, anchor, 0xb40);
+GAME_AT(struct game_editbox, caret, 0xb44);
+GAME_AT(struct game_editbox, blink, 0xb48);
+GAME_AT(struct game_editbox, timer, 0xb4c);
+// The two windows that have a mouse button down in an EditBox (0x9b7abc and 0x9b7ac0).
+extern struct game_win **game_edit_press;  // [2]
+
+// An EditGroup: up to ten EditBoxes with labels, in one dialog. It has a pointer to its vbtable at 0,
+// and a Win (entry 1, at 0x8c when it is by itself) and a Dialog (entry 2, at 0xaa4) as virtual bases.
+// The Dialog's list at 0xbc holds the labels. `text` are the boxes' default texts, `limit` their maximum
+// lengths; label_w and edit_w the widest label and the widest text with its padding.
+struct game_editgroup {
+    int32_t *vbptr;                 // 0x0
+    struct game_editbox *edit[10];  // 0x4
+    char *text[10];                 // 0x2c
+    int32_t limit[10];              // 0x54
+    int32_t label_w, edit_w;        // 0x7c, 0x80
+    int32_t f84;                    // 0x84
+};
+_Static_assert(sizeof(struct game_editgroup) == 0x88, "layout of the game's EditGroup");
+GAME_AT(struct game_editgroup, edit, 0x4);
+GAME_AT(struct game_editgroup, text, 0x2c);
+GAME_AT(struct game_editgroup, limit, 0x54);
+GAME_AT(struct game_editgroup, label_w, 0x7c);
+GAME_AT(struct game_editgroup, edit_w, 0x80);
+
+// The string list class (OpenSMACX's StringStruct): a ring of nodes, each with an item and an id.
+// `head` is the first node, `cur` the one a walk is at, `idx` where it is (counted from the head),
+// `count` how many. A StringList item has its text at 0x4 (and a number each at 0x8 and 0xc). The Dialog
+// class (a list box's and an EditGroup's virtual base) has one of these at 0xbc.
+struct game_strnode {
+    int32_t pad0, id;
+    void *item;
+    struct game_strnode *next, *prev;
+};
+_Static_assert(sizeof(struct game_strnode) == 0x14, "layout of a string list node");
+GAME_AT(struct game_strnode, id, 0x4);
+GAME_AT(struct game_strnode, item, 0x8);
+GAME_AT(struct game_strnode, next, 0xc);
+GAME_AT(struct game_strnode, prev, 0x10);
+struct game_strlist {
+    void **vtable;              // 0x0
+    void *vbptr;                // 0x4
+    struct game_strnode *head;  // 0x8
+    struct game_strnode *cur;   // 0xc
+    int32_t count;              // 0x10
+    int32_t idx;                // 0x14
+};
+_Static_assert(sizeof(struct game_strlist) == 0x18, "the string list's own part");
+GAME_AT(struct game_strlist, head, 0x8);
+GAME_AT(struct game_strlist, cur, 0xc);
+GAME_AT(struct game_strlist, count, 0x10);
+GAME_AT(struct game_strlist, idx, 0x14);
+// The string table (Strings, at 0x9b8fcc): `base` and `size` of what it holds.
+struct game_strings {
+    int32_t f0;
+    uint32_t base;  // 0x4
+    int32_t f8;
+    uint32_t size;  // 0xc
+    int32_t f10, f14;
+};
+GAME_AT(struct game_strings, base, 0x4);
+GAME_AT(struct game_strings, size, 0xc);
+
 // Windows calls Win makes (through the import table, so a shadow check's journal sees them).
 extern int(__attribute__((stdcall)) * game_set_cursor_pos)(int x, int y);
 extern int(__attribute__((stdcall)) * game_get_cursor_pos)(int32_t *point);

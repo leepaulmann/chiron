@@ -1,0 +1,30 @@
+# Text entry in an edit box, loaded from the game's autosave: found a base with the colony pod (b), open its
+# base screen (Return) and its Rename window, whose Name box starts with the old name selected. Typing
+# replaces the selection, Backspace and Delete remove characters, Left, Right and Home move the caret, and Cancel
+# leaves the name as it was; the base is not renamed. (The keys that make no character reach the box as clicks
+# too, as the number their key code has: the box shows $, % and . among the text. That is how the game, with
+# the window layer's MapVirtualKey, treats them, in the original's code as in Chiron's.) Leave time after each
+# step; a snap takes two seconds.
+25 load
+48 click 362 734         # the note's Close
+55 key b                 # found a base where the colony pod stands
+64 key Return            # its base screen
+72 click 398 523         # RENAME
+80 snap rename
+84 type Fox              # replaces the selected name
+88 snap typed
+92 key BackSpace
+95 snap backspace
+99 key Left
+102 snap left
+106 key Delete
+109 snap delete
+113 key Home
+116 snap home
+120 type ab
+123 snap typed-again
+127 key Right
+130 snap right
+134 click 677 429         # CANCEL
+138 snap cancelled
+142 close

@@ -100,6 +100,10 @@ extern void *(*hooks_dc_state)(void *hdc, int *size);
 extern int (*hooks_dc_same)(void *a, void *b);
 // Set by the host: whether two GDI fonts were made from the same LOGFONT.
 extern int (*hooks_font_same)(void *a, void *b);
+// Set by the host: the id the next multimedia timer will get, and a way to stop every timer made from
+// one on. A sweep of a function that starts a timer (the original's run does, for real) stops them again.
+extern unsigned (*hooks_timer_mark)(void);
+extern void (*hooks_timers_kill_from)(unsigned mark);
 
 void hooks_writes_add(struct hook_writes *w, void *p, size_t size);
 void hooks_writes_dc(struct hook_writes *w, void *hdc);  // nothing if hdc isn't a DC

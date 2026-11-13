@@ -77,6 +77,8 @@ static void *game_thread(void *arg) {
         hooks_dc_state = gdi_dc_state;
         hooks_dc_same = gdi_dc_same;
         hooks_font_same = gdi_font_same;
+        hooks_timer_mark = winmm_timer_mark;
+        hooks_timers_kill_from = winmm_timers_kill_from;
         hooks_apply(exe, reimpl_mode);
     }
     // The MSVC entry point (WinMainCRTStartup) never returns; it calls ExitProcess.

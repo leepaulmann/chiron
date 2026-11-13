@@ -28,10 +28,12 @@ extern struct hook_module button_module;
 extern struct hook_module scroll_module;
 extern struct hook_module menu_module;
 extern struct hook_module dialog_module;
+extern struct hook_module strings_module;
+extern struct hook_module edit_module;
 extern struct hook_module tech_module, map_module, mapgen_module, base_module, production_module, upkeep_module, social_module,
     faction_module, strategy_module, build_module, veh_module, spot_module, council_module, path_module, score_module, move_module, combat_module, events_module, ai_module, setup_module, probe_module, save_module, rules_module, diplomacy_module, palette_module, buffer_module, text_module, quiet_module;
 static struct hook_module *const modules[] = {&tech_module, &map_module, &mapgen_module, &base_module, &production_module,
-                                              &upkeep_module, &social_module, &faction_module, &strategy_module, &build_module, &veh_module, &spot_module, &council_module, &path_module, &score_module, &move_module, &combat_module, &events_module, &ai_module, &setup_module, &probe_module, &save_module, &rules_module, &diplomacy_module, &palette_module, &buffer_module, &text_module, &sprite_module, &texture_module, &bufobj_module, &bufimg_module, &bufdraw_module, &font_module, &win_module, &button_module, &scroll_module, &menu_module, &dialog_module, &quiet_module};
+                                              &upkeep_module, &social_module, &faction_module, &strategy_module, &build_module, &veh_module, &spot_module, &council_module, &path_module, &score_module, &move_module, &combat_module, &events_module, &ai_module, &setup_module, &probe_module, &save_module, &rules_module, &diplomacy_module, &palette_module, &buffer_module, &text_module, &sprite_module, &texture_module, &bufobj_module, &bufimg_module, &bufdraw_module, &font_module, &win_module, &button_module, &scroll_module, &menu_module, &dialog_module, &strings_module, &edit_module, &quiet_module};
 
 #define N_MODULES (sizeof(modules) / sizeof(modules[0]))
 
@@ -152,6 +154,8 @@ void (*hooks_hold_time)(int hold);
 void *(*hooks_dc_state)(void *hdc, int *size);
 int (*hooks_dc_same)(void *a, void *b);
 int (*hooks_font_same)(void *a, void *b);
+unsigned (*hooks_timer_mark)(void);
+void (*hooks_timers_kill_from)(unsigned mark);
 
 // Two save buffers per nesting level: the memory before the original ran,
 // and after.

@@ -86,5 +86,9 @@ int path_copy_file(const char *from, const char *to);
 // array and each name are malloc'd). Returns the count, or -1 if no layer
 // has the folder.
 int path_list_dir(const char *winpath, char ***names);
+// The next multimedia timer's id, and a way to stop every one made since (for a shadow sweep, which
+// starts the original's timers on scratch objects and can't put the ids back).
+unsigned winmm_timer_mark(void);
+void winmm_timers_kill_from(unsigned mark);
 const char *path_get_cwd(void);
 int path_set_cwd(const char *winpath);
