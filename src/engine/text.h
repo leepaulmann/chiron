@@ -76,3 +76,38 @@ int TEXT_THIS buffer_wrap_right(game_buffer_t *b, struct font *f, const char *s,
 int TEXT_THIS buffer_wrap_right_2(game_buffer_t *b, struct font *f, const char *s, const int32_t *rect);
 int TEXT_THIS buffer_wrap_right_3(game_buffer_t *b, const char *s, int x, int y, int w);
 int TEXT_THIS buffer_wrap_right_4(game_buffer_t *b, const char *s, const int32_t *rect);
+
+// "Flying" text, laid out over several calls into a global queue and flushed, and lists of
+// strings drawn with it. A list is the game's circular list class: a head, the node it stands
+// at (each node has a key, an entry and the next node), how many entries there are and which
+// one it stands at. An entry has a text and a kind.
+struct list_entry {
+    int32_t f0;
+    const char *text;
+    int32_t kind;
+};
+struct list_node {
+    int32_t f0;
+    int32_t key;
+    struct list_entry *entry;
+    struct list_node *next;
+};
+struct str_list {
+    int32_t f0, f4;
+    void *head;
+    struct list_node *cur;
+    int32_t count, index;
+};
+_Static_assert(sizeof(struct str_list) == 0x18, "layout of the game's list");
+
+int TEXT_THIS buffer_wrap_height_flying(game_buffer_t *b, const char *s, int width);
+int TEXT_THIS buffer_wrap_height_flying_2(game_buffer_t *b, const char *s);
+int TEXT_THIS buffer_wrap_height_flying_flush(game_buffer_t *b);
+int TEXT_THIS buffer_wrap_flying(game_buffer_t *b, const char *s, int x, int y, int width);
+int TEXT_THIS buffer_wrap_flying_2(game_buffer_t *b, const char *s);
+int TEXT_THIS buffer_wrap_flying_flush(game_buffer_t *b);
+int TEXT_THIS buffer_wrap_cent_flying(game_buffer_t *b, const char *s, int x, int y, int width);
+int TEXT_THIS buffer_wrap_cent_flying_2(game_buffer_t *b, const char *s);
+int TEXT_THIS buffer_wrap_cent_flying_flush(game_buffer_t *b);
+int TEXT_THIS buffer_write_strings_height(game_buffer_t *b, struct str_list *list, int width, int flags);
+int TEXT_THIS buffer_write_strings(game_buffer_t *b, struct str_list *list, int x, int y, int width, int flags);

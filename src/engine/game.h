@@ -1841,6 +1841,12 @@ extern void(__attribute__((thiscall)) * game_spot_ctor)(void *spot);
 extern void(__attribute__((thiscall)) * game_spot_dtor)(void *spot);
 extern void(__attribute__((thiscall)) * game_spot_init)(void *spot, int n);
 extern void (*game_exit)(int code);
+// The queue "flying" text is laid out in: the x and y the line being filled goes at, the width left for it, the text queued so far (a
+// C string, 1 KB or so) and the strings the original adds to it and to the widths (a gap between pieces, and one measured as the
+// space a piece takes in each of the three layouts).
+extern int32_t *game_flying_x, *game_flying_y, *game_flying_left;
+extern char *game_flying_text;
+extern const char *game_flying_gap, *game_flying_pad_height, *game_flying_pad, *game_flying_pad_cent;
 // ---- Sprites (sprite.c) ---------------------------------------------------------
 
 // The game's Sprite class (OpenSMACX calls it so): a keyed 8-bit image with

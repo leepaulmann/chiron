@@ -858,6 +858,346 @@ int TEXT_THIS buffer_wrap_right_2(buffer_t *b, struct font *font, const char *s,
     return r;
 }
 
+// ---- Buffer: "flying" text and lists of strings -------------------------------------------------------
+//
+// Text laid out over several calls. A call to the wrap_flying functions says where the first
+// line goes and how wide it may be; each call after that adds text to the line being filled
+// (the pieces are joined with a gap) until it is full, when the line is drawn and the next
+// started below it. A flush draws what is left. The queue lives in the game's globals: the
+// x and y of the line, the width left for it (0 means nothing is queued: calls do nothing),
+// the text so far, and the width the text of the line has used (the same slack that
+// find_line_break adds to). The height variants only count: they leave the lines (the Buffer
+// counts them) and the y below the last. The indent works as in wrap_left.
+//
+// A list of strings (the game's own circular list class, whose few methods the original inlines
+// in places) holds entries with a text and a kind: 0 is running text, anything else starts a
+// block of its own after the text before is flushed (2: centred, wrapped; 3: a heading line in
+// the first font; others: flying text again, from a new place).
+
+// Where the list keeps its parts: a head (non-zero when it has entries), the node it stands at
+// (a ring: each node has the key handed to the Buffer's list callback, an entry and the next
+// node), how many entries there are and which one it stands at.
+
+enum { LIST_HOOK = 0xc };  // a callback in the Buffer: cdecl (key, kind), called as the list steps to an entry
+
+static const char *list_text(struct str_list *l) { return l->head ? l->cur->entry->text : NULL; }
+static int list_kind(struct str_list *l) { return l->head ? l->cur->entry->kind : 0; }
+static void list_advance(struct str_list *l) {
+    if (!l->head) return;
+    l->cur = l->cur->next;
+    if (++l->index == l->count) l->index = 0;
+}
+static void list_rewind(struct str_list *l, int flags) {
+    if (!(flags & 2) && l->count - 1 >= 0) l->index = 0, l->cur = l->head;
+}
+static void list_callback(buffer_t *b, struct str_list *l, int kind) {
+    typedef int(__attribute__((cdecl)) * cb_t)(int key, int kind);
+    cb_t cb = *(cb_t *)at(b, LIST_HOOK);
+    if (cb) cb(l->head ? l->cur->key : 0, kind);
+}
+
+// Back to plain text: the three modes and the marker state.
+static void reset_modes(buffer_t *b) {
+    *at(b, DRAW_MODE) = *at(b, MODE_WIDTH) = *at(b, MODE_LINES) = 0;
+    *at(b, STATE) = 0;
+}
+
+// Start a queue: the line starts at x, y and may be w wide.
+static void queue_start(buffer_t *b, int x, int y, int w) {
+    *at(b, LINES) = 0;
+    *game_flying_x = x;
+    *game_flying_y = y;
+    *game_flying_left = w;
+    *game_font_slack = 0;
+    game_flying_text[0] = 0;
+}
+
+// -- the height of flying text
+
+// Adds s to the queue, line by line; gives back the y below what is queued.
+int TEXT_THIS buffer_wrap_height_flying_2(buffer_t *b, const char *s) {
+    if (!*game_flying_left) return 0;
+    if (!s) return *game_flying_y;
+    first_font(b);
+    if (!*s) return *game_flying_y;
+    for (;;) {
+        int left = *game_flying_left - *game_font_slack;
+        const char *next = buffer_find_line_break(b, s, &left, (int)strlen(s));
+        if (!next) break;
+        ++*at(b, LINES);
+        *game_flying_y += buffer_text_line_height(b);
+        *game_font_slack = 0;
+        if (*at(b, INDENT_LEFT)) *game_flying_left -= *at(b, INDENT_LEFT), *at(b, INDENT_LEFT) = 0;
+        s = next;
+    }
+    *game_font_slack += buffer_text_width_2(b, game_flying_pad_height, (int)strlen(game_flying_pad_height));
+    return *game_flying_y;
+}
+
+// Starts a queue of width w (the y counts from 0) and adds s.
+int TEXT_THIS buffer_wrap_height_flying(buffer_t *b, const char *s, int w) {
+    *at(b, INDENT_LEFT) = *at(b, INDENT);
+    *at(b, LINES) = 0;
+    *at(b, STATE) = 0;
+    *game_flying_y = 0;
+    *game_font_slack = 0;
+    *game_flying_left = w;
+    return buffer_wrap_height_flying_2(b, s);
+}
+
+// Ends the queue (a line that has anything in it counts); gives back the y below it.
+int TEXT_THIS buffer_wrap_height_flying_flush(buffer_t *b) {
+    if (*game_font_slack) {
+        *game_flying_y += buffer_text_line_height(b);
+        ++*at(b, LINES);
+    }
+    *game_flying_left = 0;
+    reset_modes(b);
+    return *game_flying_y;
+}
+
+// -- drawing flying text
+
+// Draws what is queued in the first font at the line's x and y (nothing without a GDI font).
+static void flying_draw(buffer_t *b) {
+    buffer_write_l_3(b, game_flying_text, *game_flying_x, *game_flying_y, (int)strlen(game_flying_text));
+}
+
+// Adds s to the queue: each time the line is full it is drawn and the next started below; the
+// rest of s waits in the queue. Gives back the y of the line being filled.
+int TEXT_THIS buffer_wrap_flying_2(buffer_t *b, const char *s) {
+    if (!*game_flying_left) return 0;
+    if (!s || !*s) return *game_flying_y;
+    for (;;) {
+        if (game_flying_text[0]) {
+            strcat(game_flying_text, game_flying_gap);
+            *game_font_slack += buffer_text_width_2(b, game_flying_pad, (int)strlen(game_flying_pad));
+        }
+        const char *next;
+        if (*game_font_slack < *game_flying_left) {
+            int left = *game_flying_left - *game_font_slack;
+            next = buffer_find_line_break(b, s, &left, (int)strlen(s));
+        } else {
+            next = s;  // no room for any more: draw what is there
+        }
+        if (!next) {
+            strcat(game_flying_text, s);
+            return *game_flying_y;
+        }
+        size_t used = strlen(game_flying_text), n = (size_t)(next - s);
+        memmove(game_flying_text + used, s, n);
+        game_flying_text[used + n] = 0;
+        flying_draw(b);
+        game_flying_text[0] = 0;
+        *game_font_slack = 0;
+        ++*at(b, LINES);
+        *game_flying_y += buffer_text_line_height(b);
+        if (*at(b, INDENT_LEFT)) {
+            *game_flying_left -= *at(b, INDENT_LEFT);
+            *game_flying_x += *at(b, INDENT_LEFT);
+            *at(b, INDENT_LEFT) = 0;
+        }
+        s = next;
+    }
+}
+
+// Starts a queue at x, y of width w, and adds s.
+int TEXT_THIS buffer_wrap_flying(buffer_t *b, const char *s, int x, int y, int w) {
+    *at(b, INDENT_LEFT) = *at(b, INDENT);
+    *at(b, STATE) = 0;
+    queue_start(b, x, y, w);
+    return buffer_wrap_flying_2(b, s);
+}
+
+// Draws the line that is left and ends the queue; gives back the y of that line (the line's own
+// height is added only if something was drawn).
+int TEXT_THIS buffer_wrap_flying_flush(buffer_t *b) {
+    if (game_flying_text[0]) {
+        flying_draw(b);
+        *game_flying_y += buffer_text_line_height(b);
+        ++*at(b, LINES);
+    }
+    game_flying_text[0] = 0;
+    *game_flying_left = 0;
+    reset_modes(b);
+    return *game_flying_y;
+}
+
+// -- the same, each line centred in the width
+
+static void flying_draw_cent(buffer_t *b) {
+    buffer_write_cent_l_5(b, game_flying_text, *game_flying_x, *game_flying_y, *game_flying_left, (int)strlen(game_flying_text));
+}
+
+// As wrap_flying_2, but centred (every line is drawn, font or not, and the indent is not used).
+int TEXT_THIS buffer_wrap_cent_flying_2(buffer_t *b, const char *s) {
+    if (!*game_flying_left) return 0;
+    if (!s || !*s) return *game_flying_y;
+    for (;;) {
+        if (game_flying_text[0]) {
+            strcat(game_flying_text, game_flying_gap);
+            *game_font_slack += buffer_text_width_2(b, game_flying_pad_cent, (int)strlen(game_flying_pad_cent));
+        }
+        const char *next;
+        if (*game_font_slack < *game_flying_left) {
+            int left = *game_flying_left - *game_font_slack;
+            next = buffer_find_line_break(b, s, &left, (int)strlen(s));
+        } else {
+            next = s;
+        }
+        if (!next) {
+            strcat(game_flying_text, s);
+            return *game_flying_y;
+        }
+        size_t used = strlen(game_flying_text), n = (size_t)(next - s);
+        memmove(game_flying_text + used, s, n);
+        game_flying_text[used + n] = 0;
+        flying_draw_cent(b);
+        game_flying_text[0] = 0;
+        *game_font_slack = 0;
+        ++*at(b, LINES);
+        *game_flying_y += buffer_text_line_height(b);
+        s = next;
+    }
+}
+
+// Starts a queue of centred lines at x, y of width w (the indent and the marker state are left as
+// they were), and adds s.
+int TEXT_THIS buffer_wrap_cent_flying(buffer_t *b, const char *s, int x, int y, int w) {
+    queue_start(b, x, y, w);
+    return buffer_wrap_cent_flying_2(b, s);
+}
+
+// Draws the line that is left; gives back the y below it, but leaves the queue's y at that line.
+int TEXT_THIS buffer_wrap_cent_flying_flush(buffer_t *b) {
+    if (game_flying_text[0]) {
+        flying_draw_cent(b);
+        ++*at(b, LINES);
+    }
+    game_flying_text[0] = 0;
+    *game_flying_left = 0;
+    reset_modes(b);
+    return *game_flying_y + buffer_text_line_height(b);
+}
+
+// -- lists of strings
+
+// The height of a list of strings laid out in a width, as write_strings would draw them.
+// Unless flags has bit 1 set the list is rewound first, and it is left standing at its last
+// entry.
+int TEXT_THIS buffer_write_strings_height(buffer_t *b, struct str_list *list, int width, int flags) {
+    if (!list) return 0;
+    list_rewind(list, flags);
+    int kind = list_kind(list);
+    list_callback(b, list, kind);
+    int total = 0;
+    if (kind == 3) {
+        first_font(b);
+        total = buffer_text_line_height(b);
+        *at(b, INDENT_LEFT) = *at(b, INDENT), *at(b, LINES) = 0, *at(b, STATE) = 0;
+        *game_flying_y = 0, *game_flying_left = width, *game_font_slack = 0;
+        buffer_wrap_height_flying_2(b, NULL);
+    } else {
+        const char *text = list_text(list);
+        if (kind == 2) {
+            total = text ? buffer_wrap_height(b, text, width) : 0;
+            text = NULL;
+        }
+        *at(b, INDENT_LEFT) = *at(b, INDENT), *at(b, LINES) = 0, *at(b, STATE) = 0;
+        *game_flying_y = 0, *game_flying_left = width, *game_font_slack = 0;
+        buffer_wrap_height_flying_2(b, text);
+    }
+    while (list->index < list->count - 1) {
+        list_advance(list);
+        kind = list_kind(list);
+        list_callback(b, list, kind);
+        if (list->head && kind != 0) {
+            total += buffer_wrap_height_flying_flush(b);
+            if (kind == 3) {
+                total += buffer_text_line_height(b);
+                buffer_wrap_height_flying(b, NULL, width);
+            } else if (kind == 2) {
+                total += buffer_wrap_height(b, list_text(list), width);
+                buffer_wrap_height_flying(b, NULL, width);
+            } else {
+                buffer_wrap_height_flying(b, list_text(list), width);
+            }
+        } else {
+            buffer_wrap_height_flying_2(b, list_text(list));
+        }
+    }
+    return total + buffer_wrap_height_flying_flush(b);
+}
+
+// Draws a list of strings from x, y in a width of w, down to the bottom of the Buffer, and gives
+// back the y below the lowest.
+int TEXT_THIS buffer_write_strings(buffer_t *b, struct str_list *list, int x, int y, int w, int flags) {
+    if (!list) return y;
+    list_rewind(list, flags);
+    int kind = list_kind(list), bottom = y;
+    list_callback(b, list, kind);
+    if (kind == 3) {
+        first_font(b);
+        bottom = y + buffer_text_line_height(b);
+        *at(b, INDENT_LEFT) = *at(b, INDENT), *at(b, LINES) = 0, *at(b, STATE) = 0;
+        queue_start(b, x, bottom, w);
+        buffer_wrap_flying_2(b, NULL);
+    } else {
+        const char *text = list_text(list);
+        if (kind == 2) {
+            if (text) {
+                *at(b, LINES) = 0;
+                const char *p = text;
+                do {
+                    *game_font_slack = 0;
+                    int left = w;
+                    const char *next = buffer_find_line_break(b, p, &left, (int)strlen(p));
+                    buffer_write_cent_l_5(b, p, x, bottom, w, next ? (int)(next - p) : (int)strlen(p));
+                    ++*at(b, LINES);
+                    bottom += buffer_text_line_height(b);
+                    p = next;
+                } while (p);
+            }
+            text = NULL;
+        }
+        *at(b, INDENT_LEFT) = *at(b, INDENT), *at(b, LINES) = 0, *at(b, STATE) = 0;
+        queue_start(b, x, bottom, w);
+        buffer_wrap_flying_2(b, text);
+    }
+    while (list->index < list->count - 1 && bottom <= -b->neg_height) {
+        list_advance(list);
+        kind = list_kind(list);
+        if (list->head && kind != 0) {
+            if (game_flying_text[0]) {
+                buffer_write_l_3(b, game_flying_text, *game_flying_x, *game_flying_y, (int)strlen(game_flying_text));
+                *game_flying_y += buffer_text_line_height(b);
+                ++*at(b, LINES);
+            }
+            game_flying_text[0] = 0;
+            *game_flying_left = 0;
+            reset_modes(b);
+            int line = *game_flying_y;
+            list_callback(b, list, kind);
+            if (line >= bottom) bottom = line;
+            if (kind == 3) {
+                first_font(b);
+                bottom += buffer_text_line_height(b);
+                buffer_wrap_flying(b, NULL, x, bottom, w);
+            } else if (kind == 2) {
+                bottom = buffer_wrap_cent_4(b, list_text(list), x, bottom, w);
+                buffer_wrap_flying(b, NULL, x, bottom, w);
+            } else {
+                buffer_wrap_flying(b, list_text(list), x, bottom, w);
+            }
+        } else {
+            list_callback(b, list, kind);
+            buffer_wrap_flying_2(b, list_text(list));
+        }
+    }
+    int r = buffer_wrap_flying_flush(b);
+    return r >= bottom ? r : bottom;
+}
+
 // ---- Shadow checks ---------------------------------------------------------------------
 //
 // The measuring calls make GDI calls on the game's device context; those leave
@@ -921,7 +1261,7 @@ static int64_t font_extent(const struct font *f) {
 // them, each a line of the tallest font and a step. Whole rows, so the width does not matter.
 static void writes_text(struct hook_writes *w, buffer_t *b, int y0, int y1, int lines, int step) {
     hooks_writes_add(w, b, sizeof *b);
-    hooks_writes_add(w, game_link_rects, (size_t)((uint8_t *)game_font_slack + 4 - (uint8_t *)game_link_rects));
+    hooks_writes_add(w, game_flying_text, (size_t)((uint8_t *)game_font_slack + 4 - (uint8_t *)game_flying_text));
     hooks_writes_dc(w, (void *)(intptr_t)*at(b, MEM_DC));
     if (*at(b, DC_NOW) != *at(b, MEM_DC)) hooks_writes_dc(w, (void *)(intptr_t)*at(b, DC_NOW));
     if (game_font_dc) hooks_writes_dc(w, *game_font_dc);
@@ -1065,6 +1405,79 @@ TEXT_WRITER(buffer_wrap_right_3, (buffer_t * b, const char *s, int x, int y, int
 TEXT_WRITER(buffer_wrap_right_4, (buffer_t * b, const char *s, const int32_t *rect), (b, s, rect), RT(rect), LN(s), 0, "%s",
             STR(s))
 
+// ---- Shadow checks: flying text and lists of strings ------------------------------------------------
+//
+// These change the queue's globals (the text, the x and y, the width left and the slack all lie
+// within one stretch, which writes_text saves), the Buffer, and the list's own position; the
+// drawing ones the pixels and the device context as well. As above, text the original would
+// draw itself ($LINK<), a Buffer with a DirectDraw surface and a list callback are left to the
+// original.
+
+// Every entry's text of a list: does one hold a hyperlink the original keeps on the heap, and
+// how many characters might be drawn.
+static int list_walk(struct str_list *l, int *chars) {
+    int link = 0, n = 0;
+    if (chars) *chars = 0;
+    if (!l || !l->head || l->count < 0 || l->count > 4096) return 0;
+    struct list_node *node = l->head;
+    for (int i = 0; i < l->count && node; i++, node = node->next) {
+        const char *t = node->entry ? node->entry->text : NULL;
+        if (!t) continue;
+        n += (int)strlen(t) + 1;
+        if (strstr(t, "$LINK<")) link = 1;
+    }
+    if (chars) *chars = n;
+    return link;
+}
+
+static int list_skip(buffer_t *b, struct str_list *l) {
+    if (*at(b, LIST_HOOK) || link_text(b, NULL)) return 1;
+    return l && *at(b, MULTI) && list_walk(l, NULL);
+}
+static int list_chars(struct str_list *l) {
+    int chars;
+    list_walk(l, &chars);
+    return chars + 1;
+}
+#define LIST_W(l) ((l) ? WRITES((l), sizeof(struct str_list)) : 0)
+
+// The queue's globals: what the measuring ones write besides the Buffer.
+#define FLY_HEIGHT_WRITES (BUFFER_WRITES, WRITES(game_flying_x, 16))
+#define FLY_ROWS(y, lines) writes_text(&w_, b, (y), (y), (lines), 0)
+
+#define FLY_WRITER(name, params, args, writes, skip, fmt, ...)                \
+    SHADOW_DECLARE_T(int, name, params)                                       \
+    SHADOW_WRITER_BODY(int, name, params, args, writes, fmt, __VA_ARGS__)     \
+    static int THISCALL shadow_##name params {                                \
+        if (hooks_nested || (skip)) return orig_##name args;                  \
+        if (shadow_bypass()) return name args;                                \
+        stats_##name.calls++;                                                 \
+        shadow_tick(TEXT);                                                    \
+        return check_##name args;                                             \
+    }
+
+#define FLY_DRAW_SKIP(s) (b->dd || link_text(b, s) || link_text(b, game_flying_text))
+#define QUEUE_LINES(s) (LN(s) + LN(game_flying_text))
+
+FLY_WRITER(buffer_wrap_height_flying_2, (buffer_t * b, const char *s), (b, s), FLY_HEIGHT_WRITES, 0, "%s", STR(s))
+FLY_WRITER(buffer_wrap_height_flying, (buffer_t * b, const char *s, int w), (b, s, w), FLY_HEIGHT_WRITES, 0, "%s, %d", STR(s), w)
+FLY_WRITER(buffer_wrap_height_flying_flush, (buffer_t * b), (b), FLY_HEIGHT_WRITES, 0, "%d", 0)
+FLY_WRITER(buffer_write_strings_height, (buffer_t * b, struct str_list * l, int w, int flags), (b, l, w, flags),
+           (FLY_HEIGHT_WRITES, LIST_W(l)), *at(b, LIST_HOOK), "%d, %d", w, flags)
+
+FLY_WRITER(buffer_wrap_flying_2, (buffer_t * b, const char *s), (b, s), FLY_ROWS(*game_flying_y, QUEUE_LINES(s)), FLY_DRAW_SKIP(s),
+           "%s", STR(s))
+FLY_WRITER(buffer_wrap_flying, (buffer_t * b, const char *s, int x, int y, int w), (b, s, x, y, w), FLY_ROWS(y, LN(s)),
+           FLY_DRAW_SKIP(s), "%s, %d, %d, %d", STR(s), x, y, w)
+FLY_WRITER(buffer_wrap_flying_flush, (buffer_t * b), (b), FLY_ROWS(*game_flying_y, 1), FLY_DRAW_SKIP(NULL), "%d", 0)
+FLY_WRITER(buffer_wrap_cent_flying_2, (buffer_t * b, const char *s), (b, s), FLY_ROWS(*game_flying_y, QUEUE_LINES(s)),
+           FLY_DRAW_SKIP(s), "%s", STR(s))
+FLY_WRITER(buffer_wrap_cent_flying, (buffer_t * b, const char *s, int x, int y, int w), (b, s, x, y, w), FLY_ROWS(y, LN(s)),
+           FLY_DRAW_SKIP(s), "%s, %d, %d, %d", STR(s), x, y, w)
+FLY_WRITER(buffer_wrap_cent_flying_flush, (buffer_t * b), (b), FLY_ROWS(*game_flying_y, 1), FLY_DRAW_SKIP(NULL), "%d", 0)
+FLY_WRITER(buffer_write_strings, (buffer_t * b, struct str_list * l, int x, int y, int w, int flags), (b, l, x, y, w, flags),
+           (FLY_ROWS(y, list_chars(l)), LIST_W(l)), b->dd || list_skip(b, l), "%d, %d, %d, %d", x, y, w, flags)
+
 // ---- Sweep ---------------------------------------------------------------------------------
 
 static uint32_t rng_state = 1;
@@ -1173,6 +1586,124 @@ static void reset_draw(buffer_t *b, struct font *font, struct font *nogdi, int r
     for (int link = 0; link < 10; link++) *(uint16_t *)((uint8_t *)game_link_rects + link * 0x30 + 0x2c) = (uint16_t)rnd();
 }
 
+// The Buffer's pixels all one value that text hardly ever is, so that a line a check draws shows:
+// drawn over the same text from an earlier check (or in the colour of the pixels) it changes nothing.
+static void clear_bits(buffer_t *b) {
+    if (!b->bits || b->dd) return;
+    int64_t rows = -(int64_t)b->neg_height, pitch = b->pitch;
+    if (rows <= 0) return;
+    uint8_t *a = b->bits, *c = b->bits + pitch * (rows - 1);
+    memset(a < c ? a : c, 0x55, (size_t)((pitch < 0 ? -pitch : pitch) * rows));
+}
+
+// Flying text and lists of strings, over the Buffer's current state: queues of several calls and a
+// flush (and calls with nothing queued, a width of 0, no text), then lists of up to six entries
+// of every kind, rewound or left where they stand. The widths are more than any indent, which
+// the original would loop on forever.
+static void flying_sweep(buffer_t *b, int links) {
+    static char t[3][400];
+    static struct list_node nodes[6];
+    static struct list_entry entries[6];
+    static char texts[6][240];
+    static struct str_list list;
+    int w = 40 + rnd_to(110);
+    int x = rnd_to(60), y = rnd_to(30) - 5;  // where the text is on the Buffer, not off it
+    for (int i = 0; i < 3; i++) make_draw_text(t[i], rnd_to(i ? 8 : 14), links);
+
+    // A check puts the state back when it is done, so a queue is set up before the check of each
+    // call that works on one, with the calls themselves (their own checks are further down).
+    int w2 = 31 + rnd_to(10);
+    *game_font_slack = rnd_to(2) ? 0 : 1 + rnd_to(30);
+    check_buffer_wrap_height_flying_flush(b);  // a flush with nothing queued, and the calls that follow it
+    check_buffer_wrap_height_flying_2(b, t[0]);
+    for (int k = 0; k < 3; k++) {
+        const char *first = k == 0 ? t[0] : (k == 1 ? "A" : t[1]);
+        buffer_wrap_height_flying(b, first, k == 2 ? w2 : w);
+        check_buffer_wrap_height_flying_2(b, t[1]);
+        buffer_wrap_height_flying(b, first, k == 2 ? w2 : w);
+        check_buffer_wrap_height_flying_2(b, "");
+        check_buffer_wrap_height_flying_2(b, NULL);
+        clear_bits(b);
+        check_buffer_wrap_height_flying_flush(b);
+        buffer_wrap_height_flying(b, first, w);
+        buffer_wrap_height_flying_2(b, t[2]);
+        clear_bits(b);
+        check_buffer_wrap_height_flying_flush(b);
+    }
+    check_buffer_wrap_height_flying(b, t[0], w);
+    check_buffer_wrap_height_flying(b, NULL, w);
+    check_buffer_wrap_height_flying(b, t[2], 0);
+
+    check_buffer_wrap_flying_flush(b);
+    check_buffer_wrap_flying_2(b, t[0]);
+    for (int k = 0; k < 3; k++) {
+        const char *first = k == 0 ? t[0] : (k == 1 ? "A" : t[1]);
+        buffer_wrap_flying(b, first, x, y, k == 2 ? w2 : w);
+        check_buffer_wrap_flying_2(b, t[1]);
+        buffer_wrap_flying(b, first, x, y, k == 2 ? w2 : w);
+        check_buffer_wrap_flying_2(b, "");
+        check_buffer_wrap_flying_2(b, NULL);
+        clear_bits(b);
+        check_buffer_wrap_flying_flush(b);
+        buffer_wrap_flying(b, first, x, y, w);
+        buffer_wrap_flying_2(b, t[2]);
+        clear_bits(b);
+        check_buffer_wrap_flying_flush(b);
+    }
+    check_buffer_wrap_flying(b, t[0], x, y, w);
+    check_buffer_wrap_flying(b, NULL, x, y, w);
+    check_buffer_wrap_flying(b, t[2], x, y, 0);
+    check_buffer_wrap_flying(b, t[1], x, y, w2);  // about a word to a line (more than the indent)
+
+    check_buffer_wrap_cent_flying_flush(b);
+    check_buffer_wrap_cent_flying_2(b, t[0]);
+    for (int k = 0; k < 3; k++) {
+        const char *first = k == 0 ? t[0] : (k == 1 ? "A" : t[1]);
+        buffer_wrap_cent_flying(b, first, x, y, k == 2 ? w2 : w);
+        check_buffer_wrap_cent_flying_2(b, t[1]);
+        buffer_wrap_cent_flying(b, first, x, y, k == 2 ? w2 : w);
+        check_buffer_wrap_cent_flying_2(b, "");
+        check_buffer_wrap_cent_flying_2(b, NULL);
+        clear_bits(b);
+        check_buffer_wrap_cent_flying_flush(b);
+        buffer_wrap_cent_flying(b, first, x, y, w);
+        buffer_wrap_cent_flying_2(b, t[2]);
+        clear_bits(b);
+        check_buffer_wrap_cent_flying_flush(b);
+    }
+    check_buffer_wrap_cent_flying(b, t[0], x, y, w);
+    check_buffer_wrap_cent_flying(b, NULL, x, y, w);
+    check_buffer_wrap_cent_flying(b, t[2], x, y, 0);
+    check_buffer_wrap_cent_flying(b, t[1], x, y, 1 + rnd_to(30));
+
+    for (int round = 0; round < 3; round++) {
+        static const int kinds[] = {0, 0, 0, 1, 2, 3};
+        int count = round == 0 ? rnd_to(2) : rnd_to(7);
+        for (int i = 0; i < count; i++) {
+            make_draw_text(texts[i], rnd_to(12), links);
+            entries[i].f0 = 0, entries[i].kind = kinds[rnd_to(6)];
+            entries[i].text = rnd_to(8) ? texts[i] : NULL;
+            nodes[i].f0 = 0, nodes[i].key = (int32_t)rnd(), nodes[i].entry = &entries[i], nodes[i].next = &nodes[(i + 1) % count];
+        }
+        int at_index = count ? rnd_to(count) : 0;
+        for (int flags = 0; flags < 4; flags += 2) {
+            list.head = count ? &nodes[0] : NULL;
+            list.cur = count ? &nodes[at_index] : NULL;
+            list.count = count, list.index = at_index;
+            check_buffer_write_strings_height(b, &list, w, flags);
+            list.cur = count ? &nodes[at_index] : NULL;
+            list.index = at_index;
+            check_buffer_write_strings(b, &list, x, y, w, flags);
+            list.cur = count ? &nodes[at_index] : NULL;
+            list.index = at_index;
+            check_buffer_write_strings_height(b, &list, 0, flags);
+            check_buffer_write_strings(b, &list, x, y, 31 + rnd_to(10), flags);
+        }
+    }
+    check_buffer_write_strings(b, NULL, x, y, w, 0);
+    check_buffer_write_strings_height(b, NULL, w, 0);
+}
+
 static void draw_sweep(struct font *font) {
     buffer_t *b = draw_buffer();
     if (!b) return;
@@ -1181,6 +1712,8 @@ static void draw_sweep(struct font *font) {
     uint8_t links[10 * 0x30];
     memcpy(links, game_link_rects, sizeof links);
     int32_t saved_end = *game_text_end_x;
+    char saved_queue[0x6d4];
+    memcpy(saved_queue, game_flying_text, sizeof saved_queue);
     tall = *font, tall.first = 2, tall.height += 3;
     nogdi = *font, nogdi.hfont = NULL;
     for (int round = 0; round < 45; round++) {
@@ -1239,6 +1772,7 @@ static void draw_sweep(struct font *font) {
             check_buffer_wrap_right_2(b, f, s, rect);
             check_buffer_wrap_right_3(b, s, x, y, w);
             check_buffer_wrap_right_4(b, s, rect);
+            flying_sweep(b, *at(b, TILDE_LINKS));
         }
         // Nothing to draw, and no text at all.
         if (fonts(b)[0]) check_buffer_write_raw_l(b, "abc", 5, 5, 0);
@@ -1249,6 +1783,7 @@ static void draw_sweep(struct font *font) {
     }
     memcpy(game_link_rects, links, sizeof links);
     *game_text_end_x = saved_end;
+    memcpy(game_flying_text, saved_queue, sizeof saved_queue);
 }
 
 static void text_sweep(void) {
@@ -1376,5 +1911,16 @@ static const struct hook text_hooks[] = {
     HOOK(0x5dbcb0, buffer_wrap_right_2, 0x53, 0x55, 0x56, 0x8d, 0xb1, 0x2c, 0x05, 0x00, 0x00),
     HOOK(0x5ddbb0, buffer_wrap_right_3, 0x56, 0x57, 0x8b, 0x7c, 0x24, 0x0c),
     HOOK(0x5ddc90, buffer_wrap_right_4, 0x51, 0x8b, 0x44, 0x24, 0x0c, 0x56),
+    HOOK(0x5dad70, buffer_write_strings_height, 0x53, 0x8b, 0x5c, 0x24, 0x08, 0x56, 0x57, 0x33, 0xff),
+    HOOK(0x5db040, buffer_write_strings, 0x53, 0x55, 0x8b, 0x6c, 0x24, 0x0c, 0x33, 0xdb),
+    HOOK(0x5ddda0, buffer_wrap_height_flying, 0x8b, 0x51, 0x10, 0x33, 0xc0, 0x89, 0x41, 0x18),
+    HOOK(0x5ddde0, buffer_wrap_height_flying_2, 0xa1, 0x98, 0x3a, 0x9b, 0x00, 0x53, 0x33, 0xdb),
+    HOOK(0x5ddef0, buffer_wrap_height_flying_flush, 0xa1, 0x9c, 0x3a, 0x9b, 0x00, 0x56, 0x33, 0xf6),
+    HOOK(0x5ddf60, buffer_wrap_flying, 0x8b, 0x51, 0x10, 0x33, 0xc0, 0x89, 0x51, 0x14),
+    HOOK(0x5ddfb0, buffer_wrap_flying_2, 0x51, 0xa1, 0x98, 0x3a, 0x9b, 0x00, 0x55),
+    HOOK(0x5de1d0, buffer_wrap_flying_flush, 0xa0, 0xcc, 0x33, 0x9b, 0x00, 0x56, 0x84, 0xc0),
+    HOOK(0x5de2e0, buffer_wrap_cent_flying, 0x8b, 0x54, 0x24, 0x08, 0x33, 0xc0, 0x89, 0x41, 0x18),
+    HOOK(0x5de320, buffer_wrap_cent_flying_2, 0x51, 0xa1, 0x98, 0x3a, 0x9b, 0x00, 0x56),
+    HOOK(0x5de4d0, buffer_wrap_cent_flying_flush, 0xa0, 0xcc, 0x33, 0x9b, 0x00, 0x56, 0x84, 0xc0),
 };
 struct hook_module text_module = {"text", text_hooks, HOOK_COUNT(text_hooks), text_sweep, NULL, -1};

@@ -64,6 +64,14 @@ static int __attribute__((cdecl)) text_callback(const char *s, int x, int y, int
     return callback_answer;
 }
 
+static int32_t fly_x, fly_y, fly_left;
+static char fly_text[1024];
+static int list_calls, list_keys, list_kinds;
+static int __attribute__((cdecl)) list_callback(int key, int kind) {
+    list_calls++, list_keys += key, list_kinds = list_kinds * 10 + kind;
+    return 0;
+}
+
 static struct game_buffer buf;
 static struct font f1, f2;
 static int32_t slack;
@@ -83,6 +91,8 @@ int main(void) {
     game_font_slack = &slack;
     game_set_bk_mode = set_bk_mode, game_set_text_color = set_text_color, game_text_out = text_out;
     game_link_rects = link_table, game_text_end_x = &text_end;
+    game_flying_x = &fly_x, game_flying_y = &fly_y, game_flying_left = &fly_left, game_flying_text = fly_text;
+    game_flying_gap = " ", game_flying_pad_height = " ", game_flying_pad = " ", game_flying_pad_cent = " ";
 
     // A Font starts empty.
     struct font f;
@@ -359,6 +369,106 @@ int main(void) {
     EXPECT(buffer_wrap_cent(&buf, &f2, "aaa bbb", 5, 100, 40), 100 + 2 * 23), EXPECT(buffer_wrap_right(&buf, &f2, "aaa", 5, 100, 40), 100 + 23);
     EXPECT(buffer_wrap_right_2(&buf, &f2, "aaa", wr), 50 + 23), EXPECT(buffer_wrap_cent_3(&buf, &f2, "aaa", wr), 50 + 23);
     EXPECT(*(void **)((uint8_t *)&buf + 0x52c) == &f1, 1);
+
+    // ---- Flying text and lists of strings ----
+    // The height of flying text: lines are counted as they fill; what is queued last counts only at the flush.
+    reset();
+    EXPECT(buffer_wrap_height_flying_2(&buf, "abc"), 0), EXPECT(fly_left, 0);  // nothing queued: nothing happens
+    EXPECT(buffer_wrap_height_flying(&buf, "aaa bbb", 60), 0), EXPECT(slack, 42 + 6), EXPECT(fly_left, 60);
+    EXPECT(buffer_wrap_height_flying_2(&buf, "ccc"), 10), EXPECT(*at(0x18), 1);  // no room left: a line ends
+    EXPECT(buffer_wrap_height_flying_2(&buf, NULL), 10), EXPECT(buffer_wrap_height_flying_2(&buf, ""), 10);
+    EXPECT(buffer_wrap_height_flying_flush(&buf), 20), EXPECT(*at(0x18), 2), EXPECT(fly_left, 0);
+    EXPECT(buffer_wrap_height_flying_2(&buf, "abc"), 0);
+    *at(0x510) = 2, *at(0x514) = 1, *at(0x518) = 3, *at(0x51c) = 1, slack = 0, fly_left = 5, fly_y = 7;
+    EXPECT(buffer_wrap_height_flying_flush(&buf), 7);  // nothing in the line: no height added
+    EXPECT(*at(0x510) + *at(0x514) + *at(0x518) + *at(0x51c), 0);
+    *at(0x10) = 30;  // the indent: the first line is 30 narrower, the next ones not
+    EXPECT(buffer_wrap_height_flying(&buf, "aaa bbb ccc ddd", 60), 20), EXPECT(fly_left, 30), EXPECT(*at(0x14), 0);
+    *at(0x10) = 0;
+
+    // Flying text drawn: a line is drawn when it is full, and what is left when the queue is flushed.
+    reset();
+    *at(0x64) = 0x1234, *at(0x53c) = 1, *at(0x54c) = -1;
+    nouts = 0;
+    fly_left = 0;
+    EXPECT(buffer_wrap_flying_2(&buf, "abc"), 0);
+    EXPECT(buffer_wrap_flying(&buf, "aaa bbb", 5, 100, 60), 100), EXPECT(nouts, 0), EXPECT(strcmp(fly_text, "aaa bbb"), 0);
+    EXPECT(buffer_wrap_flying_2(&buf, "ccc"), 110), EXPECT(nouts, 1), EXPECT(strcmp(fly_text, "ccc"), 0);
+    OUT(0, "aaa bbb ", 5, 100 + 14, 0x10ff0001);
+    EXPECT(buffer_wrap_flying_2(&buf, ""), 110), EXPECT(buffer_wrap_flying_2(&buf, NULL), 110);
+    EXPECT(buffer_wrap_flying_flush(&buf), 120), EXPECT(nouts, 2), OUT(1, "ccc", 5, 110 + 14, 0x10ff0001);
+    EXPECT(*at(0x18), 2), EXPECT(fly_left, 0), EXPECT(fly_text[0], 0), EXPECT(buffer_wrap_flying_flush(&buf), 120), EXPECT(nouts, 2);
+    // A piece that does not fit goes to the next line; the indent moves it in and narrows the line.
+    *at(0x10) = 10;
+    EXPECT(buffer_wrap_flying(&buf, "aaa bbb ccc", 5, 100, 40), 120), EXPECT(buffer_wrap_flying_flush(&buf), 130);
+    EXPECT(nouts, 5), OUT(2, "aaa ", 5, 114, 0x10ff0001), OUT(3, "bbb ", 15, 124, 0x10ff0001), OUT(4, "ccc", 15, 134, 0x10ff0001);
+    *at(0x10) = 0;
+    // No font to draw with: nothing drawn, but the lines count.
+    nothing.first = 2, nothing.height = 5;
+    *(struct font **)((uint8_t *)&buf + 0x52c) = &nothing;
+    nouts = 0;
+    EXPECT(buffer_wrap_flying(&buf, "abc", 5, 100, 60), 100), EXPECT(buffer_wrap_flying_flush(&buf), 100 + 7), EXPECT(nouts, 0);
+    *(struct font **)((uint8_t *)&buf + 0x52c) = &f1;
+
+    // Centred flying text: the same, each line centred in what is left of the width; the flush gives
+    // back the y below the line but does not move the queue's.
+    nouts = 0;
+    EXPECT(buffer_wrap_cent_flying_2(&buf, "abc"), 0);
+    EXPECT(buffer_wrap_cent_flying(&buf, "aaa", 5, 100, 60), 100), EXPECT(nouts, 0);
+    EXPECT(buffer_wrap_cent_flying_flush(&buf), 110), EXPECT(fly_y, 100), EXPECT(nouts, 1);
+    OUT(0, "aaa", 5 + (60 - 18) / 2, 114, 0x10ff0001);
+    EXPECT(fly_left, 0), EXPECT(buffer_wrap_cent_flying_2(&buf, "x"), 0);
+    nouts = 0;
+    EXPECT(buffer_wrap_cent_flying(&buf, "aaa bbb ccc", 5, 100, 40), 120), EXPECT(nouts, 2);
+    OUT(0, "aaa ", 5 + (40 - 24) / 2, 114, 0x10ff0001), OUT(1, "bbb ", 5 + (40 - 24) / 2, 124, 0x10ff0001);
+    EXPECT(buffer_wrap_cent_flying_2(&buf, "ddd"), 130), OUT(2, "ccc ", 5 + (40 - 24) / 2, 134, 0x10ff0001);
+    EXPECT(buffer_wrap_cent_flying_flush(&buf), 140), EXPECT(nouts, 4), OUT(3, "ddd", 5 + (40 - 18) / 2, 144, 0x10ff0001);
+
+    // Lists of strings: three entries, a heading, running text and a centred block.
+    {
+        static struct list_entry entries[3] = {{0, "Head", 3}, {0, "aaa bbb", 0}, {0, "aaa bbb ccc", 2}};
+        static struct list_node nodes[3];
+        static struct str_list list;
+        for (int i = 0; i < 3; i++) nodes[i].key = 100 + i, nodes[i].entry = &entries[i], nodes[i].next = &nodes[(i + 1) % 3];
+        list.head = &nodes[0], list.cur = &nodes[2], list.count = 3, list.index = 2;
+        reset();
+        EXPECT(buffer_write_strings_height(&buf, NULL, 40, 0), 0);
+        EXPECT(buffer_write_strings_height(&buf, &list, 40, 0), 60), EXPECT(list.index, 2), EXPECT(list.cur == &nodes[2], 1);
+        // Left where it stands (flags & 2): from the second entry on.
+        list.cur = &nodes[1], list.index = 1;
+        EXPECT(buffer_write_strings_height(&buf, &list, 40, 2), 50), EXPECT(list.index, 2);
+        // The Buffer's callback hears of each entry (its key and kind).
+        *(void **)at(0x0c) = list_callback;
+        EXPECT(buffer_write_strings_height(&buf, &list, 40, 0), 60);
+        EXPECT(list_calls, 3), EXPECT(list_keys, 100 + 101 + 102), EXPECT(list_kinds, 302);
+        *(void **)at(0x0c) = NULL;
+        // An empty list has no height.
+        struct str_list empty = {0};
+        EXPECT(buffer_write_strings_height(&buf, &empty, 40, 0), 0);
+
+        reset();
+        *at(0x64) = 0x1234, *at(0x53c) = 1, *at(0x54c) = -1;
+        buf.neg_height = -200;
+        nouts = 0;
+        EXPECT(buffer_write_strings(&buf, NULL, 5, 100, 40, 0), 100);
+        EXPECT(buffer_write_strings(&buf, &list, 5, 100, 40, 0), 160), EXPECT(list.index, 2), EXPECT(nouts, 5);
+        OUT(0, "aaa ", 5, 110 + 14, 0x10ff0001), OUT(1, "bbb", 5, 120 + 14, 0x10ff0001);
+        OUT(2, "aaa ", 5 + (40 - 24) / 2, 130 + 14, 0x10ff0001), OUT(3, "bbb ", 5 + (40 - 24) / 2, 140 + 14, 0x10ff0001);
+        OUT(4, "ccc", 5 + (40 - 18) / 2, 150 + 14, 0x10ff0001);
+        EXPECT(fly_left, 0);
+        // Nothing more is drawn once a block ends below the bottom of the Buffer.
+        buf.neg_height = -105;
+        nouts = 0;
+        EXPECT(buffer_write_strings(&buf, &list, 5, 100, 40, 0), 110), EXPECT(nouts, 0), EXPECT(list.index, 0);
+        buf.neg_height = -200;
+        // From where it stands, and the callback.
+        list.cur = &nodes[2], list.index = 2, nouts = 0;
+        *(void **)at(0x0c) = list_callback;
+        list_calls = list_keys = list_kinds = 0;
+        EXPECT(buffer_write_strings(&buf, &list, 5, 100, 40, 2), 100 + 30), EXPECT(nouts, 3), EXPECT(list_calls, 1), EXPECT(list_kinds, 2);
+        *(void **)at(0x0c) = NULL;
+        EXPECT(buffer_write_strings(&buf, &empty, 5, 100, 40, 0), 100), EXPECT(nouts, 3);
+    }
 
     printf(failures ? "text: %d failures\n" : "text: all passed\n", failures);
     return failures != 0;
