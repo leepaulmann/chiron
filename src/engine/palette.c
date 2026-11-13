@@ -7,7 +7,7 @@
 // What is left to the original: Palette_ctor, _init, _set, _close, the
 // cycle functions and the timer callback (they allocate from the game's heap,
 // make Time objects, and call GDI and DirectDraw, none of which a check can
-// put back), and the tables made by hue, which call sin and cos.
+// put back). The tables made by hue call the game's own sin and cos.
 #include "palette.h"
 
 #include <stdio.h>
@@ -276,6 +276,70 @@ void hsv_to_rgb(const struct hsv *hsv, uint8_t *rgb) {
     rgb[0] = channel(r), rgb[1] = channel(g), rgb[2] = channel(b);
 }
 
+// ---- Nearest by hue ------------------------------------------------------------
+
+// The colour (of the 256 in `hsv`, this palette's in HSV; with skip_cycles
+// only colours 10 to 245 that do not cycle) nearest to an HSV colour. The
+// distance is that between points of a cylinder: (sin h * s, cos h * s, v), so
+// that the hue wraps round. It is squared and summed the way the original's
+// x87 code does, with its stores to doubles (rd) and the squares of the two
+// horizontal differences taken as the difference stored by the first times
+// the difference left in a register for the second. The first colour of the
+// least distance wins, and an unordered (NaN) distance always wins. 7 if
+// there is no GDI palette.
+int __attribute__((thiscall)) palette_nearest_hsv(struct palette *p, const struct hsv *target, const struct hsv *hsv,
+                                                  int skip_cycles) {
+    if (!*game_palette_handle) return ERR_NO_PALETTE;
+    uint8_t mask[256] = {0};
+    int from = 0, to = 256;
+    if (skip_cycles) cycling(p, mask), from = DIB_FIRST, to = DIB_LAST;
+    double best = BEST_START;
+    int found = 0;
+    long double k = *game_palette_rad;
+    for (int i = from; i < to; i++) {
+        if (skip_cycles && mask[i]) continue;
+        const struct hsv *c = &hsv[i];
+        double dv = rd((long double)target->v - c->v);
+        long double sin_t = game_crt_sin(rd((long double)target->h * k));
+        double a = rd(sin_t * target->s);
+        long double sin_i = game_crt_sin(rd((long double)c->h * k));
+        long double sin_diff = a - sin_i * c->s;
+        double ds = rd(sin_diff);
+        double ds2 = rd(sin_diff * ds);
+        long double cos_t = game_crt_cos(rd((long double)target->h * k));
+        double b = rd(cos_t * target->s);
+        long double cos_i = game_crt_cos(rd((long double)c->h * k));
+        long double cos_diff = b - cos_i * c->s;
+        double dc = rd(cos_diff);
+        long double total = cos_diff * dc + ds2;
+        total += (long double)dv * dv;
+        if (!(total >= (long double)best)) best = rd(total), found = i;
+    }
+    return found;
+}
+
+// A table that sends each colour from start to start + count to the colour
+// nearest to it made lighter or darker: its value (brightness) is scaled to
+// (level + 100)% (level from -100 to 100, else 3). Colours outside the range send
+// themselves. 7 if there is no GDI palette, 16 if there is no table. Only
+// colours that do not cycle are the answers.
+int __attribute__((thiscall)) palette_create_table(struct palette *p, uint8_t *table, int start, int count, int level) {
+    if (!*game_palette_handle) return ERR_NO_PALETTE;
+    if (!table) return ERR_NO_TABLE;
+    if (level < -100 || level > 100) return ERR_NULL;
+    int end = start + count;
+    for (int i = 0; i < start; i++) table[i] = (uint8_t)i;
+    for (int i = end; i < 256; i++) table[i] = (uint8_t)i;
+    struct hsv hsv[256];
+    for (int i = 0; i < 256; i++) rgb_to_hsv(p->rgb[i], &hsv[i]);
+    for (int i = start; i < end; i++) {
+        struct hsv c = hsv[i];
+        c.v = rd((long double)(double)(level + 100) * c.v * 0.01);
+        table[i] = (uint8_t)palette_nearest_hsv(p, &c, hsv, 1);
+    }
+    return 0;
+}
+
 // ---- Shadow checks -----------------------------------------------------------
 
 typedef void *voidp;
@@ -317,6 +381,12 @@ SHADOW_WRITER_T(PALETTE, int, palette_table_from_palette,
 SHADOW_WRITER_T(PALETTE, int, palette_table_to_dib, (struct palette *p, uint8_t *bmi, int start, int count),
                 (p, bmi, start, count), (bmi ? WRITES(bmi + DIB_COLOURS, (DIB_LAST - DIB_FIRST) * 4) : 0), "%d, %d, %d",
                 bmi != NULL, start, count)
+SHADOW_THIS_FN(PALETTE, int, palette_nearest_hsv,
+               (struct palette *p, const struct hsv *target, const struct hsv *hsv, int skip), (p, target, hsv, skip),
+               "%g, %g, %g, %d", target->h, target->s, target->v, skip)
+SHADOW_WRITER_T(PALETTE, int, palette_create_table, (struct palette *p, uint8_t *table, int start, int count, int level),
+                (p, table, start, count, level), (table ? WRITES(table, 256) : 0), "%d, %d, %d, %d", table != NULL, start,
+                count, level)
 SHADOW_WRITER(PALETTE, void, rgb_to_hsv, (const uint8_t *rgb, struct hsv *out), (rgb, out),
               (out ? WRITES(out, sizeof *out) : 0), "%d, %d, %d", rgb ? rgb[0] : -1, rgb ? rgb[1] : -1, rgb ? rgb[2] : -1)
 SHADOW_WRITER(PALETTE, void, hsv_to_rgb, (const struct hsv *hsv, uint8_t *rgb), (hsv, rgb), (rgb ? WRITES(rgb, 3) : 0),
@@ -364,6 +434,7 @@ static int has_free(const struct palette *p, int start, int count) {
 
 static void palette_sweep(void) {
     static struct palette pal, other;
+    static uint8_t table256[256];
     static uint8_t table[256], rgbquad[256 * 4], dib[DIB_COLOURS + 256 * 4];
     int sweeping = hooks_sweeping;
     hooks_sweeping = 1;
@@ -409,6 +480,36 @@ static void palette_sweep(void) {
         if (has_free(&pal, start, count ? count : 1)) check_palette_table_to_dib(&pal, dib, start, count ? count : 1);
         check_palette_table_to_dib(&pal, NULL, start, count);
     }
+    // By hue: the colours of a random palette, each way, with the colours it has and some that
+    // are off its scale.
+    for (int round = 0; round < 6; round++) {
+        static struct hsv tab[256];
+        random_palette(&pal);
+        for (int i = 0; i < 256; i++) rgb_to_hsv(pal.rgb[i], &tab[i]);
+        for (int k = 0; k < 40; k++) {
+            struct hsv t;
+            if (k % 4 == 0) {
+                t = tab[rnd_to(256)];
+            } else if (k % 4 == 1) {
+                uint8_t c[3] = {(uint8_t)rnd(), (uint8_t)rnd(), (uint8_t)rnd()};
+                rgb_to_hsv(c, &t);
+            } else {
+                t.h = k % 7 == 0 ? -1.0 : (rnd() % 36001) / 100.0;
+                t.s = (rnd() % 257) / 256.0, t.v = (rnd() % 257) / 256.0;
+            }
+            check_palette_nearest_hsv(&pal, &t, tab, k & 1);
+        }
+        for (int k = 0; k < 4; k++) {
+            int start = rnd_to(256), count = rnd_to(257 - start);
+            if (k == 0) start = 10, count = 236;
+            check_palette_create_table(&pal, table256, start, count, rnd_to(201) - 100);
+        }
+        check_palette_create_table(&pal, table256, 0, 256, 0);
+        check_palette_create_table(&pal, table256, 5, 40, 100);
+        check_palette_create_table(&pal, table256, 5, 40, -100);
+        check_palette_create_table(&pal, table256, 5, 40, 101);
+        check_palette_create_table(&pal, NULL, 5, 40, 0);
+    }
     // RGB and HSV: random colours, greys, the extremes, and every kind of hue; and back.
     for (int k = 0; k < 2500; k++) {
         uint8_t rgb[3] = {(uint8_t)rnd(), (uint8_t)rnd(), (uint8_t)rnd()};
@@ -446,6 +547,8 @@ static const struct hook palette_hooks[] = {
     HOOK(0x5ff1a0, palette_table_from_palette, PROLOGUE_ARG1, 0x55),                // push ebp
     HOOK(0x5ff220, palette_table_to_dib, PROLOGUE_ARG1, 0x57, 0x85, 0xc0, 0x8b, 0xf9),
     HOOK(0x5ff280, palette_nearest_in, 0x81, 0xec, 0x14, 0x04, 0x00, 0x00, 0xa1, 0x78, 0x81, 0x9b, 0x00),
+    HOOK(0x5fed40, palette_create_table, 0xb8, 0x28, 0x18, 0x00, 0x00),  // mov eax, 0x1828 (then the stack probe)
+    HOOK(0x5ff630, palette_nearest_hsv, 0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8, 0x81, 0xec, 0x3c, 0x04, 0x00, 0x00),
     HOOK(0x5ff470, palette_nearest, 0x81, 0xec, 0x10, 0x04, 0x00, 0x00, 0xa1, 0x78, 0x81, 0x9b, 0x00),
     HOOK(0x628b70, hsv_to_rgb, 0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8, 0x83, 0xec, 0x3c),  // and esp, -8; sub esp, 0x3c
     HOOK(0x628db0, rgb_to_hsv, 0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8, 0x83, 0xec, 0x18),

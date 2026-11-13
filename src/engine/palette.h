@@ -25,6 +25,8 @@ int __attribute__((thiscall)) palette_set_from_dib(struct palette *p, const uint
 void __attribute__((thiscall)) palette_reseed(struct palette *p);
 int __attribute__((thiscall)) palette_get_pos(struct palette *p, int id);
 int __attribute__((thiscall)) palette_nearest(struct palette *p, int r, int g, int b, int skip_cycles);
+int __attribute__((thiscall)) palette_nearest_hsv(struct palette *p, const struct hsv *target, const struct hsv *hsv, int skip_cycles);
+int __attribute__((thiscall)) palette_create_table(struct palette *p, uint8_t *table, int start, int count, int level);
 int __attribute__((thiscall)) palette_nearest_in(struct palette *p, int r, int g, int b, int start, int count,
                                                  int skip_cycles);
 int __attribute__((thiscall)) palette_blend_table(struct palette *p, const uint8_t *other, uint8_t *table, int start,

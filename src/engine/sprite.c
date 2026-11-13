@@ -22,15 +22,13 @@
 // written here too (game_sprite_scratch), so a later call that reads a stale
 // one, or a check that compares them, sees the same.
 //
-// What is left to the original: draw_dest_unk2 (5e81bc; the game was not seen to call it, and its
-// unrolled loops disagree with each other: the first of every four pixels
-// looks the colour up from the pixel under it, the others from the sprite's
-// own, which a different entry point into the four makes a different one),
-// the constructor, close, init, extract, copy,
+// draw_dest_unk2_2 (5e81bc) is draw_4 with a different test per pixel; its
+// unrolled loops disagree with each other (see OP_UNK2_FIRST), and the game
+// was not seen to call it, so the sweep is what checks it.
+// What is left to the original: the constructor, close, init, extract, copy,
 // create_blank, save and load (they allocate from the game's heap or read and
 // write files), the draws of a sprite loaded by name (they go through the
-// game's resource code), the draws into a DirectDraw surface, and the 80-byte
-// wrappers that set the scale around a draw (they call the functions here).
+// game's resource code), and the draws into a DirectDraw surface.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -75,6 +73,15 @@ SHADOW_DECLARE_T(int, sprite_draw_dest_unk1, (sprite_t * s, buffer_t *b, int x, 
 SHADOW_DECLARE_T(int, sprite_draw_dest_source, (sprite_t * s, buffer_t *b, int key, int x, int y, const uint8_t *table))
 SHADOW_DECLARE_T(int, sprite_draw_multi_table_dest_2, (sprite_t * s, buffer_t *b, int key, int x, int y, const uint8_t *table))
 SHADOW_DECLARE_T(int, sprite_draw_4, (sprite_t * s, buffer_t *b, int key, int x, int y, const uint8_t *table))
+SHADOW_DECLARE_T(int, sprite_draw_dest_unk2_2, (sprite_t * s, buffer_t *b, int key, int x, int y, const uint8_t *table))
+SHADOW_DECLARE_T(int, sprite_draw_mono, (sprite_t * s, buffer_t *b, int key, int x, int y, int colour, int num, int den))
+SHADOW_DECLARE_T(int, sprite_draw, (sprite_t * s, buffer_t *b, int key, int x, int y, int num, int den, const uint8_t *table))
+SHADOW_DECLARE_T(int, sprite_draw_2, (sprite_t * s, buffer_t *b, int key, int x, int y, int num, int den))
+SHADOW_DECLARE_T(int, sprite_draw_dest_2, (sprite_t * s, buffer_t *b, int key, int x, int y, int num, int den, const uint8_t *table))
+SHADOW_DECLARE_T(int, sprite_draw_dest_unk1_2, (sprite_t * s, buffer_t *b, int x, int y, int num, int den, const uint8_t *table))
+SHADOW_DECLARE_T(int, sprite_draw_dest_source_2, (sprite_t * s, buffer_t *b, int key, int x, int y, int num, int den, const uint8_t *table))
+SHADOW_DECLARE_T(int, sprite_draw_dest_unk2, (sprite_t * s, buffer_t *b, int key, int x, int y, int num, int den, const uint8_t *table))
+SHADOW_DECLARE_T(int, sprite_draw_multi_table_dest, (sprite_t * s, buffer_t *b, int key, int x, int y, int num, int den, const uint8_t *table))
 SHADOW_DECLARE_T(void, sprite_fill_scaling_table, (sprite_t * s))
 SHADOW_DECLARE_T(int, sprite_get_clipped_x_table_expand, (sprite_t * s, const int32_t *orig, const int32_t *clip, int32_t *a3, int32_t *a4, int32_t *a5, int32_t *a6))
 SHADOW_DECLARE_T(int, sprite_get_clipped_y_table_expand, (sprite_t * s, const int32_t *orig, const int32_t *clip, int32_t *a3, int32_t *a4, int32_t *a5, int32_t *a6))
@@ -219,7 +226,7 @@ int SPRITE_THIS sprite_get_clipped_y_table_shrink(sprite_t *s, const int32_t *or
 
 // ---- Drawing -------------------------------------------------------------------
 
-enum { OP_COPY, OP_MONO, OP_DEST, OP_DEST_ZERO, OP_DEST_SRC, OP_MULTI, OP_REMAP };
+enum { OP_COPY, OP_MONO, OP_DEST, OP_DEST_ZERO, OP_DEST_SRC, OP_MULTI, OP_REMAP, OP_UNK2, OP_UNK2_FIRST, OP_UNK2_REST };
 struct paint {
     uint8_t key, colour;
     const uint8_t *table;
@@ -250,6 +257,21 @@ static inline __attribute__((always_inline)) void paint(int op, const struct pai
     case OP_REMAP:
         if (s != p->key) *d = p->table[s];
         break;
+    // draw_dest_unk2_2: neither the key nor colour 0 draws, the rest darken by the table.
+    case OP_UNK2:
+        if (s != p->key && s != 0) *d = p->table[*d];
+        break;
+    // Its scaled-down path is written out four pixels at a time, and the four
+    // are not alike: the first of each four (counted from where the row's
+    // width makes the unrolled loop start) looks the new colour up from the
+    // sprite's own pixel when that is not 0, the other three do so only when
+    // it is 0 (so from table entry 0).
+    case OP_UNK2_FIRST:
+        if (s != p->key && s != 0) *d = p->table[s];
+        break;
+    case OP_UNK2_REST:
+        if (s != p->key && s == 0) *d = p->table[s];
+        break;
     }
 }
 
@@ -275,6 +297,7 @@ static inline __attribute__((always_inline)) int expand_value(int op, const stru
         *v = p->table[n < 4 ? s : d];
         return s != p->key && s != 0;
     case OP_MULTI: *v = p->table[(s << 8) | d]; return s != p->key;
+    case OP_UNK2: *v = p->table[n < 4 ? s : d]; return s != p->key && s != 0;  // as draw_4's
     }
     return 0;
 }
@@ -372,7 +395,9 @@ static inline __attribute__((always_inline)) int draw_core(int op, const struct 
         do {
             const int32_t *xs = (const int32_t *)(uintptr_t)sc->xtab_ptr;
             for (int i = 0; i < sc->width; i++) {
-                paint(op, p, dst + i, *src);
+                int pop = op;
+                if (op == OP_UNK2) pop = ((i + ((4 - (sc->width & 3)) & 3)) & 3) == 0 ? OP_UNK2_FIRST : OP_UNK2_REST;
+                paint(pop, p, dst + i, *src);
                 src += xs[i];
             }
             uint8_t yc = (uint8_t) * (const int32_t *)(uintptr_t)sc->ytab_ptr;
@@ -460,6 +485,30 @@ int SPRITE_THIS sprite_draw_4(sprite_t *s, buffer_t *b, int key, int x, int y, c
     struct paint p = {(uint8_t)key, 0, table};
     return draw_core(OP_REMAP, &p, s, b, x, y);
 }
+int SPRITE_THIS sprite_draw_dest_unk2_2(sprite_t *s, buffer_t *b, int key, int x, int y, const uint8_t *table) {
+    if (NEEDS_ORIG(s, b)) return orig_sprite_draw_dest_unk2_2(s, b, key, x, y, table);
+    struct paint p = {(uint8_t)key, 0, table};
+    return draw_core(OP_UNK2, &p, s, b, x, y);
+}
+
+// The wrappers: each sets the scale (a numerator and a denominator after the
+// coordinates) for the one draw and puts the old one back.
+#define WRAP(name, body, params, call)                                \
+    int SPRITE_THIS name params {                                     \
+        int32_t n0 = game_sprite_scale[0], d0 = game_sprite_scale[1]; \
+        game_sprite_scale[0] = num, game_sprite_scale[1] = den;       \
+        int r = body call;                                            \
+        game_sprite_scale[0] = n0, game_sprite_scale[1] = d0;         \
+        return r;                                                     \
+    }
+WRAP(sprite_draw_mono, sprite_draw_mono_2, (sprite_t * s, buffer_t *b, int key, int x, int y, int colour, int num, int den), (s, b, key, x, y, colour))
+WRAP(sprite_draw, sprite_draw_4, (sprite_t * s, buffer_t *b, int key, int x, int y, int num, int den, const uint8_t *table), (s, b, key, x, y, table))
+WRAP(sprite_draw_2, sprite_draw_3, (sprite_t * s, buffer_t *b, int key, int x, int y, int num, int den), (s, b, key, x, y))
+WRAP(sprite_draw_dest_2, sprite_draw_dest, (sprite_t * s, buffer_t *b, int key, int x, int y, int num, int den, const uint8_t *table), (s, b, key, x, y, table))
+WRAP(sprite_draw_dest_unk1_2, sprite_draw_dest_unk1, (sprite_t * s, buffer_t *b, int x, int y, int num, int den, const uint8_t *table), (s, b, x, y, table))
+WRAP(sprite_draw_dest_source_2, sprite_draw_dest_source, (sprite_t * s, buffer_t *b, int key, int x, int y, int num, int den, const uint8_t *table), (s, b, key, x, y, table))
+WRAP(sprite_draw_dest_unk2, sprite_draw_dest_unk2_2, (sprite_t * s, buffer_t *b, int key, int x, int y, int num, int den, const uint8_t *table), (s, b, key, x, y, table))
+WRAP(sprite_draw_multi_table_dest, sprite_draw_multi_table_dest_2, (sprite_t * s, buffer_t *b, int key, int x, int y, int num, int den, const uint8_t *table), (s, b, key, x, y, table))
 
 // Replaces one colour of the picture by another (only the low byte of each
 // counts). 7 if there is no picture. (A picture of fewer than four pixels is
@@ -519,7 +568,7 @@ static void writes_pixels(struct hook_writes *w, buffer_t *b, int l, int t, int 
 // lands, within the clip rectangle.
 static void writes_draw(struct hook_writes *w, const sprite_t *s, buffer_t *b, int x, int y) {
     writes_scratch(w);
-    hooks_writes_add(w, (void *)&game_sprite_scale[2], 8);
+    hooks_writes_add(w, (void *)&game_sprite_scale[0], 16);  // [0] and [1] too: the wrappers set them for a draw
     hooks_writes_add(w, (void *)game_sprite_ratio, 4);
     if (!b) return;
     hooks_writes_add(w, (void *)b, sizeof *b);
@@ -569,6 +618,36 @@ SPR_WRITER_NN(sprite_draw_multi_table_dest_2, (sprite_t * s, buffer_t *b, int ke
               writes_draw(&w_, s, b, x, y), "%d, %d, %d scale %d/%d sprite %dx%d+%d+%d clip %d,%d,%d,%d", key, x, y, DETAIL)
 SPR_WRITER_NN(sprite_draw_4, (sprite_t * s, buffer_t *b, int key, int x, int y, const uint8_t *table), (s, b, key, x, y, table),
               writes_draw(&w_, s, b, x, y), "%d, %d, %d scale %d/%d sprite %dx%d+%d+%d clip %d,%d,%d,%d", key, x, y, DETAIL)
+
+SPR_WRITER_NN(sprite_draw_dest_unk2_2, (sprite_t * s, buffer_t *b, int key, int x, int y, const uint8_t *table), (s, b, key, x, y, table),
+              writes_draw(&w_, s, b, x, y), "%d, %d, %d scale %d/%d sprite %dx%d+%d+%d clip %d,%d,%d,%d", key, x, y, DETAIL)
+
+// A wrapper writes what its body does for the scale it sets, and sets the
+// old one back (writes_draw watches the two words to see that it does).
+static void writes_wrapped(struct hook_writes *w, const sprite_t *s, buffer_t *b, int x, int y, int num, int den) {
+    int32_t n0 = game_sprite_scale[0], d0 = game_sprite_scale[1];
+    game_sprite_scale[0] = num, game_sprite_scale[1] = den;
+    writes_draw(w, s, b, x, y);
+    game_sprite_scale[0] = n0, game_sprite_scale[1] = d0;
+}
+#define WRAP_FMT "%d, %d, %d scale %d/%d sprite %dx%d+%d+%d clip %d,%d,%d,%d"
+#define WDETAIL num, den, s->width, s->height, s->left, s->top, b ? b->clip[0] : 0, b ? b->clip[1] : 0, b ? b->clip[2] : 0, b ? b->clip[3] : 0
+SPR_WRITER(sprite_draw_mono, (sprite_t * s, buffer_t *b, int key, int x, int y, int colour, int num, int den), (s, b, key, x, y, colour, num, den),
+           writes_wrapped(&w_, s, b, x, y, num, den), WRAP_FMT, key, x, y, WDETAIL)
+SPR_WRITER_NN(sprite_draw, (sprite_t * s, buffer_t *b, int key, int x, int y, int num, int den, const uint8_t *table), (s, b, key, x, y, num, den, table),
+              writes_wrapped(&w_, s, b, x, y, num, den), WRAP_FMT, key, x, y, WDETAIL)
+SPR_WRITER(sprite_draw_2, (sprite_t * s, buffer_t *b, int key, int x, int y, int num, int den), (s, b, key, x, y, num, den),
+           writes_wrapped(&w_, s, b, x, y, num, den), WRAP_FMT, key, x, y, WDETAIL)
+SPR_WRITER_NN(sprite_draw_dest_2, (sprite_t * s, buffer_t *b, int key, int x, int y, int num, int den, const uint8_t *table), (s, b, key, x, y, num, den, table),
+              writes_wrapped(&w_, s, b, x, y, num, den), WRAP_FMT, key, x, y, WDETAIL)
+SPR_WRITER_NN(sprite_draw_dest_unk1_2, (sprite_t * s, buffer_t *b, int x, int y, int num, int den, const uint8_t *table), (s, b, x, y, num, den, table),
+              writes_wrapped(&w_, s, b, x, y, num, den), WRAP_FMT, 0, x, y, WDETAIL)
+SPR_WRITER_NN(sprite_draw_dest_source_2, (sprite_t * s, buffer_t *b, int key, int x, int y, int num, int den, const uint8_t *table), (s, b, key, x, y, num, den, table),
+              writes_wrapped(&w_, s, b, x, y, num, den), WRAP_FMT, key, x, y, WDETAIL)
+SPR_WRITER_NN(sprite_draw_dest_unk2, (sprite_t * s, buffer_t *b, int key, int x, int y, int num, int den, const uint8_t *table), (s, b, key, x, y, num, den, table),
+              writes_wrapped(&w_, s, b, x, y, num, den), WRAP_FMT, key, x, y, WDETAIL)
+SPR_WRITER_NN(sprite_draw_multi_table_dest, (sprite_t * s, buffer_t *b, int key, int x, int y, int num, int den, const uint8_t *table), (s, b, key, x, y, num, den, table),
+              writes_wrapped(&w_, s, b, x, y, num, den), WRAP_FMT, key, x, y, WDETAIL)
 
 // The scaling table is part of the scratch.
 SHADOW_WRITER_BODY(void, sprite_fill_scaling_table, (sprite_t * s), (s), hooks_writes_add(&w_, (void *)SC->scale, sizeof SC->scale), "%d", 0)
@@ -709,6 +788,25 @@ static void sprite_sweep(void) {
             check_sprite_draw_dest_source(&sp, &b, key, x, y, table);
                         check_sprite_draw_multi_table_dest_2(&sp, &b, key, x, y, table);
             check_sprite_draw_4(&sp, &b, key, x, y, table);
+            check_sprite_draw_dest_unk2_2(&sp, &b, key, x, y, table);
+            // The wrappers, with a scale of their own (the globals' scale comes back).
+            {
+                int wn, wd;
+                switch (rnd_to(4)) {
+                case 0: wn = wd = 1 + rnd_to(4); break;
+                case 1: wn = 1 + rnd_to(4), wd = 1 + rnd_to(12); break;
+                default: wn = 1 + rnd_to(12), wd = 1 + rnd_to(4); break;
+                }
+                int wx = rnd_to(SW + 40) - 24, wy = rnd_to(SH + 40) - 24;
+                check_sprite_draw_mono(&sp, &b, key, wx, wy, colour, wn, wd);
+                check_sprite_draw(&sp, &b, key, wx, wy, wn, wd, table);
+                check_sprite_draw_2(&sp, &b, key, wx, wy, wn, wd);
+                check_sprite_draw_dest_2(&sp, &b, key, wx, wy, wn, wd, table);
+                check_sprite_draw_dest_unk1_2(&sp, &b, wx, wy, wn, wd, table);
+                check_sprite_draw_dest_source_2(&sp, &b, key, wx, wy, wn, wd, table);
+                check_sprite_draw_dest_unk2(&sp, &b, key, wx, wy, wn, wd, table);
+                check_sprite_draw_multi_table_dest(&sp, &b, key, wx, wy, wn, wd, table);
+            }
             check_sprite_change_color(&sp, key, colour);
             // The tables for the part of a scaled sprite that a made-up rectangle leaves.
             if (num != den && num <= 4 * den) {
@@ -754,6 +852,16 @@ static const struct hook sprite_hooks[] = {
     HOOK(0x5e741c, sprite_draw_dest_source, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x5c, 0x53, 0x56, 0x57),
     HOOK(0x5e8ff5, sprite_draw_multi_table_dest_2, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x5c, 0x53, 0x56, 0x57),
     HOOK(0x5e9d44, sprite_draw_4, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x5c, 0x53, 0x56, 0x57),
+    HOOK(0x5e81bc, sprite_draw_dest_unk2_2, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x5c, 0x53, 0x56, 0x57),
+    // The wrappers: mov eax, [esp+n]; mov edx, [esp+n+4]; push esi
+    HOOK(0x5e3e00, sprite_draw_mono, 0x8b, 0x44, 0x24, 0x18, 0x8b, 0x54, 0x24, 0x1c, 0x56),
+    HOOK(0x5e4afa, sprite_draw, 0x8b, 0x44, 0x24, 0x14, 0x8b, 0x54, 0x24, 0x18, 0x56),
+    HOOK(0x5e4b4a, sprite_draw_2, 0x8b, 0x44, 0x24, 0x14, 0x8b, 0x54, 0x24, 0x18, 0x56),
+    HOOK(0x5e6652, sprite_draw_dest_2, 0x8b, 0x44, 0x24, 0x14, 0x8b, 0x54, 0x24, 0x18, 0x56),
+    HOOK(0x5e73cc, sprite_draw_dest_unk1_2, 0x8b, 0x44, 0x24, 0x10, 0x8b, 0x54, 0x24, 0x14, 0x56),
+    HOOK(0x5e811c, sprite_draw_dest_source_2, 0x8b, 0x44, 0x24, 0x14, 0x8b, 0x54, 0x24, 0x18, 0x56),
+    HOOK(0x5e816c, sprite_draw_dest_unk2, 0x8b, 0x44, 0x24, 0x14, 0x8b, 0x54, 0x24, 0x18, 0x56),
+    HOOK(0x5e8fa5, sprite_draw_multi_table_dest, 0x8b, 0x44, 0x24, 0x14, 0x8b, 0x54, 0x24, 0x18, 0x56),
     // mov eax, [0x696d18]; mov ecx, [0x696d1c]
     HOOK(0x5eb20f, sprite_fill_scaling_table, 0xa1, 0x18, 0x6d, 0x69, 0x00, 0x8b, 0x0d, 0x1c, 0x6d, 0x69, 0x00),
     // mov ecx, [esp+8]; push esi; mov esi, [esp+8]; push edi

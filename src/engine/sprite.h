@@ -25,6 +25,20 @@ int SPRITE_THIS sprite_draw_multi_table_dest_2(struct game_sprite *s, struct gam
 // Every pixel but the key colour is drawn as the table's colour for it.
 int SPRITE_THIS sprite_draw_4(struct game_sprite *s, struct game_buffer *b, int key, int x, int y, const uint8_t *table);
 
+// Draw_4 for the pixels that are neither the key nor colour 0: the colour under them is darkened
+// by the table (scaled down, the colour comes from the sprite's own pixel in some places).
+int SPRITE_THIS sprite_draw_dest_unk2_2(struct game_sprite *s, struct game_buffer *b, int key, int x, int y, const uint8_t *table);
+
+// The wrappers: the same draws with the scale (num / den) given, which is put back after.
+int SPRITE_THIS sprite_draw_mono(struct game_sprite *s, struct game_buffer *b, int key, int x, int y, int colour, int num, int den);
+int SPRITE_THIS sprite_draw(struct game_sprite *s, struct game_buffer *b, int key, int x, int y, int num, int den, const uint8_t *table);
+int SPRITE_THIS sprite_draw_2(struct game_sprite *s, struct game_buffer *b, int key, int x, int y, int num, int den);
+int SPRITE_THIS sprite_draw_dest_2(struct game_sprite *s, struct game_buffer *b, int key, int x, int y, int num, int den, const uint8_t *table);
+int SPRITE_THIS sprite_draw_dest_unk1_2(struct game_sprite *s, struct game_buffer *b, int x, int y, int num, int den, const uint8_t *table);
+int SPRITE_THIS sprite_draw_dest_source_2(struct game_sprite *s, struct game_buffer *b, int key, int x, int y, int num, int den, const uint8_t *table);
+int SPRITE_THIS sprite_draw_dest_unk2(struct game_sprite *s, struct game_buffer *b, int key, int x, int y, int num, int den, const uint8_t *table);
+int SPRITE_THIS sprite_draw_multi_table_dest(struct game_sprite *s, struct game_buffer *b, int key, int x, int y, int num, int den, const uint8_t *table);
+
 void SPRITE_THIS sprite_fill_scaling_table(struct game_sprite *s);
 // The tables for the part of a scaled sprite that is on the buffer; see sprite.c.
 int SPRITE_THIS sprite_get_clipped_x_table_expand(struct game_sprite *s, const int32_t *orig, const int32_t *clip, int32_t *a3, int32_t *a4, int32_t *a5, int32_t *a6);

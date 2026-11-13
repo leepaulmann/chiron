@@ -92,6 +92,8 @@ void(__attribute__((thiscall)) * game_path_init)(void *path);
 void (*game_check_tamper)(void);
 void(__attribute__((thiscall)) * game_string_list_add)(void *list, int id);
 uint32_t *game_palette_handle;
+long double (*game_crt_sin)(double), (*game_crt_cos)(double);
+double *game_palette_rad;
 void *(__attribute__((stdcall)) * game_select_object)(void *dc, void *obj);
 int(__attribute__((stdcall)) * game_set_bk_mode)(void *dc, int mode);
 uint32_t(__attribute__((stdcall)) * game_set_text_color)(void *dc, uint32_t color);
@@ -1337,6 +1339,9 @@ void game_bind(struct pe_image *exe) {
     game_check_tamper = (void *)code_at(exe, 0x51e110);
     game_string_list_add = (void *)code_at(exe, 0x401100);
     game_palette_handle = (uint32_t *)code_at(exe, 0x9b8178);
+    game_crt_sin = (void *)code_at(exe, 0x6463e4);
+    game_crt_cos = (void *)code_at(exe, 0x646494);
+    game_palette_rad = (double *)code_at(exe, 0x670280);
     game_fill_gap = (int32_t *)code_at(exe, 0x9b3a10);
     game_copy_rem = (int32_t *)code_at(exe, 0x9b39e4);
     game_mask_units = (int32_t *)code_at(exe, 0x9b3a80);

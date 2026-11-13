@@ -104,6 +104,32 @@ int main(void) {
     sprite_draw_multi_table_dest_2(&spr, &b, 9, 0, 0, table);  // from sprite colour and what is under it
     EXPECT(px(1, 1), (uint8_t)((1 << 8 | 20) + 1)), EXPECT(px(2, 2), (uint8_t)((3 << 8 | 20) + 1));
 
+    memset(pixels, 20, sizeof pixels);
+    sprite_draw_dest_unk2_2(&spr, &b, 9, 0, 0, table);  // not the key, not 0: darkens what is under
+    EXPECT(count(21), 3), EXPECT(px(1, 2), 20), EXPECT(px(1, 1), 21), EXPECT(px(2, 2), 21);
+
+    // The wrappers set a scale for the call and put the old one back.
+    reset();
+    EXPECT(sprite_draw_2(&spr, &b, 9, 0, 0, 2, 1), 0);
+    EXPECT(count(1), 4), EXPECT(count(3), 4), EXPECT(scale[0], 1), EXPECT(scale[1], 1);
+    reset();
+    sprite_draw_mono(&spr, &b, 9, 0, 0, 7, 2, 1);
+    EXPECT(count(7), 16), EXPECT(scale[0], 1), EXPECT(scale[1], 1);
+    reset();
+    memset(pixels, 20, sizeof pixels);
+    sprite_draw_dest_unk2(&spr, &b, 9, 0, 0, 1, 1, table);
+    EXPECT(count(21), 3);
+    memset(pixels, 20, sizeof pixels);
+    sprite_draw_dest_unk1_2(&spr, &b, 0, 0, 2, 1, table);  // colour 0 scaled to 2 by 2
+    EXPECT(count(21), 4);
+    memset(pixels, 20, sizeof pixels);
+    sprite_draw_dest_source_2(&spr, &b, 9, 0, 0, 1, 1, table);
+    EXPECT(count(21), 4);
+    sprite_draw_dest_2(&spr, &b, 9, 0, 0, 1, 1, table);
+    sprite_draw(&spr, &b, 9, 0, 0, 1, 1, table);
+    sprite_draw_multi_table_dest(&spr, &b, 9, 0, 0, 1, 1, table);
+    EXPECT(scale[0], 1), EXPECT(scale[1], 1);
+
     // The scaling table: 2 to 1 is 2 each; 3 to 2 gives 1 or 2 entries that sum to 3 for every 2.
     set_scale(2, 1);
     sprite_fill_scaling_table(&spr);
@@ -149,6 +175,25 @@ int main(void) {
     EXPECT(sprite_draw_3(&spr, &b, 9, 4, 4), 0);
     EXPECT(count(0), W * H);
     min_size[0] = 0;
+
+    // Draw_dest_unk2_2 scaled down: a one-pixel row starts at the last of an unrolled four, which
+    // draws only a pixel of colour 0 (from table entry 0, here 1).
+    {
+        static uint8_t d0[6] = {0, 9, 2, 0, 3, 9}, d5[6] = {5, 9, 2, 0, 3, 9};
+        struct game_sprite z = spr;
+        static uint8_t tb[65536];
+        for (int i = 0; i < 65536; i++) tb[i] = (uint8_t)(i + 1);
+        z.data = d0;
+        reset();
+        set_scale(1, 2);
+        sprite_draw_dest_unk2_2(&z, &b, 9, 4, 4, tb);
+        EXPECT(px(4, 4), 1), EXPECT(count(0), W * H - 1);
+        z.data = d5;
+        reset();
+        set_scale(1, 2);
+        sprite_draw_dest_unk2_2(&z, &b, 9, 4, 4, tb);
+        EXPECT(count(0), W * H);
+    }
 
     // Changing a colour.
     EXPECT(sprite_change_color(&spr, 9, 4), 0);

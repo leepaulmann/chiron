@@ -1752,6 +1752,10 @@ GAME_AT(struct palette_cycle, saved, 12);
 // Non-zero once the game has a GDI palette (the functions that need one
 // return 7 until then).
 extern uint32_t *game_palette_handle;
+// The game's C runtime sin and cos (the x87 instructions, answering in 80 bits), and the double it
+// multiplies degrees by to get radians (a little off pi / 180, so read, not computed).
+extern long double (*game_crt_sin)(double), (*game_crt_cos)(double);
+extern double *game_palette_rad;
 
 // The game's Buffer class (OpenSMACX calls it so): a drawing surface that is
 // either a DIB (bits, drawn on directly) or a DirectDraw surface (dd, locked

@@ -20,6 +20,17 @@ static void check_(const char *what, int got, int want) {
 #define EXPECT(expr, want) check_(#expr, (expr), (want))
 
 // A stand-in for the game's random(): 0 the first time, so the serial must be drawn again.
+static long double t_sin(double x) {
+    long double r;
+    __asm__("fsin" : "=t"(r) : "0"((long double)x));
+    return r;
+}
+static long double t_cos(double x) {
+    long double r;
+    __asm__("fcos" : "=t"(r) : "0"((long double)x));
+    return r;
+}
+static double rad = 0.017453292519943295;
 static int fake_random(int lo, int hi) { return randoms++ ? lo + hi / 2 : 0; }
 
 static void grey_ramp(struct palette *p) {
@@ -38,6 +49,7 @@ static int hue_of(int r, int g, int b) {
 int main(void) {
     game_palette_handle = &handle;
     game_random = fake_random;
+    game_crt_sin = t_sin, game_crt_cos = t_cos, game_palette_rad = &rad;
     game_random_seed = &seed;
     grey_ramp(&pal);
 
@@ -137,6 +149,37 @@ int main(void) {
     EXPECT(rgb[0], 0);
     hsv_to_rgb(&(struct hsv){360, 1, 0.5}, rgb);
     EXPECT(rgb[0], 128);
+
+    // Nearest by hue and the tables made from it: on a grey ramp only the value counts.
+    grey_ramp(&pal);
+    struct hsv tab[256], want = {-1, 0, 100 / 256.0};
+    for (int i = 0; i < 256; i++) rgb_to_hsv(pal.rgb[i], &tab[i]);
+    EXPECT(palette_nearest_hsv(&pal, &want, tab, 0), 100);
+    want.v = 5 / 256.0;
+    EXPECT(palette_nearest_hsv(&pal, &want, tab, 1), 10);  // with skip, colours 10 to 245
+    pal.cycle[0].id = 3, pal.cycle[0].start = 10, pal.cycle[0].count = 5;
+    EXPECT(palette_nearest_hsv(&pal, &want, tab, 1), 15);
+    want = (struct hsv){0, 1, 1};  // a saturated red is nearest the one saturated colour
+    pal.rgb[77][0] = 255, pal.rgb[77][1] = pal.rgb[77][2] = 0;
+    rgb_to_hsv(pal.rgb[77], &tab[77]);
+    EXPECT(palette_nearest_hsv(&pal, &want, tab, 0), 77);
+    handle = 0;
+    EXPECT(palette_nearest_hsv(&pal, &want, tab, 0), 7);
+    handle = 1;
+    grey_ramp(&pal);
+    uint8_t tbl[256];
+    memset(tbl, 0xee, sizeof tbl);
+    EXPECT(palette_create_table(&pal, tbl, 20, 10, 0), 0);
+    EXPECT(tbl[19], 19), EXPECT(tbl[20], 20), EXPECT(tbl[29], 29), EXPECT(tbl[30], 30), EXPECT(tbl[255], 255);
+    EXPECT(palette_create_table(&pal, tbl, 20, 10, 100), 0);  // twice as bright
+    EXPECT(tbl[25], 50), EXPECT(tbl[19], 19);
+    EXPECT(palette_create_table(&pal, tbl, 20, 10, -100), 0);  // black: the darkest colour allowed
+    EXPECT(tbl[25], 10);
+    EXPECT(palette_create_table(&pal, tbl, 20, 10, 101), 3);
+    EXPECT(palette_create_table(&pal, NULL, 20, 10, 0), 16);
+    handle = 0;
+    EXPECT(palette_create_table(&pal, tbl, 20, 10, 0), 7);
+    handle = 1;
 
     printf(failures ? "palette: %d failures\n" : "palette: all passed\n", failures);
     return failures != 0;
