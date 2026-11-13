@@ -29,6 +29,9 @@ _Static_assert(__builtin_offsetof(struct teb, tls_slots) == 0xe10, "TEB layout")
 // shared and created on first use. `tid` is the Windows thread id; pass 0 to
 // allocate one.
 struct teb *teb_attach_current_thread(uint32_t tid);
+// Called last on a thread that is ending: its LDT entry, TEB and signal stack go to the next thread
+// attached. The thread must not run game code after this.
+void teb_detach_current_thread(void);
 uint32_t teb_new_thread_id(void);
 struct teb *teb_current(void);
 void teb_set_image_base(uint32_t base);

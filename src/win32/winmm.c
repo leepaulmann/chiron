@@ -82,6 +82,24 @@ static void *mmtimer_thread(void *arg) {
             if (t->kind == 2) ResetEvent(t->target);
         }
     } while (t->periodic && !t->stop);
+    // A one-shot timer is gone once it has fired, as on Windows: unless timeKillEvent already took
+    // it (and joins this thread), it leaves the list and nobody joins it.
+    int own = 0;
+    if (!t->periodic) {
+        pthread_mutex_lock(&mmtimer_lock);
+        for (struct mmtimer **pp = &mmtimers; *pp; pp = &(*pp)->next)
+            if (*pp == t) {
+                *pp = t->next;
+                own = 1;
+                break;
+            }
+        pthread_mutex_unlock(&mmtimer_lock);
+    }
+    teb_detach_current_thread();
+    if (own) {
+        pthread_detach(pthread_self());
+        free(t);
+    }
     return NULL;
 }
 

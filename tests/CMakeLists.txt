@@ -27,6 +27,14 @@ foreach(name hello seh overlay)
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/pe/${name}.c)
   list(APPEND TEST_PES ${exe})
 endforeach()
+set(exe ${CMAKE_CURRENT_BINARY_DIR}/threads.exe)
+add_custom_command(
+  OUTPUT ${exe}
+  COMMAND ${MINGW_CC} -O1 -ffreestanding -nostdlib -fno-stack-protector -fno-builtin
+          -Wl,--entry=_start@0 -Wl,--dynamicbase -Wl,--subsystem,windows
+          -o ${exe} ${CMAKE_CURRENT_SOURCE_DIR}/pe/threads.c -lkernel32 -lwinmm
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/pe/threads.c)
+list(APPEND TEST_PES ${exe})
 add_custom_target(test_pe ALL DEPENDS ${TEST_PES})
 
 foreach(mode preferred relocated)
@@ -37,6 +45,9 @@ endforeach()
 add_test(NAME seh
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_hello.sh $<TARGET_FILE:chiron>
                  ${CMAKE_CURRENT_BINARY_DIR}/seh.exe preferred)
+add_test(NAME threads
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_hello.sh $<TARGET_FILE:chiron>
+                 ${CMAKE_CURRENT_BINARY_DIR}/threads.exe preferred)
 add_test(NAME overlay
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_hello.sh $<TARGET_FILE:chiron>
                  ${CMAKE_CURRENT_BINARY_DIR}/overlay.exe overlay)

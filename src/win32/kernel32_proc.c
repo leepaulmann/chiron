@@ -425,6 +425,7 @@ static void *thread_main(void *arg) {
     pthread_mutex_unlock(&t->start_lock);
     t->exit_code = t->start(t->param);
     signal_waitable(&t->w, 1);
+    teb_detach_current_thread();
     return NULL;
 }
 
