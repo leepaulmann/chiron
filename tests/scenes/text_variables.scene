@@ -1,0 +1,14 @@
+# Text with variables filled in (parse_string: "$NUM0" and the like, the grammar choices "$<#0:...>"): the tutorial's
+# note, then the colony pod founds the first base (key B), whose screen has labels made from the base's
+# numbers ("Growth: 22 turns", "TURNS: 7", the energy and eco-damage lines), then the same screen a few
+# seconds on and after F2. Loaded from the game's autosave. Leave time after each step; the snaps take 2 s each.
+25 load
+42 snap note
+48 click 362 734         # the note's Close
+52 snap map
+55 key b                 # found a base with the colony pod: its screen opens
+62 snap base-screen
+66 snap base-screen-again
+69 key F2
+74 snap after-f2
+77 close

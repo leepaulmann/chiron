@@ -1662,6 +1662,18 @@ extern void(__attribute__((thiscall)) * game_fx_fade)(void *fx, int id);
 extern void(__attribute__((thiscall)) * game_fx_stop)(void *fx, int id);
 extern uint32_t(__attribute__((stdcall)) * *game_char_lower)(char *s);  // CharLowerA, as imported
 extern char *game_parse_text;  // the text variables parse_says() fills, 256 bytes each
+extern int32_t *game_parse_nums;     // [10] the numbers parse_num() sets
+extern int32_t *game_parse_genders;  // [10] the grammar parse_say() and parse_says() set for each variable
+extern int32_t *game_parse_plurals;  // [10]
+extern const int8_t *game_findnum_range;  // the lowest and highest character findnum() takes for a digit
+extern const char *game_fr_articles;      // [6][20] the French words parse_string() joins to a vowel
+// What the popup entry points call (cdecl): run a popup from the file and label they were given and the rest,
+// and the same for a question with an answer typed in.
+extern int (*game_pops_18)(int file, int label, int a, int b, int c, int d, int e, int f, int g);
+extern int (*game_pop_ask_6)(int file, int label, int len, int a, int b, int c);
+extern char **game_text_cursor;           // where text_item() and its kin take the next item from the line
+extern char **game_text_item_buf;         // the buffer they put the item in (512 bytes)
+extern uint8_t *game_text_slots;          // [4][0x118] the text indexes (a file name at 0, the number of labels at 0x100, the labels at 0x108)
 // A new game (setup_game): the preferences file, and the game's state
 // cleared; time warp, or the balance of the factions' starts.
 extern void (*game_prefs_put)(char *key, char *value);

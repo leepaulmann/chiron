@@ -21,6 +21,14 @@
 // mouse functions that tell a screen's function which sprite was hit (and post the Enter key to the
 // game's window when it answers non-zero).
 //
+// The popup engine's text half: parse_string (fills the text variables into a line, with the choices by
+// gender and number and the French articles) and findnum; the script text's number readers stoi, btoi and
+// htoi, the item readers of the line that text_get holds (text_item and the number, binary and hex
+// versions, on the game's own line and on a Text object), the label search of a Text index
+// (text_index_search) over the game's four (text_search_index); and the 31 entry points that the game's
+// code calls to show a message (popup, popups and popup_ask with their numbers), which build the
+// arguments of pops_18 and pop_ask_6.
+//
 // Left to the original:
 //  - the constructors and destructors and everything that opens, builds or frees objects the game
 //    keeps on its heap with an exception frame (Dialog_ctor, dtor and scalar_dtor, BasePop_ctor,
@@ -33,12 +41,22 @@
 //    runs the popup (BasePop_start and exec_3, which quiet.c already holds while state is protected)
 //    or calls a function that is not ours to run on a scratch object (BasePop_on_button_clicked calls
 //    Dialogs_UNK at 0x613740, the SpriteBox's attach and sprite, Dialog's UNK2, a window procedure);
-//  - the pop_ and pops_ functions and the X_ ones that call them: they are cdecl forwarders that
-//    build the arguments of pops_18 (0x6276a0), which runs the popup;
+//  - the runs of a popup: pops_18 (0x6276a0), pop_ask_6 (0x627910), pop_ask_number and its three
+//    kin, BasePop_start and exec_3 (they open a window and run its loop, with the heap, the script file
+//    and the Font and Buffer in use; the entry points above call them, and a check of one keeps a log
+//    instead of calling them), the X_ functions that call the entry points, BasePop_calculate_dimensions
+//    and on_redraw, text_get and the other readers of the script's lines (they read a file with the C
+//    runtime's fgets), text_item_string (it adds the text to the string table, on the game's heap), and
+//    the make and close of the text indexes (they read the whole file and allocate);
 //  - set_width, BasePop_init and string, Dialogs_item and SpriteBox_sprite, which the quiet hooks
 //    already own.
 //
-// Differences from OpenSMACX and Thinker: neither lays the classes out. Dialog_UNK1 calls slot 1 of
+// Differences from OpenSMACX and Thinker: neither lays the classes out. parse_string reads its digit
+// tests as signed, so a character below '0' (after "$NUM" or the grammar of a choice) passes as a negative
+// variable and reads the table before it; it never ends on a "$NUM", "$HEX" or other word with no digit
+// after it (the original asks for the same dollar sign for ever; this ends the line there, as for the
+// other words), and the gender of a choice made with '#' is the stack's leftover in the original (the line's
+// last choice, or whatever was there), 0 here. stoi wraps a long number round, as the C runtime's atoi did. Dialog_UNK1 calls slot 1 of
 // the Dialog's vtable with the Dialog's position; BasePop_UNK3 and UNK4 set bit 0 and bit 1 of the
 // field at 0x20; the defaults' colour setters count their row from a number that is not checked above
 // 3, so one past it writes the next row's first colour (and a last row's, the Dialog default flags).
@@ -56,6 +74,13 @@
 // sweep also running every init on a twin pair of Dialogs that are given a size (the data is made on
 // the real heap, which a check cannot put back) and comparing the two field by field, the data by
 // whether it is set. A plant that writes nothing, or a wrong value, shows as a difference.
+//
+// The text functions are checked as they are called (they write the buffer they are given, the item buffer
+// and the line's place, or nothing) with the sweep on made-up lines and indexes. parse_string's buffer has
+// no known size: its check takes as many bytes as the longer of what ours makes and the line's own length.
+// The entry points are checked by logging: the check runs the original entry point and ours, each ending in
+// a call that a shadow-only hook on pops_18 or pop_ask_6 answers with a count and records, and compares the
+// two logs and answers; the game's own calls of them run the original.
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -122,6 +147,343 @@ void add_lf(char *s) {
     size_t n = strlen(s);
     s[n] = '\n';
     s[n + 1] = 0;
+}
+
+// ---- Text variables -----------------------------------------------------------------------------
+
+// The first character in the text that is a digit, by the two characters the game keeps for the range
+// (signed comparisons, as the original's), or NULL.
+char *findnum(char *s) {
+    if (!s) return NULL;
+    int8_t lo = game_findnum_range[0], hi = game_findnum_range[1];
+    for (; *s; s++)
+        if ((int8_t)*s >= lo && (int8_t)*s <= hi) return s;
+    return NULL;
+}
+
+// French: " de ", " le " or " la " (and "De ", "Le ", "La " at the start of a sentence) before a vowel or
+// an h loses its vowel and its space. Each pass takes the earliest of the six words, and the next one
+// starts a character after it.
+static void french_articles(char *text) {
+    char *from = text;
+    for (;;) {
+        char *best = NULL;
+        int len = 0;
+        for (int i = 0; i < 6; i++) {
+            char *m = strstr(from, game_fr_articles + i * 20);
+            if (m && (!best || m < best)) best = m, len = i < 3 ? 2 : 1;
+        }
+        if (!best) return;
+        char after = best[len + 2];
+        if (after && strchr("aeiouyhAEIOUYH", after)) {
+            char *p = best + len;
+            *p = '\'';
+            char c;
+            do {
+                c = p[2];
+                p++;
+                *p = c;
+            } while (c);
+        }
+        from = best + 1;
+    }
+}
+
+// Fill the text variables into a line. The text before a directive is copied to the output and the
+// directive's own text goes in its place:
+//   $$           a dollar sign
+//   $NUMBERn     the number n (set by parse_num), in decimal; so are $NUMn and $HEXn
+//   $LINK<       kept as it is (the link's text goes through the same way)
+//   $<...>       a choice among words, by gender and number (below)
+//   $NAMEn ...   any other word that starts with a dollar sign takes the text variable n (a string
+//                parse_says set), n being the first digit after the word, wherever it is; a dollar sign
+//                with no digit anywhere after it ends the line there.
+// A choice is "$<", the grammar, the words separated by colons, and ">". The grammar is M, F or N (the
+// gender 0, 1 or 2) with an optional digit after it that sets the number (the digit less one), "#n"
+// (the number n's value, the plural unless it is 1), or a digit n (the gender and number parse_say set
+// for the variable n). The word is picked by how many colons there are: 1: singular or plural; 2: by
+// gender; 3: by gender not 0 and by plural; 5: by gender and by plural (three each); with any other
+// count the one that number of colons along. With no colons the words are in the text variable named
+// by the first digit after the grammar. A variable number above 9 in a "$NUM" or "$HEX" ends the line
+// with the answer 14; a null pointer answers 3. After a French line (language 1) the articles are
+// joined to the vowels after them. The rest of the line, after the last word, is added with strcat: the
+// buffer's own text stays when the line has nothing the output was written for (no dollar sign in it,
+// or a word with no digit after it, which stops the line), and the line is put after it. The callers
+// that mean to take the line only start the buffer with a 0, and supply_options, which does not for its
+// second and third lines, has them follow the first.
+// The original tests its digits with signed comparisons, so a character below '0' passes as a negative
+// number and reads the table before its start; this does too. It never ends on a "$NUM..." or "$HEX..."
+// word with no digit after it: it looks for the same dollar sign again forever; this ends the line, as
+// the other words do. The gender of a "#" choice is whatever the stack held in the original (the
+// value of the line's last choice, or what was there); this starts the line with 0.
+int parse_string(char *src, char *dst) {
+    if (!src || !dst) return 3;
+    char *cur = src, *out = dst;
+    int gender = 0;
+    for (;;) {
+        char *d = strchr(cur, '$');
+        if (!d) break;
+        size_t n = (size_t)(d - cur);
+        char kind = d[1];
+        if (kind == '$') {
+            memcpy(out, cur, n + 1);
+            out += n + 1, cur = d + 2, *out = 0;
+            continue;
+        }
+        if (kind == '<') {
+            memcpy(out, cur, n);
+            out += n, *out = 0;
+            char *close = strchr(d, '>');
+            if (!close) {
+                cur = d + 1;
+                continue;
+            }
+            char *p = d + 2;
+            cur = close + 1;
+            while (*p == ' ') p++;
+            char c = *p;
+            int var = -1, plural = 0;
+            if (c == 'M' || c == 'm') gender = 0;
+            else if (c == 'F' || c == 'f') gender = 1;
+            else if (c == 'N' || c == 'n') gender = 2;
+            else if (c == '#') {
+                var = (int8_t)*++p - '0';
+                plural = game_parse_nums[var] != 1;
+            } else {
+                var = (int8_t)c - '0';
+                if (var >= 10) continue;
+                gender = game_parse_genders[var], plural = game_parse_plurals[var];
+            }
+            p++;
+            if (var < 0 && *p >= '0' && *p <= '9') plural = *p++ - '1';
+            while (*p == ' ') p++;
+            if (*p == ':') p++;
+            int colons = 0;
+            for (char *q = p; q < cur; q++) colons += *q == ':';
+            int words = 1;  // whether the words are there (else, in a variable)
+            if (!colons) {
+                char *digit = findnum(p);
+                if (!digit) words = 0;
+                else {
+                    var = (int8_t)*digit - '0';
+                    if (var >= 10) continue;
+                    p = game_parse_text + var * 256;
+                    for (char *q = p; *q; q++) colons += *q == ':';
+                    if (!*p) words = 0;
+                }
+            }
+            if (words) {
+                int pick = colons;
+                if (colons == 1) pick = plural != 0;
+                else if (colons == 2) pick = gender;
+                else if (colons == 3) pick = (gender != 0) + (plural ? 2 : 0);
+                else if (colons == 5) pick = gender + (plural ? 3 : 0);
+                while (pick)
+                    if (*p++ == ':') pick--;
+            }
+            while (*p && *p != ':' && *p != '>') *out++ = *p++;
+            *out = 0;
+            continue;
+        }
+        if (kind == 'L' && !strncmp(d, "$LINK<", 6)) {
+            memcpy(out, cur, n + 1);
+            out += n + 1, cur = d + 1, *out = 0;
+            continue;
+        }
+        int digits = kind == 'N' && !strncmp(d, "$NUMBER", 7) ? 7 : (kind == 'N' && !strncmp(d, "$NUM", 4)) || (kind == 'H' && !strncmp(d, "$HEX", 4)) ? 4 : 0;
+        if (digits) {
+            int k = (int8_t)d[digits] - '0';
+            if (k > 9) return 14;
+            memcpy(out, cur, n);
+            out += n, *out = 0;
+            out += sprintf(out, "%d", game_parse_nums[k]);
+            cur = d + digits + 1;
+            continue;
+        }
+        // Any other word: the first digit after it names the variable.
+        char *digit = findnum(d);
+        if (!digit) break;
+        int k = (int8_t)*digit - '0';
+        if (k > 9) return 14;
+        memcpy(out, cur, n);
+        out += n, *out = 0;
+        cur = digit + 1;
+        strcpy(out, game_parse_text + k * 256);
+        out += strlen(out);
+    }
+    strcat(out, cur);
+    if (*game_language == 1) french_articles(dst);
+    return 0;
+}
+
+// ---- Script text --------------------------------------------------------------------------------
+
+// Numbers in text: the C runtime's own isxdigit, isdigit and toupper took anything, and answered no for
+// what is not an ASCII letter or digit.
+static int is_hex(int c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
+
+// Binary digits: the value of the 0s and 1s at the start (zero when there are none).
+int btoi(const char *s) {
+    uint32_t v = 0;
+    for (; *s == '0' || *s == '1'; s++) v = v * 2 + (uint32_t)(*s - '0');
+    return (int)v;
+}
+// Hexadecimal digits, either case.
+int htoi(const char *s) {
+    uint32_t v = 0;
+    for (; is_hex((int8_t)*s); s++) {
+        char c = *s;
+        v = v * 16 + (uint32_t)(c <= '9' ? c - '0' : (c & ~0x20) - 'A' + 10);
+    }
+    return (int)v;
+}
+// The C runtime's atoi: white space, a sign and digits; a number too long for an int wraps round (the
+// original's does not stop at the largest).
+static int atoi_wrap(const char *s) {
+    while (*s == ' ' || (*s >= 9 && *s <= 13)) s++;
+    int neg = *s == '-';
+    if (*s == '-' || *s == '+') s++;
+    uint32_t v = 0;
+    for (; *s >= '0' && *s <= '9'; s++) v = v * 10 + (uint32_t)(*s - '0');
+    return (int)(neg ? 0 - v : v);
+}
+// A number from text: "0b" or "0B" and binary digits, "0x" or "0X" and hexadecimal ones, and "0d" or
+// "0D" and decimal ones are read as such. Any other text is decimal (atoi); one that starts with a 0
+// is read from the character after it.
+int stoi(const char *s) {
+    if (*s != '0') return atoi_wrap(s);
+    s++;
+    switch (*s) {
+    case 'b': case 'B': return btoi(s + 1);
+    case 'x': case 'X': return htoi(s + 1);
+    case 'd': case 'D': return atoi_wrap(s + 1);
+    default: return atoi_wrap(s);
+    }
+}
+
+// The next item of the line the script file's reader holds (the game's text_get): the characters up
+// to a comma (or the end), moved to the item buffer with the spaces off both ends, the line's place
+// going past the comma. The original moves the place a character at a time, as it copies.
+static char *take_item(char **cursor, char *buf) {
+    char *p = *cursor, *out = buf;
+    while (*p && *p != ',') *out++ = *p++;
+    *cursor = p;
+    *out = 0;
+    if (*p) *cursor = p + 1;
+    purge_spaces(buf);
+    return buf;
+}
+// (The answer is the address, as a number, as purge_leading's is.)
+int text_item(void) { return (int)(intptr_t)take_item(game_text_cursor, *game_text_item_buf); }
+int text_item_number(void) { return stoi((char *)(intptr_t)text_item()); }
+int text_item_binary(void) { return btoi((char *)(intptr_t)text_item()); }
+int text_item_hex(void) { return htoi((char *)(intptr_t)text_item()); }
+
+// The same on a Text object (the line's place at 0x150 and the item buffer at 0x15c; the game never calls these).
+static char **obj_cursor(void *t) { return (char **)((uint8_t *)t + 0x150); }
+static char *obj_buf(void *t) { return *(char **)((uint8_t *)t + 0x15c); }
+int DLG_THIS text_obj_item(void *t) { return (int)(intptr_t)take_item(obj_cursor(t), obj_buf(t)); }
+int DLG_THIS text_obj_item_number(void *t) { return stoi((char *)(intptr_t)text_obj_item(t)); }
+int DLG_THIS text_obj_item_binary(void *t) { return btoi((char *)(intptr_t)text_obj_item(t)); }
+int DLG_THIS text_obj_item_hex(void *t) { return htoi((char *)(intptr_t)text_obj_item(t)); }
+
+// Case-blind comparison, as the C runtime's _stricmp.
+static int icmp(const char *a, const char *b) {
+    for (;; a++, b++) {
+        int x = (uint8_t)*a, y = (uint8_t)*b;
+        if (x >= 'A' && x <= 'Z') x += 32;
+        if (y >= 'A' && y <= 'Z') y += 32;
+        if (x != y) return x < y ? -1 : 1;
+        if (!x) return 0;
+    }
+}
+
+// Where a "#LABEL" is in a script file, from the index the game made of its labels: the Text object holds
+// the file's name at 0 (it must be the given name, with ".txt" added if there is no dot in it) and the
+// number of labels at 0x100, and a pointer at 0x108 to the labels, each a file offset (an int) followed by
+// its name and a 0. The first label equal to the given one (with the "#" off), whatever case, answers its
+// offset; no match, or another file, -1. The count is only looked at after the first label.
+int DLG_THIS text_index_search(void *t, const char *name, const char *label) {
+    char file[0x200];
+    strcpy(file, name);
+    if (!strchr(file, '.')) strcat(file, ".txt");
+    if (icmp(file, (const char *)t)) return -1;
+    if (*label == '#') label++;
+    int left = *(int32_t *)((uint8_t *)t + 0x100);
+    const char *entry = *(const char **)((uint8_t *)t + 0x108);
+    for (;;) {
+        const char *at = entry + 4;
+        if (!icmp(label, at)) return *(const int32_t *)entry;
+        entry = at + strlen(at) + 1;
+        if (--left == 0) return -1;
+    }
+}
+// The same over the game's four text indexes (the ones that have labels).
+int text_search_index(const char *name, const char *label) {
+    for (int i = 0; i < 4; i++) {
+        uint8_t *slot = game_text_slots + i * 0x118;
+        if (!*(int32_t *)(slot + 0x100)) continue;
+        int at = text_index_search(slot, name, label);
+        if (at >= 0) return at;
+    }
+    return -1;
+}
+
+// ---- Popup entry points ----------------------------------------------------------------------
+
+// The functions the game's code calls to show a message: each takes the label (and the file, unless it is
+// the game's own popup file, the one set by pop_set_def_file) and what its kind of popup needs, and passes
+// them to pops_18 (0x6276a0), which takes nine arguments; the ones the kind of popup fixes are 0, -1 or 1,
+// and the file is the popup file's address when it is not given. The ones with a string (popup_3,
+// popups_7 and popups_8, popup_ask_4 and popup_ask_5) pass its length too, and answer -1 at once when it
+// is a null pointer. popup_ask and its kin do the same for pop_ask_6
+// (0x627910), whose popup takes a number typed in. A run of the popup itself (pops_18, pop_ask_6,
+// pop_ask_number_4 and the others that call BasePop_start and exec_3) stays with the original.
+int popup(int a0, int a1) { return game_pops_18((int)(intptr_t)game_pop_file, a0, -1, 0, 0, 0, 1, 1, a1); }
+int popup_2(int a0, int a1, int a2) { return game_pops_18(a0, a1, -1, 0, 0, 0, 1, 1, a2); }
+int popup_3(int a0, int a1, int a2, int a3, int a4) {
+    if (!a2) return -1;
+    return game_pops_18(a0, a1, (int)strlen((const char *)(intptr_t)a2), a2, a3, 0, 1, 1, a4);
+}
+int popup_4(int a0, int a1, int a2, int a3) { return game_pops_18((int)(intptr_t)game_pop_file, a0, a1, 0, a2, 0, 1, 1, a3); }
+int popup_5(int a0, int a1, int a2, int a3, int a4) { return game_pops_18(a0, a1, a2, 0, a3, 0, 1, 1, a4); }
+int popup_6(int a0, int a1, int a2) { return game_pops_18((int)(intptr_t)game_pop_file, a0, -1, 0, a1, 0, 1, 1, a2); }
+int popup_7(int a0, int a1, int a2, int a3) { return game_pops_18(a0, a1, -1, 0, a2, 0, 1, 1, a3); }
+int popup_8(int a0, int a1, int a2, int a3, int a4) { return game_pops_18((int)(intptr_t)game_pop_file, a0, a1, a2, a3, 0, 1, 1, a4); }
+int popup_9(int a0, int a1, int a2, int a3, int a4, int a5) { return game_pops_18(a0, a1, a2, a3, a4, 0, 1, 1, a5); }
+int popups(int a0, int a1, int a2) { return game_pops_18((int)(intptr_t)game_pop_file, a0, -1, 0, 0, a1, 1, 1, a2); }
+int popups_2(int a0, int a1, int a2, int a3, int a4) { return game_pops_18((int)(intptr_t)game_pop_file, a0, -1, 0, 0, a1, a2, a3, a4); }
+int popups_3(int a0, int a1, int a2, int a3) { return game_pops_18(a0, a1, -1, 0, 0, a2, 1, 1, a3); }
+int popups_4(int a0, int a1, int a2, int a3, int a4, int a5) { return game_pops_18(a0, a1, -1, 0, 0, a2, a3, a4, a5); }
+int popups_5(int a0, int a1, int a2, int a3, int a4) { return game_pops_18((int)(intptr_t)game_pop_file, a0, a1, 0, a2, a3, 1, 1, a4); }
+int popups_6(int a0, int a1, int a2, int a3, int a4, int a5, int a6) { return game_pops_18((int)(intptr_t)game_pop_file, a0, a1, 0, a2, a3, a4, a5, a6); }
+int popups_7(int a0, int a1, int a2, int a3, int a4, int a5) {
+    if (!a2) return -1;
+    return game_pops_18(a0, a1, (int)strlen((const char *)(intptr_t)a2), a2, a3, a4, 1, 1, a5);
+}
+int popups_8(int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7) {
+    if (!a2) return -1;
+    return game_pops_18(a0, a1, (int)strlen((const char *)(intptr_t)a2), a2, a3, a4, a5, a6, a7);
+}
+int popups_9(int a0, int a1, int a2, int a3, int a4, int a5) { return game_pops_18(a0, a1, a2, 0, a3, a4, 1, 1, a5); }
+int popups_10(int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7) { return game_pops_18(a0, a1, a2, 0, a3, a4, a5, a6, a7); }
+int popups_11(int a0, int a1, int a2, int a3) { return game_pops_18((int)(intptr_t)game_pop_file, a0, -1, 0, a1, a2, 1, 1, a3); }
+int popups_12(int a0, int a1, int a2, int a3, int a4, int a5) { return game_pops_18((int)(intptr_t)game_pop_file, a0, -1, 0, a1, a2, a3, a4, a5); }
+int popups_13(int a0, int a1, int a2, int a3, int a4) { return game_pops_18(a0, a1, -1, 0, a2, a3, 1, 1, a4); }
+int popups_14(int a0, int a1, int a2, int a3, int a4, int a5, int a6) { return game_pops_18(a0, a1, -1, 0, a2, a3, a4, a5, a6); }
+int popups_15(int a0, int a1, int a2, int a3, int a4, int a5) { return game_pops_18((int)(intptr_t)game_pop_file, a0, a1, a2, a3, a4, 1, 1, a5); }
+int popups_16(int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7) { return game_pops_18((int)(intptr_t)game_pop_file, a0, a1, a2, a3, a4, a5, a6, a7); }
+int popups_17(int a0, int a1, int a2, int a3, int a4, int a5, int a6) { return game_pops_18(a0, a1, a2, a3, a4, a5, 1, 1, a6); }
+int popup_ask(int a0, int a1, int a2, int a3, int a4) { return game_pop_ask_6((int)(intptr_t)game_pop_file, a0, a1, a2, a3, a4); }
+int popup_ask_2(int a0, int a1, int a2, int a3, int a4) { return game_pop_ask_6(a0, a1, a2, 0, a3, a4); }
+int popup_ask_3(int a0, int a1, int a2, int a3) { return game_pop_ask_6((int)(intptr_t)game_pop_file, a0, a1, 0, a2, a3); }
+int popup_ask_4(int a0, int a1, int a2, int a3, int a4) {
+    if (!a2) return -1;
+    return game_pop_ask_6(a0, a1, (int)strlen((const char *)(intptr_t)a2), a2, a3, a4);
+}
+int popup_ask_5(int a0, int a1, int a2, int a3) {
+    if (!a1) return -1;
+    return game_pop_ask_6((int)(intptr_t)game_pop_file, a0, (int)strlen((const char *)(intptr_t)a1), a1, a2, a3);
 }
 
 // ---- BasePop ------------------------------------------------------------------------------------
@@ -578,6 +940,135 @@ SHADOW_WRITER(DLG, void, purge_trailing, (char *s), (s), WRITES(s, strlen(s) + 1
 SHADOW_WRITER(DLG, void, purge_spaces, (char *s), (s), WRITES(s, strlen(s) + 1), "%d", P(s))
 SHADOW_WRITER(DLG, void, kill_lf, (char *s), (s), WRITES(s, strlen(s) + 1), "%d", P(s))
 SHADOW_WRITER(DLG, void, add_lf, (char *s), (s), WRITES(s, strlen(s) + 2), "%d", P(s))
+SHADOW_FN(DLG, char *, findnum, (char *s), (s), "%d", P(s))
+SHADOW_FN(DLG, int, stoi, (const char *s), (s), "%s", s)
+SHADOW_FN(DLG, int, btoi, (const char *s), (s), "%s", s)
+SHADOW_FN(DLG, int, htoi, (const char *s), (s), "%s", s)
+// The item functions write the item buffer (as many characters as there are before a comma) and the line's place.
+static size_t item_room(const char *p) {
+    size_t n = 0;
+    while (p[n] && p[n] != ',') n++;
+    return n + 1;
+}
+#define ITEM_WRITES                                  \
+    WRITES(game_text_cursor, sizeof(char *));        \
+    WRITES(*game_text_item_buf, item_room(*game_text_cursor))
+#define OBJ_WRITES                             \
+    WRITES(obj_cursor(t), sizeof(char *));     \
+    WRITES(obj_buf(t), item_room(*obj_cursor(t)))
+SHADOW_WRITER(DLG, int, text_item, (void), (), ITEM_WRITES, "%s", "")
+SHADOW_WRITER(DLG, int, text_item_number, (void), (), ITEM_WRITES, "%s", "")
+SHADOW_WRITER(DLG, int, text_item_binary, (void), (), ITEM_WRITES, "%s", "")
+SHADOW_WRITER(DLG, int, text_item_hex, (void), (), ITEM_WRITES, "%s", "")
+SHADOW_WRITER_T(DLG, int, text_obj_item, (void *t), (t), OBJ_WRITES, "%d", P(t))
+SHADOW_WRITER_T(DLG, int, text_obj_item_number, (void *t), (t), OBJ_WRITES, "%d", P(t))
+SHADOW_WRITER_T(DLG, int, text_obj_item_binary, (void *t), (t), OBJ_WRITES, "%d", P(t))
+SHADOW_WRITER_T(DLG, int, text_obj_item_hex, (void *t), (t), OBJ_WRITES, "%d", P(t))
+SHADOW_THIS_FN(DLG, int, text_index_search, (void *t, const char *name, const char *label), (t, name, label), "%s, %s", name,
+               label)
+SHADOW_FN(DLG, int, text_search_index, (const char *name, const char *label), (name, label), "%s, %s", name, label)
+// The popup entry points. pops_18 and pop_ask_6 run a popup, which no check can put back; while one of the
+// entry points is being checked, shadow-only hooks on those two keep a log of the calls they get and answer
+// a number made from the count, without running. The check calls the original entry point and ours in turn
+// (each ends in a call of pops_18 or pop_ask_6) and compares the answers and the logs. The game's own calls
+// of an entry point run the original and are counted.
+static int pops_logging;
+static struct popup_log {
+    int n;
+    struct {
+        int kind, a[9];
+    } c[4];
+} plog;
+static int popup_stub(int kind, const int *a, int count) {
+    if (plog.n < 4) {
+        plog.c[plog.n].kind = kind;
+        memcpy(plog.c[plog.n].a, a, (size_t)count * sizeof *a);
+    }
+    return 0x5100 + plog.n++;
+}
+static int (*orig_pops_18)(int, int, int, int, int, int, int, int, int);
+static struct hook_stats stats_pops_18 = {"(logged pops_18)"};
+static int shadow_pops_18(int a, int b, int c, int d, int e, int f, int g, int h, int i) {
+    if (pops_logging) return popup_stub(0, (const int[]){a, b, c, d, e, f, g, h, i}, 9);
+    return orig_pops_18(a, b, c, d, e, f, g, h, i);
+}
+static int (*orig_pop_ask_6)(int, int, int, int, int, int);
+static struct hook_stats stats_pop_ask_6 = {"(logged pop_ask_6)"};
+static int shadow_pop_ask_6(int a, int b, int c, int d, int e, int f) {
+    if (pops_logging) return popup_stub(1, (const int[]){a, b, c, d, e, f}, 6);
+    return orig_pop_ask_6(a, b, c, d, e, f);
+}
+#define FORWARDER(name, params, args)                                                                            \
+    SHADOW_DECLARE(int, name, params)                                                                            \
+    static int check_##name params {                                                                             \
+        memset(&plog, 0, sizeof plog);                                                                           \
+        pops_logging = 1;                                                                                        \
+        hooks_nested++;                                                                                          \
+        int want = orig_##name args;                                                                             \
+        hooks_nested--;                                                                                          \
+        struct popup_log wlog = plog;                                                                            \
+        memset(&plog, 0, sizeof plog);                                                                           \
+        int got = name args;                                                                                     \
+        pops_logging = 0;                                                                                        \
+        if (got != want || memcmp(&wlog, &plog, sizeof wlog))                                                    \
+            hooks_mismatch(&stats_##name, "(a0 = %d) = %d, original %d; %d calls, original %d", (int)a0, got, want, plog.n, wlog.n); \
+        return want;                                                                                             \
+    }                                                                                                            \
+    static int shadow_##name params {                                                                            \
+        if (!hooks_nested && !shadow_bypass()) {                                                                 \
+            stats_##name.calls++;                                                                                \
+            shadow_tick(DLG);                                                                                    \
+        }                                                                                                        \
+        return orig_##name args;                                                                                 \
+    }
+FORWARDER(popup, (int a0, int a1), (a0, a1))
+FORWARDER(popup_2, (int a0, int a1, int a2), (a0, a1, a2))
+FORWARDER(popup_3, (int a0, int a1, int a2, int a3, int a4), (a0, a1, a2, a3, a4))
+FORWARDER(popup_4, (int a0, int a1, int a2, int a3), (a0, a1, a2, a3))
+FORWARDER(popup_5, (int a0, int a1, int a2, int a3, int a4), (a0, a1, a2, a3, a4))
+FORWARDER(popup_6, (int a0, int a1, int a2), (a0, a1, a2))
+FORWARDER(popup_7, (int a0, int a1, int a2, int a3), (a0, a1, a2, a3))
+FORWARDER(popup_8, (int a0, int a1, int a2, int a3, int a4), (a0, a1, a2, a3, a4))
+FORWARDER(popup_9, (int a0, int a1, int a2, int a3, int a4, int a5), (a0, a1, a2, a3, a4, a5))
+FORWARDER(popups, (int a0, int a1, int a2), (a0, a1, a2))
+FORWARDER(popups_2, (int a0, int a1, int a2, int a3, int a4), (a0, a1, a2, a3, a4))
+FORWARDER(popups_3, (int a0, int a1, int a2, int a3), (a0, a1, a2, a3))
+FORWARDER(popups_4, (int a0, int a1, int a2, int a3, int a4, int a5), (a0, a1, a2, a3, a4, a5))
+FORWARDER(popups_5, (int a0, int a1, int a2, int a3, int a4), (a0, a1, a2, a3, a4))
+FORWARDER(popups_6, (int a0, int a1, int a2, int a3, int a4, int a5, int a6), (a0, a1, a2, a3, a4, a5, a6))
+FORWARDER(popups_7, (int a0, int a1, int a2, int a3, int a4, int a5), (a0, a1, a2, a3, a4, a5))
+FORWARDER(popups_8, (int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7), (a0, a1, a2, a3, a4, a5, a6, a7))
+FORWARDER(popups_9, (int a0, int a1, int a2, int a3, int a4, int a5), (a0, a1, a2, a3, a4, a5))
+FORWARDER(popups_10, (int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7), (a0, a1, a2, a3, a4, a5, a6, a7))
+FORWARDER(popups_11, (int a0, int a1, int a2, int a3), (a0, a1, a2, a3))
+FORWARDER(popups_12, (int a0, int a1, int a2, int a3, int a4, int a5), (a0, a1, a2, a3, a4, a5))
+FORWARDER(popups_13, (int a0, int a1, int a2, int a3, int a4), (a0, a1, a2, a3, a4))
+FORWARDER(popups_14, (int a0, int a1, int a2, int a3, int a4, int a5, int a6), (a0, a1, a2, a3, a4, a5, a6))
+FORWARDER(popups_15, (int a0, int a1, int a2, int a3, int a4, int a5), (a0, a1, a2, a3, a4, a5))
+FORWARDER(popups_16, (int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7), (a0, a1, a2, a3, a4, a5, a6, a7))
+FORWARDER(popups_17, (int a0, int a1, int a2, int a3, int a4, int a5, int a6), (a0, a1, a2, a3, a4, a5, a6))
+FORWARDER(popup_ask, (int a0, int a1, int a2, int a3, int a4), (a0, a1, a2, a3, a4))
+FORWARDER(popup_ask_2, (int a0, int a1, int a2, int a3, int a4), (a0, a1, a2, a3, a4))
+FORWARDER(popup_ask_3, (int a0, int a1, int a2, int a3), (a0, a1, a2, a3))
+FORWARDER(popup_ask_4, (int a0, int a1, int a2, int a3, int a4), (a0, a1, a2, a3, a4))
+FORWARDER(popup_ask_5, (int a0, int a1, int a2, int a3), (a0, a1, a2, a3))
+// parse_string writes the line into a buffer of the caller's, of no known size: the span is what ours makes
+// of the text (and at least the text's own length, so that a version that writes nothing is not missed).
+static size_t parse_span(char *src, char *dst) {
+    static char scratch[0x10000];
+    if (!src || !dst) return 0;
+    size_t len = strlen(src), dollars = 0;
+    for (char *p = src; *p; p++) dollars += *p == '$';
+    if (len + dollars * 256 + 16 > sizeof scratch) return len + dollars * 256 + 16;
+    size_t keep = strnlen(dst, 0x400);  // (a line with no dollar sign goes after the buffer's text)
+    if (len + dollars * 256 + 16 + keep > sizeof scratch) return len + dollars * 256 + 16 + keep;
+    memcpy(scratch, dst, keep), scratch[keep] = 0;
+    parse_string(src, scratch);
+    size_t n = strlen(scratch);
+    return (n > len ? n : len) + 2;
+}
+SHADOW_WRITER(DLG, int, parse_string, (char *src, char *dst), (src, dst), WRITES(dst, parse_span(src, dst)), "%s",
+              src ? src : "(null)")
 
 // ---- BasePop. The object and the Dialog it holds are what a function can change.
 #define BPD(p) (BPW(p), DW(bp_dialog(p)))
@@ -841,6 +1332,51 @@ static void random_text(char *buf, int cap) {
     buf[n] = 0;
 }
 
+// A line for parse_string: words, directives and choices, put together at random. (No choice is left
+// without its grammar: a character below '0' after "$<" would pass as a negative variable and take its gender
+// from the memory before the table, which can be any number, and the words are then looked for that many
+// colons along, off the end of the line.) A "$" word that is not a
+// $NUM, $NUMBER or $HEX takes the first digit anywhere after it, and the original, given none, never
+// comes back; so a line with such a word that has no digit of its own ends in one. A choice made with '#'
+// has no gender of its own (the original reads a stack slot it never set), so it has one or four colons.
+static void random_line(char *buf, size_t cap) {
+    static const char *const words[] = {" de ", " le ", " la ", "De ", "Le ", "La ", "ile ", "Hotel ", "hotel ", "yak ", "x", ".",
+                                        "base of ", " ", "a:b", ">", "d'", "", "Un ", "de homme "};
+    static const char *const fixed[] = {"$$", "$LINK<abc>", "$LINK<", "$<M:he:she>", "$<F:le:la>", "$<N:a:b:c>",
+                                        "$<M1:x:y>", "$<M2:x:y>", "$< F 3 :a:b:c>", "$<M 3>", "$<F 4>", "$<Q:a:b>",
+                                        "$<m:a:b:c:d>", "$<f1:a:b:c:d:e:f>", "$<n:u:v:w:x:y:z:o>", "$<M:a:b:c>",
+                                        "$<M:no end", "$< :a:b>", "$<#1:one:many>", "$<5:a:b>", "$<M2: :>", "$<M:::>"};
+    static const char *const risky[] = {"$NAME", "$HEXAGON", "$NUMERIC", "$X", "$ ", "$."};
+    size_t n = 0;
+    int need_digit = 0;
+    buf[0] = 0;
+    int parts = 1 + rnd_to(8);
+    for (int i = 0; i < parts && n + 64 < cap; i++) {
+        char piece[48];
+        int r = rnd_to(24);
+        if (r < 6) snprintf(piece, sizeof piece, "%s", words[rnd_to(sizeof words / sizeof *words)]);
+        else if (r < 9) snprintf(piece, sizeof piece, "$NUM%d", rnd_to(10));
+        else if (r < 11) snprintf(piece, sizeof piece, "$NUMBER%d", rnd_to(10));
+        else if (r < 12) snprintf(piece, sizeof piece, "$HEX%d", rnd_to(10));
+        else if (r < 13) snprintf(piece, sizeof piece, "$%s%d", rnd_to(2) ? "NAME" : "CITY LABEL ", rnd_to(10));
+        else if (r < 14) snprintf(piece, sizeof piece, "$<%d:%s>", rnd_to(10), rnd_to(2) ? "a:b" : "a:b:c:d:e:f");
+        else if (r < 15) snprintf(piece, sizeof piece, "$<#%d:one:many>", rnd_to(10));
+        else if (r < 16) snprintf(piece, sizeof piece, "$<#%d:s:p:q:r:t>", rnd_to(10));
+        else if (r < 17) snprintf(piece, sizeof piece, "$<%d>", rnd_to(10));
+        else if (r < 18) snprintf(piece, sizeof piece, "$<M %d>", rnd_to(10));
+        else if (r < 19) snprintf(piece, sizeof piece, "$<%c%d:p:q%s>", "MFN"[rnd_to(3)], rnd_to(10), rnd_to(2) ? ":r" : "");
+        else if (r < 20) snprintf(piece, sizeof piece, "$%s", rnd_to(2) ? "NUM " : "HEX-");
+        else if (r < 21) {
+            snprintf(piece, sizeof piece, "%s", risky[rnd_to(sizeof risky / sizeof *risky)]);
+            need_digit = 1;
+        } else snprintf(piece, sizeof piece, "%s", fixed[rnd_to(sizeof fixed / sizeof *fixed)]);
+        size_t l = strlen(piece);
+        memcpy(buf + n, piece, l + 1);
+        n += l;
+    }
+    if (need_digit || !rnd_to(4)) snprintf(buf + n, cap - n, "%s%d", rnd_to(2) ? " " : "", rnd_to(10));
+}
+
 static void dialog_sweep(void) {
     static struct font f_ok, f_bad;
     int sweeping = hooks_sweeping;
@@ -860,6 +1396,10 @@ static void dialog_sweep(void) {
     memcpy(file, game_pop_file, 13);
     uint32_t hwnd = *game_win_hwnd;
     struct game_win *focus = *game_win_modal_focus;
+    int32_t pnums[10], pgenders[10], pplurals[10], language = *game_language;
+    char ptext[2560];
+    memcpy(pnums, game_parse_nums, sizeof pnums), memcpy(pgenders, game_parse_genders, sizeof pgenders);
+    memcpy(pplurals, game_parse_plurals, sizeof pplurals), memcpy(ptext, game_parse_text, sizeof ptext);
     *game_win_hwnd = 1;
     for (int round = 0; round < 30; round++) {
         build();
@@ -875,6 +1415,151 @@ static void dialog_sweep(void) {
         strcpy(buf, ""), check_purge_spaces(buf), check_purge_trailing(buf), check_kill_lf(buf);
         strcpy(buf, "   "), check_purge_spaces(buf);
         strcpy(buf, " a "), check_purge_trailing(buf), check_purge_leading(buf);
+        // The popup entry points, with random arguments (a string where the entry point takes one).
+        {
+            static const char *const strs[] = {NULL, "", "ab", "a longer popup label, for its length"};
+#define R() (rnd_to(4) ? (int)rnd_to(7) - 2 : (int)rnd())
+#define STR() ((int)(intptr_t)strs[rnd_to(4)])
+            for (int j = 0; j < 3; j++) {
+                check_popup(R(), R());
+                check_popup_2(R(), R(), R());
+                check_popup_3(R(), R(), STR(), R(), R());
+                check_popup_4(R(), R(), R(), R());
+                check_popup_5(R(), R(), R(), R(), R());
+                check_popup_6(R(), R(), R());
+                check_popup_7(R(), R(), R(), R());
+                check_popup_8(R(), R(), R(), R(), R());
+                check_popup_9(R(), R(), R(), R(), R(), R());
+                check_popups(R(), R(), R());
+                check_popups_2(R(), R(), R(), R(), R());
+                check_popups_3(R(), R(), R(), R());
+                check_popups_4(R(), R(), R(), R(), R(), R());
+                check_popups_5(R(), R(), R(), R(), R());
+                check_popups_6(R(), R(), R(), R(), R(), R(), R());
+                check_popups_7(R(), R(), STR(), R(), R(), R());
+                check_popups_8(R(), R(), STR(), R(), R(), R(), R(), R());
+                check_popups_9(R(), R(), R(), R(), R(), R());
+                check_popups_10(R(), R(), R(), R(), R(), R(), R(), R());
+                check_popups_11(R(), R(), R(), R());
+                check_popups_12(R(), R(), R(), R(), R(), R());
+                check_popups_13(R(), R(), R(), R(), R());
+                check_popups_14(R(), R(), R(), R(), R(), R(), R());
+                check_popups_15(R(), R(), R(), R(), R(), R());
+                check_popups_16(R(), R(), R(), R(), R(), R(), R(), R());
+                check_popups_17(R(), R(), R(), R(), R(), R(), R());
+                check_popup_ask(R(), R(), R(), R(), R());
+                check_popup_ask_2(R(), R(), R(), R(), R());
+                check_popup_ask_3(R(), R(), R(), R());
+                check_popup_ask_4(R(), R(), STR(), R(), R());
+                check_popup_ask_5(R(), STR(), R(), R());
+            }
+#undef R
+#undef STR
+        }
+        // The text variables: numbers, grammar and strings set at random (and the game's own put back below).
+        {
+            static const char *const slot_text[] = {"",     "he:she",       "he:she:it",    "a:b:c:d",   "a:b:c:d:e:f", "plain",
+                                                    "x:y",  "la:le:les:l'", "an apple",     ":",         "::",          "p:q:r:s:t"};
+            for (int j = 0; j < 10; j++) {
+                game_parse_nums[j] = rnd_to(3) ? rnd_to(5) : (int32_t)rnd() >> rnd_to(30);
+                game_parse_genders[j] = rnd_to(3), game_parse_plurals[j] = rnd_to(3) ? rnd_to(2) : (int)rnd_to(1000) + 2;
+                char *slot = game_parse_text + j * 256;
+                if (rnd_to(8) == 0) {  // a long one, to the end of the variable's room
+                    memset(slot, 'w', 255), slot[255] = 0;
+                    if (rnd_to(2)) slot[rnd_to(255)] = ':';
+                } else strcpy(slot, slot_text[rnd_to(sizeof slot_text / sizeof *slot_text)]);
+            }
+            static char line[600], out[0x4000];
+            for (int j = 0; j < 14; j++) {
+                *game_language = rnd_to(3);
+                random_line(line, sizeof line);
+                static const char *const before[] = {"", "", "line", "x", "a longer text, to be added to"};
+                strcpy(out, before[rnd_to(sizeof before / sizeof *before)]);
+                check_parse_string(line, out);
+                check_findnum(line);
+            }
+            *game_language = rnd_to(2);
+            // Text at the end of a variable, the end of the line, and nothing at all.
+            out[0] = 0;
+            strcpy(line, "$NUM1"), check_parse_string(line, out);
+            strcpy(line, "$NUMx"), check_parse_string(line, out);
+            strcpy(line, "$NUMBERq1 $NUM2"), check_parse_string(line, out);
+            strcpy(line, "a $HEXk"), check_parse_string(line, out);
+            strcpy(line, "$$$$"), check_parse_string(line, out);
+            strcpy(out, "old"), strcpy(line, "text"), check_parse_string(line, out);
+            strcpy(out, "old"), strcpy(line, "$X text"), check_parse_string(line, out);
+            strcpy(out, "old"), strcpy(line, "a $NUM1 b"), check_parse_string(line, out);
+            out[0] = 0;
+            strcpy(line, ""), check_parse_string(line, out), check_findnum(line);
+            check_parse_string(NULL, out), check_parse_string(line, NULL), check_findnum(NULL);
+        }
+        // The script text: numbers in text, the items of a line, and the labels of an index.
+        {
+            static const char *const items[] = {"12", "-7", "0x1F", "0X7fFf", "0b101", "0B1102", "0d77", "0D5x", "007", "0", "00", "0xg",
+                                                "0b", "0x", "+3", " 42 ", "abc", "", "  ", "0Xzz", "0xFFFFFFFF", "0b11111111111111111111111111111111",
+                                                "0xdead", "0BEEF", "0Xface", "  0x10", "0d", "x", "9z", "0xab cd"};
+            static char line[400], item[600], file[0x160], index[400];
+            char *saved_cursor = *game_text_cursor, *saved_buf = *game_text_item_buf;
+            *game_text_item_buf = item;
+            for (int j = 0; j < 6; j++) {
+                size_t n = 0;
+                line[0] = 0;
+                for (int k = 0, parts = 1 + rnd_to(6); k < parts; k++)
+                    n += (size_t)snprintf(line + n, sizeof line - n, "%s%s", k ? (rnd_to(6) ? "," : ", ") : "", items[rnd_to(sizeof items / sizeof *items)]);
+                for (int k = 0; k < 4; k++) {
+                    *game_text_cursor = line + rnd_to((int)n + 1);
+                    check_text_item(), check_text_item_number(), check_text_item_binary(), check_text_item_hex();
+                    check_stoi(*game_text_cursor), check_btoi(*game_text_cursor), check_htoi(*game_text_cursor);
+                    *(char **)(file + 0x150) = *game_text_cursor, *(char **)(file + 0x15c) = item;
+                    check_text_obj_item(file), check_text_obj_item_number(file);
+                    check_text_obj_item_binary(file), check_text_obj_item_hex(file);
+                }
+            }
+            for (size_t k = 0; k < sizeof items / sizeof *items; k++) check_stoi(items[k]), check_btoi(items[k]), check_htoi(items[k]);
+            *game_text_cursor = saved_cursor, *game_text_item_buf = saved_buf;
+            // The index: a file name at 0, the number of labels at 0x100 and a pointer to them at 0x108.
+            static const char *const labels[] = {"ALPHA", "Beta", "gamma", "DELTA", "x", "", "epsilon zeta"};
+            static const char *const names[] = {"script", "SCRIPT.TXT", "script.txt", "other", "Script.Bin", "", "s.txt", "a.b.txt"};
+            static const char *const wanted[] = {"#alpha", "BETA", "#Gamma", "#delta", "X", "#", "epsilon ZETA", "zzz", "#zeta", "alph", "ALPHAS", ""};
+            for (int j = 0; j < 8; j++) {
+                memset(file, 0, sizeof file);
+                int count = 1 + rnd_to((int)(sizeof labels / sizeof *labels));
+                size_t at = 0;
+                for (int k = 0; k < count; k++) {
+                    *(int32_t *)(index + at) = 100 * (k + 1) + rnd_to(50), at += 4;
+                    size_t l = strlen(labels[k]) + 1;
+                    memcpy(index + at, labels[k], l), at += l;
+                }
+                strcpy(file, rnd_to(2) ? "script.txt" : names[rnd_to(sizeof names / sizeof *names)]);
+                *(int32_t *)(file + 0x100) = count, *(char **)(file + 0x108) = index;
+                for (int k = 0; k < 5; k++)
+                    check_text_index_search(file, names[rnd_to(sizeof names / sizeof *names)], wanted[rnd_to(sizeof wanted / sizeof *wanted)]);
+            }
+            // The game's own four indexes.
+            uint8_t saved_slots[4 * 0x118];
+            memcpy(saved_slots, game_text_slots, sizeof saved_slots);
+            for (int j = 0; j < 3; j++) {
+                memset(game_text_slots, 0, sizeof saved_slots);
+                for (int s = 0; s < 4; s++) {
+                    uint8_t *slot = game_text_slots + s * 0x118;
+                    if (rnd_to(3) == 0) continue;
+                    strcpy((char *)slot, names[rnd_to(sizeof names / sizeof *names)]);
+                    if (!strchr((char *)slot, '.')) strcat((char *)slot, ".txt");
+                    size_t at2 = 0;
+                    static char idx[4][200];
+                    int count = 1 + rnd_to(4);
+                    for (int k = 0; k < count; k++) {
+                        *(int32_t *)(idx[s] + at2) = 1000 * s + k, at2 += 4;
+                        const char *l = labels[rnd_to(5)];
+                        memcpy(idx[s] + at2, l, strlen(l) + 1), at2 += strlen(l) + 1;
+                    }
+                    *(int32_t *)(slot + 0x100) = count, *(char **)(slot + 0x108) = idx[s];
+                }
+                for (int k = 0; k < 6; k++)
+                    check_text_search_index(names[rnd_to(sizeof names / sizeof *names)], wanted[rnd_to(sizeof wanted / sizeof *wanted)]);
+            }
+            memcpy(game_text_slots, saved_slots, sizeof saved_slots);
+        }
         // The popups.
         for (int k = 0; k < NB; k++) {
             struct game_base_pop *p = &S.pop[k];
@@ -1001,6 +1686,9 @@ static void dialog_sweep(void) {
             TWIN(dialog_init_4, orig_dialog_init_4(D, 21), dialog_init_4(D, 21));
         }
     }
+    memcpy(game_parse_nums, pnums, sizeof pnums), memcpy(game_parse_genders, pgenders, sizeof pgenders);
+    memcpy(game_parse_plurals, pplurals, sizeof pplurals), memcpy(game_parse_text, ptext, sizeof ptext);
+    *game_language = language;
     *game_win_hwnd = hwnd, *game_win_modal_focus = focus;
     *game_dialog_defs_a = da, *game_dialog_defs_b = db, *game_pop_defs = pd, *game_pop_fonts = pf;
     memcpy(game_pop_ext_a, ext_a, sizeof ext_a), memcpy(game_pop_ext_b, ext_b, sizeof ext_b);
@@ -1017,6 +1705,56 @@ static const struct hook dialog_hooks[] = {
     HOOK(0x6007b0, purge_spaces, 0x81, 0xec, 0x00, 0x02, 0x00, 0x00),
     HOOK(0x600820, kill_lf, 0x8b, 0x44, 0x24, 0x04, 0x6a, 0x0a),
     HOOK(0x600840, add_lf, 0x56, 0x8b, 0x74, 0x24, 0x08, 0x56),
+    HOOK(0x625880, parse_string, 0x81, 0xec, 0xfc, 0x00, 0x00, 0x00, 0x53, 0x8b, 0x9c, 0x24, 0x04, 0x01, 0x00, 0x00),
+    HOOK(0x628b30, findnum, 0x55, 0x8b, 0xec, 0x51, 0x53, 0x8b, 0x45, 0x08),
+    HOOK(0x6288d0, btoi, 0x8b, 0x54, 0x24, 0x04, 0x33, 0xc0, 0x8a, 0x0a),
+    HOOK(0x6288f0, htoi, 0x56, 0x57, 0x8b, 0x7c, 0x24, 0x0c, 0x33, 0xf6),
+    HOOK(0x628950, stoi, 0x8b, 0x44, 0x24, 0x04, 0x80, 0x38, 0x30),
+    HOOK(0x5fd670, text_item, 0xa1, 0xf0, 0x7c, 0x9b, 0x00, 0x8b, 0x0d, 0xfc, 0x7c, 0x9b, 0x00),
+    HOOK(0x5fd740, text_item_number, 0xa1, 0xf0, 0x7c, 0x9b, 0x00, 0x8b, 0x0d, 0xfc, 0x7c, 0x9b, 0x00),
+    HOOK(0x5fd7a0, text_item_binary, 0xa1, 0xf0, 0x7c, 0x9b, 0x00, 0x8b, 0x0d, 0xfc, 0x7c, 0x9b, 0x00),
+    HOOK(0x5fd800, text_item_hex, 0xa1, 0xf0, 0x7c, 0x9b, 0x00, 0x8b, 0x0d, 0xfc, 0x7c, 0x9b, 0x00),
+    HOOK(0x5fdd10, text_obj_item, 0x56, 0x8b, 0xf1, 0x8b, 0x8e, 0x50, 0x01, 0x00, 0x00),
+    HOOK(0x5fddf0, text_obj_item_number, 0x56, 0x8b, 0xf1, 0x8b, 0x8e, 0x50, 0x01, 0x00, 0x00),
+    HOOK(0x5fde60, text_obj_item_binary, 0x56, 0x8b, 0xf1, 0x8b, 0x8e, 0x50, 0x01, 0x00, 0x00),
+    HOOK(0x5fded0, text_obj_item_hex, 0x56, 0x8b, 0xf1, 0x8b, 0x8e, 0x50, 0x01, 0x00, 0x00),
+    HOOK(0x5fe120, text_index_search, 0x8b, 0x44, 0x24, 0x04, 0x81, 0xec, 0x00, 0x02, 0x00, 0x00),
+    HOOK(0x5fe230, text_search_index, 0x53, 0x8b, 0x5c, 0x24, 0x08, 0x56, 0x57, 0x8b, 0x7c, 0x24, 0x14),
+    HOOK(0x627130, popup, 0x8b, 0x44, 0x24, 0x08, 0x8b, 0x4c, 0x24, 0x04),
+    HOOK(0x627160, popup_2, 0x8b, 0x44, 0x24, 0x0c, 0x8b, 0x4c, 0x24, 0x08),
+    HOOK(0x627190, popup_3, 0x56, 0x8b, 0x74, 0x24, 0x10),
+    HOOK(0x6271d0, popup_4, 0x8b, 0x44, 0x24, 0x10, 0x8b, 0x4c, 0x24, 0x0c),
+    HOOK(0x627200, popup_5, 0x8b, 0x44, 0x24, 0x14, 0x8b, 0x4c, 0x24, 0x10),
+    HOOK(0x627230, popup_6, 0x8b, 0x44, 0x24, 0x0c, 0x8b, 0x4c, 0x24, 0x08),
+    HOOK(0x627260, popup_7, 0x8b, 0x44, 0x24, 0x10, 0x8b, 0x4c, 0x24, 0x0c),
+    HOOK(0x627290, popup_8, 0x8b, 0x44, 0x24, 0x14, 0x8b, 0x4c, 0x24, 0x10),
+    HOOK(0x6272c0, popup_9, 0x8b, 0x44, 0x24, 0x18, 0x8b, 0x4c, 0x24, 0x14),
+    HOOK(0x627310, popups, 0x8b, 0x44, 0x24, 0x0c, 0x8b, 0x4c, 0x24, 0x08),
+    HOOK(0x627340, popups_2, 0x8b, 0x44, 0x24, 0x14, 0x8b, 0x4c, 0x24, 0x10),
+    HOOK(0x627370, popups_3, 0x8b, 0x44, 0x24, 0x10, 0x8b, 0x4c, 0x24, 0x0c),
+    HOOK(0x6273a0, popups_4, 0x8b, 0x44, 0x24, 0x18, 0x8b, 0x4c, 0x24, 0x14),
+    HOOK(0x6273d0, popups_5, 0x8b, 0x44, 0x24, 0x14, 0x8b, 0x4c, 0x24, 0x10),
+    HOOK(0x627400, popups_6, 0x8b, 0x44, 0x24, 0x1c, 0x8b, 0x4c, 0x24, 0x18),
+    HOOK(0x627440, popups_7, 0x56, 0x8b, 0x74, 0x24, 0x10),
+    HOOK(0x627480, popups_8, 0x8b, 0x44, 0x24, 0x0c, 0x85, 0xc0),
+    HOOK(0x6274d0, popups_9, 0x8b, 0x44, 0x24, 0x18, 0x8b, 0x4c, 0x24, 0x14),
+    HOOK(0x627500, popups_10, 0x8b, 0x44, 0x24, 0x20, 0x8b, 0x4c, 0x24, 0x1c),
+    HOOK(0x627540, popups_11, 0x8b, 0x44, 0x24, 0x10, 0x8b, 0x4c, 0x24, 0x0c),
+    HOOK(0x627570, popups_12, 0x8b, 0x44, 0x24, 0x18, 0x8b, 0x4c, 0x24, 0x14),
+    HOOK(0x6275a0, popups_13, 0x8b, 0x44, 0x24, 0x14, 0x8b, 0x4c, 0x24, 0x10),
+    HOOK(0x6275d0, popups_14, 0x8b, 0x44, 0x24, 0x1c, 0x8b, 0x4c, 0x24, 0x18),
+    HOOK(0x627600, popups_15, 0x8b, 0x44, 0x24, 0x18, 0x8b, 0x4c, 0x24, 0x14),
+    HOOK(0x627630, popups_16, 0x8b, 0x44, 0x24, 0x20, 0x8b, 0x4c, 0x24, 0x1c),
+    HOOK(0x627670, popups_17, 0x8b, 0x44, 0x24, 0x1c, 0x8b, 0x4c, 0x24, 0x18),
+    HOOK(0x627800, popup_ask, 0x8b, 0x44, 0x24, 0x14, 0x8b, 0x4c, 0x24, 0x10),
+    HOOK(0x627830, popup_ask_2, 0x8b, 0x44, 0x24, 0x14, 0x8b, 0x4c, 0x24, 0x10),
+    HOOK(0x627860, popup_ask_3, 0x8b, 0x44, 0x24, 0x10, 0x8b, 0x4c, 0x24, 0x0c),
+    HOOK(0x627890, popup_ask_4, 0x8b, 0x44, 0x24, 0x0c, 0x85, 0xc0),
+    HOOK(0x6278d0, popup_ask_5, 0x8b, 0x44, 0x24, 0x08, 0x85, 0xc0),
+    {0x6276a0, (const uint8_t[]){0x8b, 0x0d, 0x74, 0xc0, 0x9b, 0x00, 0x53, 0x56, 0x57}, 9, NULL, (void *)shadow_pops_18,
+     (void **)&orig_pops_18, &stats_pops_18, 1, 0},
+    {0x627910, (const uint8_t[]){0x8b, 0x0d, 0x74, 0xc0, 0x9b, 0x00, 0x56}, 7, NULL, (void *)shadow_pop_ask_6,
+     (void **)&orig_pop_ask_6, &stats_pop_ask_6, 1, 0},
     HOOK(0x601ac0, pop_set_height, 0x8b, 0x81, 0x14, 0x0a, 0x00, 0x00),
     HOOK(0x601b80, pop_set_loc, 0x8b, 0x44, 0x24, 0x04, 0x3d, 0x00, 0x20, 0x00, 0x00),
     HOOK(0x601bd0, pop_read_check, 0x8b, 0x81, 0x28, 0x22, 0x00, 0x00),
