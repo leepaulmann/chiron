@@ -1,4 +1,5 @@
 #include "hooks.h"
+#include "journal.h"
 
 #include <signal.h>
 #include <stdarg.h>
@@ -80,6 +81,9 @@ static void on_signal(int sig) {
 void hooks_apply(struct pe_image *exe, enum hook_mode mode) {
     hooks_mode = mode;
     if (mode == HOOKS_OFF) return;
+    // In shadow mode some Windows calls go through the journal (journal.c); its wrappers
+    // must be in the import table before game_bind reads it.
+    if (mode == HOOKS_SHADOW) journal_install(exe);
     game_bind(exe);
     // CHIRON_SKIP lists modules (by name) and functions (by name or
     // address) to leave with the original's code, for bisecting: a skipped
@@ -258,7 +262,7 @@ void hooks_writes_begin(struct hook_writes *w) {
     // The clock is held before the state is saved: a timer firing between
     // the two would set its flag after the save, in the original's run only.
     if (!w->protect_only) {
-        checking_depth++;
+        if (!checking_depth++ && hooks_mode == HOOKS_SHADOW) journal_start();
         if (hooks_hold_time) hooks_hold_time(1);
     }
     writes_copy(w, saves[w->depth].buf[0], 1);
@@ -269,7 +273,7 @@ void hooks_writes_abandon(struct hook_writes *w) {
     ui_n = saves[w->depth].ui_start;
     writes_depth--;
     if (!w->protect_only) {
-        checking_depth--;
+        if (!--checking_depth) journal_abandon();
         if (hooks_hold_time) hooks_hold_time(0);
     }
 }
@@ -307,6 +311,7 @@ int hooks_protecting(void) { return writes_depth > 0; }
 
 void hooks_writes_middle(struct hook_writes *w) {
     saves[w->depth].ui_mid = ui_n;
+    if (checking_depth == 1) journal_middle();
     writes_copy(w, saves[w->depth].buf[1], 1);
     writes_copy(w, saves[w->depth].buf[0], 0);
 }
@@ -342,6 +347,10 @@ const char *hooks_writes_end(struct hook_writes *w, int got, int want) {
         result = diff;
     }
     if (!result) result = ui_compare(saves[w->depth].ui_start, saves[w->depth].ui_mid, diff, sizeof(diff));
+    if (checking_depth == 1) {
+        const char *calls = journal_end();
+        if (!result) result = calls;
+    }
     // Keep the original's held calls, for an outer check or for release.
     ui_n = hooks_sweeping ? saves[w->depth].ui_start : saves[w->depth].ui_mid;
     writes_copy(w, saves[w->depth].buf[hooks_sweeping ? 0 : 1], 0);
