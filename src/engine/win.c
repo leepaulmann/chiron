@@ -69,6 +69,8 @@
 #include <string.h>
 
 #include "buffer.h"
+#include "drawcheck.h"
+#include "sprite.h"
 #include "bufdraw.h"
 #include "bufimg.h"
 #include "bufobj.h"
@@ -1287,6 +1289,174 @@ int WIN_THIS graphic_win_soft_update_3(struct game_win *w, const int32_t *rect) 
     return gw_invalidate(w, a);
 }
 
+// ---- Copying a window into another's frame --------------------------------------------------------
+//
+// The large function at 0x5f3b80 (the one the task notes call the frame overlay: the copy goes the other way). Buffer_copy_full
+// copies from the Buffer it is called on into the one it is given, so this puts parts of this window's frame strips
+// (and its own Buffer at 0x444) into another window's strips and picture: the other window has a sprite frame (bit
+// 0x10000000, see below), is on the screen over this one, and the pieces of this window it covers are copied into
+// its frame, so what is drawn of it (the strips it is drawn from) shows this window under it. The other window's strips
+// are placed on the screen from its outer rectangle: the top one at its corner, the left one and the right one below the
+// top one's bottom edge (the right one flush with the top one's right edge, worked out from its own left edge less its
+// right edge, and counting the left edge twice, as the original does), the bottom one below the left one. This
+// window's strips are placed likewise from its own outer rectangle (the top at the corner, the left one below it, the
+// bottom one up from the bottom edge, the right one in from the right edge). Each strip of this window, cut to `rect` if
+// there is one, goes into each of the other's (the top, left, right, bottom ones, for `which` of -1 or 0, 3, 1, 2; a
+// `rect` makes `which` -1) where they overlap, and, for `which` of -1, into the other's picture (a Buffer at 0xa08)
+// where it overlaps the other's window rectangle in Windows, if the other draws its frame itself (slot 0xf4) and has
+// bit 0x40000000. Then this window's own Buffer, if it draws a frame itself, goes the same way from its own window
+// rectangle in Windows. OpenSMACX does not know the function.
+
+struct ovl_src {
+    struct game_buffer *buf;
+    int32_t r[4];
+    int code;
+};
+
+static int ovl_empty(const int32_t *r) { return r[2] <= r[0] || r[3] <= r[1]; }
+
+// What `dest` (whose place on the screen is `q`) takes from the other window's strips and picture.
+static void ovl_take(struct game_buffer *dest, const int32_t *q0, const int32_t *q1, const struct ovl_src src[4], int have_pic,
+                     struct game_buffer *pic, const int32_t *wr, int which) {
+    int32_t r[4];
+    for (int j = 0; j < 4; j++) {
+        int hit = game_intersect_rect(r, q1, src[j].r);
+        if (hit && (which == -1 || which == src[j].code))
+            buffer_copy_full(dest, src[j].buf, r[0] - q0[0], r[1] - q0[1], r[0] - src[j].r[0], r[1] - src[j].r[1], r[2] - r[0], r[3] - r[1]);
+    }
+    if (have_pic && which == -1 && game_intersect_rect(r, q1, wr))
+        buffer_copy_full(dest, pic, r[0] - q0[0], r[1] - q0[1], r[0] - wr[0], r[1] - wr[1], r[2] - r[0], r[3] - r[1]);
+}
+
+void WIN_THIS win_copy_into_frame(struct game_win *w, struct game_win *o, const int32_t *rect, int which) {
+    if (!o || !(o->flags2 & WIN_F2_FRAME) || !(o->flags & 0x10000000)) return;
+    if (rect) which = -1;
+    if (rect && ovl_empty(rect)) return;
+    struct game_buffer *ob[4] = {o->nc_buf_b4, o->nc_buf_bc, o->nc_buf_b8, o->nc_buf_c0};  // top, left, right, bottom
+    const int32_t ox = o->outer[0], oy = o->outer[1];
+    struct ovl_src src[4];
+    for (int j = 0; j < 4; j++) src[j].buf = ob[j];
+    src[0].code = 0, src[1].code = 3, src[2].code = 1, src[3].code = 2;
+    const int32_t *f;
+    f = ob[0]->full;
+    int32_t top_bottom = f[3] + oy, top_right = f[2] + ox;
+    src[0].r[0] = f[0] + ox, src[0].r[1] = f[1] + oy, src[0].r[2] = f[2] + ox, src[0].r[3] = top_bottom;
+    f = ob[1]->full;
+    int32_t left_bottom = f[3] + top_bottom;
+    src[1].r[0] = f[0] + ox, src[1].r[1] = f[1] + top_bottom, src[1].r[2] = f[2] + ox, src[1].r[3] = left_bottom;
+    f = ob[3]->full;
+    src[3].r[0] = f[0] + ox, src[3].r[1] = f[1] + left_bottom, src[3].r[2] = f[2] + ox, src[3].r[3] = f[3] + left_bottom;
+    f = ob[2]->full;
+    int32_t rx = f[0] - f[2] + top_right;
+    src[2].r[0] = f[0] + rx, src[2].r[1] = f[1] + top_bottom, src[2].r[2] = f[2] + rx, src[2].r[3] = f[3] + top_bottom;
+    int32_t wr[4] = {0, 0, 0, 0};
+    struct game_buffer *pic = NULL;
+    int have_pic = 0;
+    if (vcall0(o, 0xf4) && (o->flags & 0x40000000)) {
+        game_get_window_rect(*game_win_hwnd, wr);
+        pic = *(struct game_buffer **)((uint8_t *)o + 0xa08);
+        have_pic = 1;
+    }
+    if (w->flags2 & WIN_F2_FRAME) {
+        struct game_buffer *tb = w->nc_buf_b4, *lb = w->nc_buf_bc, *bb = w->nc_buf_c0, *rb = w->nc_buf_b8;
+        struct game_buffer *dest[4] = {tb, lb, bb, rb};
+        int32_t xoff[4] = {w->outer[0], w->outer[0], w->outer[0], w->outer[2] - rb->width};
+        int32_t yoff[4] = {w->outer[1], w->outer[1] - tb->neg_height, w->outer[3] + bb->neg_height, w->outer[1] - tb->neg_height};
+        for (int d = 0; d < 4; d++) {
+            const int32_t *df = dest[d]->full;
+            int32_t q0[4] = {df[0] + xoff[d], df[1] + yoff[d], df[2] + xoff[d], df[3] + yoff[d]}, q1[4];
+            memcpy(q1, q0, sizeof q1);
+            if (rect && !game_intersect_rect(q1, q0, rect)) continue;
+            ovl_take(dest[d], q0, q1, src, have_pic, pic, wr, which);
+        }
+    }
+    if (!vcall0(w, 0xf4)) return;
+    int32_t q0[4], q1[4];
+    game_get_window_rect(*game_win_hwnd, q0);
+    memcpy(q1, q0, sizeof q1);
+    if (rect && !game_intersect_rect(q1, q0, rect)) return;
+    ovl_take((struct game_buffer *)((uint8_t *)w + 0x444), q0, q1, src, have_pic, pic, wr, which);
+}
+
+// ---- The GraphicWin's frame --------------------------------------------------------------------
+//
+// A GraphicWin with bit 0x10000000 set draws its frame from sprites (the pieces a subclass sets at 0x9cc to
+// 0x9f4; Chiron's names for them: corner sprites, edge tiles) instead of the Win's lines. The four strips of the
+// frame (top 0xb4, right 0xb8, left 0xbc, bottom 0xc0) are cleared to the key colour and the pieces drawn on
+// them, then the window is told (slot 0xf0) the strip is done. A window with a caption (and without 0x400000) uses
+// the caption's set of pieces (9cc, 9d4, 9e8: the top left corner, top right corner and the tile between them)
+// and the caption's height, any other window the border's (9ec, 9f0, 9f4); the bottom and the sides share the
+// pieces at 9d0 and 9d8 (bottom corners) and 9dc and 9e0 (the tiles of the left and right sides) and 9e4 (the
+// bottom tile). Without the bit it is the Win's frame (win_on_redraw_nc).
+enum {
+    GW_TL = 0x9cc, GW_BL = 0x9d0, GW_TR = 0x9d4, GW_BR = 0x9d8, GW_LEFT_TILE = 0x9dc, GW_RIGHT_TILE = 0x9e0,
+    GW_BOTTOM_TILE = 0x9e4, GW_TOP_TILE = 0x9e8, GW_TL_B = 0x9ec, GW_TR_B = 0x9f0, GW_TOP_TILE_B = 0x9f4,
+    GW_TITLE_HOOK = 0xa0c, VT_NC_TITLE = 0x164, GW_VT_DONE = 0xf0, WIN_F_SPRITE_FRAME = 0x10000000, WIN_F_NO_CAPTION_PIECES = 0x400000
+};
+#define GW_SPRITE(w, off) (*(struct game_sprite **)((uint8_t *)(w) + (off)))
+
+static void gw_nc_draw(struct game_buffer *b, struct game_sprite *s, int x, int y) {
+    sprite_draw_2(s, b, s->key, x, y, 1, 1);
+}
+
+void WIN_THIS graphic_win_on_redraw_nc(struct game_win *w, const int32_t *rect, int which) {
+    if (!(w->flags2 & WIN_F2_FRAME)) return;
+    if (rect) which = -1;
+    int caption = (w->flags & WIN_F_CAPTION) && !(w->flags & WIN_F_NO_CAPTION_PIECES);
+    int top = caption ? w->caption_h : w->border;
+    struct game_sprite *a = GW_SPRITE(w, caption ? GW_TL : GW_TL_B), *tile = GW_SPRITE(w, caption ? GW_TOP_TILE : GW_TOP_TILE_B),
+                       *c = GW_SPRITE(w, caption ? GW_TR : GW_TR_B);
+    int bottom = w->bottom == -1 ? w->border : w->bottom;
+    if (!(w->flags & WIN_F_SPRITE_FRAME)) {
+        win_on_redraw_nc(w, rect, which);
+        return;
+    }
+    struct game_sprite *d = GW_SPRITE(w, GW_BL), *e = GW_SPRITE(w, GW_BR);
+    struct game_buffer *b4 = w->nc_buf_b4, *b8 = w->nc_buf_b8, *bc = w->nc_buf_bc, *c0 = w->nc_buf_c0;
+    if (b4 && (which == -1 || which == 0)) {
+        buffer_fill_all(b4, *game_default_key);
+        if (a) gw_nc_draw(b4, a, 0, 0);
+        if (c) gw_nc_draw(b4, c, b4->width - c->full_w, 0);
+        if (tile && c && a)
+            buffer_tile_2(b4, tile, 0, 0, a->full_w, 0, (w->outer[2] - w->outer[0]) - c->full_w - a->full_w, -b4->neg_height);
+        if (w->title && (w->flags & WIN_F_CAPTION)) {
+            void(__attribute__((cdecl)) * hook)(struct game_win *, const char *, struct game_buffer *) =
+                *(void **)((uint8_t *)w + GW_TITLE_HOOK);
+            if (hook) hook(w, w->title, b4);
+            vcall2(w, VT_NC_TITLE, (int)(uintptr_t)w->title, (int)(uintptr_t)b4);
+        }
+        vcall2(w, GW_VT_DONE, (int)(uintptr_t)b4, 0);
+    }
+    if (c0 && (which == -1 || which == 2)) {
+        buffer_fill_all(c0, *game_default_key);
+        if (d) gw_nc_draw(c0, d, 0, -(d->full_h + c0->neg_height));
+        if (e) gw_nc_draw(c0, e, c0->width - e->full_w, -(e->full_h + c0->neg_height));
+        struct game_sprite *f = GW_SPRITE(w, GW_BOTTOM_TILE);
+        if (f && d && e)
+            buffer_tile_2(c0, f, 0, 0, d->full_w, -(c0->neg_height + f->full_h), c0->width - e->full_w - d->full_w, f->full_h);
+        vcall2(w, GW_VT_DONE, (int)(uintptr_t)c0, 2);
+    }
+    if (bc && (which == -1 || which == 3)) {
+        buffer_fill_all(bc, *game_default_key);
+        if (a) gw_nc_draw(bc, a, 0, -top);
+        if (d) gw_nc_draw(bc, d, 0, bottom - bc->neg_height - d->full_h);
+        struct game_sprite *g = GW_SPRITE(w, GW_LEFT_TILE);
+        if (g && a && d)
+            buffer_tile_2(bc, g, 0, 0, 0, a->full_h - top, w->border, bottom - bc->neg_height - d->full_h - a->full_h + top);
+        vcall2(w, GW_VT_DONE, (int)(uintptr_t)bc, 3);
+    }
+    if (b8 && (which == -1 || which == 1)) {
+        buffer_fill_all(b8, *game_default_key);
+        if (c) gw_nc_draw(b8, c, b8->width - c->full_w, -top);
+        if (e) gw_nc_draw(b8, e, b8->width - e->full_w, bottom - b8->neg_height - e->full_h);
+        struct game_sprite *h = GW_SPRITE(w, GW_RIGHT_TILE);
+        if (h && c && e)
+            buffer_tile_2(b8, h, 0, 0, b8->width - h->full_w, c->full_h - top, h->full_w,
+                          bottom - b8->neg_height - e->full_h - c->full_h + top);
+        vcall2(w, GW_VT_DONE, (int)(uintptr_t)b8, 1);
+    }
+}
+
 static void(THISCALL *orig_graphic_win_on_paint)(struct game_win *w, const int32_t *clip);
 static struct hook_stats stats_graphic_win_on_paint = {"graphic_win_on_paint"};
 
@@ -2270,6 +2440,41 @@ SHADOW_WRITER_T(WIN, int, graphic_win_soft_update_2, (struct game_win * w), (w),
 SHADOW_WRITER_T(WIN, int, graphic_win_soft_update_3, (struct game_win * w, const int32_t *rect), (w, rect), writes_vlog(&w_), "%d, %d",
                 P(w), rect ? rect[0] : -1)
 
+// The frame's four strips: each Buffer and the pixels of its rows. Drawing it calls the window's virtual functions,
+// so the game's calls run the original and the sweep checks Chiron's code over scratch windows (gw_nc_sweep).
+static void gw_nc_writes(struct hook_writes *w, struct game_win *x) {
+    void *strips[4] = {x->nc_buf_b4, x->nc_buf_b8, x->nc_buf_bc, x->nc_buf_c0};
+    for (int i = 0; i < 4; i++) {
+        if (!strips[i]) continue;
+        int dup = 0;
+        for (int j = 0; j < i; j++) dup |= strips[j] == strips[i];
+        if (!dup) dc_writes_pixels(w, strips[i]);
+    }
+}
+SHADOW_DECLARE_T(void, graphic_win_on_redraw_nc, (struct game_win * w, const int32_t *rect, int which))
+SHADOW_WRITER_BODY(void, graphic_win_on_redraw_nc, (struct game_win * w, const int32_t *rect, int which), (w, rect, which),
+                   (gw_nc_writes(&w_, w), writes_vlog(&w_)), "%d, %d, %d", P(w), P(rect), which)
+static void THISCALL shadow_graphic_win_on_redraw_nc(struct game_win *w, const int32_t *rect, int which) {
+    if (!hooks_nested && !shadow_bypass()) stats_graphic_win_on_redraw_nc.calls++, shadow_tick(WIN);
+    orig_graphic_win_on_redraw_nc(w, rect, which);
+}
+
+// What copying a window into another's frame writes: the other window's four strips and, if it has bit 0x40000000, its
+// picture (the Buffer at 0xa08). It asks the other window's virtual function, so the game's calls run the original and
+// the sweep checks Chiron's code.
+static void cif_writes(struct hook_writes *w, struct game_win *o) {
+    gw_nc_writes(w, o);
+    struct game_buffer *pic = *(struct game_buffer **)((uint8_t *)o + 0xa08);
+    if ((o->flags & 0x40000000) && pic) dc_writes_pixels(w, pic);
+}
+SHADOW_DECLARE_T(void, win_copy_into_frame, (struct game_win * w, struct game_win *o, const int32_t *rect, int which))
+SHADOW_WRITER_BODY(void, win_copy_into_frame, (struct game_win * w, struct game_win *o, const int32_t *rect, int which), (w, o, rect, which),
+                   (cif_writes(&w_, o), writes_vlog(&w_)), "%d, %d, %d, %d", P(w), P(o), P(rect), which)
+static void THISCALL shadow_win_copy_into_frame(struct game_win *w, struct game_win *o, const int32_t *rect, int which) {
+    if (!hooks_nested && !shadow_bypass()) stats_win_copy_into_frame.calls++, shadow_tick(WIN);
+    orig_win_copy_into_frame(w, o, rect, which);
+}
+
 // Painting makes and frees a clip region (a handle) in the Buffer it draws on, which a check can't put back, so the
 // game's calls run the original and the sweep checks Chiron's code (paint_check, below).
 static void THISCALL shadow_graphic_win_on_paint(struct game_win *w, const int32_t *clip) {
@@ -2331,7 +2536,7 @@ static int rect_sig(int a) {
     const int32_t *r = (const int32_t *)(uintptr_t)a;
     return r[0] * 3 + r[1] * 5 + r[2] * 7 + r[3] * 11;
 }
-STUB0(0x8) STUB3(0xc) STUB0(0x10) STUB0(0x30) STUB2(0x34) STUB1(0xcc) STUB0(0xf8) STUB0(0x108) STUB2(0x10c) STUB0(0xfc)
+STUB2(0x164) STUB0(0x8) STUB3(0xc) STUB0(0x10) STUB0(0x30) STUB2(0x34) STUB1(0xcc) STUB0(0xf8) STUB0(0x108) STUB2(0x10c) STUB0(0xfc)
 static int THISCALL stub_0x128(struct game_win *w, int a, int b) { return vrec(0x128, w, rect_sig(a), b, 0), 0x129; }
 static int THISCALL stub_0x124(struct game_win *w, int a) { return vrec(0x124, w, rect_sig(a), 0, 0), 0x125; }
 // Told a strip of the frame is drawn: which one (the Buffer is another window's own).
@@ -2354,6 +2559,7 @@ static void fill_stub_vtable(void) {
     stub_vtable[0x128 / 4] = (void *)stub_0x128;
     stub_vtable[0x124 / 4] = (void *)stub_0x124;
     stub_vtable[0xf0 / 4] = (void *)stub_0xf0;
+    stub_vtable[0x164 / 4] = (void *)stub_0x164;
     stub_vtable[0xf4 / 4] = (void *)stub_0xf4;
     stub_vtable[0xfc / 4] = (void *)stub_0xfc;
     fill_event_stubs();
@@ -3366,6 +3572,95 @@ static void sweep_graphic(uint32_t hwnd) {
     *game_win_overlay_on = saved_over;
 }
 
+// The GraphicWin's frame: windows with room for the sprites at 0x9cc to 0x9f4 and the title hook at 0xa0c, four
+// strips of their own, and sprites of random sizes (any of them missing now and then), with and without the
+// sprite-frame bit (without it the Win's frame is called, which returns at once for a window with no caption or
+// bit 0), a caption or not, every strip and the whole frame, with and without an area, and the title's hook.
+static void gw_title_hook(struct game_win *w, const char *t, struct game_buffer *b) {
+    vrec(0xa0c, w, (int)(uintptr_t)t, (int)(uintptr_t)b, 0);
+}
+static void sweep_nc_graphic(void) {
+    static struct {
+        struct game_win w;
+        uint8_t rest[0xa40 - sizeof(struct game_win)];
+    } gn;
+    static struct game_sprite spr[11];
+    static uint8_t sdata[11][16 * 16];
+    static char title[] = "Title";
+    for (int k = 0; k < 40; k++) {
+        memset(&gn, 0, sizeof gn);
+        gn.w.vtable = stub_vtable;
+        uint32_t fl = (uint32_t)rnd() & (WIN_F_CAPTION | 0x400000 | 1);
+        if (rnd_to(5)) fl |= 0x10000000;
+        else fl &= ~0x11u;
+        gn.w.flags = fl;
+        gn.w.flags2 = rnd_to(8) ? WIN_F2_FRAME : 0;
+        gn.w.border = rnd_to(9), gn.w.caption_h = rnd_to(24), gn.w.bottom = rnd_to(3) == 0 ? -1 : rnd_to(14);
+        for (int i = 0; i < 4; i++) gn.w.outer[i] = rnd_to(80) - 10;
+        if (rnd_to(2)) gn.w.outer[2] = gn.w.outer[0] + 10 + rnd_to(40), gn.w.outer[3] = gn.w.outer[1] + 10 + rnd_to(40);
+        gn.w.title = rnd_to(3) ? title : NULL;
+        *(void **)((uint8_t *)&gn + GW_TITLE_HOOK) = rnd_to(2) ? (void *)gw_title_hook : NULL;
+        int first = rnd_to(NBUF - 4);
+        void **strips[4] = {&gn.w.nc_buf_b4, &gn.w.nc_buf_b8, &gn.w.nc_buf_bc, &gn.w.nc_buf_c0};
+        for (int i = 0; i < 4; i++) *strips[i] = rnd_to(8) ? (void *)&nbuf[first + i] : NULL;
+        for (int i = 0; i < 11; i++) {
+            struct game_sprite *sp = &spr[i];
+            memset(sp, 0, sizeof *sp);
+            for (int j = 0; j < 256; j++) sdata[i][j] = (uint8_t)rnd_to(rnd_to(2) ? 256 : 4);
+            sp->data = sdata[i], sp->key = (uint8_t)rnd_to(256);
+            sp->width = 1 + rnd_to(10), sp->height = 1 + rnd_to(10), sp->stride = 16;
+            sp->full_w = sp->width + rnd_to(3), sp->full_h = sp->height + rnd_to(3);
+            *(struct game_sprite **)((uint8_t *)&gn + GW_TL + 4 * i) = rnd_to(6) ? sp : NULL;
+        }
+        for (int i = 0; i < 4; i++) scatter(&nbuf[first + i]);
+        int32_t area[4] = {rnd_to(40) - 10, rnd_to(40) - 10, 0, 0};
+        area[2] = area[0] + rnd_to(40), area[3] = area[1] + rnd_to(40);
+        int which = rnd_to(6) - 1;
+        check_graphic_win_on_redraw_nc(&gn.w, rnd_to(4) ? NULL : area, which);
+        stats_graphic_win_on_redraw_nc.calls++;
+        if (rnd_to(2)) check_graphic_win_on_redraw_nc(&gn.w, NULL, -1);
+    }
+}
+
+// A window copied into another's frame: scratch windows (the pool's, with the Buffer at 0x444) and a window with a
+// sprite frame (with its strips, its picture at 0xa08 and flags 0x40000000 and bit 7, which the stand-in for slot 0xf4
+// reads), placed near each other so that strips meet, with and without an area, and every `which`.
+static void sweep_overlay(uint32_t hwnd) {
+    static struct {
+        struct game_win w;
+        uint8_t rest[0xa40 - sizeof(struct game_win)];
+    } on;
+    uint32_t saved_hwnd = *game_win_hwnd;
+    *game_win_hwnd = hwnd;
+    for (int k = 0; k < 40; k++) {
+        memset(&on, 0, sizeof on);
+        on.w.vtable = stub_vtable;
+        on.w.flags = 0x10000000u | (rnd_to(2) ? 0x40000000u : 0) | (rnd_to(2) ? 0x80u : 0);
+        if (rnd_to(10) == 0) on.w.flags &= ~0x10000000u;
+        on.w.flags2 = rnd_to(12) ? WIN_F2_FRAME : 0;
+        int first = rnd_to(NBUF - 4);
+        for (int i = 0; i < 4; i++) (&on.w.nc_buf_b4)[i] = &nbuf[first + (rnd_to(6) ? i : rnd_to(4))];
+        *(void **)((uint8_t *)&on + 0xa08) = &nbuf[rnd_to(NBUF)];
+        on.w.outer[0] = rnd_to(40) - 10, on.w.outer[1] = rnd_to(40) - 10;
+        on.w.outer[2] = on.w.outer[0] + 20 + rnd_to(80), on.w.outer[3] = on.w.outer[1] + 20 + rnd_to(80);
+        struct game_win *w = PW(rnd_to(POOL));
+        if (rnd_to(3) == 0) w->flags ^= 0x80;
+        w->flags2 = rnd_to(6) ? (w->flags2 | WIN_F2_FRAME) : (w->flags2 & ~(uint32_t)WIN_F2_FRAME);
+        w->outer[0] = on.w.outer[0] + rnd_to(30) - 15, w->outer[1] = on.w.outer[1] + rnd_to(30) - 15;
+        w->outer[2] = w->outer[0] + 20 + rnd_to(80), w->outer[3] = w->outer[1] + 20 + rnd_to(80);
+        for (int i = 0; i < 4; i++) scatter(&nbuf[first + i]);
+        scatter((buffer_t *)((uint8_t *)w + 0x444));
+        scatter((buffer_t *)*(void **)((uint8_t *)&on + 0xa08));
+        int32_t area[4] = {rnd_to(60) - 20, rnd_to(60) - 20, 0, 0};
+        area[2] = area[0] + rnd_to(80) - 10, area[3] = area[1] + rnd_to(80) - 10;
+        for (int v = 0; v < 6; v++) {
+            check_win_copy_into_frame(w, &on.w, rnd_to(3) ? NULL : area, rnd_to(6) - 1);
+            stats_win_copy_into_frame.calls++;
+        }
+    }
+    *game_win_hwnd = saved_hwnd;
+}
+
 static void win_sweep(void) {
     static struct win_globals saved;
     static struct game_win *real[REAL];
@@ -3438,6 +3733,8 @@ static void win_sweep(void) {
         sweep_screen();
         random_globals();
         if (round % 8 == 3) sweep_graphic(saved.hwnd);
+        if (nbuf_state > 0) sweep_nc_graphic();
+        if (nbuf_state > 0 && saved.hwnd) sweep_overlay(saved.hwnd);
         random_globals();
         for (int k = 0; k < 3 * POOL; k++) sweep_window(PW(k % POOL), any_pool());
         // Lists and focus.
@@ -3594,6 +3891,8 @@ static const struct hook win_hooks[] = {
     // push esi; mov esi, ecx; test BYTE PTR [esi+0x9c], 0x2
     HOOK(0x5f2940, win_set_rects, 0x56, 0x8b, 0xf1, 0xf6, 0x86, 0x9c, 0x00, 0x00, 0x00, 0x02),
     // sub esp, 0x64; push ebx; push ebp; push esi; mov esi, ecx
+    HOOK(0x5d63f0, graphic_win_on_redraw_nc, 0x83, 0xec, 0x0c, 0x53, 0x55, 0x56, 0x8b, 0xf1, 0x57),
+    HOOK(0x5f3b80, win_copy_into_frame, 0x81, 0xec, 0x94, 0x00, 0x00, 0x00, 0x53, 0x55, 0x56),
     HOOK(0x5f2cf0, win_on_redraw_nc, 0x83, 0xec, 0x64, 0x53, 0x55, 0x56, 0x8b, 0xf1),
     // sub esp, 0x40; push ebx; push ebp; push esi; push edi
     HOOK(0x5f37c0, win_draw_nc_to, 0x83, 0xec, 0x40, 0x53, 0x55, 0x56, 0x57),

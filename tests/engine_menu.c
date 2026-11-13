@@ -142,7 +142,11 @@ static void __attribute__((cdecl)) frame_hook(struct game_pulldown *p) {
     if (hook_log_n < 8) hook_log[hook_log_n++] = -1;
 }
 
+static int draws_done;
+static void s_do_all_draws(void) { draws_done++; }
+
 static void draw_tests(void) {
+    game_do_all_draws = s_do_all_draws;
     static int32_t cr, fg, mu, mga, mgb;
     game_copy_rem = &cr, game_fill_gap = &fg, game_mask_units = &mu, game_mask_gap_a = &mga, game_mask_gap_b = &mgb;
     game_sprite_scale = scale, game_sprite_ratio = &ratio_, game_sprite_max_ratio = &max_ratio_, game_sprite_min_size = min_size_;
@@ -201,6 +205,39 @@ static void draw_tests(void) {
     EXPECT(PD.ff38 != 0 && PD.ff3c != 0, 1), EXPECT(pix[30 * DW + 30], 1), EXPECT(fills.count, 0);
     EXPECT(hook_log_n, 3), EXPECT(hook_log[0], -1), EXPECT(hook_log[1], 1), EXPECT(hook_log[2], 0);  // (the frame, then the lines: the selected and the checked)
     pd_hooks[0] = pd_hooks[1] = NULL;
+    // pulldown_update draws the line it is given and the one it moves to (the second one is not drawn if it is the first
+    // again, and a line that is not shown is not drawn), each in the place the redraw puts it, and then the game draws
+    // what is waiting. The selected line has its rectangle filled; the second's hotkey is underlined from the text
+    // height (the Font's, 11, here, not the line's 13) rather than the line height. The window is hidden here, so
+    // nothing is marked for painting.
+    PD.ff38 = 0, PD.ff3c = 0, PD.sel = 0;
+    memset(pix, 1, sizeof pix);
+    nouts = 0, fills.count = 0, draws_done = 0;
+    pulldown_update(&PD, 0, 2);
+    EXPECT(draws_done, 1), EXPECT(fills.count, 2);  // (the selected line, then line 2, cleared in the unselected background: the
+    // second line's rectangle is not widened by the text space, and starts after the check mark)
+    EXPECT(fills.rect[0], 7), EXPECT(fills.rect[1], 27), EXPECT(fills.rect[2], 68), EXPECT(fills.rect[3], 40), EXPECT(fills.color, style[1]);
+    EXPECT(nouts >= 3, 1);
+    EXPECT(strcmp(outs[0].s, "Open") == 0 || strcmp(outs[1].s, "Open") == 0 || strcmp(outs[2].s, "Open") == 0, 1);
+    EXPECT(pix[14 * DW + 15], 8), EXPECT(pix[32 * DW + 4], sdata[0]);  // (the underline, the check mark of line 2)
+    EXPECT(pix[30 * DW + 30], 1);  // (nothing else is filled)
+    nouts = 0, fills.count = 0, draws_done = 0;
+    pulldown_update(&PD, 2, 2);  // (the same line twice is drawn once)
+    EXPECT(nouts, 1), EXPECT(strcmp(outs[0].s, "Quit"), 0), EXPECT(outs[0].x, 7), EXPECT(outs[0].y, 39), EXPECT(fills.count, 1);
+    EXPECT(fills.rect[0], 7 - style[0]), EXPECT(fills.rect[2], 68 + style[0]), EXPECT(fills.color, style[1]);  // (as the first line: widened)
+    memset(pix, 1, sizeof pix);
+    pulldown_update(&PD, -1, 0);  // (as the second line: the underline one row higher, from the text height)
+    EXPECT(pix[13 * DW + 15], 8), EXPECT(pix[14 * DW + 15] != 8, 1);
+    memset(pix, 1, sizeof pix);
+    pulldown_update(&PD, 0, -1);
+    EXPECT(pix[14 * DW + 15], 8), EXPECT(pix[13 * DW + 15] != 8, 1);
+    nouts = 0, draws_done = 0;
+    pulldown_update(&PD, 3, -1);  // (line 3 is not shown)
+    EXPECT(nouts, 0), EXPECT(draws_done, 1);
+    pulldown_update(&PD, -1, -1), EXPECT(nouts, 0), EXPECT(draws_done, 2);
+    nouts = 0;
+    pulldown_update(&PD, -1, 1);  // (a separator: lines, no text)
+    EXPECT(nouts, 0), EXPECT(pix[20 * DW + 30], 3), EXPECT(pix[21 * DW + 30], 4);
 
     // A Menu: the fill, then the titles in a row from the gap string's width in ("ab" is 12), the open one on its
     // background, the greyed one in the greyed colour, and the right one against the right edge.

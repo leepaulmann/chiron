@@ -137,4 +137,6 @@ int WIN_THIS graphic_win_update_3(struct game_win *w, int unused);
 int WIN_THIS graphic_win_soft_update(struct game_win *w, int x, int y, int cw, int ch);
 int WIN_THIS graphic_win_soft_update_2(struct game_win *w);
 int WIN_THIS graphic_win_soft_update_3(struct game_win *w, const int32_t *rect);
+void WIN_THIS graphic_win_on_redraw_nc(struct game_win *w, const int32_t *rect, int which);
+void WIN_THIS win_copy_into_frame(struct game_win *w, struct game_win *o, const int32_t *rect, int which);
 void WIN_THIS graphic_win_on_paint(struct game_win *w, const int32_t *clip);

@@ -116,6 +116,16 @@ static void hand_buffer(struct game_buffer *b, uint8_t *bits, int w, int h, int 
 static int hpx(const struct game_buffer *b, int x, int y) { return b->bits[(intptr_t)b->pitch * y + x]; }
 
 static int f4_result;
+static int wr_calls;
+static int STD intersect_rect_(int32_t *d, const int32_t *a, const int32_t *b) {
+    int32_t r[4] = {a[0] > b[0] ? a[0] : b[0], a[1] > b[1] ? a[1] : b[1], a[2] < b[2] ? a[2] : b[2], a[3] < b[3] ? a[3] : b[3]};
+    if (r[2] <= r[0] || r[3] <= r[1]) return memset(d, 0, 16), 0;
+    return memcpy(d, r, 16), 1;
+}
+static int STD get_window_rect_(uint32_t h, int32_t *r) {
+    r[0] = 90, r[1] = 90, r[2] = 130, r[3] = 130;
+    return wr_calls++, 1;
+}
 static int32_t seen_rect[4];
 static int seen_rects;
 static int WIN_THIS stub_0xf4(struct game_win *w) { return f4_result; }
@@ -128,6 +138,8 @@ static int WIN_THIS stub_0x124(struct game_win *w, int a) {
 }
 static int WIN_THIS stub_0x128b(struct game_win *w, int a, int b) { return vrec(0x128, w, a ? 1 : 0, b, 0), 0x129; }
 STUB0(0xfc)
+static int WIN_THIS stub_0x164(struct game_win *w, int title, int buf) { return vrec(0x164, w, title ? 1 : 0, buf ? 1 : 0, 0), 0x165; }
+static void gw_title_cb(struct game_win *w, const char *t, struct game_buffer *b) { vrec(0x2030, w, t ? t[0] : 0, b ? 1 : 0, 0); }
 
 // A window that has the picture a hit test may use after the Win part, like the game's own classes.
 struct hit_win {
@@ -1220,7 +1232,7 @@ int main(void) {
     game_win_mouse_pos = mouse_pos_, game_win_hit_nc = &hit_nc_, game_win_back = &back_, game_win_overlay = &overlay_;
     game_win_back_alt = &back_alt_, game_win_back_off = back_off_, game_win_overlay_on = &overlay_on_;
     game_win_overlay_pos = overlay_pos_, game_win_overlay_size = overlay_size_;
-    vtable[0xf0 / 4] = (void *)stub_0xf0, vtable[0xf4 / 4] = (void *)stub_0xf4, vtable[0xfc / 4] = (void *)stub_0xfc;
+    vtable[0x164 / 4] = (void *)stub_0x164, vtable[0xf0 / 4] = (void *)stub_0xf0, vtable[0xf4 / 4] = (void *)stub_0xf4, vtable[0xfc / 4] = (void *)stub_0xfc;
     vtable[0x124 / 4] = (void *)stub_0x124, vtable[0x128 / 4] = (void *)stub_0x128b;
     pal_.serial = 0;
 
@@ -1521,6 +1533,161 @@ int main(void) {
         win_on_redraw_nc(&FW, NULL, -1);
         EXPECT(nvlog, 0);
         FW.flags = WIN_F_CAPTION;
+
+        // The GraphicWin's frame from sprites (bit 0x10000000): each strip is cleared to the key colour, the corner
+        // sprites put in its corners, a tile between them and the window told (and the title written first). Without
+        // the bit the Win's frame is drawn; without a frame nothing is.
+        {
+            static uint8_t gmem[0xa40];
+            struct game_win *G = (struct game_win *)gmem;
+            static struct game_sprite sp[11];
+            static uint8_t sd[11][64];
+            for (int i = 0; i < 11; i++) {
+                memset(sd[i], 21 + i, sizeof sd[i]);
+                sp[i] = (struct game_sprite){.data = sd[i], .key = 0, .stride = 8, .width = 3, .height = 2, .full_w = 3, .full_h = 2};
+                *(struct game_sprite **)(gmem + 0x9cc + 4 * i) = &sp[i];
+            }
+            sp[0].full_h = 4, sp[0].height = 4;  // 9cc: the top left corner
+            for (int i = 0; i < 4; i++) memset(s[i].bits, 99, (size_t)s[i].pitch * -s[i].neg_height);
+            memcpy(G, &FW, sizeof FW);
+            G->flags = WIN_F_CAPTION | 0x10000000;
+            G->title = "Hi";
+            *(void **)(gmem + 0xa0c) = (void *)gw_title_cb;
+            nvlog = 0;
+            graphic_win_on_redraw_nc(G, NULL, 0);
+            // The top strip (40 wide, 10 high): key colour; the top left corner (9cc) at 0,0; the top right (9d4) at
+            // the right edge; the tile (9e8) between them (from the left corner's width, over the window's width less
+            // both corners); then the title hook (cdecl), the title slot, and the strip's slot.
+            EXPECT(hpx(&s[0], 0, 0), 21), EXPECT(hpx(&s[0], 2, 3), 21), EXPECT(hpx(&s[0], 3, 3), 21 + 7);
+            EXPECT(hpx(&s[0], 37, 0), 21 + 2), EXPECT(hpx(&s[0], 36, 9), 21 + 7);  // (the tile: 9e8 is the eighth piece)
+            EXPECT(hpx(&s[0], 20, 5), 21 + 7), EXPECT(hpx(&s[1], 5, 2), 99);
+            EXPECT(nvlog, 3), expect_call(0, 0x2030, G, 'H', 1, 0), expect_call(1, 0x164, G, 1, 1, 0), expect_call(2, 0xf0, G, 1, 0, 0);
+            // A window without a title hook or a caption: no title.
+            G->flags = 0x10000000, *(void **)(gmem + 0xa0c) = NULL;
+            nvlog = 0;
+            graphic_win_on_redraw_nc(G, NULL, 0);
+            EXPECT(nvlog, 1), expect_call(0, 0xf0, G, 1, 0, 0);
+            // The bottom strip (40 x 5): bottom corners (9d0, 9d8) with their bottom edges on the strip's, the tile
+            // (9e4) between them; the sides (3 x 25): the top left corner (9ec when there is no caption: the border's
+            // set) at the top, the bottom corner at the bottom.
+            for (int i = 0; i < 4; i++) memset(s[i].bits, 99, (size_t)s[i].pitch * -s[i].neg_height);
+            nvlog = 0;
+            graphic_win_on_redraw_nc(G, NULL, -1);
+            EXPECT(nvlog, 4), expect_call(0, 0xf0, G, 1, 0, 0), expect_call(1, 0xf0, G, 1, 2, 0), expect_call(2, 0xf0, G, 1, 3, 0);
+            expect_call(3, 0xf0, G, 1, 1, 0);
+            EXPECT(hpx(&s[1], 0, 3), 21 + 1), EXPECT(hpx(&s[1], 0, 4), 21 + 1), EXPECT(hpx(&s[1], 0, 2), key_);
+            EXPECT(hpx(&s[1], 38, 4), 21 + 3), EXPECT(hpx(&s[1], 20, 4), 21 + 6);
+            // One strip by itself, or the area (screen coordinates): every strip.
+            for (int i = 0; i < 4; i++) memset(s[i].bits, 99, (size_t)s[i].pitch * -s[i].neg_height);
+            nvlog = 0;
+            graphic_win_on_redraw_nc(G, NULL, 3);
+            EXPECT(nvlog, 1), expect_call(0, 0xf0, G, 1, 3, 0), EXPECT(hpx(&s[0], 20, 5), 99), EXPECT(hpx(&s[2], 1, 12), 21 + 4);  // (the left tile, 9dc)
+            graphic_win_on_redraw_nc(G, NULL, 1);
+            EXPECT(hpx(&s[3], 1, 12), 21 + 5);  // (the right tile, 9e0)
+            nvlog = 0;
+            graphic_win_on_redraw_nc(G, part, 1);
+            EXPECT(nvlog, 4);
+            // A missing piece leaves out what needs it (the tile needs both corners).
+            *(struct game_sprite **)(gmem + 0x9ec) = NULL;
+            for (int i = 0; i < 4; i++) memset(s[i].bits, 99, (size_t)s[i].pitch * -s[i].neg_height);
+            graphic_win_on_redraw_nc(G, NULL, 3);
+            EXPECT(hpx(&s[2], 1, 20), key_);  // (the tile of 9dc is not drawn without the corner 9ec)
+            // Without a frame nothing; without the bit, the Win's frame (nothing for a window with no caption).
+            G->flags2 = WIN_F2_VISIBLE;
+            nvlog = 0;
+            graphic_win_on_redraw_nc(G, NULL, -1);
+            EXPECT(nvlog, 0);
+            G->flags2 = WIN_F2_VISIBLE | WIN_F2_FRAME, G->flags = 0;
+            graphic_win_on_redraw_nc(G, NULL, -1);
+            EXPECT(nvlog, 0);
+            G->flags = WIN_F_CAPTION;
+            graphic_win_on_redraw_nc(G, NULL, 2);
+            EXPECT(nvlog, 1), expect_call(0, 0xf0, G, 1, 2, 0);  // (the Win's own redraw of the bottom strip)
+        }
+
+        // This window's frame and Buffer copied into another window's frame (the one with the sprite frame): the
+        // other's strips go on the screen from its outer corner (the top at the corner, the left and the right under the
+        // top, the bottom under the left), this window's likewise, and each of this window's strips is put into each of
+        // the other's where they overlap, for the `which` asked for (an area makes it every one) and, if the other
+        // draws its own frame, into its picture over its window rectangle.
+        {
+            game_intersect_rect = intersect_rect_, game_get_window_rect = get_window_rect_;
+            static uint8_t obytes[0xa40];
+            static struct {
+                struct game_win w;
+                struct game_buffer own;
+            } W;
+            struct game_win *O = (struct game_win *)obytes;
+            static struct game_buffer os[4], ds[4], pic;
+            static uint8_t opx[4][80], dpx[4][80], picpx[40 * 40], ownpx[40 * 40];
+            int ow[4] = {20, 3, 3, 20}, oh[4] = {4, 10, 10, 3};  // top, left, right, bottom
+            init(&W.w, WIN_F2_VISIBLE | WIN_F2_FRAME);
+            init(O, WIN_F2_VISIBLE | WIN_F2_FRAME);
+            O->flags = 0x10000000;
+            O->outer[0] = 100, O->outer[1] = 100, W.w.outer[0] = 100, W.w.outer[1] = 100, W.w.outer[2] = 120, W.w.outer[3] = 117;
+            void **os_slot[4] = {&O->nc_buf_b4, &O->nc_buf_bc, &O->nc_buf_b8, &O->nc_buf_c0};
+            void **ds_slot[4] = {&W.w.nc_buf_b4, &W.w.nc_buf_bc, &W.w.nc_buf_b8, &W.w.nc_buf_c0};
+            for (int i = 0; i < 4; i++) {  // (the slots are in the order top, left, right, bottom: this window's are 61 to 64)
+                hand_buffer(&ds[i], dpx[i], ow[i], oh[i], 61 + i), hand_buffer(&os[i], opx[i], ow[i], oh[i], 9);
+                *os_slot[i] = &os[i], *ds_slot[i] = &ds[i];
+            }
+            hand_buffer(&pic, picpx, 40, 40, 9), hand_buffer(&W.own, ownpx, 40, 40, 8);
+            *(struct game_buffer **)(obytes + 0xa08) = &pic;
+            f4_result = 0;
+            win_copy_into_frame(&W.w, O, NULL, -1);
+            EXPECT(hpx(&os[0], 3, 2), 61), EXPECT(hpx(&os[1], 1, 5), 62), EXPECT(hpx(&os[2], 1, 5), 63), EXPECT(hpx(&os[3], 3, 1), 64);
+            EXPECT(wr_calls, 0), EXPECT(hpx(&pic, 0, 0), 9);
+            // One strip: this window's top into the other's top.
+            for (int i = 0; i < 4; i++) memset(opx[i], 9, sizeof opx[i]);
+            win_copy_into_frame(&W.w, O, NULL, 0);
+            EXPECT(hpx(&os[0], 3, 2), 61), EXPECT(hpx(&os[1], 1, 5), 9), EXPECT(hpx(&os[2], 1, 5), 9), EXPECT(hpx(&os[3], 3, 1), 9);
+            win_copy_into_frame(&W.w, O, NULL, 2);
+            EXPECT(hpx(&os[3], 3, 1), 64), EXPECT(hpx(&os[1], 1, 5), 9);
+            // An area (screen coordinates) cuts every strip and means every one: x 105..109 of the top strip.
+            for (int i = 0; i < 4; i++) memset(opx[i], 9, sizeof opx[i]);
+            int32_t area[4] = {105, 100, 110, 110};
+            win_copy_into_frame(&W.w, O, area, 3);
+            EXPECT(hpx(&os[0], 4, 1), 9), EXPECT(hpx(&os[0], 5, 1), 61), EXPECT(hpx(&os[0], 9, 1), 61), EXPECT(hpx(&os[0], 10, 1), 9);
+            EXPECT(hpx(&os[1], 1, 5), 9), EXPECT(hpx(&os[3], 6, 1), 9);  // (the others are outside the area)
+            int32_t empty_area[4] = {105, 100, 105, 110};
+            for (int i = 0; i < 4; i++) memset(opx[i], 9, sizeof opx[i]);
+            win_copy_into_frame(&W.w, O, empty_area, -1);
+            EXPECT(hpx(&os[0], 5, 1), 9);
+            // Not a window with a sprite frame (or without a frame): nothing.
+            O->flags = 0;
+            win_copy_into_frame(&W.w, O, NULL, -1);
+            EXPECT(hpx(&os[0], 5, 1), 9);
+            O->flags = 0x10000000, O->flags2 = WIN_F2_VISIBLE;
+            win_copy_into_frame(&W.w, O, NULL, -1), win_copy_into_frame(&W.w, NULL, NULL, -1);
+            EXPECT(hpx(&os[0], 5, 1), 9);
+            O->flags2 = WIN_F2_VISIBLE | WIN_F2_FRAME;
+            // This window without a frame has only its Buffer copied (if it draws a frame itself, slot 0xf4) from
+            // its window rectangle in Windows (90, 90 to 130, 130) into the other's strips, where they lie.
+            W.w.flags2 = WIN_F2_VISIBLE;
+            f4_result = 1;
+            win_copy_into_frame(&W.w, O, NULL, 0);
+            EXPECT(wr_calls, 1), EXPECT(hpx(&os[0], 5, 1), 8);  // (O has no bit 0x40000000: no picture, one rectangle asked for)
+            EXPECT(hpx(&os[1], 1, 5), 9), EXPECT(hpx(&pic, 10, 10), 9);
+            // With the picture over the other's window rectangle (bit 0x40000000): for every strip.
+            O->flags |= 0x40000000;
+            wr_calls = 0;
+            win_copy_into_frame(&W.w, O, NULL, 0);
+            EXPECT(wr_calls, 2), EXPECT(hpx(&pic, 0, 0), 9);  // (not for one strip)
+            win_copy_into_frame(&W.w, O, NULL, -1);
+            EXPECT(wr_calls, 4), EXPECT(hpx(&pic, 0, 0), 8), EXPECT(hpx(&pic, 39, 39), 8), EXPECT(hpx(&os[1], 1, 5), 8);
+            // The window with a frame as well: each of its strips goes into the picture, too, and the Buffer over them.
+            memset(picpx, 9, sizeof picpx);
+            W.w.flags2 = WIN_F2_VISIBLE | WIN_F2_FRAME;
+            win_copy_into_frame(&W.w, O, NULL, -1);
+            EXPECT(hpx(&pic, 12, 12), 8), EXPECT(hpx(&pic, 39, 39), 8);
+            // The other window not drawing its frame itself: no picture and no Windows call for its rectangle.
+            f4_result = 0;
+            for (int i = 0; i < 4; i++) memset(opx[i], 9, sizeof opx[i]);
+            memset(picpx, 9, sizeof picpx);
+            wr_calls = 0;
+            win_copy_into_frame(&W.w, O, NULL, -1);
+            EXPECT(wr_calls, 0), EXPECT(hpx(&os[0], 3, 2), 61), EXPECT(hpx(&pic, 12, 12), 9);
+        }
 
         // The strips copied into another Buffer, each where it lies on the screen.
         hand_buffer(&dest_, dest_px, 100, 60, 9);

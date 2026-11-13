@@ -68,5 +68,6 @@ void MENU_THIS menu_on_adjust_pulldown_pos(struct game_menu *m, int a, int b);
 
 // Drawing (slot 0xf8): a PullDown's lines and a Menu's titles.
 void MENU_THIS pulldown_on_redraw(struct game_pulldown *pd);
+void MENU_THIS pulldown_update(struct game_pulldown *pd, int a, int b);
 void MENU_THIS menu_on_redraw(struct game_menu *m);
 void menu_draw_sweep(void);  // (the drawing checks' sweep, run by edit.c's once the fonts exist)
