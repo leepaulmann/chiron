@@ -169,6 +169,11 @@ uint32_t *game_win_hwnd;
 int32_t *game_win_screen_w, *game_win_screen_h, *game_win_pic_normal, *game_win_pic_zoomed;
 int32_t *game_win_mouse_pos, *game_win_hit_nc, *game_win_back_off, *game_win_overlay_on, *game_win_overlay_pos, *game_win_overlay_size;
 struct game_buffer *game_win_back, *game_win_overlay, **game_win_back_alt;
+struct game_button_defaults *game_button_defaults;
+struct game_button_fonts *game_button_fonts;
+void(__attribute__((cdecl)) * *game_button_hooks)(void);
+int32_t *game_win_press_inside;
+const uint8_t **game_win_tint;
 int(__attribute__((stdcall)) * game_set_cursor_pos)(int x, int y);
 int(__attribute__((stdcall)) * game_get_cursor_pos)(int32_t *point);
 int(__attribute__((stdcall)) * game_show_window)(uint32_t hwnd, int cmd);
@@ -1518,6 +1523,11 @@ void game_bind(struct pe_image *exe) {
     game_win_overlay_on = (int32_t *)code_at(exe, 0x9b7a2c);
     game_win_overlay_pos = (int32_t *)code_at(exe, 0x9b7a30);
     game_win_overlay_size = (int32_t *)code_at(exe, 0x9b7a40);
+    game_button_defaults = (struct game_button_defaults *)code_at(exe, 0x69704c);
+    game_button_fonts = (struct game_button_fonts *)code_at(exe, 0x9b8e2c);
+    game_button_hooks = (void *)code_at(exe, 0x9b7a98);
+    game_win_press_inside = (int32_t *)code_at(exe, 0x9b7ad4);
+    game_win_tint = (const uint8_t **)code_at(exe, 0x9b3390);
     game_set_cursor_pos = *(void **)code_at(exe, 0x669310);  // the imports, as bound (and journaled in shadow mode)
     game_get_cursor_pos = *(void **)code_at(exe, 0x669284);
     game_show_window = *(void **)code_at(exe, 0x669320);

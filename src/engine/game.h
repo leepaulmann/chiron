@@ -2206,6 +2206,153 @@ extern struct game_buffer **game_win_back_alt;
 extern int32_t *game_win_back_off;            // [2]: x and y (0x9b7a70, 0x9b7a74)
 extern int32_t *game_win_overlay_on;          // 0x9b7a2c
 extern int32_t *game_win_overlay_pos, *game_win_overlay_size;  // [2] each: where it lies and how big (0x9b7a30, 0x9b7a40)
+
+// ---- The button classes (button.c) ----
+// Every button is a Win (0x444 bytes) with a Buffer behind it (0x444, 0x588 bytes) and the rest of
+// a GraphicWin up to 0xa18, where BaseButton's own fields start. PushButton, FlatButton and
+// ImageButton derive from BaseButton and add little (ImageButton a picture at 0xab8).
+struct game_button_group;
+struct game_button {
+    struct game_win win;
+    struct game_buffer buf;  // 0x444
+    GAME_PAD(0x9cc, 0xa18);
+    int32_t state;                // 0xa18: 0 up, 1 down (or what the group makes of it)
+    uint8_t timer_hold[0x28];     // 0xa1c: a Time object, started to show the bubble text
+    int32_t repeat_first, repeat_next;  // 0xa44, 0xa48: the delays of the auto-repeat, -1 for none
+    uint8_t timer_repeat[0x28];   // 0xa4c: the auto-repeat's Time object
+    int32_t changed;              // 0xa74: set when the group changes it, cleared at the end of a group click
+    int32_t id;                   // 0xa78: what the button tells its parent (-1 and -2 call the globals' functions)
+    char *name;                   // 0xa7c
+    char *bubble;                 // 0xa80: the text shown when the mouse rests on it
+    int32_t fill, border_a, border_b, border_w;  // 0xa84: the fill colour, the two border colours and the border's width
+    int32_t focus_a, focus_b;     // 0xa94, 0xa98: the colour of the focus frame (-1 for none), and one more
+    int32_t pressed;              // 0xa9c: the mouse is down in it
+    int32_t press_ms;             // 0xaa0: how long a press shows at least
+    uint32_t press_time;          // 0xaa4: timeGetTime when it went down
+    struct game_button_group *group;  // 0xaa8
+    int32_t disabled;             // 0xaac: the parent isn't told of a click
+    void(__attribute__((cdecl)) * on_click)(int id);  // 0xab0
+    void(__attribute__((cdecl)) * on_press)(int id);  // 0xab4
+    void *picture;                // 0xab8: ImageButton's picture
+};
+GAME_AT(struct game_button, buf, 0x444);
+GAME_AT(struct game_button, state, 0xa18);
+GAME_AT(struct game_button, timer_hold, 0xa1c);
+GAME_AT(struct game_button, repeat_first, 0xa44);
+GAME_AT(struct game_button, timer_repeat, 0xa4c);
+GAME_AT(struct game_button, changed, 0xa74);
+GAME_AT(struct game_button, id, 0xa78);
+GAME_AT(struct game_button, name, 0xa7c);
+GAME_AT(struct game_button, bubble, 0xa80);
+GAME_AT(struct game_button, fill, 0xa84);
+GAME_AT(struct game_button, border_w, 0xa90);
+GAME_AT(struct game_button, focus_a, 0xa94);
+GAME_AT(struct game_button, pressed, 0xa9c);
+GAME_AT(struct game_button, press_ms, 0xaa0);
+GAME_AT(struct game_button, press_time, 0xaa4);
+GAME_AT(struct game_button, group, 0xaa8);
+GAME_AT(struct game_button, disabled, 0xaac);
+GAME_AT(struct game_button, on_click, 0xab0);
+GAME_AT(struct game_button, on_press, 0xab4);
+GAME_AT(struct game_button, picture, 0xab8);
+
+// A PushButton is a BaseButton with a frame of sprites for the button as it lies and as it is pressed (the
+// first is `picture`, at 0xab8): the four edges and corners (the ones for the pressed button at 0xadc and
+// 0xaec), and a tile for the middle (0xad8, 0xafc).
+struct game_push_button {
+    struct game_button base;  // (up to and including picture, the left edge, at 0xab8)
+    struct game_sprite *right, *top, *bottom;       // 0xabc
+    struct game_sprite *tl, *tr, *bl, *br, *mid;    // 0xac8
+    struct game_sprite *pleft, *pright, *ptop, *pbottom;  // 0xadc: pressed
+    struct game_sprite *ptl, *ptr, *pbl, *pbr, *pmid;     // 0xaec
+};
+GAME_AT(struct game_push_button, right, 0xabc);
+GAME_AT(struct game_push_button, tl, 0xac8);
+GAME_AT(struct game_push_button, mid, 0xad8);
+GAME_AT(struct game_push_button, pleft, 0xadc);
+GAME_AT(struct game_push_button, ptl, 0xaec);
+GAME_AT(struct game_push_button, pmid, 0xafc);
+
+// A CheckButton: a Win with a Buffer behind it like the others, a checked state, and two pictures.
+struct game_check_button {
+    struct game_win win;
+    struct game_buffer buf;  // 0x444
+    GAME_PAD(0x9cc, 0xa14);
+    int32_t state;  // 0xa14: checked
+    int32_t id;     // 0xa18
+    void(__attribute__((cdecl)) * on_click)(int id);         // 0xa1c
+    void(__attribute__((cdecl)) * on_double_click)(int id);  // 0xa20
+    void *pic_off, *pic_on;                                  // 0xa24, 0xa28
+};
+GAME_AT(struct game_check_button, state, 0xa14);
+GAME_AT(struct game_check_button, id, 0xa18);
+GAME_AT(struct game_check_button, on_click, 0xa1c);
+GAME_AT(struct game_check_button, on_double_click, 0xa20);
+GAME_AT(struct game_check_button, pic_on, 0xa28);
+
+// A ButtonGroup: up to 32 buttons, of which at most one is selected (by its id).
+struct game_button_group {
+    struct game_button *buttons[32];
+    int32_t count;   // 0x80
+    int32_t sel;     // 0x84: the selected button's id, -1 for none, -2 at the start
+    int32_t flags;   // 0x88: 1 lets a click on the selected one be a click, 2 deselects it
+    void *user;      // 0x8c: passed to the parent's handler
+    int32_t silent;  // 0x90: the parent isn't told while set
+};
+_Static_assert(sizeof(struct game_button_group) == 0x94, "ButtonGroup");
+GAME_AT(struct game_button_group, count, 0x80);
+GAME_AT(struct game_button_group, sel, 0x84);
+GAME_AT(struct game_button_group, flags, 0x88);
+GAME_AT(struct game_button_group, user, 0x8c);
+GAME_AT(struct game_button_group, silent, 0x90);
+
+// The Dialog class's list of items, as CheckBox and RadioButton hold it as a virtual base: the
+// positions are from the start of the Dialog object. The list is a ring of nodes with the
+// item's id at 0x4. `sel` is the selected position (RadioButton) or a mask of the checked ones
+// (CheckBox); `hover` is the item under the mouse, or -1.
+struct game_dlg_node {
+    int32_t pad0, key, pad8;
+    struct game_dlg_node *next, *prev;
+};
+struct game_dlg {
+    GAME_PAD(0x0, 0xc4);
+    struct game_dlg_node *head;  // 0xc4
+    struct game_dlg_node *cur;   // 0xc8
+    int32_t count;               // 0xcc
+    int32_t idx;                 // 0xd0: where `cur` is
+    GAME_PAD(0xd4, 0xec);
+    int32_t sel;    // 0xec
+    int32_t hover;  // 0xf0
+};
+GAME_AT(struct game_dlg, head, 0xc4);
+GAME_AT(struct game_dlg, count, 0xcc);
+GAME_AT(struct game_dlg, idx, 0xd0);
+GAME_AT(struct game_dlg, sel, 0xec);
+GAME_AT(struct game_dlg, hover, 0xf0);
+
+// The defaults a new button takes (0x69704c): the fill, the two border colours and the border
+// width, how long a press shows, and the text colours for the four Buffer colour slots, each
+// with the three the Buffer takes. (set_def_text_color sets the first of each, ..._2 the second.)
+struct game_button_defaults {
+    int32_t fill, border_a, border_b, border_w, press_ms;
+    int32_t text[4][3];
+};
+_Static_assert(sizeof(struct game_button_defaults) == 0x44, "button defaults");
+extern struct game_button_defaults *game_button_defaults;
+// What a new button takes (0x9b8e2c): the two numbers its ctor gives (focus_a, focus_b), and the
+// three Fonts init gives its Buffer (the first and the two after it, set by set_def_font).
+struct game_button_fonts {
+    int32_t focus_a, focus_b;
+    void *def, *def_a, *def_b;
+};
+extern struct game_button_fonts *game_button_fonts;
+// The functions called when a button with id -1 or -2 is clicked.
+extern void(__attribute__((cdecl)) * *game_button_hooks)(void);  // [2]
+// Whether the mouse is inside the window that has it pressed.
+extern int32_t *game_win_press_inside;
+// The colour table (or NULL) that a window copied from its parent is darkened with (0x9b3390).
+extern const uint8_t **game_win_tint;
+
 // Windows calls Win makes (through the import table, so a shadow check's journal sees them).
 extern int(__attribute__((stdcall)) * game_set_cursor_pos)(int x, int y);
 extern int(__attribute__((stdcall)) * game_get_cursor_pos)(int32_t *point);
