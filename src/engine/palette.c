@@ -4,10 +4,12 @@
 // Reimplemented from terranx.exe 2.0's disassembly; the class is called
 // Palette in OpenSMACX (GPL-3.0-or-later).
 //
-// What is left to the original: Palette_ctor, _init, _set, _close, the
-// cycle functions and the timer callback (they allocate from the game's heap,
-// make Time objects, and call GDI and DirectDraw, none of which a check can
-// put back). The tables made by hue call the game's own sin and cos.
+// What is left to the original: Palette_ctor, _init, _close and the cycle
+// set-up (they allocate from the game's heap, make Time objects, and call GDI
+// and DirectDraw, none of which a check can put back). Palette_set (the palette
+// Windows is showing) and the cycle's timer callback are in screen.c, with the
+// rest of what reaches the window. The tables made by hue call the game's own
+// sin and cos.
 #include "palette.h"
 
 #include <stdio.h>

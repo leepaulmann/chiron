@@ -53,6 +53,8 @@ extern int audio_volume;  // percent, applied to the final mix
 // that framebuffer's coordinates. Returns NULL for an unknown window; a NULL
 // hwnd means the whole screen.
 struct surface *user32_window_surface(HWND hwnd, RECT *client);
+// The framebuffer's pixels and their size in bytes (a window's shadow-check state), or NULL.
+void *user32_window_pixels(void *hwnd, int *size);
 // Note that part of the screen changed so the next present picks it up, and
 // present now if a frame's worth of time has passed.
 void user32_screen_dirty(void);

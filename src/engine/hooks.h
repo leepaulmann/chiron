@@ -76,7 +76,7 @@ struct hook_writes {
     struct {
         void *p;
         size_t size;
-    } span[12];
+    } span[24];
     int n;
     int depth;         // which save buffers, as checks can nest
     int protect_only;  // only saved and put back (hooks_writes_abandon), not a check
@@ -98,6 +98,9 @@ extern void *(*hooks_dc_state)(void *hdc, int *size);
 // Set by the host: whether two DCs are in the same state, bitmaps compared by size, format
 // and content rather than identity (for checks that build two objects side by side).
 extern int (*hooks_dc_same)(void *a, void *b);
+// Set by the host: the pixels of the framebuffer a window draws into, with their size in bytes, or
+// NULL. A function that copies to the real window lists them with WRITES_WINDOW.
+extern void *(*hooks_window_pixels)(void *hwnd, int *size);
 // Set by the host: whether two GDI fonts were made from the same LOGFONT.
 extern int (*hooks_font_same)(void *a, void *b);
 // Set by the host: the id the next multimedia timer will get, and a way to stop every timer made from
@@ -106,6 +109,7 @@ extern unsigned (*hooks_timer_mark)(void);
 extern void (*hooks_timers_kill_from)(unsigned mark);
 
 void hooks_writes_add(struct hook_writes *w, void *p, size_t size);
+void hooks_writes_window(struct hook_writes *w, void *hwnd);  // nothing if there is no such window
 void hooks_writes_dc(struct hook_writes *w, void *hdc);  // nothing if hdc isn't a DC
 // Before the original runs.
 void hooks_writes_begin(struct hook_writes *w);

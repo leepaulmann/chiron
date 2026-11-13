@@ -2077,7 +2077,7 @@ struct game_win {
     const char *title;  // 0xe0: drawn in the caption
     struct game_win_btn *btn_e4, *btn_e8, *btn_ec;  // 0xe4: the caption buttons (the last is the rightmost)
     struct game_win *nc_owner;  // 0xf0: the window whose NC_HEIGHT slot adds to a nonclient position
-    GAME_PAD(0xf4, 0xf8);
+    int32_t bg_color;           // 0xf4: the palette entry the window's background is painted with
     void *nc_font;                  // 0xf8: the Font the title is written in
     struct game_buffer *nc_tile;    // 0xfc: the picture the frame is tiled from, or NULL for a plain colour
     int32_t nc_color;               // 0x100: that colour
@@ -2087,13 +2087,17 @@ struct game_win {
     int32_t bottom;     // 0x11c: the bottom border, or -1 for the same as `border`
     int32_t box_color[2];  // 0x120: the frame's lines, light and dark
     int32_t cap_btn;  // 0x128: the size of a caption button
-    GAME_PAD(0x12c, 0x13c);
+    struct game_buffer *bg_pic;  // 0x12c: the picture painted over the background, or NULL
+    int32_t bg_center;           // 0x130: the picture is centred (else tiled)
+    GAME_PAD(0x134, 0x13c);
     int32_t inner[4];  // 0x13c
     int32_t outer[4];  // 0x14c
-    GAME_PAD(0x15c, 0x16c);
+    int32_t clip[4];   // 0x15c: what a copy to the screen is cut to
     int32_t title_h;       // 0x16c: the height of the caption area for a hit test
     int32_t resize_border;  // 0x170
-    GAME_PAD(0x174, 0x1a4);
+    GAME_PAD(0x174, 0x184);
+    uint32_t pal_serial;    // 0x184: the serial number of the palette the window last used
+    GAME_PAD(0x188, 0x1a4);
     struct game_win *children[150];  // 0x1a4, front first
     int32_t n_children;              // 0x3fc
     void *resize_cb;                 // 0x400: called (cdecl) with the new width and height
@@ -2136,6 +2140,11 @@ GAME_AT(struct game_win, dlg_index, 0xd8);
 GAME_AT(struct game_win, btn_e4, 0xe4);
 GAME_AT(struct game_win, btn_ec, 0xec);
 GAME_AT(struct game_win, nc_owner, 0xf0);
+GAME_AT(struct game_win, bg_color, 0xf4);
+GAME_AT(struct game_win, bg_pic, 0x12c);
+GAME_AT(struct game_win, bg_center, 0x130);
+GAME_AT(struct game_win, clip, 0x15c);
+GAME_AT(struct game_win, pal_serial, 0x184);
 GAME_AT(struct game_win, title, 0xe0);
 GAME_AT(struct game_win, nc_font, 0xf8);
 GAME_AT(struct game_win, nc_tile, 0xfc);
@@ -2206,6 +2215,42 @@ extern struct game_buffer **game_win_back_alt;
 extern int32_t *game_win_back_off;            // [2]: x and y (0x9b7a70, 0x9b7a74)
 extern int32_t *game_win_overlay_on;          // 0x9b7a2c
 extern int32_t *game_win_overlay_pos, *game_win_overlay_size;  // [2] each: where it lies and how big (0x9b7a30, 0x9b7a40)
+
+struct font;
+// ---- The screen: how a Buffer reaches the window (screen.c) ----
+// The Windows calls it makes, as imported (stdcall).
+#define GAME_STD __attribute__((stdcall))
+extern void *(GAME_STD *game_get_dc)(void *hwnd);
+extern int(GAME_STD *game_release_dc)(void *hwnd, void *dc);
+extern int(GAME_STD *game_bit_blt)(void *dst, int x, int y, int w, int h, void *src, int sx, int sy, unsigned rop);
+extern int(GAME_STD *game_validate_rect)(void *hwnd, const int32_t *rect);
+extern void *(GAME_STD *game_create_solid_brush)(uint32_t color);
+extern int(GAME_STD *game_fill_rect)(void *dc, const int32_t *rect, void *brush);
+extern void *(GAME_STD *game_create_pen_indirect)(const int32_t *logpen);
+extern int(GAME_STD *game_move_to_ex)(void *dc, int x, int y, void *old);
+extern int(GAME_STD *game_line_to)(void *dc, int x, int y);
+extern void *(GAME_STD *game_select_palette)(void *dc, void *palette, int background);
+extern unsigned(GAME_STD *game_realize_palette)(void *dc);
+extern int(GAME_STD *game_animate_palette)(void *palette, unsigned start, unsigned n, const void *entries);
+extern int(GAME_STD *game_invalidate_rect)(void *hwnd, const int32_t *rect, int erase);
+// The window's device context is counted: the first user gets it (from the DirectDraw surface if the
+// game has one, else for the window `hwnd`) and the last gives it back.
+extern int32_t *game_dc_count;     // 0x9b3ab0
+extern void **game_dc;             // 0x9b7b2c
+struct game_com {
+    void **vtable;  // a COM object: its methods, stdcall with the object first
+};
+extern struct game_com **game_dd_surface;  // 0x9bc498: the primary surface, or NULL
+extern struct game_com **game_dd_palette;  // 0x9bc4a0: the DirectDraw palette
+extern uint32_t *game_palette_serial, *game_palette_hold;  // 0x9b8184: the serial of the palette last given to Windows; 0x9b8188
+extern int32_t *game_copy_own_palette;  // 0x696bf4: zero lets a Buffer copy use its own palette
+// What the screen flip draws over the picture: a callback, a text (lines separated by ^) in a box with
+// a border, and its font.
+extern void (**game_flip_hook)(void);  // 0x9b7a48
+extern char **game_flip_text;          // 0x9b7a50
+extern int32_t *game_flip_box;         // 0x9b6e38: left, top, right, bottom
+extern int32_t *game_flip_border, *game_flip_text_color, *game_flip_fill;  // 0x696d30, 0x696d2c, 0x9b7a64
+extern struct font **game_flip_font;   // 0x9b7a54
 
 // ---- The button classes (button.c) ----
 // Every button is a Win (0x444 bytes) with a Buffer behind it (0x444, 0x588 bytes) and the rest of

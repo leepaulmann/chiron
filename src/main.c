@@ -76,6 +76,7 @@ static void *game_thread(void *arg) {
         hooks_hold_time = kernel32_hold_ticks;
         hooks_dc_state = gdi_dc_state;
         hooks_dc_same = gdi_dc_same;
+        hooks_window_pixels = user32_window_pixels;
         hooks_font_same = gdi_font_same;
         hooks_timer_mark = winmm_timer_mark;
         hooks_timers_kill_from = winmm_timers_kill_from;

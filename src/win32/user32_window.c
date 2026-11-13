@@ -563,6 +563,16 @@ struct surface *user32_window_surface(HWND hwnd, RECT *client) {
     return &top->fb;
 }
 
+// The pixels of the framebuffer a window draws into, and their size in bytes, for the engine's
+// shadow checks (NULL if there is no such window).
+void *user32_window_pixels(void *hwnd, int *size) {
+    RECT client;
+    struct surface *s = user32_window_surface(hwnd, &client);
+    if (!s || !s->bits) return NULL;
+    *size = s->stride * s->height;
+    return s->bits;
+}
+
 struct window *user32_main_window(void) {
     // The most recently created visible top-level window is the one shown
     // on screen; hidden helper windows are skipped.

@@ -73,6 +73,8 @@ static inline int shadow_bypass(void) { return hooks_sweeping || hooks_checking(
 #define WRITES(p, size) hooks_writes_add(&w_, (void *)(p), (size))
 // A device context's state in Chiron's GDI (see hooks_dc_state).
 #define WRITES_DC(hdc) hooks_writes_dc(&w_, (void *)(hdc))
+// The pixels of the real window's framebuffer, which a copy to the window writes (see hooks_window_pixels).
+#define WRITES_WINDOW(hwnd) hooks_writes_window(&w_, (void *)(hwnd))
 
 #define SHADOW_WRITER(module, ret, name, params, args, writes, fmt, ...) \
     SHADOW_WRITER_VIA(module, ret, name, params, args, orig_##name args, writes, fmt, __VA_ARGS__)

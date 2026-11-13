@@ -91,6 +91,8 @@ int WIN_THIS win_update_nc_buffer(struct game_win *w, int what);
 struct game_win *win_get_mouse_window(int32_t *px, int32_t *py);
 void win_update_screen(const int32_t *rect, struct game_win *win);
 void WIN_THIS win_update_window(struct game_win *w, const int32_t *rect);
+void WIN_THIS win_update_back_to_window(struct game_win *w, struct game_buffer *dest);
+void WIN_THIS win_update_window_to_buffer(struct game_win *w, struct game_buffer *dest);
 void win_redraw(void);
 void win_update(void);
 
@@ -126,3 +128,13 @@ void win_OnLButtonDown(int hwnd, int dbl, int x, int y, int keys);
 void win_OnLButtonUp(int hwnd, int x, int y, int keys);
 void win_OnRButtonDown(int hwnd, int dbl, int x, int y, int keys);
 void win_OnRButtonUp(int hwnd, int x, int y, int keys);
+
+// The GraphicWin class (a Win with a Buffer of its own at 0x444, see win.c): showing what was drawn in it,
+// and drawing it into the back buffer.
+int WIN_THIS graphic_win_update(struct game_win *w, int x, int y, int cw, int ch, int unused);
+int WIN_THIS graphic_win_update_2(struct game_win *w, const int32_t *rect, int unused);
+int WIN_THIS graphic_win_update_3(struct game_win *w, int unused);
+int WIN_THIS graphic_win_soft_update(struct game_win *w, int x, int y, int cw, int ch);
+int WIN_THIS graphic_win_soft_update_2(struct game_win *w);
+int WIN_THIS graphic_win_soft_update_3(struct game_win *w, const int32_t *rect);
+void WIN_THIS graphic_win_on_paint(struct game_win *w, const int32_t *clip);

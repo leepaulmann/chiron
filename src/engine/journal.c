@@ -27,7 +27,9 @@
 #define STD __attribute__((stdcall))
 
 // What an argument is.
-enum { V, IN_RECT, OUT_POINT, OUT_RECT, INOUT_POINT };
+// IN_ENTRIES is a pointer to as many 4-byte colour entries (a PALETTEENTRY or an RGBQUAD) as the
+// third argument says (at most 256); the call is compared by a hash of them.
+enum { V, IN_RECT, OUT_POINT, OUT_RECT, INOUT_POINT, IN_ENTRIES };
 
 struct import {
     const char *name;
@@ -62,6 +64,8 @@ static struct import imports[] = {
     {"MessageBeep", 0x6692ec, 1, {V}},
     {"timeKillEvent", 0x669380, 1, {V}},
     {"timeSetEvent", 0x669384, 5, {V, V, V, V, V}},
+    {"SetDIBColorTable", 0x6690b4, 4, {V, V, V, IN_ENTRIES}},
+    {"AnimatePalette", 0x6690a8, 4, {V, V, V, IN_ENTRIES}},
 };
 enum { N_IMPORTS = sizeof imports / sizeof imports[0] };
 
@@ -80,7 +84,15 @@ static uint32_t call_real(const struct import *im, const uint32_t *a) {
     }
 }
 
-static size_t data_size(int kind) { return kind == IN_RECT || kind == OUT_RECT ? 16 : kind == V ? 0 : 8; }
+static size_t data_size(int kind) { return kind == IN_RECT || kind == OUT_RECT ? 16 : kind == V ? 0 : kind == IN_ENTRIES ? 4 : 8; }
+
+// A hash of the entries an IN_ENTRIES argument points to (n of them, as the call's third argument says).
+static uint32_t entries_hash(const uint32_t *a, int i) {
+    const uint8_t *p = (const uint8_t *)(uintptr_t)a[i];
+    uint32_t n = a[2] > 256 ? 256 : a[2], h = 2166136261u;
+    for (uint32_t k = 0; k < n * 4; k++) h = (h ^ p[k]) * 16777619u;
+    return h;
+}
 
 // A recorded call: arguments, the data in-pointers pointed to (before) and out-pointers
 // were given (after), and the result.
@@ -117,6 +129,7 @@ static uint32_t journal_call(int fn, uint32_t *a) {
                 e->arg[i] = a[i];
                 int k = im->kind[i];
                 if ((k == IN_RECT || k == INOUT_POINT) && a[i]) memcpy(e->in[i], (void *)(uintptr_t)a[i], data_size(k));
+                if (k == IN_ENTRIES && a[i]) *(uint32_t *)e->in[i] = entries_hash(a, i);
             }
         }
         n_log++;
@@ -148,6 +161,7 @@ static uint32_t journal_call(int fn, uint32_t *a) {
         else if (!e->arg[i] != !a[i]) same = 0;  // pointers: whether given, and what they hold
         else if ((k == IN_RECT || k == INOUT_POINT) && a[i])
             same = !memcmp(e->in[i], (void *)(uintptr_t)a[i], data_size(k));
+        else if (k == IN_ENTRIES && a[i]) same = *(uint32_t *)e->in[i] == entries_hash(a, i);
     }
     if (!same) {
         char d[100], o[100];
@@ -186,12 +200,12 @@ static uint32_t journal_call(int fn, uint32_t *a) {
         return journal_call(i, (uint32_t[]){a, b, c, d, e, f});                                            \
     }
 W2(0) W1(1) W1(2) W2(3) W2(4) W2(5) W2(6) W0(7) W2(8) W4(9) W3(10) W2(11) W4(12) W2(13) W6(14) W1(15) W1(16) W1(17) W0(18)
-    W2(19) W4(20) W1(21) W1(22) W5(23)
+    W2(19) W4(20) W1(21) W1(22) W5(23) W4(24) W4(25)
 static void *const wrappers[N_IMPORTS] = {
     (void *)wrap_0,  (void *)wrap_1,  (void *)wrap_2,  (void *)wrap_3,  (void *)wrap_4,  (void *)wrap_5,  (void *)wrap_6,
     (void *)wrap_7,  (void *)wrap_8,  (void *)wrap_9,  (void *)wrap_10, (void *)wrap_11, (void *)wrap_12, (void *)wrap_13,
     (void *)wrap_14, (void *)wrap_15, (void *)wrap_16, (void *)wrap_17, (void *)wrap_18, (void *)wrap_19, (void *)wrap_20,
-    (void *)wrap_21, (void *)wrap_22, (void *)wrap_23};
+    (void *)wrap_21, (void *)wrap_22, (void *)wrap_23, (void *)wrap_24, (void *)wrap_25};
 _Static_assert(sizeof wrappers / sizeof wrappers[0] == N_IMPORTS, "a wrapper for each import");
 
 void journal_install(struct pe_image *exe) {
