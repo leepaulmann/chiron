@@ -33,14 +33,20 @@
 // them on scratch boxes, groups and parents in static memory whose vtables log the calls. The text
 // measuring needs a Font: the sweep makes one of its own as text.c's does, and puts it in the
 // scratch boxes' Buffers.
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "bufobj.h"
+#include "buffer.h"
+#include "button.h"
+#include "drawcheck.h"
 #include "edit.h"
 #include "game.h"
 #include "hooks.h"
+#include "menu.h"
 #include "shadow.h"
 #include "strlist.h"
 #include "text.h"
@@ -438,6 +444,15 @@ void EDIT_THIS group_pass_dialog_focus(void *w) {
     win_pass_dialog_focus(win);
 }
 
+// Put a list's cursor on its last item (a seek to -1): the head, then one step back, if there is an item.
+static void list_seek_last(struct game_strlist *list) {
+    list->cur = list->head;
+    if (1 <= list->count) {
+        list->cur = list->cur->prev;
+        list->idx = list->count - 1;
+    }
+}
+
 // How big the group is: the Dialog's colours and fonts go to the Buffer, the labels' and the default texts'
 // widest widths are measured, and the Dialog's columns, rows and size follow. The Dialog's own fields are
 // at 0x20 (flags), 0x2c and 0x30 (the size asked for), 0x34, 0x40, 0x44 (spaces), 0x4c and 0x50 (the number
@@ -455,13 +470,7 @@ int EDIT_THIS group_calculate_dimensions(struct game_editgroup *g) {
     int rows = *d32(D, 0xcc);
     *d32(D, 0x58) = rows < *d32(D, 0x50) ? rows : *d32(D, 0x50);
     // The cursor to the last label (a seek to -1).
-    if (rows - 1 >= -1) {
-        list->cur = list->head;
-        if (1 <= list->count) {
-            for (int n = 1; n > 0; n--) list->cur = list->cur->prev;
-            list->idx = list->count - 1;
-        }
-    }
+    if (rows - 1 >= -1) list_seek_last(list);
     g->label_w = 0, g->edit_w = 0;
     for (int i = 0; i < *d32(D, 0xcc); i++) {
         struct game_strnode *head = list->head;
@@ -496,6 +505,103 @@ int EDIT_THIS group_calculate_dimensions(struct game_editgroup *g) {
     }
     *d32(D, 0x60) = *d32(D, 0x68) * *d32(D, 0x58) + *d32(D, 0x44);
     return 0;
+}
+
+// ---- Drawing -----------------------------------------------------------------------------------------------------------------
+
+// The Buffer's first text colour (the one its text is drawn in until a mode is chosen), at 0x53c.
+static int32_t buf_text_color(const struct game_buffer *b) { return *(const int32_t *)((const uint8_t *)b + 0x53c); }
+
+// An EditBox draws into its own Buffer: the clip is set to the whole surface and what lies behind is filled (the
+// colour `color`), then the frame (`border_w` lines in the two colours, each inside the last), then, with the
+// frame taken off again (less `pad` on the sides), the caret if it is showing (a vertical line the height of a line
+// in the Buffer's text colour, at the width of the text up to the caret), the text clipped to that rectangle, and the
+// selection: the width of the selected text is worked out and its rectangle is recoloured in three steps, text colour
+// to a temporary colour (the selection's background plus one), the text's colour to the selected text's colour, and
+// the temporary to the background, so the glyph pixels and the background change colours without mixing. The
+// selection's background is the Buffer's text colour when it is -1, and the selected text's colour is `color`
+// when that is -1. A masked box measures and draws asterisks from the start of its text whatever `first` is (as
+// the width questions do). A selection that starts left of `first` starts at `first` but keeps its whole length
+// for the width, which makes it too wide.
+void EDIT_THIS edit_on_redraw(struct game_editbox *e) {
+    char masked[0x100];
+    int mk = e->flags & 2;
+    if (mk) mask(e, masked);
+    struct game_buffer *buf = &e->buf;
+    buffer_set_clip(buf, buf->full);
+    graphic_win_fill(&e->win, e->color);
+    int32_t r[4] = {buf->full[0], buf->full[1], buf->full[2], buf->full[3]};
+    for (int i = 0; i < e->border_w; i++) {
+        buffer_box_rect(buf, r, e->border_a, e->border_b);
+        r[0]++, r[1]++, r[2]--, r[3]--;
+    }
+    int adj = e->border_w - e->pad;
+    r[0] -= adj, r[2] += adj, r[1] -= e->border_w, r[3] += e->border_w;
+    int lh = buffer_text_line_height(buf);
+    int top = -(lh + buf->neg_height) >> 1;
+    if (e->blink) {
+        int w = mk ? buffer_text_width_2(buf, masked, e->caret - e->first)
+                   : buffer_text_width_2(buf, e->text + e->first, e->caret - e->first);
+        int x = w + e->pad;
+        buffer_vline(buf, x, top, buffer_text_line_height(buf) + top, buf_text_color(buf));
+    }
+    buffer_set_clip(buf, r);
+    const char *shown = mk ? masked : e->text + e->first;
+    buffer_write_l_4(buf, shown, r, (int)strlen(shown));
+    if (e->anchor == e->caret) return;
+    int x, selw;
+    if (e->anchor > e->caret) {
+        int w = mk ? buffer_text_width_2(buf, masked, e->caret - e->first)
+                   : buffer_text_width_2(buf, e->text + e->first, e->caret - e->first);
+        x = w + e->pad;
+        selw = buffer_text_width_2(buf, mk ? masked : e->text + e->caret, e->anchor - e->caret);
+    } else {
+        int lo = e->anchor > e->first ? e->anchor : e->first;
+        int w = mk ? buffer_text_width_2(buf, masked, lo - e->first) : buffer_text_width_2(buf, e->text + e->first, lo - e->first);
+        x = w + e->pad;
+        selw = buffer_text_width_2(buf, mk ? masked : e->text + lo, e->caret - e->anchor);
+    }
+    int32_t back = e->sel_back != -1 ? e->sel_back : buf_text_color(buf);
+    int32_t fore = e->sel_text != -1 ? e->sel_text : e->color;
+    buffer_change_color_3(buf, x, top, selw, buffer_text_line_height(buf), e->color, back + 1);
+    buffer_change_color_3(buf, x, top, selw, buffer_text_line_height(buf), buf_text_color(buf), fore);
+    buffer_change_color_3(buf, x, top, selw, buffer_text_line_height(buf), back + 1, back);
+}
+
+// An EditGroup draws what lies behind it, copied from its parent's Buffer at the place the Dialog keeps (0x24 and
+// 0x28), makes the parent the current window, then writes the labels: the Dialog's columns (0x54) of rows (0x58),
+// each cell `0x64` wide and `0x68` high, from the left margin (`0x34` and the space `0x40`) and half the Dialog's
+// space (`0x44`) down, the label list's cursor moving on a label at a time (from the last label, as the
+// dimensions' seek leaves it) and wrapping, so a group with fewer labels than cells shows them over again. Without
+// a parent nothing is done. A cursor that has no list head but a node (never so in the game) draws nothing; the
+// original would read a null item.
+void EDIT_THIS group_on_redraw(void *w) {
+    struct game_editgroup *g = group_of(w);
+    struct game_win *parent = group_win(g)->parent;
+    if (!parent) return;
+    *game_win_cur = parent;
+    uint8_t *D = group_dialog(g);
+    struct game_buffer *B = group_buffer(g);
+    struct game_strlist *list = (struct game_strlist *)(D + 0xbc);
+    buffer_copy_full(dc_win_buf(parent), B, *d32(D, 0x24), *d32(D, 0x28), 0, 0, B->width, -B->neg_height);
+    int x1 = *d32(D, 0x34) + *d32(D, 0x40);
+    int x2 = *d32(D, 0x64) + x1;
+    int y1 = *d32(D, 0x44) >> 1;
+    int y2 = *d32(D, 0x68) - *d32(D, 0x44) + y1;
+    if (list->count - 1 >= -1) list_seek_last(list);
+    for (int col = 0; col < *d32(D, 0x54); col++) {
+        int32_t r[4] = {x1 + *d32(D, 0x64) * col, y1, x2 + *d32(D, 0x64) * col, y2};
+        for (int row = 0; row < *d32(D, 0x58); row++) {
+            const char *label = NULL;
+            if (list->head) {
+                list->cur = list->cur->next;
+                if (++list->idx == list->count) list->idx = 0;
+            }
+            if (list->cur && list->head) label = *(const char **)((uint8_t *)list->cur->item + 4);
+            if (label) buffer_write_l_4(B, label, r, (int)strlen(label));
+            r[1] += *d32(D, 0x68), r[3] += *d32(D, 0x68);
+        }
+    }
 }
 
 // ---- Shadow checks ----------------------------------------------------------------------------------------------------
@@ -564,6 +670,22 @@ SHADOW_WRITER_T(EDIT, void, group_set_text_limits, (struct game_editgroup * g, i
      WRITES(group_dialog(g) + 0x54, 0x6c - 0x54), WRITES(group_dialog(g) + 0xc8, 0xd4 - 0xc8))
 SHADOW_WRITER_T(EDIT, int, group_calculate_dimensions, (struct game_editgroup * g), (g), DIM_WRITES(g), "%d", P(g))
 
+// Drawing: the Buffer's pixels and the text state, and for a group the window made current and the label cursor.
+// The box sets a clip region (a Windows object the check can't put back), so the game's calls run the original and
+// the sweep checks Chiron's code on twin boxes.
+SHADOW_DECLARE_T(void, edit_on_redraw, (struct game_editbox * e))
+static void THISCALL shadow_edit_on_redraw(struct game_editbox *e) {
+    if (!hooks_nested && !shadow_bypass()) {
+        stats_edit_on_redraw.calls++;
+        shadow_tick(EDIT);
+    }
+    orig_edit_on_redraw(e);
+}
+#define GROUP_DRAW_WRITES(g)                                                                              \
+    (dc_writes_pixels(&w_, group_buffer(g)), dc_writes_text_state(&w_, group_buffer(g)), WRITES(game_win_cur, 4), \
+     WRITES(group_dialog(g) + 0xc8, 0xd4 - 0xc8))
+DRAW_CHECKED(EDIT, group_on_redraw, (void *w), (w), dc_win_dd(group_win(group_of(w))), GROUP_DRAW_WRITES(group_of(w)), "%d", P(w))
+
 // The handlers that call another window's handler: the game's calls run the original, are counted (to start
 // the sweep), and the sweep checks them on scratch objects.
 #define SWEEP_ONLY(ret, name, params, args, writes, fmt, ...)             \
@@ -619,6 +741,8 @@ static void vrec(int slot, const void *o, int a) {
 static int THISCALL stub_0x10(void *o) { return vrec(0x10, o, 0), 0x11; }
 static int THISCALL stub_0xcc(void *o, int a) { return vrec(0xcc, o, a), 0xcd; }
 static int THISCALL stub_0xf8(void *o) { return vrec(0xf8, o, 0), 0xf9; }
+static int parent_copy_answer;  // what a scratch parent answers to the window fill's question (slot 0xf4)
+static int THISCALL stub_0xf4(void *o) { return vrec(0xf4, o, 0), parent_copy_answer; }
 static int THISCALL stub_0x100(void *o) { return vrec(0x100, o, 0), 0x101; }
 static void *stub_vt[0x180 / 4];
 // Each multimedia timer the original's run starts is a thread with an LDT entry of its own, which the loader never gives back,
@@ -836,6 +960,144 @@ static void sweep_groups(void) {
     }
 }
 
+// ---- Drawing sweep -------------------------------------------------------------------------------------------------------------
+
+// Parents with Buffers of their own (pixels from noise), for what the window fill copies from, and the real Buffer
+// (a DIB, with the sweep's Font) the boxes and groups draw into.
+enum { PW = 100, PH = 30 };
+struct dparent {
+    struct game_win win;
+    struct game_buffer buf;
+    uint8_t pix[PW * PH + 16];
+};
+static struct dparent DP[2];
+static uint8_t tint[256];
+
+static void noise(uint8_t *p, int n) {
+    for (int i = 0; i < n; i++) p[i] = (uint8_t)rnd_to(8);
+}
+static void random_rect(int32_t *r) {
+    r[0] = rnd_to(20) - 5, r[1] = rnd_to(20) - 5, r[2] = r[0] + rnd_to(30), r[3] = r[1] + rnd_to(30);
+}
+static void build_parents(void) {
+    for (int i = 0; i < 2; i++) {
+        struct dparent *p = &DP[i];
+        memset(p, 0, sizeof *p);
+        p->win.vtable = stub_vt;
+        noise(p->pix, sizeof p->pix);
+        p->buf.bits = p->pix, p->buf.width = PW, p->buf.neg_height = -PH, p->buf.pitch = PW;
+        p->buf.full[2] = PW, p->buf.full[3] = PH, p->buf.clip[2] = PW, p->buf.clip[3] = PH;
+    }
+}
+// A colour from the few the Buffer's pixels hold, so a recolouring is seen.
+static int small_color(void) { return rnd_to(8); }
+
+// Twin boxes, with Buffers of their own (DIBs made by the game's code and given the sweep's Font): the original
+// draws on one and Chiron's code on the other, from the same state, and the Buffers (fields, device context state
+// and pixels), the box and what was asked of the parent are compared. After a difference the twins are made again.
+static struct game_editbox TA, TB;
+static int twins_made;
+static void make_twins(void) {
+    for (int i = 0; i < 2; i++) {
+        struct game_editbox *t = i ? &TB : &TA;
+        if (twins_made) game_buffer_dtor(&t->buf);
+        memset(t, 0, sizeof *t);
+        game_buffer_ctor(&t->buf);
+        game_buffer_init(&t->buf, PW, 24, 0, 0);
+        buffer_set_font(&t->buf, &mine, &mine, &mine, &mine);
+    }
+    twins_made = 1;
+}
+static void twin_redraw(struct game_editbox *a, struct game_editbox *b) {
+    // The same pixels and the same box in both.
+    for (int i = 0; i < a->buf.pitch * -a->buf.neg_height; i++) a->buf.bits[i] = b->buf.bits[i] = (uint8_t)rnd_to(8);
+    struct game_buffer ka = a->buf, kb = b->buf;
+    memcpy(b, a, sizeof *b);
+    b->buf = kb, a->buf = ka;
+    uint32_t h0 = vlog.hash;
+    int32_t n0 = vlog.n;
+    hooks_nested++;
+    orig_edit_on_redraw(a);
+    hooks_nested--;
+    uint32_t h1 = vlog.hash;
+    int32_t n1 = vlog.n;
+    vlog.hash = h0, vlog.n = n0;
+    edit_on_redraw(b);
+    const char *d = NULL;
+    if (vlog.hash != h1 || vlog.n != n1) d = "calls to the parent";
+    if (!d) d = buffer_twin_diff(&a->buf, &b->buf, 0, 0);
+    if (!d) d = buffer_pixels_diff(&a->buf, &b->buf);
+    if (!d && memcmp(a, b, offsetof(struct game_editbox, buf))) d = "the box";
+    if (!d && memcmp(&a->text, &b->text, sizeof *a - offsetof(struct game_editbox, text))) d = "the box's fields";
+    if (d) {
+        hooks_mismatch(&stats_edit_on_redraw, " (%s)", d);
+        make_twins();
+    }
+}
+
+static void sweep_draw(struct game_buffer *real) {
+    const uint8_t *saved_tint = *game_win_tint;
+    struct game_win *saved_cur = *game_win_cur;
+    for (int round = 0; round < 16; round++) {
+        build_parents();
+        for (int i = 0; i < 256; i++) tint[i] = (uint8_t)rnd_to(8);
+        *game_win_tint = rnd_to(2) ? tint : NULL;
+        buffer_set_text_color(real, small_color(), small_color(), small_color(), small_color());
+        noise(real->bits, (int)(real->pitch * -real->neg_height));
+        for (int k = 0; k < 12; k++) {
+            struct game_editbox *e = &TA;
+            struct game_buffer keep = e->buf;
+            build_box(e);
+            e->buf = keep;
+            buffer_set_text_color(&TA.buf, small_color(), small_color(), small_color(), small_color());
+            buffer_set_text_color(&TB.buf, *(int32_t *)((uint8_t *)&TA.buf + 0x53c), *(int32_t *)((uint8_t *)&TA.buf + 0x54c),
+                                  *(int32_t *)((uint8_t *)&TA.buf + 0x55c), *(int32_t *)((uint8_t *)&TA.buf + 0x56c));
+            e->win.parent = rnd_to(6) ? &DP[rnd_to(2)].win : NULL;
+            e->win.flags = rnd_to(2) ? 0x80000 : 0;
+            random_rect(e->win.inner), random_rect(e->win.outer);
+            parent_copy_answer = rnd_to(4) != 0;
+            e->color = small_color();
+            e->sel_text = rnd_to(3) ? small_color() : -1, e->sel_back = rnd_to(3) ? small_color() : -1;
+            e->border_a = small_color(), e->border_b = small_color(), e->border_w = rnd_to(4);
+            e->pad = rnd_to(8), e->blink = rnd_to(2);
+            int len = (int)strlen(e->text);
+            // The caret and selection around `first`, as typing leaves them, and any other way too.
+            e->caret = rnd_to(len + 1);
+            e->first = rnd_to(2) ? 0 : rnd_to(e->caret + 1);  // (never past the caret, as the game keeps it)
+            e->anchor = rnd_to(3) == 0 ? e->caret : rnd_to(len + 1);
+            for (int v = 0; v < 4; v++) {
+                twin_redraw(&TA, &TB);
+                e->flags ^= rnd_to(2) ? 2 : 0;
+                e->blink = !e->blink;
+                e->anchor = rnd_to(2) ? e->caret : rnd_to(len + 1);
+                if (rnd_to(2)) e->win.flags ^= 0x80000;
+                e->border_w = rnd_to(4), e->pad = rnd_to(8);
+                e->caret = rnd_to(len + 1), e->first = rnd_to(2) ? 0 : rnd_to(e->caret + 1);
+                e->color = small_color();
+            }
+        }
+        for (int k = 0; k < NG; k++) {
+            for (int j = 0; j < 3; j++) {
+                build_group(k);
+                struct game_editgroup *g = (struct game_editgroup *)S.group[k];
+                struct game_win *win = group_win(g);
+                uint8_t *D = group_dialog(g);
+                win->parent = rnd_to(6) ? &DP[rnd_to(2)].win : NULL;
+                memcpy(group_buffer(g), real, sizeof *real);
+                *d32(D, 0x24) = rnd_to(40), *d32(D, 0x28) = rnd_to(40);
+                *d32(D, 0x34) = rnd_to(8), *d32(D, 0x40) = rnd_to(5), *d32(D, 0x44) = rnd_to(8);
+                *d32(D, 0x54) = rnd_to(4), *d32(D, 0x58) = rnd_to(5);
+                *d32(D, 0x64) = 10 + rnd_to(40), *d32(D, 0x68) = 8 + rnd_to(14);
+                check_group_on_redraw(win);
+                *d32(D, 0x58) = 1 + rnd_to(6);
+                check_group_on_redraw(win);
+            }
+        }
+    }
+    *game_win_tint = saved_tint;
+    *game_win_cur = saved_cur;
+}
+
 static void edit_sweep(void) {
     if (!*game_win_hwnd) return;
     // The sweep needs the game's fonts (as text.c's sweep does): the game hasn't set them up yet before its first screen.
@@ -847,8 +1109,16 @@ static void edit_sweep(void) {
     rng_state = 0x4e5a91c3u ^ (uint32_t)*game_turn * 2654435761u;
     mm_budget = 1;
     if (!rng_state) rng_state = 1;
+    // A Buffer with pixels of its own and the sweep's Font, made outside any check and kept.
+    static struct game_buffer real;
+    static int real_made;
+    if (!real_made) {
+        game_buffer_ctor(&real);
+        game_buffer_init(&real, PW, 24, 0, 0);
+        if (real.bits) buffer_set_font(&real, &mine, &mine, &mine, &mine), real_made = 1, make_twins();
+    }
     stub_vt[0x10 / 4] = (void *)stub_0x10, stub_vt[0xcc / 4] = (void *)stub_0xcc, stub_vt[0xf8 / 4] = (void *)stub_0xf8;
-    stub_vt[0x100 / 4] = (void *)stub_0x100;
+    stub_vt[0x100 / 4] = (void *)stub_0x100, stub_vt[0xf4 / 4] = (void *)stub_0xf4;
     struct game_win *press[2] = {game_edit_press[0], game_edit_press[1]};
     struct game_win *prev = *game_win_prev_focus;
     memset(&S, 0, sizeof S);
@@ -857,6 +1127,8 @@ static void edit_sweep(void) {
         sweep_boxes();
         sweep_groups();
     }
+    if (real_made) sweep_draw(&real);
+    menu_draw_sweep();
     memset(&S, 0, sizeof S);  // (a timer message that arrives later finds nothing to do)
     game_edit_press[0] = press[0], game_edit_press[1] = press[1];
     *game_win_prev_focus = prev;
@@ -888,6 +1160,8 @@ static const struct hook edit_hooks[] = {
     HOOK(0x6120b0, group_set_text_limits, 0x8b, 0x44, 0x24, 0x04, 0x57, 0x8d, 0x79, 0x54),
     HOOK(0x612150, group_calculate_dimensions, 0x55, 0x56, 0x8b, 0xf1, 0x33, 0xed, 0x8b, 0x0e),
     HOOK(0x612670, group_on_dialog_focus, 0x8b, 0x44, 0x24, 0x04, 0x85, 0xc0),
+    HOOK(0x615270, edit_on_redraw, 0x81, 0xec, 0x20, 0x01, 0x00, 0x00, 0x53, 0x55, 0x56, 0x8b, 0xf1),
+    HOOK(0x612450, group_on_redraw, 0x83, 0xec, 0x2c, 0x53, 0x55, 0x56, 0x8b, 0xf1),
     HOOK(0x6126c0, group_pass_dialog_focus, 0x8b, 0x81, 0x74, 0xff, 0xff, 0xff, 0x8b, 0x50, 0x04),
 };
 struct hook_module edit_module = {"edit", edit_hooks, HOOK_COUNT(edit_hooks), edit_sweep, NULL, -1};

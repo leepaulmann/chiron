@@ -30,3 +30,7 @@ void EDIT_THIS group_set_text_limits(struct game_editgroup *g, int n);
 int EDIT_THIS group_calculate_dimensions(struct game_editgroup *g);
 void EDIT_THIS group_on_dialog_focus(void *w, int focus);
 void EDIT_THIS group_pass_dialog_focus(void *w);
+
+// Drawing (the boxes' and the group's slot 0xf8).
+void EDIT_THIS edit_on_redraw(struct game_editbox *e);
+void EDIT_THIS group_on_redraw(void *w);

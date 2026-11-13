@@ -90,6 +90,153 @@ static struct game_pulldown PD2;
 static int proc_arg;
 static void proc_fn(int id) { proc_arg = id; }
 
+
+// ---- Drawing ----
+#define STD __attribute__((stdcall))
+static struct {
+    int x, y;
+    char s[24];
+} outs[32];
+static int nouts;
+static int STD s_bk_mode(void *dc, int mode) { return 0; }
+static uint32_t STD s_text_color(void *dc, uint32_t c) { return 0; }
+static int STD s_text_out(void *dc, int x, int y, const char *s, int n) {
+    if (nouts < 32) outs[nouts].x = x, outs[nouts].y = y, snprintf(outs[nouts].s, sizeof outs[nouts].s, "%.*s", n, s);
+    return nouts++, 1;
+}
+static struct {
+    int count;
+    int32_t rect[4];
+    int color;
+} fills;
+static void THIS s_fill_rect(void *win, const int32_t *r, int color) {
+    fills.count++, memcpy(fills.rect, r, 16), fills.color = color;
+}
+enum { DW = 72, DH = 60 };
+static uint8_t pix[DW * DH + 256];
+static void hand_buffer(struct game_buffer *b, uint8_t *p, struct font *f) {
+    memset(b, 0, sizeof *b);
+    b->bits = p, b->width = DW, b->neg_height = -DH, b->pitch = DW;
+    b->full[2] = DW, b->full[3] = DH, b->clip[2] = DW, b->clip[3] = DH;
+    *(int32_t *)((uint8_t *)b + 0x64) = 1, *(int32_t *)((uint8_t *)b + 0x60) = 1;
+    *(struct font **)((uint8_t *)b + 0x52c) = f;
+    *(int32_t *)((uint8_t *)b + 0x53c) = 5;  // the text colour
+}
+static const uint8_t *tint_ptr;
+static int32_t style[7] = {3, 7, 8, 9, 4, 3, 1}, menu_colors[3] = {20, 21, 22}, menu_colors2[2] = {23, 24};
+static void *pd_hooks[4] = {NULL, NULL, (void *)12, (void *)6};
+static uint8_t sdata[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+static struct game_sprite check_spr = {.data = sdata, .key = 0, .stride = 2, .width = 2, .height = 2, .full_w = 3, .full_h = 3};
+static struct game_sprite *check_ptr = &check_spr;
+static char gap2[] = "ab";
+static struct game_sprite_scratch scratch_;
+static int32_t scale[4] = {1, 1, 0, 0}, min_size_[2];
+static float ratio_;
+static double max_ratio_ = 4.0;
+
+static int hook_log[8], hook_log_n;
+static void __attribute__((cdecl)) item_hook(struct game_pulldown *p, int sel, int32_t *r) {
+    if (hook_log_n < 8) hook_log[hook_log_n++] = sel;
+}
+static void __attribute__((cdecl)) frame_hook(struct game_pulldown *p) {
+    if (hook_log_n < 8) hook_log[hook_log_n++] = -1;
+}
+
+static void draw_tests(void) {
+    static int32_t cr, fg, mu, mga, mgb;
+    game_copy_rem = &cr, game_fill_gap = &fg, game_mask_units = &mu, game_mask_gap_a = &mga, game_mask_gap_b = &mgb;
+    game_sprite_scale = scale, game_sprite_ratio = &ratio_, game_sprite_max_ratio = &max_ratio_, game_sprite_min_size = min_size_;
+    game_sprite_scratch = &scratch_;
+    game_set_bk_mode = s_bk_mode, game_set_text_color = s_text_color, game_text_out = s_text_out;
+    game_win_tint = &tint_ptr, game_graphic_win_fill_rect = s_fill_rect;
+    static struct game_win *cur_win;
+    game_win_cur = &cur_win;
+    game_pd_style = style, game_pd_margin = &style[6], game_pd_hooks = pd_hooks, game_pd_check = &check_ptr;
+    game_menu_colors = menu_colors, game_menu_colors2 = menu_colors2, game_menu_gap = gap2;
+    *game_pd_font = &fnt_pd, *game_menu_font = &fnt_menu;
+    // A PullDown: the fill and a one-line frame, then the lines (from 3 + 1 in and 1 down, 13 high): "Open" with its key
+    // and a hotkey, selected (the window's fill of the rectangle from edge to edge, in the selected background); a
+    // separator (two lines); a checked "Quit" (the mark, the text moved by its width); a hidden line.
+    reset_pd();
+    hand_buffer(&PD.buf, pix, &fnt_pd);
+    static char open_t[] = "Open", key_t[] = "Ctrl+O", quit_t[] = "Quit";
+    line(0, 1, 1, open_t, key_t), line(1, 2, 5, NULL, NULL), line(2, 3, 9, quit_t, NULL), line(3, 4, 0, quit_t, NULL);
+    PD.items[0].hotkey = open_t + 1;
+    PD.count = 4, PD.sel = 0;
+    memset(pix, 1, sizeof pix);
+    nouts = 0, fills.count = 0;
+    pulldown_on_redraw(&PD);
+    EXPECT(PD.ff38, 0);
+    EXPECT(pix[30 * DW + 30], 7), EXPECT(pix[0] == 3 || pix[0] == 4, 1), EXPECT(pix[(DH - 1) * DW + 30] == 3 || pix[(DH - 1) * DW + 30] == 4, 1);
+    EXPECT(fills.count, 1), EXPECT(fills.rect[0], 1), EXPECT(fills.rect[1], 1), EXPECT(fills.rect[2], 71), EXPECT(fills.rect[3], 14);
+    EXPECT(fills.color, 12);
+    EXPECT(pix[20 * DW + 30], 3), EXPECT(pix[21 * DW + 30], 4), EXPECT(pix[20 * DW + 2], 3);  // (the separator)
+    EXPECT(pix[14 * DW + 10], 8), EXPECT(pix[14 * DW + 15], 8), EXPECT(pix[14 * DW + 17], 7), EXPECT(pix[14 * DW + 9], 7);  // (the hotkey's underline)
+    int open_i = -1, quit_i = -1, key_i = -1;
+    for (int i = 0; i < nouts && i < 32; i++) {
+        if (!strcmp(outs[i].s, "Open") && open_i < 0) open_i = i;
+        if (!strcmp(outs[i].s, "Quit") && quit_i < 0) quit_i = i;
+        if (!strcmp(outs[i].s, "Ctrl+O") && key_i < 0) key_i = i;
+    }
+    EXPECT(open_i >= 0 && quit_i >= 0 && key_i >= 0, 1);
+    EXPECT(outs[open_i].x, 4), EXPECT(outs[open_i].y, 13), EXPECT(outs[quit_i].x, 4 + 3), EXPECT(outs[quit_i].y, 13 + 26 + 13 - 13);
+    EXPECT(outs[key_i].x, 68 - 36);
+    // The mark (data 1 at the first pixel): at the text's left, centred in the line.
+    EXPECT(pix[32 * DW + 4], sdata[0]);
+    // Without a font nothing is drawn; a Buffer with none refuses it.
+    *game_pd_font = NULL;
+    default_font_slot = &fnt_default;
+    memset(pix, 1, sizeof pix);
+    fnt_default.hfont = NULL;
+    pulldown_on_redraw(&PD);
+    EXPECT(*game_pd_font == &fnt_default, 1);
+    fnt_default.hfont = (void *)0x11;
+    *game_pd_font = &fnt_pd;
+    // The function that draws the frame takes over the fill and frame; the one that draws a line is told 1 or 0 and
+    // the rectangle, and the fill of the selected line is left to it.
+    pd_hooks[0] = (void *)item_hook, pd_hooks[1] = (void *)frame_hook;
+    memset(pix, 1, sizeof pix);
+    hook_log_n = 0, fills.count = 0;
+    pulldown_on_redraw(&PD);
+    EXPECT(PD.ff38 != 0 && PD.ff3c != 0, 1), EXPECT(pix[30 * DW + 30], 1), EXPECT(fills.count, 0);
+    EXPECT(hook_log_n, 3), EXPECT(hook_log[0], -1), EXPECT(hook_log[1], 1), EXPECT(hook_log[2], 0);  // (the frame, then the lines: the selected and the checked)
+    pd_hooks[0] = pd_hooks[1] = NULL;
+
+    // A Menu: the fill, then the titles in a row from the gap string's width in ("ab" is 12), the open one on its
+    // background, the greyed one in the greyed colour, and the right one against the right edge.
+    reset_menu();
+    hand_buffer(&M.buf, pix, &fnt_menu);
+    static char file_t[] = "File", edit_t[] = "Edit", help_t[] = "Help";
+    static struct game_spot_rect rects[3];
+    rects[1].rect[0] = 30;
+    M.spots.rects = rects, M.spots.cap = 3, M.spots.count = 3;
+    M.count = 3, M.open = 1;
+    M.entries[0].flags = 1, M.entries[0].text = file_t, M.entries[0].hotkey = file_t;
+    M.entries[1].flags = 3, M.entries[1].text = edit_t;
+    M.entries[2].flags = 5, M.entries[2].text = help_t;
+    memset(pix, 1, sizeof pix);
+    nouts = 0;
+    menu_on_redraw(&M);
+    EXPECT(pix[2 * DW + 2], 20), EXPECT(pix[0], 20);
+    EXPECT(pix[5 * DW + 18], 23), EXPECT(pix[5 * DW + 41], 23), EXPECT(pix[5 * DW + 17], 20), EXPECT(pix[5 * DW + 42], 20);  // (the open title: 18 to 42)
+    int f = -1, e = -1, h = -1;
+    for (int i = 0; i < nouts && i < 32; i++) {
+        if (!strcmp(outs[i].s, "File") && f < 0) f = i;
+        if (!strcmp(outs[i].s, "Edit") && e < 0) e = i;
+        if (!strcmp(outs[i].s, "Help") && h < 0) h = i;
+    }
+    EXPECT(f >= 0 && e >= 0 && h >= 0, 1);
+    EXPECT(outs[f].x, 12), EXPECT(outs[e].x, 12 + 24), EXPECT(outs[h].x, 72 - 12 - 24);
+    // The hotkey of "File" (its first letter, 6 wide) is underlined from the title's left, in the Buffer's text colour.
+    EXPECT(pix[(DH - (DH - 12) / 2) * DW + 12], 24), EXPECT(pix[(DH - (DH - 12) / 2) * DW + 17], 24), EXPECT(pix[(DH - (DH - 12) / 2) * DW + 11], 20);
+    // Without a font of its own the default one is taken; with none at all nothing is drawn.
+    *game_menu_font = NULL, default_font_slot = NULL;
+    memset(pix, 1, sizeof pix);
+    menu_on_redraw(&M);
+    EXPECT(pix[0], 1), EXPECT(*game_menu_font == NULL, 1);
+    default_font_slot = &fnt_default, *game_menu_font = &fnt_menu;
+}
+
 int main(void) {
     vt[0x8 / 4] = (void *)s_0x8, vt[0xc / 4] = (void *)s_0xc, vt[0x50 / 4] = (void *)s_0x50, vt[0x54 / 4] = (void *)s_0x54;
     vt[0xf8 / 4] = (void *)s_0xf8, vt[0x170 / 4] = (void *)s_0x170;
@@ -343,6 +490,8 @@ int main(void) {
     *game_menu_font = NULL, default_font_slot = NULL, ncalls = 0;
     menu_adjust(&M);
     EXPECT(ncalls, 0), EXPECT(*game_menu_font == NULL, 1);
+
+    draw_tests();
 
     if (failures) printf("%d failures\n", failures);
     else printf("ok\n");

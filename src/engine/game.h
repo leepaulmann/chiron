@@ -2772,6 +2772,17 @@ GAME_AT(struct game_menu, entries, 0xa38);
 extern void **game_pd_font, **game_menu_font;
 extern int32_t *game_pd_margin;
 extern const char *game_pd_gap;  // (the strings are 4 bytes apart)
+// What a PullDown is drawn with: seven numbers from 0x696e04 (the left space of a line's text, the fill colour, the
+// text colours of the selected line and of a greyed one, the frame's two colours and the margin, which is
+// game_pd_margin); four from 0x9b7b58 (the two functions that can take over the drawing, cdecl, then the selected
+// line's background and the text colour); and the sprite of a checked line's mark. A Menu's: the fill, the title and
+// greyed title text colours (0x696e30), the open title's background and the title text colour (0x9b7b8c), and the
+// string whose width is the space round the titles (0x696e5c).
+extern int32_t *game_pd_style;
+extern void **game_pd_hooks;
+extern struct game_sprite **game_pd_check;
+extern int32_t *game_menu_colors, *game_menu_colors2;
+extern const char *game_menu_gap;
 
 // ---- The Dialog, SpriteBox and BasePop (popup) classes (dialog.c) ----
 // A node of the list a Dialog or a SpriteBox keeps (the game's StringStruct class): the key (the id)

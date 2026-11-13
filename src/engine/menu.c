@@ -46,9 +46,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "buffer.h"
+#include "button.h"
+#include "drawcheck.h"
+#include "bufobj.h"
 #include "game.h"
 #include "hooks.h"
 #include "menu.h"
+#include "sprite.h"
 #include "shadow.h"
 #include "text.h"
 #include "win.h"
@@ -471,6 +476,149 @@ void MENU_THIS menu_adjust(struct game_menu *m) {
 }
 void MENU_THIS menu_on_adjust_pulldown_pos(struct game_menu *m, int a, int b) { (void)m, (void)a, (void)b; }
 
+// ---- Drawing -------------------------------------------------------------------------------------------------
+
+// The Buffer's first text colour, at 0x53c: the colour a hotkey's underline is drawn in.
+static int32_t buf_text_color(const struct game_buffer *b) { return *(const int32_t *)((const uint8_t *)b + 0x53c); }
+
+// A PullDown draws into its own Buffer in the Font all PullDowns share (the game's default one, taken the first time
+// it is wanted; a Buffer that refuses the Font gets nothing). The two functions in game_pd_hooks[0] and [1] are
+// kept in the PullDown (ff38 and ff3c), and a function in [1] draws the whole background and frame itself, called
+// with the PullDown; without one the window's fill and a frame of `margin` lines go on the Buffer. The lines
+// begin at the margin from the top and `text space + margin` from the left. For each line that is shown, in turn:
+//  - a checked line (flags 8) has the check sprite put at its left, centred in the line's height, and the text moves
+//    right by the sprite's width until the line is done;
+//  - a separator (4) is two lines across the PullDown a line's half height down, one pixel apart, and nothing else;
+//  - any other line has its background drawn first if it is the selected one (the function in ff38, called with 1
+//    and the rectangle, or if there is none the window's rectangle fill, from edge to edge, in the selected
+//    background); the other lines call ff38 with 0. Then the text colour (selected or not, greyed or not), the text
+//    in the rectangle, the letter of the hotkey underlined (the hotkey points into the text), and the text after
+//    the '|' (the key) against the right edge.
+// Each line then moves the rectangle down by a line's height.
+void MENU_THIS pulldown_on_redraw(struct game_pulldown *pd) {
+    if (!*game_pd_font) *game_pd_font = *game_font_default;
+    struct game_buffer *buf = &pd->buf;
+    if (buffer_set_font(buf, (struct font *)*game_pd_font, NULL, NULL, NULL)) return;
+    const int32_t *st = game_pd_style;
+    int32_t r[4] = {buf->full[0], buf->full[1], buf->full[2], buf->full[3]};
+    void(__attribute__((cdecl)) * frame_hook)(struct game_pulldown *) = (void *)game_pd_hooks[1];
+    pd->ff38 = (int32_t)(intptr_t)game_pd_hooks[0];
+    pd->ff3c = (int32_t)(intptr_t)game_pd_hooks[1];
+    typedef void(__attribute__((cdecl)) * item_hook_t)(struct game_pulldown *, int, int32_t *);
+    if (frame_hook) {
+        frame_hook(pd);
+    } else {
+        graphic_win_fill(&pd->win, st[1]);
+        for (int i = 0; i < *game_pd_margin; i++) {
+            buffer_box_rect(buf, r, st[4], st[5]);
+            r[0]++, r[1]++, r[2]--, r[3]--;
+        }
+        int n = *game_pd_margin;
+        r[0] -= n, r[2] += n, r[1] -= n, r[3] += n;
+    }
+    int width = r[2] - r[0];
+    int lh = buffer_text_line_height(buf);
+    int m = *game_pd_margin;
+    r[0] = st[0] + m, r[1] = m, r[2] = width - (st[0] + m), r[3] = m + lh;
+    for (int i = 0; i < pd->count; i++) {
+        struct game_pd_item *it = &pd->items[i];
+        uint32_t flags = it->flags;
+        if (!(flags & 1)) continue;
+        int checked = flags & 8;
+        if (checked) {
+            struct game_sprite *spr = *game_pd_check;
+            int y = r[1] + ((r[3] - spr->full_h) - r[1]) / 2;
+            sprite_draw_2(spr, buf, spr->key, r[0], y, 1, 1);
+            r[0] += (*game_pd_check)->full_w;
+        }
+        if (flags & 4) {
+            int w = buf->width - 2 * *game_pd_margin;
+            int y = buffer_text_line_height(buf) / 2 + r[1];
+            buffer_hline(buf, *game_pd_margin, *game_pd_margin + w, y, st[5]);
+            y = buffer_text_line_height(buf) / 2 + r[1] + 1;
+            buffer_hline(buf, *game_pd_margin, *game_pd_margin + w, y, st[4]);
+        } else {
+            if (i == pd->sel) {
+                if (pd->ff38) {
+                    ((item_hook_t)(intptr_t)pd->ff38)(pd, 1, r);
+                } else {
+                    r[0] -= st[0], r[2] += st[0];
+                    game_graphic_win_fill_rect(&pd->win, r, (int)(intptr_t)game_pd_hooks[2]);
+                    r[0] += st[0], r[2] -= st[0];
+                }
+                buffer_set_text_color(buf, (flags & 2) ? st[1] : st[2], -1, 1, 1);
+            } else {
+                if (pd->ff38) ((item_hook_t)(intptr_t)pd->ff38)(pd, 0, r);
+                buffer_set_text_color(buf, (flags & 2) ? st[3] : (int)(intptr_t)game_pd_hooks[3], -1, 1, 1);
+            }
+            if (it->text) buffer_write_l_4(buf, it->text, r, (int)strlen(it->text));
+            if (it->hotkey) {
+                int32_t colour = buf_text_color(buf);
+                int f14 = ((struct font *)*game_pd_font)->f14;
+                int hw = buffer_text_width_2(buf, it->hotkey, 1);
+                int line = buffer_text_line_height(buf);
+                int y = r[3] - ((r[3] - r[1]) - line) / 2 - f14;
+                int x = buffer_text_width_2(buf, it->text, (int)(it->hotkey - it->text)) + r[0];
+                buffer_hline(buf, x, x + hw, y, colour);
+            }
+            if (it->tail) buffer_write_right_l_6(buf, it->tail, r, (int)strlen(it->tail));
+        }
+        if (checked) r[0] -= (*game_pd_check)->full_w;
+        int line = buffer_text_line_height(buf);
+        r[1] += line, r[3] += line;
+    }
+}
+
+// A Menu's bar: the fill, then the titles in a row from the space the gap string measures in from the left (and
+// out from the right), in the bar's Font (the game's default, kept, if it has none: with no font either nothing is
+// drawn). Each title that is shown has its width measured; the open one is drawn with its background (from the left
+// of its place, `tw` wide and the bar's height) and the titles' text colours (greyed or not, open or not). A
+// title with flag 4 is written against the right edge, which moves left by its width; the others from the left,
+// which moves right by it. A hotkey letter is underlined, `(height + font's 0x14 - text height) / 2` above the
+// bottom (a PullDown's underline is half the room above the text less the Font's 0x14 from the bottom: the two
+// are worked out differently).
+void MENU_THIS menu_on_redraw(struct game_menu *m) {
+    if (!*game_menu_font) {
+        *game_menu_font = *game_font_default;
+        if (!*game_menu_font) return;
+    }
+    graphic_win_fill(&m->win, game_menu_colors[0]);
+    struct game_buffer *buf = &m->buf;
+    int sp = buffer_text_width(buf, game_menu_gap);
+    int32_t r[4] = {buf->full[0] + sp, buf->full[1], buf->full[2] - sp, buf->full[3]};
+    buffer_set_font(buf, (struct font *)*game_menu_font, NULL, NULL, NULL);
+    for (int i = 0; i < m->count; i++) {
+        struct game_menu_entry *e = &m->entries[i];
+        if (!(e->flags & 1)) continue;
+        const char *text = e->text, *hotkey = e->hotkey;
+        int tw = buffer_text_width(buf, text);
+        if (i == m->open) {
+            buffer_set_text_color(buf, (e->flags & 2) ? game_menu_colors[0] : game_menu_colors[1], -1, 1, 1);
+            buffer_fill(buf, ((int32_t *)&m->spots.rects[m->open])[0] - sp, 0, tw, r[3] - r[1], game_menu_colors2[0]);
+        } else {
+            buffer_set_text_color(buf, (e->flags & 2) ? game_menu_colors[2] : game_menu_colors2[1], -1, 1, 1);
+        }
+        int right = e->flags & 4;
+        if (right) {
+            if (text) buffer_write_right_l_6(buf, text, r, (int)strlen(text));
+            r[2] -= tw;
+        } else if (text) {
+            buffer_write_l_4(buf, text, r, (int)strlen(text));
+        }
+        if (hotkey) {
+            int h = r[3] - r[1];
+            int32_t colour = buf_text_color(buf);
+            int f14 = ((struct font *)*game_menu_font)->f14;
+            int hw = buffer_text_width_2(buf, hotkey, 1);
+            int th = buffer_text_height(buf);
+            int y = r[3] - (h + f14 - th) / 2;
+            int x = buffer_text_width_2(buf, text, (int)(hotkey - text)) + (right ? r[2] : r[0]);
+            buffer_hline(buf, x, x + hw, y, colour);
+        }
+        if (!right) r[0] += tw;
+    }
+}
+
 // ---- Shadow checks -----------------------------------------------------------------------------
 
 #define P(p) ((int)(uintptr_t)(p))
@@ -601,6 +749,18 @@ SHADOW_WRITER_T(MENU, void, menu_on_adjust_pulldown_pos, (struct game_menu * m, 
                 "%d, %d, %d", P(m), a, b)
 SWEEP_ONLY(void, menu_adjust, (struct game_menu * m), (m), (writes_scratch(&w_), WRITES(game_menu_font, 4)), "%d", P(m))
 
+// ---- Checks of drawing -----------------------------------------------------------------------------------------
+//
+// Drawing changes the Buffer's object and pixels, the text state (globals and device contexts) and the Font a
+// class keeps. A PullDown whose functions (game_pd_hooks) are set runs the original in shadow mode: they are the game's
+// own and may do what they like.
+#define PD_DRAW_WRITES(p) \
+    (dc_writes_pixels(&w_, &(p)->buf), dc_writes_text_state(&w_, &(p)->buf), WRITES(&(p)->ff38, 8), WRITES(game_pd_font, 4), writes_vlog(&w_))
+DRAW_CHECKED(MENU, pulldown_on_redraw, (struct game_pulldown * p), (p), (dc_win_dd(&p->win) || game_pd_hooks[0] || game_pd_hooks[1]),
+             PD_DRAW_WRITES(p), "%d", P(p))
+DRAW_CHECKED(MENU, menu_on_redraw, (struct game_menu * m), (m), dc_win_dd(&m->win),
+             (dc_writes_pixels(&w_, &m->buf), dc_writes_text_state(&w_, &m->buf), WRITES(game_menu_font, 4), writes_vlog(&w_)), "%d", P(m))
+
 // ---- Sweep -------------------------------------------------------------------------------------
 //
 // Scratch lists, PullDowns and Menus in static memory (S), with a random state each round, and a
@@ -626,10 +786,13 @@ static void vrec(int slot, const void *o, int a, int b, int c) {
 #define STUB3(slot) \
     static int THISCALL stub_##slot(void *o, int a, int b, int c) { return vrec(slot, o, a, b, c), slot + 1; }
 STUB0(0x8) STUB3(0xc) STUB2(0x50) STUB2(0x54) STUB0(0xf8) STUB0(0x170)
+static int parent_copy_answer;  // what a scratch parent answers to the window fill's question (slot 0xf4)
+static int THISCALL stub_0xf4(void *o) { return vrec(0xf4, o, 0, 0, 0), parent_copy_answer; }
 static void *stub_vt[0x180 / 4];
 static void fill_stub_vt(void) {
     stub_vt[0x8 / 4] = (void *)stub_0x8, stub_vt[0xc / 4] = (void *)stub_0xc, stub_vt[0x50 / 4] = (void *)stub_0x50;
     stub_vt[0x54 / 4] = (void *)stub_0x54, stub_vt[0xf8 / 4] = (void *)stub_0xf8, stub_vt[0x170 / 4] = (void *)stub_0x170;
+    stub_vt[0xf4 / 4] = (void *)stub_0xf4;
 }
 
 static const char *const words[NPOOL] = {"&Save|Ctrl+S", "Open", "E&xit|Alt+F4", "&&Both|F1", "|Bare", "Wide wide text|X", "a", "",
@@ -692,6 +855,168 @@ static void build(void) {
 // An id a PullDown has, or one it hasn't.
 static int pd_id(struct game_pulldown *p) { return rnd_to(5) ? p->items[rnd_to(10)].id : rnd_to(18) - 2; }
 static int menu_pick(struct game_menu *m) { return rnd_to(5) ? m->entries[rnd_to(7)].id : 98 + rnd_to(10); }
+
+// ---- Drawing sweep ---------------------------------------------------------------------------------------------
+//
+// A PullDown and a Menu (in static memory) draw into Buffers that are copies of a real one (a DIB, with the sweep's
+// Font), from random lines, flags, hotkeys, colours and margins, with and without the functions the game can set,
+// and with the sprite for the check mark; a parent with pixels of its own is what a see-through window fill copies.
+
+enum { DW = 110, DH = 70 };
+static struct {
+    struct game_pulldown pd;
+    struct game_menu menu;
+    struct game_win parent;
+    struct game_buffer parent_buf;
+    struct game_sprite spr;
+    uint8_t sdata[1024];
+    uint8_t ppix[DW * DH + 16];
+    struct game_spot_rect rects[8];
+} D;
+static struct font drawfont;
+static struct game_buffer real;
+static int real_made;
+
+static void __attribute__((cdecl)) draw_hook_item(struct game_pulldown *p, int sel, int32_t *r) {
+    vrec(0xff38, p, sel, r[0] + r[1], r[2]);
+    if (sel) r[2] -= 1, r[0] += 1;
+}
+static void __attribute__((cdecl)) draw_hook_frame(struct game_pulldown *p) { vrec(0xff3c, p, 0, 0, 0); }
+
+static int small(void) { return rnd_to(8); }
+static void noise(uint8_t *p, int n) {
+    for (int i = 0; i < n; i++) p[i] = (uint8_t)rnd_to(8);
+}
+
+// A position inside a line's text for its hotkey, or none.
+static char *hotkey_in(char *text) {
+    if (!text || !*text || rnd_to(3) == 0) return NULL;
+    return text + rnd_to((int)strlen(text));
+}
+
+static void draw_sweep_inner(void) {
+    if (!*game_font_default || !*game_font_dc) return;
+    if (!real_made) {
+        game_buffer_ctor(&real);
+        game_buffer_init(&real, DW, DH, 0, 0);
+        font_ctor(&drawfont), game_font_init(&drawfont, "Arial", 12, 0);
+        if (!real.bits || !drawfont.hfont) return;
+        buffer_set_font(&real, &drawfont, &drawfont, &drawfont, &drawfont);
+        real_made = 1;
+    }
+    void *saved_pd_font = *game_pd_font, *saved_menu_font = *game_menu_font;
+    int32_t saved_style[7], saved_menu[3], saved_menu2[2];
+    void *saved_hooks[4], *saved_check = *game_pd_check;
+    memcpy(saved_style, game_pd_style, sizeof saved_style), memcpy(saved_menu, game_menu_colors, sizeof saved_menu);
+    memcpy(saved_menu2, game_menu_colors2, sizeof saved_menu2), memcpy(saved_hooks, game_pd_hooks, sizeof saved_hooks);
+    const uint8_t *saved_tint = *game_win_tint;
+    static uint8_t tint[256];
+    for (int round = 0; round < 24; round++) {
+        memset(&D, 0, sizeof D);
+        D.parent.vtable = stub_vt;
+        D.parent_buf.bits = D.ppix, D.parent_buf.width = DW, D.parent_buf.neg_height = -DH, D.parent_buf.pitch = DW;
+        D.parent_buf.full[2] = DW, D.parent_buf.full[3] = DH, D.parent_buf.clip[2] = DW, D.parent_buf.clip[3] = DH;
+        noise(D.ppix, sizeof D.ppix);
+        for (int i = 0; i < 256; i++) tint[i] = (uint8_t)rnd_to(8);
+        *game_win_tint = rnd_to(2) ? tint : NULL;
+        noise(real.bits, real.pitch * -real.neg_height);
+        buffer_set_text_color(&real, small(), small(), small(), small());
+        // The sprite for the check mark.
+        for (int i = 0; i < 1024; i++) D.sdata[i] = (uint8_t)rnd_to(8);
+        D.spr.data = D.sdata, D.spr.key = (uint8_t)rnd_to(8);
+        D.spr.width = 1 + rnd_to(8), D.spr.stride = D.spr.width, D.spr.height = 1 + rnd_to(8);
+        D.spr.full_w = D.spr.width + rnd_to(4), D.spr.full_h = D.spr.height + rnd_to(4);
+        *game_pd_check = &D.spr;
+        // The globals.
+        for (int i = 0; i < 6; i++) game_pd_style[i] = i == 0 ? rnd_to(8) : small();
+        game_pd_style[6] = rnd_to(4);
+        game_pd_hooks[0] = rnd_to(4) == 0 ? (void *)draw_hook_item : NULL;
+        game_pd_hooks[1] = rnd_to(5) == 0 ? (void *)draw_hook_frame : NULL;
+        game_pd_hooks[2] = (void *)(intptr_t)small(), game_pd_hooks[3] = (void *)(intptr_t)small();
+        for (int i = 0; i < 3; i++) game_menu_colors[i] = small();
+        game_menu_colors2[0] = small(), game_menu_colors2[1] = small();
+        parent_copy_answer = rnd_to(4) != 0;
+        // A PullDown.
+        struct game_pulldown *p = &D.pd;
+        *game_pd_font = rnd_to(8) ? (void *)&drawfont : NULL;
+        for (int v = 0; v < 6; v++) {
+            memcpy(&p->buf, &real, sizeof real);
+            p->win.vtable = stub_vt;
+            p->win.parent = rnd_to(6) ? &D.parent : NULL;
+            p->win.flags = rnd_to(2) ? 0x80000 : 0;
+            for (int i = 0; i < 4; i++) p->win.inner[i] = rnd_to(20), p->win.outer[i] = rnd_to(20);
+            p->count = rnd_to(8);
+            for (int i = 0; i < 8; i++) {
+                struct game_pd_item *it = &p->items[i];
+                it->id = i;
+                it->flags = (uint32_t)rnd_to(16);
+                if (rnd_to(4)) it->flags |= 1;
+                it->text = rnd_to(6) ? S.text[rnd_to(NPOOL)] : NULL;
+                it->tail = rnd_to(2) ? S.text[rnd_to(NPOOL)] : NULL;
+                it->hotkey = hotkey_in(it->text);
+            }
+            p->sel = rnd_to(p->count + 2) - 1;
+            if (!*game_pd_font) *game_pd_font = (void *)&drawfont;
+            game_pd_style[6] = rnd_to(4), game_pd_style[0] = rnd_to(8);
+            // The Buffer's own rectangle: the whole of it, or a part.
+            p->buf.full[0] = rnd_to(2) ? 0 : rnd_to(4), p->buf.full[1] = rnd_to(2) ? 0 : rnd_to(4);
+            p->buf.full[2] = rnd_to(2) ? DW : 20 + rnd_to(DW - 20), p->buf.full[3] = rnd_to(2) ? DH : 20 + rnd_to(DH - 20);
+            check_pulldown_on_redraw(p);
+            p->sel = rnd_to(p->count + 2) - 1;
+            p->items[rnd_to(8)].flags ^= 1u << rnd_to(4);
+            noise(real.bits, real.pitch * -real.neg_height);
+            memcpy(&p->buf, &real, sizeof real);
+            check_pulldown_on_redraw(p);
+        }
+        // A Menu.
+        struct game_menu *m = &D.menu;
+        *game_menu_font = rnd_to(8) ? (void *)&drawfont : NULL;
+        for (int v = 0; v < 6; v++) {
+            memcpy(&m->buf, &real, sizeof real);
+            m->win.vtable = stub_vt;
+            m->win.parent = rnd_to(6) ? &D.parent : NULL;
+            m->win.flags = rnd_to(2) ? 0x80000 : 0;
+            for (int i = 0; i < 4; i++) m->win.inner[i] = rnd_to(20), m->win.outer[i] = rnd_to(20);
+            m->count = rnd_to(7);
+            m->open = rnd_to(m->count + 2) - 1;
+            m->spots.rects = D.rects, m->spots.cap = 8, m->spots.count = 8;
+            for (int i = 0; i < 8; i++) D.rects[i].rect[0] = rnd_to(40), D.rects[i].rect[1] = rnd_to(8);
+            for (int i = 0; i < 15; i++) {
+                struct game_menu_entry *e = &m->entries[i];
+                e->flags = (uint8_t)rnd_to(8);
+                if (rnd_to(4)) e->flags |= 1;
+                e->text = rnd_to(8) ? S.text[rnd_to(NPOOL)] : NULL;
+                e->hotkey = hotkey_in(e->text);
+            }
+            m->buf.full[0] = rnd_to(2) ? 0 : rnd_to(4), m->buf.full[1] = rnd_to(2) ? 0 : rnd_to(4);
+            m->buf.full[2] = rnd_to(2) ? DW : 40 + rnd_to(DW - 40), m->buf.full[3] = rnd_to(2) ? DH : 10 + rnd_to(DH - 10);
+            if (!*game_menu_font && rnd_to(3)) *game_menu_font = (void *)&drawfont;
+            check_menu_on_redraw(m);
+            m->open = rnd_to(m->count + 2) - 1;
+            m->entries[rnd_to(6)].flags ^= 1u << rnd_to(3);
+            noise(real.bits, real.pitch * -real.neg_height);
+            memcpy(&m->buf, &real, sizeof real);
+            check_menu_on_redraw(m);
+        }
+    }
+    *game_pd_font = saved_pd_font, *game_menu_font = saved_menu_font;
+    memcpy(game_pd_style, saved_style, sizeof saved_style), memcpy(game_menu_colors, saved_menu, sizeof saved_menu);
+    memcpy(game_menu_colors2, saved_menu2, sizeof saved_menu2), memcpy(game_pd_hooks, saved_hooks, sizeof saved_hooks);
+    *game_pd_check = saved_check;
+    *game_win_tint = saved_tint;
+}
+
+// The drawing sweep alone, for a host that runs it when the game's fonts exist (the first sweep of this module comes
+// before they do): edit.c's sweep calls it.
+void menu_draw_sweep(void) {
+    int sweeping = hooks_sweeping;
+    hooks_sweeping = 1;
+    if (!rng_state) rng_state = 0x2c1b3a95u ^ (uint32_t)*game_turn * 2654435761u, rng_state |= 1;
+    fill_stub_vt();
+    for (int i = 0; i < NPOOL; i++) strcpy(S.text[i], words[i]);
+    draw_sweep_inner();
+    hooks_sweeping = sweeping;
+}
 
 static void menu_sweep(void) {
     int sweeping = hooks_sweeping;
@@ -816,12 +1141,15 @@ static void menu_sweep(void) {
         }
     }
     *game_pd_font = saved_pd_font, *game_menu_font = saved_menu_font, *game_pd_margin = saved_margin;
+    draw_sweep_inner();
     hooks_sweeping = sweeping;
 }
 
 // ---- Hooks -------------------------------------------------------------------------------------
 
 static const struct hook menu_hooks[] = {
+    HOOK(0x5f98b0, pulldown_on_redraw, 0xa1, 0x68, 0x7b, 0x9b, 0x00, 0x83, 0xec, 0x30, 0x85, 0xc0, 0x53),
+    HOOK(0x5fc290, menu_on_redraw, 0xa1, 0x94, 0x7b, 0x9b, 0x00, 0x83, 0xec, 0x30, 0x85, 0xc0, 0x55, 0x56, 0x57),
     HOOK(0x5fa7a0, in_box, 0x8b, 0x44, 0x24, 0x04, 0x8b, 0x4c, 0x24, 0x0c),
     HOOK(0x5fa7e0, in_box_2, 0x8b, 0x44, 0x24, 0x0c, 0x8b, 0x4c, 0x24, 0x04),
     HOOK(0x5fa820, spot_clear, 0x33, 0xc0, 0x89, 0x41, 0x04),

@@ -85,6 +85,144 @@ static void make_box(const char *text, int caret, int anchor, int first) {
     ncalls = beeps = 0;
 }
 
+
+// What drawing text does, as the stand-ins saw it (the text calls, where each went).
+static struct {
+    int x, y;
+    char s[24];
+} outs[16];
+static int nouts;
+static int STD s_bk_mode(void *dc, int mode) { return 0; }
+static uint32_t STD s_text_color(void *dc, uint32_t c) { return 0; }
+static int STD s_text_out(void *dc, int x, int y, const char *s, int n) {
+    if (nouts < 16) outs[nouts].x = x, outs[nouts].y = y, snprintf(outs[nouts].s, sizeof outs[nouts].s, "%.*s", n, s);
+    return nouts++, 1;
+}
+
+// The clipping's Windows calls.
+static int regions_made;
+static void *STD s_create_rgn(const int32_t *r) { return regions_made++, (void *)(intptr_t)(100 + regions_made); }
+static int STD s_select_clip_rgn(void *dc, void *rgn) { return 1; }
+static int STD s_delete_object(void *o) { return 1; }
+static int STD s_intersect(int32_t *out, const int32_t *a, const int32_t *b) {
+    int32_t r[4] = {a[0] > b[0] ? a[0] : b[0], a[1] > b[1] ? a[1] : b[1], a[2] < b[2] ? a[2] : b[2], a[3] < b[3] ? a[3] : b[3]};
+    if (r[0] >= r[2] || r[1] >= r[3]) {
+        memset(out, 0, 16);
+        return 0;
+    }
+    memcpy(out, r, 16);
+    return 1;
+}
+static int STD s_equal(const int32_t *a, const int32_t *b) { return !memcmp(a, b, 16); }
+static void *ddraw_slot;
+
+enum { DW = 60, DH = 14 };
+static uint8_t pix[DW * DH];
+static struct {
+    struct game_win win;
+    struct game_buffer buf;
+} parent_w;
+static uint8_t ppix[DW * DH];
+static const uint8_t *tint_ptr;
+static struct game_win *cur_win;
+static void hand_buffer(struct game_buffer *b, uint8_t *p) {
+    memset(b, 0, sizeof *b);
+    b->bits = p, b->width = DW, b->neg_height = -DH, b->pitch = DW;
+    b->full[2] = DW, b->full[3] = DH, b->clip[2] = DW, b->clip[3] = DH;
+    *(int32_t *)((uint8_t *)b + 0x64) = 1, *(int32_t *)((uint8_t *)b + 0x60) = 1;  // (a device context)
+    *(struct font **)((uint8_t *)b + 0x52c) = &font;
+}
+static void colors(struct game_buffer *b, int c) { *(int32_t *)((uint8_t *)b + 0x53c) = c; }
+
+static void draw_tests(void) {
+    game_set_bk_mode = s_bk_mode, game_set_text_color = s_text_color, game_text_out = s_text_out;
+    game_win_tint = &tint_ptr, game_win_cur = &cur_win;
+    game_create_rect_rgn_indirect = s_create_rgn, game_select_clip_rgn = s_select_clip_rgn, game_delete_object = s_delete_object;
+    game_intersect_rect = s_intersect, game_equal_rect = s_equal, game_ddraw = &ddraw_slot;
+    static int32_t cr, fg, mu, mga, mgb;
+    game_copy_rem = &cr, game_fill_gap = &fg, game_mask_units = &mu, game_mask_gap_a = &mga, game_mask_gap_b = &mgb;
+    // An EditBox: the fill, a one-line frame, the caret, the selection recoloured, and the text where it goes.
+    make_box("abcd", 2, 2, 0);
+    hand_buffer(&E.buf, pix);
+    colors(&E.buf, 5);
+    E.color = 7, E.border_a = 3, E.border_b = 4, E.border_w = 1, E.pad = 2, E.sel_back = 9, E.sel_text = 8;
+    memset(pix, 1, sizeof pix);
+    nouts = 0;
+    edit_on_redraw(&E);
+    EXPECT(pix[7 * DW + 30], 7), EXPECT(pix[0] == 3 || pix[0] == 4, 1), EXPECT(pix[(DH - 1) * DW + 30] == 3 || pix[(DH - 1) * DW + 30] == 4, 1);
+    EXPECT(E.buf.clip[0], 2), EXPECT(E.buf.clip[1], 0), EXPECT(E.buf.clip[2], 58), EXPECT(E.buf.clip[3], DH);  // (the text's rectangle: the frame's inside, 1 line less the padding 2 on the sides)
+    EXPECT(nouts, 2), EXPECT_STR(outs[0].s, "abcd");  // (the text, drawn twice: its shadow, then itself)
+    // The caret (blinking) is a line the height of the text at the width of "ab" and the padding, in the text colour.
+    E.blink = 1;
+    memset(pix, 1, sizeof pix);
+    edit_on_redraw(&E);
+    EXPECT(pix[5 * DW + 16], 5), EXPECT(pix[5 * DW + 15], 7), EXPECT(pix[5 * DW + 17], 7);
+    // A selection (here from the caret back to 1): "bc" is 14 wide, from the width of "a" and the padding; its
+    // background colour becomes the selection's.
+    E.blink = 0, E.anchor = 1, E.caret = 3;
+    memset(pix, 1, sizeof pix);
+    edit_on_redraw(&E);
+    EXPECT(pix[5 * DW + 9], 9), EXPECT(pix[5 * DW + 22], 9), EXPECT(pix[5 * DW + 8], 7), EXPECT(pix[5 * DW + 23], 7);
+    // The other way round (anchor beyond the caret) gives the same rectangle from the caret on.
+    E.anchor = 3, E.caret = 1;
+    memset(pix, 1, sizeof pix);
+    edit_on_redraw(&E);
+    EXPECT(pix[5 * DW + 9], 9), EXPECT(pix[5 * DW + 22], 9), EXPECT(pix[5 * DW + 23], 7);
+    // No selection background of its own: the text colour.
+    E.sel_back = -1;
+    memset(pix, 1, sizeof pix);
+    edit_on_redraw(&E);
+    EXPECT(pix[5 * DW + 9], 5);
+    // Masked: asterisks are measured and written.
+    E.flags = 2, E.sel_back = 9, nouts = 0;
+    edit_on_redraw(&E);
+    EXPECT(nouts, 2), EXPECT_STR(outs[0].s, "****");
+
+    // An EditGroup: the parent's pixels at the Dialog's place, the parent made current, the labels cell by cell
+    // from the last, the cursor moving on and wrapping.
+    static uint8_t graw[0xc00];
+    static int32_t gvb[3] = {0, 0x8c, 0xaa4};
+    static struct game_strnode ln[2];
+    static uint8_t litem[2][16];
+    static char lab[2][8] = {"ab", "cd"};
+    memset(graw, 0, sizeof graw);
+    struct game_editgroup *g = (struct game_editgroup *)graw;
+    g->vbptr = gvb;
+    uint8_t *D = graw + 0xaa4;
+    struct game_strlist *list = (struct game_strlist *)(D + 0xbc);
+    for (int i = 0; i < 2; i++) {
+        char *tp = lab[i];
+        memcpy(litem[i] + 4, &tp, sizeof tp);
+        ln[i].item = litem[i], ln[i].next = &ln[(i + 1) % 2], ln[i].prev = &ln[(i + 1) % 2];
+    }
+    list->head = &ln[0], list->cur = &ln[0], list->count = 2, list->idx = 0;
+    struct game_buffer *gb = (struct game_buffer *)(graw + 0x8c + 0x444);
+    static uint8_t gpix[DW * DH];
+    hand_buffer(gb, gpix);
+    struct game_win *gwin = (struct game_win *)(graw + 0x8c);
+    memset(&parent_w, 0, sizeof parent_w);
+    hand_buffer(&parent_w.buf, ppix);
+    for (int i = 0; i < DW * DH; i++) ppix[i] = (uint8_t)(i % 7 + 10);
+    gwin->parent = &parent_w.win;
+    *(int32_t *)(D + 0x24) = 3, *(int32_t *)(D + 0x28) = 2;
+    *(int32_t *)(D + 0x34) = 4, *(int32_t *)(D + 0x40) = 2, *(int32_t *)(D + 0x44) = 6;
+    *(int32_t *)(D + 0x54) = 2, *(int32_t *)(D + 0x58) = 2, *(int32_t *)(D + 0x64) = 25, *(int32_t *)(D + 0x68) = 9;
+    *(int32_t *)(D + 0xcc) = 2;
+    memset(gpix, 0, sizeof gpix);
+    nouts = 0;
+    group_on_redraw(graw + 0x8c);
+    EXPECT(cur_win == &parent_w.win, 1);
+    EXPECT(gpix[0], ppix[2 * DW + 3]), EXPECT(gpix[DW + 1], ppix[3 * DW + 4]);
+    // (columns 25 apart from 4 + 2 in; rows 9 apart, the first at 6 / 2 + (6 - 14 - 3) / 2 down, with the font's height added)
+    EXPECT(outs[0].x, 6), EXPECT(outs[4].x, 31), EXPECT(outs[0].y, 12), EXPECT(outs[2].y, 21), EXPECT(outs[6].y, 21);
+    EXPECT(nouts, 8), EXPECT_STR(outs[0].s, "ab"), EXPECT_STR(outs[2].s, "cd"), EXPECT_STR(outs[4].s, "ab"), EXPECT_STR(outs[6].s, "cd");
+    EXPECT(list->idx, 1), EXPECT(list->cur == &ln[1], 1);
+    // No parent: nothing.
+    gwin->parent = NULL, nouts = 0, cur_win = NULL;
+    group_on_redraw(graw + 0x8c);
+    EXPECT(nouts, 0), EXPECT(cur_win == NULL, 1);
+}
+
 int main(void) {
     game_select_object = select_object, game_get_stock_object = stock_object, game_get_text_extent = text_extent;
     dc_slot = (void *)1, game_font_dc = &dc_slot, font_slot = &font, game_font_default = &font_slot;
@@ -447,6 +585,8 @@ int main(void) {
     // No labels: 7, nothing changes.
     list->count = 0, *(int32_t *)(D + 0x64) = 99;
     EXPECT(group_calculate_dimensions(g), 7), EXPECT(*(int32_t *)(D + 0x64), 99);
+
+    draw_tests();
 
     if (failures) printf("%d failures\n", failures);
     else printf("ok\n");
