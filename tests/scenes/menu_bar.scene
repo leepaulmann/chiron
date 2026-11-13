@@ -1,0 +1,23 @@
+# The main map's menu bar: the Menu and PullDown classes. The game lays the bar out above the top of
+# its window (Menu_adjust puts it twice the font's height over the client area), so on a screen the
+# size of the game's the pointer can only reach it at the top edge. The scene moves along that edge
+# (the bar's titles, one after another), clicks on it, moves into the map and back, and snaps the map
+# in between: the frames must not change. No keys: on the map they would play the turn. Leave time
+# after each step; the snaps take 2 s each.
+25 load
+42 snap map
+46 move 40 0
+48 move 120 0
+50 move 200 3
+52 click 120 0
+56 snap bar-click
+58 move 400 1
+60 click 400 1
+62 move 500 300
+64 move 300 0
+66 click 300 2
+70 snap bar-again
+72 move 500 300
+74 click 640 640
+78 snap closed
+82 close

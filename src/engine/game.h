@@ -2480,6 +2480,103 @@ extern intptr_t(__attribute__((stdcall)) * game_def_window_proc)(uint32_t hwnd, 
 extern int(__attribute__((stdcall)) * game_is_zoomed)(uint32_t hwnd);
 extern int(__attribute__((stdcall)) * game_get_window_rect)(uint32_t hwnd, int32_t *rect);
 
+// ---- The Menu (menu bar), PullDown (drop-down menu) and Spot (hit rectangles) classes (menu.c) ----
+// A Spot list holds rectangles a screen can be hit in, 0x18 bytes each: the rectangle (left, top, right,
+// bottom), a `kind` and an `id` that tell what it is. It has no vtable: a pointer to room for `cap`
+// rectangles, and how many are in use. A Menu keeps one for its titles.
+struct game_spot_rect {
+    int32_t rect[4];
+    int32_t kind;  // 0x10
+    int32_t id;    // 0x14
+};
+struct game_spot {
+    struct game_spot_rect *rects;
+    int32_t cap;
+    int32_t count;
+};
+_Static_assert(sizeof(struct game_spot_rect) == 0x18, "layout of the game's Spot rectangle");
+
+// One line of a drop-down menu (0x14 bytes): the text before a '|', what follows it (the key it is
+// shown with), the id, flags (1 shown, 2 greyed, 4 a separator, 8 checked) and, if the text has an '&',
+// where the letter after it is (the key that picks the line).
+struct game_pd_item {
+    char *text;    // 0
+    char *tail;    // 4
+    int32_t id;    // 8: -1 for a free line
+    uint32_t flags;  // 0xc
+    char *hotkey;  // 0x10
+};
+_Static_assert(sizeof(struct game_pd_item) == 0x14, "layout of the game's PullDown line");
+// A PullDown is a GraphicWin (a Win and a Buffer, up to 0xa14) with 64 lines. `sel` is the line the
+// mouse or the keys are on (counted among the shown lines until the click is read), `shown` how many
+// lines are shown, `dirty` that the size has to be worked out again. The Menu that owns it is at 0xf30.
+struct game_pulldown {
+    struct game_win win;
+    struct game_buffer buf;  // 0x444: its `full` rectangle (0x474) is the box a click is looked for in
+    GAME_PAD(0x9cc, 0xa14);
+    int32_t fa14;
+    struct game_pd_item items[64];  // 0xa18
+    int32_t ff18;
+    int32_t ff1c;
+    int32_t count;   // 0xf20: lines in use
+    int32_t width;   // 0xf24: the widest line, with its key
+    int32_t sel;     // 0xf28: -1 for none
+    int32_t shown;   // 0xf2c
+    void *menu;      // 0xf30
+    uint8_t dirty;   // 0xf34
+    GAME_PAD(0xf35, 0xf38);
+    int32_t ff38, ff3c;
+};
+_Static_assert(sizeof(struct game_pulldown) == 0xf40, "layout of the game's PullDown");
+GAME_AT(struct game_pulldown, items, 0xa18);
+GAME_AT(struct game_pulldown, count, 0xf20);
+GAME_AT(struct game_pulldown, width, 0xf24);
+GAME_AT(struct game_pulldown, sel, 0xf28);
+GAME_AT(struct game_pulldown, shown, 0xf2c);
+GAME_AT(struct game_pulldown, menu, 0xf30);
+GAME_AT(struct game_pulldown, dirty, 0xf34);
+GAME_AT(struct game_pulldown, ff38, 0xf38);
+
+// A title on a menu bar (0x14 bytes): id (-1 for a free one), text, flags (1 shown, 2 greyed, 4 at the
+// right end), the letter that picks it and its PullDown.
+struct game_menu_entry {
+    int32_t id;
+    char *text;
+    uint8_t flags;
+    GAME_PAD(0x9, 0xc);
+    char *hotkey;
+    struct game_pulldown *pd;
+};
+_Static_assert(sizeof(struct game_menu_entry) == 0x14, "layout of the game's Menu title");
+// A Menu is a GraphicWin with up to 15 titles. `open` is the title whose PullDown is down (-1 for none),
+// `proc` the function (cdecl, the id of the line) a pick is told to, `spots` where each title is.
+struct game_menu {
+    struct game_win win;
+    struct game_buffer buf;  // 0x444
+    GAME_PAD(0x9cc, 0xa14);
+    void(__attribute__((cdecl)) * proc)(int id);  // 0xa14
+    int32_t count;  // 0xa18: titles in use
+    int32_t fa1c;
+    int32_t fa20;
+    int32_t open;   // 0xa24
+    uint32_t flags;  // 0xa28: 1 keeps the title that is open when the mouse moves, 4 keeps the bar when a pick is made
+    struct game_spot spots;  // 0xa2c
+    struct game_menu_entry entries[15];  // 0xa38
+};
+_Static_assert(sizeof(struct game_menu) == 0xb64, "layout of the game's Menu");
+GAME_AT(struct game_menu, proc, 0xa14);
+GAME_AT(struct game_menu, count, 0xa18);
+GAME_AT(struct game_menu, open, 0xa24);
+GAME_AT(struct game_menu, flags, 0xa28);
+GAME_AT(struct game_menu, spots, 0xa2c);
+GAME_AT(struct game_menu, entries, 0xa38);
+// The Font a PullDown measures and draws with (0x9b7b68) and a Menu's (0x9b7b94): each is set from the
+// game's default font (game_font_default) the first time it is wanted. The gap above a PullDown's first
+// line (0x696e1c), and the strings its widths are worked out with (four bytes apart from 0x696e20).
+extern void **game_pd_font, **game_menu_font;
+extern int32_t *game_pd_margin;
+extern const char *game_pd_gap;  // (the strings are 4 bytes apart)
+
 // Point the variables above at a loaded terranx.exe.
 void game_bind(struct pe_image *exe);
 
