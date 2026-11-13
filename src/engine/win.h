@@ -51,3 +51,38 @@ void WIN_THIS win_set_vert_paging(struct game_win *w, int paging);
 void WIN_THIS win_set_horz_paging(struct game_win *w, int paging);
 void WIN_THIS win_unk8(struct game_win *w, int value);
 void WIN_THIS win_unk9(struct game_win *w, int value);
+
+// The parent and child lists (a window is hidden through its vtable first).
+void win_remove_parent(struct game_win *w);
+void WIN_THIS win_remove_child(struct game_win *w, struct game_win *child);
+
+// Scroll bars set through the window.
+void WIN_THIS win_set_vert_pos(struct game_win *w, int pos);
+void WIN_THIS win_set_horz_pos(struct game_win *w, int pos);
+void WIN_THIS win_set_vert_range(struct game_win *w, int a, int b);
+void WIN_THIS win_set_horz_range(struct game_win *w, int a, int b);
+
+// Caption and borders, and the dialog list's focus.
+void WIN_THIS win_set_caption_height(struct game_win *w, int h);
+void WIN_THIS win_set_border_thickness(struct game_win *w, int b);
+void WIN_THIS win_set_bottom_border_thickness(struct game_win *w, int b);
+void WIN_THIS win_set_dialog_focus(struct game_win *w, struct game_win *win);
+void WIN_THIS win_pass_dialog_focus(struct game_win *w);
+
+// The mouse and the game's window (these call Windows).
+int WIN_THIS win_set_mouse_pos(struct game_win *w, int x, int y);
+void WIN_THIS win_get_mouse_pos(struct game_win *w, int32_t *px, int32_t *py);
+int win_get_lbutton_state(void);
+int win_get_rbutton_state(void);
+int WIN_THIS win_maximize(struct game_win *w);
+int WIN_THIS win_minimize(struct game_win *w);
+int WIN_THIS win_show_maximize(struct game_win *w);
+
+// Placing and sizing.
+int WIN_THIS win_center(struct game_win *w);
+void WIN_THIS win_nonclient_to_client_2(struct game_win *w, int32_t *rect);
+void WIN_THIS win_redo_caption_buttons(struct game_win *w);
+void WIN_THIS win_resize_event(struct game_win *w, int cw, int ch);
+int WIN_THIS win_resize(struct game_win *w, int cx, int cy, int client);
+void *WIN_THIS win_redraw_nc_buffer(struct game_win *w, unsigned which);
+int WIN_THIS win_update_nc_buffer(struct game_win *w, int what);

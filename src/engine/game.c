@@ -164,6 +164,14 @@ int32_t *game_tex_tbl;
 uint8_t *game_poly_scratch;
 struct game_win **game_win_modal, **game_win_modals, **game_win_modal_focus, **game_win_focus, **game_win_def_focus, **game_win_key;
 struct game_win **game_win_parents, **game_win_zorder, **game_win_opaque;
+struct game_win **game_win_cur, **game_win_capture, **game_win_hover, **game_win_press1, **game_win_press2, **game_win_prev_focus;
+uint32_t *game_win_hwnd;
+int32_t *game_win_screen_w, *game_win_screen_h, *game_win_pic_normal, *game_win_pic_zoomed;
+int(__attribute__((stdcall)) * game_set_cursor_pos)(int x, int y);
+int(__attribute__((stdcall)) * game_get_cursor_pos)(int32_t *point);
+int(__attribute__((stdcall)) * game_show_window)(uint32_t hwnd, int cmd);
+int(__attribute__((stdcall)) * game_get_system_metrics)(int index);
+int(__attribute__((stdcall)) * game_is_zoomed)(uint32_t hwnd);
 int32_t *game_win_modal_n, *game_win_modal_aux, *game_win_modal_prev, *game_win_parent_n, *game_win_z_n, *game_win_opaque_flag, *game_win_nc_margin;
 int32_t *game_fill_gap, *game_copy_rem, *game_mask_units, *game_mask_gap_a, *game_mask_gap_b;
 int32_t *game_base_workers, *game_base_reserved, *game_base_food_ok, *game_current_turn;
@@ -1487,4 +1495,20 @@ void game_bind(struct pe_image *exe) {
     game_win_opaque = (struct game_win **)code_at(exe, 0x9b7a6c);
     game_win_opaque_flag = (int32_t *)code_at(exe, 0x9b7a78);
     game_win_nc_margin = (int32_t *)code_at(exe, 0x9b8dd4);
+    game_win_cur = (struct game_win **)code_at(exe, 0x9b7ab8);
+    game_win_capture = (struct game_win **)code_at(exe, 0x9b7abc);
+    game_win_hover = (struct game_win **)code_at(exe, 0x9b7ac0);
+    game_win_press1 = (struct game_win **)code_at(exe, 0x9b7acc);
+    game_win_press2 = (struct game_win **)code_at(exe, 0x9b7ad0);
+    game_win_prev_focus = (struct game_win **)code_at(exe, 0x9b7b38);
+    game_win_hwnd = (uint32_t *)code_at(exe, 0x9b7b28);
+    game_win_screen_w = (int32_t *)code_at(exe, 0x9b7b1c);
+    game_win_screen_h = (int32_t *)code_at(exe, 0x9b7b20);
+    game_win_pic_normal = (int32_t *)code_at(exe, 0x9b7b04);
+    game_win_pic_zoomed = (int32_t *)code_at(exe, 0x9b7b08);
+    game_set_cursor_pos = *(void **)code_at(exe, 0x669310);  // the imports, as bound (and journaled in shadow mode)
+    game_get_cursor_pos = *(void **)code_at(exe, 0x669284);
+    game_show_window = *(void **)code_at(exe, 0x669320);
+    game_get_system_metrics = *(void **)code_at(exe, 0x669334);
+    game_is_zoomed = *(void **)code_at(exe, 0x669270);
 }

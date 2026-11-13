@@ -45,6 +45,59 @@ static void lists(void) {
     parent_n = 0, z_n = 0, opaque = NULL, opaque_flag = 1;
 }
 
+
+// ---- Stand-ins for the vtable slots and the Windows calls the second set of functions makes ----
+#define STD __attribute__((stdcall))
+static struct {
+    int slot;
+    void *w;
+    int a, b, c;
+} vlog_[64];
+static int nvlog;
+static void vrec(int slot, void *w, int a, int b, int c) {
+    if (nvlog < 64) vlog_[nvlog].slot = slot, vlog_[nvlog].w = w, vlog_[nvlog].a = a, vlog_[nvlog].b = b, vlog_[nvlog].c = c;
+    nvlog++;
+}
+#define STUB0(slot) \
+    static int WIN_THIS stub_##slot(struct game_win *w) { return vrec(slot, w, 0, 0, 0), slot + 1; }
+#define STUB1(slot) \
+    static int WIN_THIS stub_##slot(struct game_win *w, int a) { return vrec(slot, w, a, 0, 0), slot + 1; }
+#define STUB2(slot) \
+    static int WIN_THIS stub_##slot(struct game_win *w, int a, int b) { return vrec(slot, w, a, b, 0), slot + 1; }
+#define STUB3(slot) \
+    static int WIN_THIS stub_##slot(struct game_win *w, int a, int b, int c) { return vrec(slot, w, a, b, c), slot + 1; }
+STUB0(0x8) STUB3(0xc) STUB0(0x10) STUB0(0x30) STUB2(0x34) STUB1(0xcc) STUB0(0xf8) STUB0(0x108) STUB2(0x10c) STUB2(0x128)
+static void stub_cb(int a, int b) { vrec(0x400, NULL, a, b, 0); }
+static void fill_vtable(void) {
+    vtable[0x8 / 4] = (void *)stub_0x8, vtable[0xc / 4] = (void *)stub_0xc, vtable[0x10 / 4] = (void *)stub_0x10;
+    vtable[0x30 / 4] = (void *)stub_0x30, vtable[0x34 / 4] = (void *)stub_0x34, vtable[0xcc / 4] = (void *)stub_0xcc;
+    vtable[0xf8 / 4] = (void *)stub_0xf8, vtable[0x108 / 4] = (void *)stub_0x108, vtable[0x10c / 4] = (void *)stub_0x10c;
+    vtable[0x128 / 4] = (void *)stub_0x128;
+}
+static void expect_call(int i, int slot, void *w, int a, int b, int c) {
+    char what[64];
+    snprintf(what, sizeof what, "call %d slot", i);
+    check_(what, i < nvlog ? vlog_[i].slot : -1, slot);
+    if (i >= nvlog) return;
+    snprintf(what, sizeof what, "call %d this", i), check_(what, (long)vlog_[i].w, (long)w);
+    snprintf(what, sizeof what, "call %d a", i), check_(what, vlog_[i].a, a);
+    snprintf(what, sizeof what, "call %d b", i), check_(what, vlog_[i].b, b);
+    snprintf(what, sizeof what, "call %d c", i), check_(what, vlog_[i].c, c);
+}
+
+static int cursor[2], cursor_set[2], cursor_sets, shown_cmd, shown_hwnd, shown, swapped, zoomed, got_cursor;
+static int16_t keys[4];
+static int STD set_cursor_pos_(int x, int y) { return cursor_set[0] = x, cursor_set[1] = y, cursor_sets++, 7; }
+static int STD get_cursor_pos_(int32_t *p) { return p[0] = cursor[0], p[1] = cursor[1], got_cursor++, 1; }
+static int STD show_window_(uint32_t h, int cmd) { return shown_hwnd = (int)h, shown_cmd = cmd, shown++, 5; }
+static int STD get_system_metrics_(int i) { return i == 0x17 ? swapped : -1; }
+static int STD is_zoomed_(uint32_t h) { return zoomed; }
+static int16_t STD key_state_(int k) { return keys[k]; }
+
+static struct game_win *cur_, *capture_, *hover_, *press1_, *press2_, *prev_focus_;
+static uint32_t hwnd_;
+static int32_t screen_w_, screen_h_, pic_normal_, pic_zoomed_;
+
 int main(void) {
     game_win_modal = &modal, game_win_modal_focus = &modal_focus, game_win_focus = &focus, game_win_def_focus = &def_focus;
     game_win_key = &key, game_win_opaque = &opaque, game_win_modals = modals, game_win_parents = parents;
@@ -324,6 +377,286 @@ int main(void) {
     W.scroll_v = W.scroll_h = NULL;
     EXPECT(win_get_vert_pos(&W), 0), EXPECT(win_get_horz_pos(&W), 0);
     win_set_vert_paging(&W, 1), win_set_horz_paging(&W, 1), win_unk8(&W, 1), win_unk9(&W, 1);
+
+
+    // ---- The second set: calls through the vtable and Windows ----
+    game_win_cur = &cur_, game_win_capture = &capture_, game_win_hover = &hover_, game_win_press1 = &press1_;
+    game_win_press2 = &press2_, game_win_prev_focus = &prev_focus_, game_win_hwnd = &hwnd_, game_win_screen_w = &screen_w_;
+    game_win_screen_h = &screen_h_, game_win_pic_normal = &pic_normal_, game_win_pic_zoomed = &pic_zoomed_;
+    game_set_cursor_pos = set_cursor_pos_, game_get_cursor_pos = get_cursor_pos_, game_show_window = show_window_;
+    game_get_system_metrics = get_system_metrics_, game_is_zoomed = is_zoomed_, game_get_async_key_state = key_state_;
+    fill_vtable();
+
+    // Taking a window off the lists hides it first and closes the list up.
+    tree();
+    lists();
+    parents[0] = &A, parents[1] = &B, parents[2] = &C, parent_n = 3;
+    nvlog = 0;
+    win_remove_parent(&B);
+    EXPECT(parent_n, 2), EXPECT(parents[0] == &A, 1), EXPECT(parents[1] == &C, 1), EXPECT(nvlog, 1);
+    expect_call(0, 0x8, &B, 0, 0, 0);
+    win_remove_parent(&B), win_remove_parent(NULL);
+    EXPECT(parent_n, 2), EXPECT(nvlog, 1);
+    win_remove_parent(&C);
+    EXPECT(parent_n, 1), EXPECT(parents[0] == &A, 1);
+    tree();
+    nvlog = 0;
+    win_remove_child(&R, &A);
+    EXPECT(R.n_children, 1), EXPECT(R.children[0] == &C, 1), EXPECT(nvlog, 1);
+    expect_call(0, 0x8, &A, 0, 0, 0);
+    win_remove_child(&R, &A), win_remove_child(&R, NULL), win_remove_child(&R, &B);
+    EXPECT(R.n_children, 1), EXPECT(nvlog, 1);
+
+    // Scroll bars: the position is kept in the range, an inverted range counts from the far end,
+    // and a bar without a parent isn't touched.
+    static struct game_win_scroll bsv, bsh;
+    memset(&bsv, 0, sizeof bsv), memset(&bsh, 0, sizeof bsh);
+    bsv.win.vtable = vtable, bsh.win.vtable = vtable;
+    bsv.win.parent = &P;
+    init(&W, 0);
+    W.scroll_v = &bsv, W.scroll_h = &bsh;
+    nvlog = 0;
+    win_set_vert_range(&W, 10, 20);
+    EXPECT(bsv.lo, 10), EXPECT(bsv.hi, 20), EXPECT(bsv.pos, 10), EXPECT(bsv.inverted, 0), EXPECT(nvlog, 1);
+    expect_call(0, 0xf8, &bsv, 0, 0, 0);
+    win_set_vert_pos(&W, 15);
+    EXPECT(bsv.pos, 15), EXPECT(cur_ == &P, 1);
+    win_set_vert_pos(&W, 99);
+    EXPECT(bsv.pos, 20);
+    win_set_vert_pos(&W, -5);
+    EXPECT(bsv.pos, 10);
+    win_set_vert_range(&W, 20, 10);
+    EXPECT(bsv.lo, 10), EXPECT(bsv.hi, 20), EXPECT(bsv.pos, 10), EXPECT(bsv.inverted, 1);
+    win_set_vert_pos(&W, 12);
+    EXPECT(bsv.pos, 18);
+    win_set_vert_pos(&W, 5);
+    EXPECT(bsv.pos, 20);
+    win_set_vert_range(&W, 7, 7);
+    EXPECT(bsv.lo, 7), EXPECT(bsv.hi, 7), EXPECT(bsv.inverted, 1);
+    nvlog = 0;
+    win_set_horz_range(&W, 1, 2), win_set_horz_pos(&W, 2);
+    EXPECT(bsh.lo, 1), EXPECT(bsh.pos, 1), EXPECT(nvlog, 1);  // no parent: the position isn't set
+    W.scroll_v = W.scroll_h = NULL;
+    win_set_vert_pos(&W, 1), win_set_horz_pos(&W, 1), win_set_vert_range(&W, 1, 2), win_set_horz_range(&W, 1, 2);
+    EXPECT(nvlog, 1);
+
+    // The caption and the borders size a window with a frame again to the rectangle it has.
+    init(&W, WIN_F2_FRAME);
+    W.outer[0] = 10, W.outer[1] = 20, W.outer[2] = 110, W.outer[3] = 80;
+    nvlog = 0;
+    win_set_caption_height(&W, 7);
+    EXPECT(W.caption_h, 7), EXPECT(nvlog, 1);
+    expect_call(0, 0xc, &W, 100, 60, 0);
+    win_set_border_thickness(&W, 3), win_set_bottom_border_thickness(&W, 4);
+    EXPECT(W.border, 3), EXPECT(W.bottom, 4), EXPECT(nvlog, 3);
+    W.flags2 = 0;
+    win_set_caption_height(&W, 9), win_set_border_thickness(&W, 9), win_set_bottom_border_thickness(&W, 9);
+    EXPECT(W.caption_h, 7), EXPECT(W.border, 3), EXPECT(W.bottom, 4), EXPECT(nvlog, 3);
+
+    // The dialog list: a ring of three windows.
+    static struct game_win_node ring[3];
+    init(&P, 0), init(&W, 0);
+    ring[0].win = &A, ring[1].win = &B, ring[2].win = &C;
+    ring[0].next = &ring[1], ring[1].next = &ring[2], ring[2].next = &ring[0];
+    P.dlg_head = &ring[0], P.dlg_cur = &ring[0], P.dlg_count = 3, P.dlg_index = 0;
+    W.parent = &B;
+    nvlog = 0;
+    win_set_dialog_focus(&P, &C);
+    EXPECT(P.dlg_cur == &ring[2], 1), EXPECT(P.dlg_index, 2), EXPECT(prev_focus_ == &A, 1), EXPECT(nvlog, 2);
+    expect_call(0, 0xcc, &A, 0, 0, 0), expect_call(1, 0xcc, &C, 1, 0, 0);
+    win_set_dialog_focus(&P, &C), win_set_dialog_focus(&P, NULL);
+    EXPECT(nvlog, 2);
+    win_set_dialog_focus(&P, &R);  // not in the ring: the search goes all the way round
+    EXPECT(P.dlg_cur == &ring[0], 1), EXPECT(P.dlg_index, 3), EXPECT(prev_focus_ == &C, 1), EXPECT(nvlog, 2);
+    P.dlg_count = 0;
+    win_set_dialog_focus(&P, &A);
+    EXPECT(nvlog, 2), EXPECT(P.dlg_index, 3);
+    P.dlg_count = 3, P.dlg_cur = &ring[0], P.dlg_index = 0;
+    // Passing the focus: the window itself is told it lost it, the next one that it gained it.
+    ring[0].win = &W, ring[1].win = &A;
+    P.dlg_head = &ring[0];
+    nvlog = 0;
+    P.flags = 0;
+    B.parent = &P;
+    win_pass_dialog_focus(&B);
+    EXPECT(P.dlg_cur == &ring[1], 1), EXPECT(P.dlg_index, 1), EXPECT(prev_focus_ == &W, 1), EXPECT(nvlog, 2);
+    expect_call(0, 0xcc, &B, 0, 0, 0), expect_call(1, 0xcc, &A, 1, 0, 0);
+    win_pass_dialog_focus(&B), win_pass_dialog_focus(&B);
+    EXPECT(P.dlg_index, 0), EXPECT(P.dlg_cur == &ring[0], 1);
+    P.dlg_count = 1;
+    nvlog = 0;
+    win_pass_dialog_focus(&B);
+    EXPECT(nvlog, 0), EXPECT(P.dlg_index, 0);
+    B.parent = NULL;
+    win_pass_dialog_focus(&B);
+    EXPECT(nvlog, 0);
+
+    // The mouse, in a window's client area and the screen.
+    init(&W, 0);
+    W.outer[0] = 5, W.outer[1] = 6, W.inner[0] = 1, W.inner[1] = 2;
+    EXPECT(win_set_mouse_pos(&W, 10, 20), 7);
+    EXPECT(cursor_set[0], 16), EXPECT(cursor_set[1], 28);
+    init(&P, 0);
+    P.outer[0] = 100, P.outer[1] = 200;
+    W.parent = &P, W.flags = WIN_F_CHILD;
+    win_set_mouse_pos(&W, 10, 20);
+    EXPECT(cursor_set[0], 116), EXPECT(cursor_set[1], 228);
+    P.inner[0] = 3, P.inner[1] = 4;
+    W.flags = WIN_F_CHILD | WIN_F_PARENT_INNER;
+    win_set_mouse_pos(&W, 0, 0);  // the parent's inner origin is taken off after its client area is added
+    EXPECT(cursor_set[0], 6 + 103 - 3), EXPECT(cursor_set[1], 8 + 204 - 4);
+    cursor[0] = 50, cursor[1] = 60;
+    int32_t mx = -1, my = -1;
+    W.parent = NULL, W.flags = 0;
+    win_get_mouse_pos(&W, &mx, &my);
+    EXPECT(mx, 44), EXPECT(my, 52);
+    W.parent = &P, W.flags = WIN_F_CHILD;
+    win_get_mouse_pos(&W, &mx, &my);
+    EXPECT(mx, 44 - 103), EXPECT(my, 52 - 204);
+    got_cursor = 0, mx = 77;
+    win_get_mouse_pos(&W, &mx, NULL), win_get_mouse_pos(&W, NULL, &my);
+    EXPECT(mx, 77), EXPECT(got_cursor, 0);
+    keys[1] = (int16_t)0x8000, keys[2] = 0x0001;
+    swapped = 0;
+    EXPECT(win_get_lbutton_state(), -1), EXPECT(win_get_rbutton_state(), 0);
+    swapped = 1;
+    EXPECT(win_get_lbutton_state(), -2), EXPECT(win_get_rbutton_state(), 1);
+
+    // Maximizing and minimizing: the presses go, a window with the capture is told, and the
+    // hover goes if it was this window.
+    hwnd_ = 0x1234;
+    capture_ = &W, hover_ = &W, press1_ = &A, press2_ = &B;
+    nvlog = 0, shown = 0;
+    EXPECT(win_maximize(&W), 0);
+    EXPECT(capture_ == NULL, 1), EXPECT(hover_ == NULL, 1), EXPECT(press1_ == NULL, 1), EXPECT(press2_ == NULL, 1);
+    EXPECT(shown, 1), EXPECT(shown_cmd, 3), EXPECT(shown_hwnd, 0x1234), EXPECT(nvlog, 1);
+    expect_call(0, 0x10, &W, 0, 0, 0);
+    capture_ = &A, hover_ = &A;
+    EXPECT(win_minimize(&W), 0);
+    EXPECT(capture_ == &A, 1), EXPECT(hover_ == &A, 1), EXPECT(shown_cmd, 6), EXPECT(nvlog, 1);
+    EXPECT(win_show_maximize(&W), 0);
+    EXPECT(shown_cmd, 3), EXPECT(shown, 3);
+
+    // Centring: in the screen, or in the parent's client area; sums halved towards zero.
+    init(&W, 0);
+    screen_w_ = 800, screen_h_ = 600;
+    W.inner[2] = 100, W.inner[3] = 50;
+    EXPECT(win_center(&W), 0);
+    EXPECT(W.inner[0], 350), EXPECT(W.inner[1], 275), EXPECT(W.inner[2], 450), EXPECT(W.inner[3], 325);
+    init(&W, WIN_F2_FRAME);
+    W.outer[2] = 1001, W.outer[3] = 11;
+    win_center(&W);
+    EXPECT(W.outer[0], -100), EXPECT(W.outer[1], 294), EXPECT(W.outer[2], 901);
+    init(&P, 0), init(&W, 0);
+    P.outer[0] = 10, P.outer[1] = 20, P.inner[0] = 1, P.inner[1] = 2;
+    W.parent = &P, W.inner[2] = 100, W.inner[3] = 50;
+    win_center(&W);
+    EXPECT(W.inner[0], 350 - 11), EXPECT(W.inner[1], 275 - 22);
+
+    // The nonclient area taken off a rectangle undoes what the client one put on.
+    init(&O, 0);
+    O.vtable = vtable;
+    vtable[WIN_VT_NC_HEIGHT / 4] = (void *)owner_height;
+    init(&W, 0);
+    W.flags = WIN_F_MARGIN_H | WIN_F_MARGIN_W | WIN_F_THICK | WIN_F_CAPTION;
+    W.border = 2, W.bottom = 5, W.caption_h = 9, W.nc_owner = &O, O.title_h = 4;
+    nc_margin = 7;
+    int32_t qq[4] = {10, 20, 300, 400}, qq0[4] = {10, 20, 300, 400};
+    win_client_to_nonclient_2(&W, qq);
+    win_nonclient_to_client_2(&W, qq);
+    EXPECT(memcmp(qq, qq0, sizeof qq), 0);
+    win_nonclient_to_client_2(&W, NULL);
+    W.flags = 0x1, W.nc_owner = NULL;
+    win_nonclient_to_client_2(&W, qq);
+    EXPECT(qq[0], 12), EXPECT(qq[1], 22), EXPECT(qq[2], 298), EXPECT(qq[3], 398 + 2 - 5);
+
+    // The caption buttons go along the right, 3 and 1 apart; the picture depends on the window.
+    static struct game_win_btn b4, b8, bc;
+    memset(&b4, 0, sizeof b4), memset(&b8, 0, sizeof b8), memset(&bc, 0, sizeof bc);
+    init(&W, WIN_F2_FRAME);
+    b4.win.vtable = b8.win.vtable = bc.win.vtable = vtable;
+    W.btn_e4 = &b4, W.btn_e8 = &b8, W.btn_ec = &bc;
+    W.cap_btn = 5, W.border = 2, W.caption_h = 7;
+    W.outer[0] = 10, W.outer[2] = 210;
+    b8.width = 20, bc.width = 30;
+    b4.win.flags2 = b8.win.flags2 = bc.win.flags2 = WIN_F2_FRAME;
+    pic_normal_ = 11, pic_zoomed_ = 22, zoomed = 0;
+    win_redo_caption_buttons(&W);
+    int start = 210 - 10 - 10 - 2 - 7 - 2;  // 179
+    EXPECT(bc.win.outer[0], start), EXPECT(bc.win.outer[1], 5);
+    EXPECT(b8.win.outer[0], start - 3 - 30), EXPECT(b8.win.outer[1], 5), EXPECT(b8.picture, 11);
+    EXPECT(b4.win.outer[0], start - 3 - 30 - 1 - 20), EXPECT(b4.win.outer[1], 5);
+    zoomed = 1;
+    win_redo_caption_buttons(&W);
+    EXPECT(b8.picture, 22);
+    W.btn_e4 = W.btn_e8 = W.btn_ec = NULL;
+    win_redo_caption_buttons(&W);
+
+    // Sizing a window with a frame to a client size, and one without; its root hears of it.
+    init(&W, WIN_F2_FRAME), init(&R, 0);
+    W.outer[0] = 10, W.outer[1] = 20, W.outer[2] = 50, W.outer[3] = 60;
+    nvlog = 0;
+    EXPECT(win_resize(&W, 100, 80, 0), 0);
+    EXPECT(W.outer[2], 110), EXPECT(W.outer[3], 100), EXPECT(W.inner[0], 0), EXPECT(W.inner[1], 0);
+    EXPECT(W.inner[2], 100), EXPECT(W.inner[3], 80), EXPECT(cur_ == &W, 1);
+    EXPECT(nvlog, 3);
+    expect_call(0, 0x108, &W, 0, 0, 0), expect_call(1, 0x34, &W, 100, 80, 0), expect_call(2, 0x30, &W, 0, 0, 0);
+    W.flags = WIN_F_THICK, W.border = 2, W.bottom = -1, W.root = &R;
+    nvlog = 0;
+    win_resize(&W, 100, 80, 1);
+    EXPECT(W.outer[2], 10 + 104), EXPECT(W.outer[3], 20 + 84);
+    EXPECT(W.inner[0], 2), EXPECT(W.inner[1], 2), EXPECT(W.inner[2], 102), EXPECT(W.inner[3], 82);
+    EXPECT(nvlog, 4);
+    expect_call(0, 0x108, &W, 0, 0, 0), expect_call(1, 0xc, &R, 104, 84, 0), expect_call(2, 0x34, &W, 100, 80, 0);
+    expect_call(3, 0x30, &W, 0, 0, 0);
+    init(&W, 0);
+    W.root = &R, W.inner[0] = 3, W.inner[1] = 4;
+    nvlog = 0;
+    win_resize(&W, 40, 30, 1);
+    EXPECT(W.inner[2], 43), EXPECT(W.inner[3], 34), EXPECT(W.outer[2], 0);
+    expect_call(1, 0xc, &R, 40, 30, 0), expect_call(2, 0x34, &W, 40, 30, 0);
+
+    // The resize event: the scroll bars to the edges, the callback, the slot and the buttons.
+    init(&W, 0);
+    W.inner[2] = 100, W.inner[3] = 60;
+    W.scroll_v = &bsv, W.scroll_h = &bsh;
+    memset(&bsv, 0, sizeof bsv), memset(&bsh, 0, sizeof bsh);
+    bsv.win.vtable = bsh.win.vtable = vtable;
+    bsv.width = 12, bsv.height = 3, bsh.width = 4, bsh.height = 14;
+    W.resize_cb = (void *)stub_cb;
+    nvlog = 0;
+    win_resize_event(&W, 100, 60);
+    EXPECT(bsv.win.inner[0], 100), EXPECT(bsv.win.inner[1], 0), EXPECT(bsh.win.inner[0], 0), EXPECT(bsh.win.inner[1], 60);
+    EXPECT(nvlog, 4);
+    expect_call(0, 0xc, &bsv, 12, 14 - 0 + 60, 0), expect_call(1, 0xc, &bsh, 100 - 12, -14, 0);
+    expect_call(2, 0x400, NULL, 100, 60, 0), expect_call(3, 0x34, &W, 100, 60, 0);
+    bsv.win.inner[0] = 0, W.scroll_h = NULL;
+    nvlog = 0;
+    win_resize_event(&W, 1, 2);
+    EXPECT(bsv.win.inner[0], 100), EXPECT(bsv.win.inner[1], 0);
+    expect_call(0, 0xc, &bsv, 12, 60, 0);
+    W.scroll_v = NULL, W.scroll_h = &bsh;
+    nvlog = 0;
+    win_resize_event(&W, 1, 2);
+    expect_call(0, 0xc, &bsh, 100, -14, 0);
+    W.flags = 0x40, W.resize_cb = NULL;
+    nvlog = 0;
+    win_resize_event(&W, 7, 8);
+    EXPECT(nvlog, 1);
+    expect_call(0, 0x34, &W, 7, 8, 0);
+
+    // The nonclient buffers: asked to rebuild, and the one for the number given.
+    init(&W, 0);
+    W.nc_buf_b4 = (void *)0xb4, W.nc_buf_b8 = (void *)0xb8, W.nc_buf_bc = (void *)0xbc, W.nc_buf_c0 = (void *)0xc0;
+    nvlog = 0;
+    EXPECT(win_redraw_nc_buffer(&W, 0), 0xb4), EXPECT(win_redraw_nc_buffer(&W, 1), 0xb8);
+    EXPECT(win_redraw_nc_buffer(&W, 2), 0xc0), EXPECT(win_redraw_nc_buffer(&W, 3), 0xbc);
+    EXPECT(win_redraw_nc_buffer(&W, 4), 0), EXPECT(win_redraw_nc_buffer(&W, 0xffffffffu), 0);
+    EXPECT(nvlog, 6);
+    expect_call(2, 0x10c, &W, 0, 2, 0);
+    nvlog = 0;
+    EXPECT(win_update_nc_buffer(&W, -1), 0x128 + 1);
+    expect_call(0, 0x128, &W, 0, -1, 0);
 
     if (failures) return 1;
     printf("engine_win: ok\n");

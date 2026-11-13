@@ -2048,22 +2048,16 @@ enum {
 enum { WIN_VT_DTOR = 0x0, WIN_VT_SHOW = 0x4, WIN_VT_HIDE = 0x8, WIN_VT_RESIZE = 0xc, WIN_VT_NC_HEIGHT = 0x16c };
 
 struct game_win;
-// A node of the dialog list a Win keeps: the window it names is at 0x4.
+// A node of the dialog list a Win keeps: the window it names is at 0x4, and the nodes make a ring.
 struct game_win_node {
     int32_t pad0;
     struct game_win *win;
-    int32_t pad8, next, prev, pad14, pad18;
+    int32_t pad8;
+    struct game_win_node *next, *prev;
+    int32_t pad14, pad18;
 };
-// A scroll bar is a Win with more behind it; the ones a Win points at (0x43c and 0x440).
-struct game_win_scroll {
-    uint8_t win[0xa2c];
-    int32_t pos;  // 0xa2c
-    GAME_PAD(0xa30, 0xa40);
-    int32_t paging;  // 0xa40
-    GAME_PAD(0xa44, 0x2144);
-    int32_t f2144, f2148;
-    GAME_PAD(0x214c, 0x2150);
-};
+struct game_win_btn;
+struct game_win_scroll;
 struct game_win {
     void **vtable;
     GAME_PAD(0x4, 0x98);
@@ -2071,19 +2065,24 @@ struct game_win {
     uint32_t flags2;  // 0x9c
     GAME_PAD(0xa0, 0xa8);
     struct game_win *root;  // 0xa8: itself for a top-level window or a widget
-    GAME_PAD(0xac, 0xc4);
+    GAME_PAD(0xac, 0xb4);
+    void *nc_buf_b4, *nc_buf_b8, *nc_buf_bc, *nc_buf_c0;  // 0xb4: the buffers the nonclient area is drawn into
     struct game_win *parent;  // 0xc4
     void *dlg_vtable;         // 0xc8: the dialog list
     struct game_win_node *dlg_head;  // 0xcc
     struct game_win_node *dlg_cur;   // 0xd0
     int32_t dlg_count;               // 0xd4
-    GAME_PAD(0xd8, 0xf0);
+    int32_t dlg_index;               // 0xd8: where dlg_cur is in the ring
+    GAME_PAD(0xdc, 0xe4);
+    struct game_win_btn *btn_e4, *btn_e8, *btn_ec;  // 0xe4: the caption buttons (the last is the rightmost)
     struct game_win *nc_owner;  // 0xf0: the window whose NC_HEIGHT slot adds to a nonclient position
     GAME_PAD(0xf4, 0x114);
     int32_t caption_h;  // 0x114
     int32_t border;     // 0x118
     int32_t bottom;     // 0x11c: the bottom border, or -1 for the same as `border`
-    GAME_PAD(0x120, 0x13c);
+    GAME_PAD(0x120, 0x128);
+    int32_t cap_btn;  // 0x128: the size of a caption button
+    GAME_PAD(0x12c, 0x13c);
     int32_t inner[4];  // 0x13c
     int32_t outer[4];  // 0x14c
     GAME_PAD(0x15c, 0x16c);
@@ -2092,29 +2091,65 @@ struct game_win {
     GAME_PAD(0x174, 0x1a4);
     struct game_win *children[150];  // 0x1a4, front first
     int32_t n_children;              // 0x3fc
-    GAME_PAD(0x400, 0x43c);
+    void *resize_cb;                 // 0x400: called (cdecl) with the new width and height
+    GAME_PAD(0x404, 0x43c);
     struct game_win_scroll *scroll_v, *scroll_h;  // 0x43c, 0x440
+};
+// A caption button (a Win with more behind it): its width, and the picture it shows.
+struct game_win_btn {
+    struct game_win win;
+    GAME_PAD(0x444, 0x4c4);
+    int32_t width, height;  // 0x4c4
+    GAME_PAD(0x4cc, 0xab8);
+    int32_t picture;  // 0xab8
+};
+// A scroll bar is a Win with more behind it; the ones a Win points at (0x43c and 0x440). The
+// range is `lo` to `hi` (`inverted` counts the position from the far end).
+struct game_win_scroll {
+    struct game_win win;
+    GAME_PAD(0x444, 0x4c4);
+    int32_t width, height;  // 0x4c4
+    GAME_PAD(0x4cc, 0xa20);
+    int32_t lo, hi, inverted;  // 0xa20
+    int32_t pos;  // 0xa2c
+    GAME_PAD(0xa30, 0xa40);
+    int32_t paging;  // 0xa40
+    GAME_PAD(0xa44, 0x2144);
+    int32_t f2144, f2148;
+    GAME_PAD(0x214c, 0x2150);
 };
 GAME_AT(struct game_win, flags, 0x98);
 GAME_AT(struct game_win, flags2, 0x9c);
 GAME_AT(struct game_win, root, 0xa8);
+GAME_AT(struct game_win, nc_buf_b4, 0xb4);
+GAME_AT(struct game_win, nc_buf_c0, 0xc0);
 GAME_AT(struct game_win, parent, 0xc4);
 GAME_AT(struct game_win, dlg_head, 0xcc);
 GAME_AT(struct game_win, dlg_cur, 0xd0);
 GAME_AT(struct game_win, dlg_count, 0xd4);
+GAME_AT(struct game_win, dlg_index, 0xd8);
+GAME_AT(struct game_win, btn_e4, 0xe4);
+GAME_AT(struct game_win, btn_ec, 0xec);
 GAME_AT(struct game_win, nc_owner, 0xf0);
 GAME_AT(struct game_win, caption_h, 0x114);
 GAME_AT(struct game_win, border, 0x118);
 GAME_AT(struct game_win, bottom, 0x11c);
+GAME_AT(struct game_win, cap_btn, 0x128);
 GAME_AT(struct game_win, inner, 0x13c);
 GAME_AT(struct game_win, outer, 0x14c);
 GAME_AT(struct game_win, title_h, 0x16c);
 GAME_AT(struct game_win, resize_border, 0x170);
 GAME_AT(struct game_win, children, 0x1a4);
 GAME_AT(struct game_win, n_children, 0x3fc);
+GAME_AT(struct game_win, resize_cb, 0x400);
 GAME_AT(struct game_win, scroll_v, 0x43c);
 GAME_AT(struct game_win, scroll_h, 0x440);
 _Static_assert(sizeof(struct game_win) == 0x444, "layout of the game's Win");
+GAME_AT(struct game_win_btn, width, 0x4c4);
+GAME_AT(struct game_win_btn, picture, 0xab8);
+GAME_AT(struct game_win_scroll, width, 0x4c4);
+GAME_AT(struct game_win_scroll, height, 0x4c8);
+GAME_AT(struct game_win_scroll, lo, 0xa20);
 GAME_AT(struct game_win_scroll, pos, 0xa2c);
 GAME_AT(struct game_win_scroll, paging, 0xa40);
 GAME_AT(struct game_win_scroll, f2144, 0x2144);
@@ -2141,6 +2176,20 @@ extern int32_t *game_win_z_n;
 extern struct game_win **game_win_opaque;
 extern int32_t *game_win_opaque_flag;
 extern int32_t *game_win_nc_margin;           // what WIN_F_MARGIN_H and WIN_F_MARGIN_W add
+extern struct game_win **game_win_cur;        // the window being sized (or a scroll bar's parent)
+extern struct game_win **game_win_capture;    // the window that has the mouse captured
+extern struct game_win **game_win_hover;      // the window the mouse is over
+extern struct game_win **game_win_press1, **game_win_press2;  // the windows a mouse button went down in
+extern struct game_win **game_win_prev_focus; // the dialog focus before the last change
+extern uint32_t *game_win_hwnd;               // the game's one HWND
+extern int32_t *game_win_screen_w, *game_win_screen_h;
+extern int32_t *game_win_pic_normal, *game_win_pic_zoomed;  // the caption button's picture, window normal or maximized
+// Windows calls Win makes (through the import table, so a shadow check's journal sees them).
+extern int(__attribute__((stdcall)) * game_set_cursor_pos)(int x, int y);
+extern int(__attribute__((stdcall)) * game_get_cursor_pos)(int32_t *point);
+extern int(__attribute__((stdcall)) * game_show_window)(uint32_t hwnd, int cmd);
+extern int(__attribute__((stdcall)) * game_get_system_metrics)(int index);
+extern int(__attribute__((stdcall)) * game_is_zoomed)(uint32_t hwnd);
 
 // Point the variables above at a loaded terranx.exe.
 void game_bind(struct pe_image *exe);
