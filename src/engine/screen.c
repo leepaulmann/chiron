@@ -806,7 +806,11 @@ static void screen_sweep(void) {
 }
 
 static const struct hook screen_hooks[] = {
-    HOOK(0x5fead0, palette_timer_callback, 0x55, 0x8b, 0x6c, 0x24, 0x0c, 0x85, 0xed, 0x56),  // push ebp; mov ebp, [esp+0xc]; test ebp, ebp; push esi
+    // The game's calls run the original in normal mode too, for now: with Chiron's version (the same steps
+    // as the original's) the popups scene's terrain came out in its other look in 3 runs of 5, never with the
+    // original's own code (6 of 6 alike). The sweep still checks Chiron's code against the original's.
+    {0x5fead0, (const uint8_t[]){0x55, 0x8b, 0x6c, 0x24, 0x0c, 0x85, 0xed, 0x56}, 8, (void *)shadow_palette_timer_callback,
+     (void *)shadow_palette_timer_callback, (void **)&orig_palette_timer_callback, &stats_palette_timer_callback},
     HOOK(0x5ec690, win_get_dc, 0xa1, 0xb0, 0x3a, 0x9b, 0x00, 0x85, 0xc0),  // mov eax, [0x9b3ab0]; test eax, eax
     HOOK(0x5ec6f0, win_release_dc, 0xa1, 0xb0, 0x3a, 0x9b, 0x00, 0x48, 0xa3, 0xb0, 0x3a, 0x9b, 0x00),  // mov eax, [..]; dec eax; mov [..], eax
     HOOK(0x5f2c60, win_sync_palette, 0x56, 0x8b, 0xf1, 0x8b, 0x0d, 0x80, 0x81, 0x9b, 0x00),  // push esi; mov esi, ecx; mov ecx, [0x9b8180]
