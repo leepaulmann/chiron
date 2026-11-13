@@ -1,0 +1,23 @@
+# The Datalinks' Tech Advances list: a ListBox with a Scroll bar. The list as it opens, the scroll
+# bar's down arrow (three clicks), a click on the track below the thumb, Page Down, a click on an item
+# (selects it, and the page beside the list follows), the up arrow, and a double click. Leave time
+# after each step; the snaps take 2 s each.
+25 load
+42 key F1
+48 snap list-open
+52 click 329 477          # the down arrow
+53 click 329 477
+54 click 329 477
+58 snap down-arrow
+62 click 329 400          # the track below the thumb
+66 snap track
+70 key Next               # Page Down
+74 snap page-down
+78 click 200 150          # an item
+82 snap item
+86 click 329 72           # the up arrow
+90 snap up-arrow
+94 dblclick 200 230       # an item, twice: the Datalinks follows it
+99 snap double-click
+103 key Escape
+110 close

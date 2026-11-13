@@ -2353,6 +2353,112 @@ extern int32_t *game_win_press_inside;
 // The colour table (or NULL) that a window copied from its parent is darkened with (0x9b3390).
 extern const uint8_t **game_win_tint;
 
+// ---- The Scroll, ListBox and StringBox classes (scroll.c) ----
+// A scroll bar is a Win with a Buffer behind it like a button (GraphicWin, up to 0xa14), its own fields,
+// and two ImageButtons for the arrows (0xaac and 0x15f8, 0xb4c bytes each), then two functions a
+// screen may set for the bar (the clicks, and the dragging; Win_UNK8 and Win_UNK9 set them). A bar is
+// horizontal when its Buffer is wider than it is high. The position runs from `lo` to `hi`; an
+// inverted bar (a range given high to low) keeps the mirror of what its parent is told.
+struct game_scroll {
+    struct game_win win;
+    struct game_buffer buf;  // 0x444
+    GAME_PAD(0x9cc, 0xa14);
+    uint32_t flags;       // 0xa14: 1 lets it be seen through, 2 gives the thumb the bar's own width
+    int32_t id;           // 0xa18: what it tells its parent
+    int32_t border;       // 0xa1c: the colour of the frame, or -1
+    int32_t lo, hi;       // 0xa20
+    int32_t inverted;     // 0xa28
+    int32_t pos;          // 0xa2c
+    int32_t delay;        // 0xa30: how long a button is held before it repeats (ms)
+    int32_t rate;         // 0xa34: repeats a second
+    uint32_t press_time;  // 0xa38: timeGetTime when a track click began, 0 for none
+    int32_t drag;         // 0xa3c: where in the bar the mouse took the thumb, -1 for none
+    int32_t paging;       // 0xa40: what Page Up and Page Down move by
+    int32_t dir;          // 0xa44: -1 or 1 while a click on the track is held, else 0
+    int32_t f48;          // 0xa48
+    int32_t bar[4];       // 0xa4c: the thumb (left, top, right, bottom)
+    int32_t button_color; // 0xa5c: the arrows' fill
+    int32_t thickness;    // 0xa60: the bar's width
+    int32_t back;         // 0xa64: the fill of the bar and the thumb
+    int32_t bevel;        // 0xa68: lines of bevel round the thumb
+    int32_t bevel_upper;  // 0xa6c
+    int32_t bevel_lower;  // 0xa70
+    struct game_sprite *grip;  // 0xa74: a picture centred on the thumb
+    struct game_sprite *tile;  // 0xa78: a picture tiled over the bar
+    int32_t spr[4][3];    // 0xa7c: the pictures for the arrows (left, right, up, down), three numbers each
+    uint8_t btn_a[0xb4c];  // 0xaac
+    uint8_t btn_b[0xb4c];  // 0x15f8: the second arrow
+    void(__attribute__((cdecl)) * on_click)(int id, int pos);  // 0x2144
+    void(__attribute__((cdecl)) * on_drag)(int id, int pos);   // 0x2148
+    GAME_PAD(0x214c, 0x2150);
+};
+_Static_assert(sizeof(struct game_scroll) == 0x2150, "layout of the game's Scroll");
+GAME_AT(struct game_scroll, flags, 0xa14);
+GAME_AT(struct game_scroll, id, 0xa18);
+GAME_AT(struct game_scroll, border, 0xa1c);
+GAME_AT(struct game_scroll, lo, 0xa20);
+GAME_AT(struct game_scroll, inverted, 0xa28);
+GAME_AT(struct game_scroll, pos, 0xa2c);
+GAME_AT(struct game_scroll, delay, 0xa30);
+GAME_AT(struct game_scroll, press_time, 0xa38);
+GAME_AT(struct game_scroll, drag, 0xa3c);
+GAME_AT(struct game_scroll, paging, 0xa40);
+GAME_AT(struct game_scroll, dir, 0xa44);
+GAME_AT(struct game_scroll, bar, 0xa4c);
+GAME_AT(struct game_scroll, button_color, 0xa5c);
+GAME_AT(struct game_scroll, thickness, 0xa60);
+GAME_AT(struct game_scroll, back, 0xa64);
+GAME_AT(struct game_scroll, bevel, 0xa68);
+GAME_AT(struct game_scroll, grip, 0xa74);
+GAME_AT(struct game_scroll, spr, 0xa7c);
+GAME_AT(struct game_scroll, btn_a, 0xaac);
+GAME_AT(struct game_scroll, btn_b, 0x15f8);
+GAME_AT(struct game_scroll, on_click, 0x2144);
+GAME_AT(struct game_scroll, on_drag, 0x2148);
+// The flag the scroll bars and list boxes share (0x9b8ddc): a bar sets it when a key moved it and
+// clears it when an arrow or the thumb did; a list box then selects the item its bar moved to.
+extern int32_t *game_scroll_by_key;
+// The flag ListBox's right click raises while it runs the left click's handler (0x9b8eec).
+extern int32_t *game_listbox_right;
+// GraphicWin_fill_rect (0x5d5350): fill a rectangle of a window's Buffer, from the parent's if it can be
+// seen through; and the two Win functions that tell both scroll bars the wheel turned (0x5f85b0: down,
+// 0x5f85e0: up), each with whether to tell the parent.
+extern void(__attribute__((thiscall)) * game_graphic_win_fill_rect)(void *win, const int32_t *rect, int color);
+extern void(__attribute__((thiscall)) * game_win_wheel_down)(void *win, int notify);
+extern void(__attribute__((thiscall)) * game_win_wheel_up)(void *win, int notify);
+
+// A StringBox is a Win (the text of a message, with links) whose scroll offset is at 0xa1c.
+struct game_stringbox {
+    struct game_win win;
+    GAME_PAD(0x444, 0xa1c);
+    int32_t scroll;  // 0xa1c
+};
+GAME_AT(struct game_stringbox, scroll, 0xa1c);
+
+// A ListBox's own part. The object has a pointer to its vbtable at 0; its virtual bases are the Win
+// (a GraphicWin, vbtable entry 1, at 0x48) and the Dialog (entry 2, at 0xa60), whose list holds the
+// items: `sel` is the selected position, `hover` the one under the mouse. A handler the Win's vtable
+// holds gets the Win, 0x48 into the box.
+struct game_listbox {
+    int32_t *vbptr;        // 0x0
+    int32_t f4;
+    int32_t force;         // 0x8: select even what is selected already
+    int32_t flags;         // 0xc
+    int32_t f10, f14;
+    int32_t top;           // 0x18: the first item shown
+    int32_t visible;       // 0x1c: how many items show
+    int32_t f20, f24, f28, f2c, f30, f34;
+    void *f38;
+    void(__attribute__((cdecl)) * on_select)(int id);  // 0x3c: told of each selection
+    void(__attribute__((cdecl)) * on_double)(int id);  // 0x40: told of a double click
+    GAME_PAD(0x44, 0x48);
+};
+GAME_AT(struct game_listbox, force, 0x8);
+GAME_AT(struct game_listbox, top, 0x18);
+GAME_AT(struct game_listbox, visible, 0x1c);
+GAME_AT(struct game_listbox, on_select, 0x3c);
+GAME_AT(struct game_listbox, on_double, 0x40);
+
 // Windows calls Win makes (through the import table, so a shadow check's journal sees them).
 extern int(__attribute__((stdcall)) * game_set_cursor_pos)(int x, int y);
 extern int(__attribute__((stdcall)) * game_get_cursor_pos)(int32_t *point);

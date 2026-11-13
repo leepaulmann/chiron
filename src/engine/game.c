@@ -173,6 +173,10 @@ struct game_button_defaults *game_button_defaults;
 struct game_button_fonts *game_button_fonts;
 void(__attribute__((cdecl)) * *game_button_hooks)(void);
 int32_t *game_win_press_inside;
+int32_t *game_scroll_by_key, *game_listbox_right;
+void(__attribute__((thiscall)) * game_graphic_win_fill_rect)(void *win, const int32_t *rect, int color);
+void(__attribute__((thiscall)) * game_win_wheel_down)(void *win, int notify);
+void(__attribute__((thiscall)) * game_win_wheel_up)(void *win, int notify);
 const uint8_t **game_win_tint;
 int(__attribute__((stdcall)) * game_set_cursor_pos)(int x, int y);
 int(__attribute__((stdcall)) * game_get_cursor_pos)(int32_t *point);
@@ -1527,6 +1531,11 @@ void game_bind(struct pe_image *exe) {
     game_button_fonts = (struct game_button_fonts *)code_at(exe, 0x9b8e2c);
     game_button_hooks = (void *)code_at(exe, 0x9b7a98);
     game_win_press_inside = (int32_t *)code_at(exe, 0x9b7ad4);
+    game_scroll_by_key = (int32_t *)code_at(exe, 0x9b8ddc);
+    game_listbox_right = (int32_t *)code_at(exe, 0x9b8eec);
+    game_graphic_win_fill_rect = (void *)code_at(exe, 0x5d5350);
+    game_win_wheel_down = (void *)code_at(exe, 0x5f85b0);
+    game_win_wheel_up = (void *)code_at(exe, 0x5f85e0);
     game_win_tint = (const uint8_t **)code_at(exe, 0x9b3390);
     game_set_cursor_pos = *(void **)code_at(exe, 0x669310);  // the imports, as bound (and journaled in shadow mode)
     game_get_cursor_pos = *(void **)code_at(exe, 0x669284);
