@@ -2,6 +2,9 @@
 # key brings up over the game menu, a Tab that moves its focus, the mouse over a button, and Escape to answer
 # it, then the same question again answered with the Return key. Loaded from the game's autosave. Leave time
 # after each step; the snaps take 2 s each.
+# The leaders' portraits in the base screen animate on their own slow clock.
+mask 266 625 310 678
+mask 702 624 760 680
 25 load
 42 snap note
 48 click 362 734         # the note's Close

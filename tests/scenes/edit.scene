@@ -5,6 +5,9 @@
 # too, as the number their key code has: the box shows $, % and . among the text. That is how the game, with
 # the window layer's MapVirtualKey, treats them, in the original's code as in Chiron's.) Leave time after each
 # step; a snap takes two seconds.
+# The leaders' portraits in the base screen animate on their own slow clock.
+mask 266 625 310 678
+mask 702 624 760 680
 25 load
 48 click 362 734         # the note's Close
 55 key b                 # found a base where the colony pod stands

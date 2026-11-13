@@ -16,7 +16,11 @@ Blinking cursors and animations change from frame to frame on their own
 timers, so each snap is a burst of frames 0.2 s apart over 2 s. A pixel
 that changes within either run's burst is left out of the comparison (and
 counted as animated); every other pixel must match exactly. Leave at least 2.5
-seconds after a snap before the next step.
+seconds after a snap before the next step. Some pictures animate on a clock
+slower than a burst (the leaders' portraits in the base screen hold a frame for
+seconds), so they can be caught in different frames by the two runs: a scene
+line "mask X0 Y0 X1 Y1" leaves that rectangle (corners included) out of every
+snap's comparison, counted as masked.
 
 A scene whose first step is "<seconds> load" starts from a saved game instead
 of a new one: the tool first runs Quick Start once with the original's code to
@@ -42,13 +46,16 @@ FIXED_TIME = "946728000"  # 2000-01-01 12:00 UTC
 
 
 def read_scene(path):
-    steps = []
+    """The scene's steps, and the rectangles its mask lines leave out."""
+    steps, masks = [], []
     with open(path) as f:
         for line in f:
             line = line.split("#", 1)[0].strip()
-            if line:
+            if line.startswith("mask "):
+                masks.append(tuple(int(v) for v in line.split()[1:5]))
+            elif line:
                 steps.extend(s.strip() for s in line.split(";") if s.strip())
-    return steps
+    return steps, masks
 
 
 def read_bmp(path):
@@ -83,22 +90,23 @@ def write_bmp(path, w, h, rows):
 BURST = [k / 5 for k in range(11)]  # 0 to 2 s
 
 
-def compare(a_paths, b_paths, diff_path):
+def compare(a_paths, b_paths, diff_path, masks=()):
     frames = []
     for p in a_paths + b_paths:
         w, h, rows = read_bmp(p)
         frames.append((w, h, rows))
     sizes = {(w, h) for w, h, _ in frames}
     if len(sizes) != 1:
-        return f"frame sizes differ: {sorted(sizes)}"
+        return f"frame sizes differ: {sorted(sizes)}", ""
     w, h = sizes.pop()
     a = [f[2] for f in frames[:len(a_paths)]]
     b = [f[2] for f in frames[len(a_paths):]]
-    count, animated, box = 0, 0, None
+    count, animated, masked, box = 0, 0, 0, None
     out = []
     for y in range(h):
         ra, rb = a[0][y], b[0][y]
         steady = all(r[y] == ra for r in a) and all(r[y] == rb for r in b)
+        row_masks = [(x0, x1) for x0, y0, x1, y1 in masks if y0 <= y <= y1]
         if steady and ra == rb:
             out.append(bytes(v >> 2 for v in ra))
             continue
@@ -107,6 +115,10 @@ def compare(a_paths, b_paths, diff_path):
             i = x * 3
             pa = ra[i:i + 3]
             pb = rb[i:i + 3]
+            if row_masks and any(x0 <= x <= x1 for x0, x1 in row_masks):
+                if pa != pb or not steady:
+                    masked += 1
+                continue
             if not steady and (any(r[y][i:i + 3] != pa for r in a) or any(r[y][i:i + 3] != pb for r in b)):
                 animated += 1
                 continue
@@ -116,6 +128,7 @@ def compare(a_paths, b_paths, diff_path):
                 box = (min(box[0], x), min(box[1], y), max(box[2], x), max(box[3], y)) if box else (x, y, x, y)
         out.append(bytes(row))
     note = f" ({animated} animated pixels skipped)" if animated else ""
+    note += f" ({masked} masked pixels differ)" if masked else ""
     if not count:
         return None, note
     write_bmp(diff_path, w, h, out)
@@ -176,7 +189,7 @@ def run(mode, steps, out, binary, timeout, save=None):
     return r.returncode
 
 
-def attempt(a, steps, snaps, modes, save):
+def attempt(a, steps, snaps, modes, save, masks):
     """Run every mode and compare the snaps; returns {snap: problem or None}."""
     for m in modes:
         status = run(m, steps, a.out, a.bin, a.timeout, save)
@@ -191,7 +204,7 @@ def attempt(a, steps, snaps, modes, save):
             continue
         results[name] = None
         for m in modes[1:]:
-            r, note = compare(paths[modes[0]], paths[m], os.path.join(a.out, f"diff-{name}.bmp"))
+            r, note = compare(paths[modes[0]], paths[m], os.path.join(a.out, f"diff-{name}.bmp"), masks)
             print(f"{name}: " + (r or "match") + note)
             results[name] = results[name] or r
     return results
@@ -206,18 +219,18 @@ def main():
     p.add_argument("--timeout", type=int, default=300)
     p.add_argument("--retries", type=int, default=1, help="rerun once when snaps differ (0 to report the first attempt)")
     a = p.parse_args()
-    steps = read_scene(a.scene)
+    steps, masks = read_scene(a.scene)
     snaps = [s.split("snap", 1)[1].strip() for s in steps if s.partition(" ")[2].startswith("snap ")]
     os.makedirs(a.out, exist_ok=True)
     modes = a.modes.split(",")
     save = make_save(a.out, a.bin) if steps and steps[0].split()[1:] == ["load"] else None
-    results = attempt(a, steps, snaps, modes, save)
+    results = attempt(a, steps, snaps, modes, save, masks)
     if any(r for r in results.values()) and a.retries:
         # A scene runs on wall-clock time, so a slow load now and then puts a
         # click on the wrong thing. A real difference shows up again.
         print("differences found; running the scene again")
         first = results
-        results = attempt(a, steps, snaps, modes, save)
+        results = attempt(a, steps, snaps, modes, save, masks)
         for name, r in results.items():
             if first[name] and not r:
                 print(f"{name}: differed only on the first attempt (timing), matches now")
