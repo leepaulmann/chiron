@@ -2577,6 +2577,183 @@ extern void **game_pd_font, **game_menu_font;
 extern int32_t *game_pd_margin;
 extern const char *game_pd_gap;  // (the strings are 4 bytes apart)
 
+// ---- The Dialog, SpriteBox and BasePop (popup) classes (dialog.c) ----
+// A node of the list a Dialog or a SpriteBox keeps (the game's StringStruct class): the key (the id)
+// at 0x4, the item at 0x8, the next and the previous node of the ring.
+struct game_dlist_node {
+    void **vtable;
+    int32_t key;
+    void *item;
+    struct game_dlist_node *next, *prev;
+};
+// The list object itself (0x1c bytes). Its vtable's slot 1 (0x4) is called with each item as the list
+// is emptied; the item and the node are then deleted through their own vtables. `idx` says where
+// `cur` is, and `buf` is the Dialog's data (or what a caller gave it).
+struct game_dlist {
+    void **vtable;  // 0x0
+    void *vbptr;    // 0x4
+    struct game_dlist_node *head, *cur;  // 0x8, 0xc
+    int32_t count;  // 0x10
+    int32_t idx;    // 0x14
+    void *buf;      // 0x18
+};
+_Static_assert(sizeof(struct game_dlist) == 0x1c, "layout of the game's list");
+GAME_AT(struct game_dlist, head, 0x8);
+GAME_AT(struct game_dlist, count, 0x10);
+GAME_AT(struct game_dlist, buf, 0x18);
+// The Dialog class: a data block (the first 0x14 bytes from 0x4: a flag byte, the data, a cursor, its
+// size and what is left), the position and size, the fonts and text colours its items take (`color` has
+// four rows, one for each of the three text colours' four numbers: row i, colour j at 0x7c + 12 * i +
+// 4 * j) and a list of items at 0xbc.
+struct game_dialog {
+    void **vtable;     // 0x0
+    uint8_t data_flag; // 0x4
+    GAME_PAD(0x5, 0x8);
+    void *data, *cursor;  // 0x8, 0xc
+    int32_t data_size, data_left;  // 0x10, 0x14
+    void *ext;         // 0x18: a data block a caller gave
+    int32_t size;      // 0x1c: bytes to make the data (-1 for none)
+    uint32_t flags;    // 0x20
+    int32_t x, y, w, h;  // 0x24
+    int32_t v34, v38, v3c, v40, v44, v48, v4c, v50;  // 0x34
+    int32_t v54[6];    // 0x54
+    int32_t v6c;       // 0x6c
+    void *font;        // 0x70
+    int32_t font_a, font_b;  // 0x74
+    int32_t color[4][3];  // 0x7c
+    int32_t vac, vb0, vb4, vb8;  // 0xac
+    struct game_dlist list;  // 0xbc
+    GAME_PAD(0xd8, 0xe4);
+    void *ve4;         // 0xe4
+    int32_t ve8;       // 0xe8
+    int32_t sel, hover;  // 0xec, 0xf0
+};
+GAME_AT(struct game_dialog, data, 0x8);
+GAME_AT(struct game_dialog, ext, 0x18);
+GAME_AT(struct game_dialog, size, 0x1c);
+GAME_AT(struct game_dialog, flags, 0x20);
+GAME_AT(struct game_dialog, v34, 0x34);
+GAME_AT(struct game_dialog, v54, 0x54);
+GAME_AT(struct game_dialog, font, 0x70);
+GAME_AT(struct game_dialog, color, 0x7c);
+GAME_AT(struct game_dialog, vac, 0xac);
+GAME_AT(struct game_dialog, list, 0xbc);
+GAME_AT(struct game_dialog, sel, 0xec);
+// What a new Dialog takes: 0x697098 (the width, three more numbers, the colours, the flags) and
+// 0x9b8eb4 (the fonts and the rest).
+struct game_dialog_defs_a {
+    int32_t w, v44, v4c, v50, v6c;  // 0x697098
+    int32_t color[4][3];  // 0x6970ac
+    int32_t flags;        // 0x6970dc
+};
+struct game_dialog_defs_b {
+    int32_t h, v34, v40;  // 0x9b8eb4
+    void *font;           // 0x9b8ec0
+    int32_t font_a, font_b;
+    int32_t vac, vb0, vb4, vb8;  // 0x9b8ecc
+};
+_Static_assert(sizeof(struct game_dialog_defs_a) == 0x48, "Dialog defaults");
+_Static_assert(sizeof(struct game_dialog_defs_b) == 0x28, "Dialog defaults");
+extern struct game_dialog_defs_a *game_dialog_defs_a;
+extern struct game_dialog_defs_b *game_dialog_defs_b;
+// A new BasePop's defaults: the text colours (four numbers each, in four rows), then the button
+// colours (three numbers each, in four rows); and the fonts at 0x9b8d98.
+struct game_pop_defs {
+    int32_t string[4][4];  // 0x696ee4
+    int32_t button[4][3];  // 0x696f24
+};
+struct game_pop_fonts {
+    void *string_font;  // 0x9b8d98
+    int32_t string_a, string_b, string_c;
+    void *button_font;  // 0x9b8da8
+    int32_t button_a, button_b;
+};
+_Static_assert(sizeof(struct game_pop_defs) == 0x70, "BasePop defaults");
+_Static_assert(sizeof(struct game_pop_fonts) == 0x1c, "BasePop fonts");
+extern struct game_pop_defs *game_pop_defs;
+extern struct game_pop_fonts *game_pop_fonts;
+// Whether a popup is up (0x9b8cfc, which its fallout sets when 0x9b8d00 is), the default external window
+// (three numbers at 0x9b8d04 and two at 0x696ec4), and the file name popups read their text from
+// (game_pop_file, up to twelve characters).
+extern int32_t *game_pop_open, *game_pop_fallout_on, *game_pop_ext_a, *game_pop_ext_b;
+
+// The pieces of a popup (BasePop, 0x3230 bytes), as far as the functions in dialog.c reach: its flags
+// (0x20, and the popup's own at 0x30a8: 0x100 keeps it from being redrawn by a double click, 0x400 stops
+// the screen scaling, 0x4000 takes keys as clicks), the external window it is drawn over (0xa14, with
+// four numbers), the answer (0xa40 and 0x3100), a Dialog at 0x21d0 that holds the buttons (its vbase
+// through the word at 0x21d0) and a CheckBox at 0x2228 (the same), the default button (0x2350), the
+// Spot list of its buttons (0x3098), where it goes (0x30f8, 0x30fc), the string and button fonts and
+// text colours it takes (0x3110 and 0x316c, colours at 0x3120 and 0x3178).
+struct game_base_pop {
+    void **vtable;  // 0x0
+    GAME_PAD(0x4, 0x20);
+    uint32_t f20;   // 0x20: bit 0 and bit 1 are set by UNK3 and UNK4
+    GAME_PAD(0x24, 0xa14);
+    void *ext;      // 0xa14
+    int32_t ext_a, ext_b, ext_c, ext_d;  // 0xa18
+    GAME_PAD(0xa28, 0xa40);
+    int32_t answer;  // 0xa40
+    GAME_PAD(0xa44, 0x21d0);
+    int32_t *dlg_vbtable;  // 0x21d0
+    GAME_PAD(0x21d4, 0x2228);
+    int32_t *chk_vbtable;  // 0x2228
+    GAME_PAD(0x222c, 0x2350);
+    int32_t def_button;    // 0x2350
+    GAME_PAD(0x2354, 0x3098);
+    struct game_spot spots;  // 0x3098
+    GAME_PAD(0x30a4, 0x30a8);
+    uint32_t flags;          // 0x30a8
+    GAME_PAD(0x30ac, 0x30f8);
+    int32_t x, y, result;    // 0x30f8
+    GAME_PAD(0x3104, 0x3110);
+    void *string_font;       // 0x3110
+    int32_t string_a, string_b, string_c;  // 0x3114
+    int32_t string_color[4][4];  // 0x3120
+    GAME_PAD(0x3160, 0x316c);
+    void *button_font;       // 0x316c
+    int32_t button_a, button_b;  // 0x3170
+    uint8_t button_flag[3];  // 0x3178
+    GAME_PAD(0x317b, 0x317c);
+    int32_t button_color[3][3];  // 0x317c
+    GAME_PAD(0x31a0, 0x3230);
+};
+_Static_assert(sizeof(struct game_base_pop) == 0x3230, "layout of the game's BasePop");
+GAME_AT(struct game_base_pop, ext, 0xa14);
+GAME_AT(struct game_base_pop, answer, 0xa40);
+GAME_AT(struct game_base_pop, dlg_vbtable, 0x21d0);
+GAME_AT(struct game_base_pop, chk_vbtable, 0x2228);
+GAME_AT(struct game_base_pop, def_button, 0x2350);
+GAME_AT(struct game_base_pop, spots, 0x3098);
+GAME_AT(struct game_base_pop, flags, 0x30a8);
+GAME_AT(struct game_base_pop, x, 0x30f8);
+GAME_AT(struct game_base_pop, string_font, 0x3110);
+GAME_AT(struct game_base_pop, string_color, 0x3120);
+GAME_AT(struct game_base_pop, button_font, 0x316c);
+GAME_AT(struct game_base_pop, button_flag, 0x3178);
+GAME_AT(struct game_base_pop, button_color, 0x317c);
+// A SpriteBox (a Dialog-like list of sprites): a Spot list at 0x10, its sprites in a list at 0x24, the functions
+// a screen set to hear of the mouse (cdecl, given the id of the sprite; 0x68 left click, 0x6c left down, 0x70
+// left up, 0x74 right click, 0x78 right down, 0x7c right up, 0x80 and 0x84 the double clicks) and its Win at
+// 0x8c (the mouse functions are called with that, the way the Win class's events are).
+struct game_sprite_box {
+    void **vtable;  // 0x0
+    GAME_PAD(0x4, 0x10);
+    struct game_spot spot;  // 0x10
+    GAME_PAD(0x1c, 0x24);
+    struct game_dlist list;  // 0x24
+    GAME_PAD(0x40, 0x68);
+    int(__attribute__((cdecl)) * fn[8])(int id);  // 0x68
+    GAME_PAD(0x88, 0x8c);
+};
+_Static_assert(sizeof(struct game_sprite_box) == 0x8c, "layout of the game's SpriteBox");
+GAME_AT(struct game_sprite_box, spot, 0x10);
+GAME_AT(struct game_sprite_box, list, 0x24);
+GAME_AT(struct game_sprite_box, fn, 0x68);
+// The Dialog's data block: closed (freeing it) and made with room for a number of bytes (the answer is 0, or 1
+// when there was no memory).
+extern void(__attribute__((thiscall)) * game_dialog_data_close)(void *data);
+extern int(__attribute__((thiscall)) * game_dialog_data_alloc)(void *data, int size);
+
 // Point the variables above at a loaded terranx.exe.
 void game_bind(struct pe_image *exe);
 

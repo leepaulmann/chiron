@@ -1,0 +1,23 @@
+# The popup dialogs (BasePop with its Dialog, buttons and key handling): the quit question that the Escape
+# key brings up over the game menu, a Tab that moves its focus, the mouse over a button, and Escape to answer
+# it, then the same question again answered with the Return key. Loaded from the game's autosave. Leave time
+# after each step; the snaps take 2 s each.
+25 load
+42 snap note
+48 click 362 734         # the note's Close
+49 snap map
+66 click 63 538          # MENU
+70 snap menu
+73 key Escape            # closes the menu, then asks to quit
+77 snap quit-dialog
+79 key Tab               # the focus moves to another button
+82 snap quit-tab
+84 key Escape            # answers the question
+88 snap map-after-cancel
+91 click 63 538          # MENU
+95 key Escape            # the question again
+99 snap quit-again
+101 move 500 300
+103 key Return           # the default button
+107 snap map-after-return
+110 close
