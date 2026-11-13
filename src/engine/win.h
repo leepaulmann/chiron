@@ -99,3 +99,30 @@ void WIN_THIS win_set_rects(struct game_win *w);
 void WIN_THIS win_on_redraw_nc(struct game_win *w, const int32_t *rect, int which);
 void WIN_THIS win_draw_nc_to(struct game_win *w, struct game_buffer *dest, int x, int y);
 void WIN_THIS win_on_nc_paint(struct game_win *w, const int32_t *rect, int which);
+
+// Mouse and key events (see win.c): the one-event functions a window's handlers are called by, the
+// raw events the game's window procedure gives a window, and the calls it makes to find the window.
+// The functions call the window's virtual functions, so the game's own calls of them run the original
+// in shadow mode.
+void WIN_THIS win_left_down_event(struct game_win *w, int x, int y, int nc);
+void WIN_THIS win_left_up_event(struct game_win *w, int x, int y, int nc);
+void WIN_THIS win_right_click_event(struct game_win *w, int x, int y, int nc);
+void WIN_THIS win_right_down_event(struct game_win *w, int x, int y, int nc);
+void WIN_THIS win_right_up_event(struct game_win *w, int x, int y, int nc);
+int WIN_THIS win_key_click_event(struct game_win *w, int a, int key);
+int WIN_THIS win_key_down_event(struct game_win *w, int key);
+int WIN_THIS win_key_up_event(struct game_win *w, int key);
+void WIN_THIS win_on_mouse_move(struct game_win *w, int x, int y, int keys, int nc);
+void WIN_THIS win_on_mouse_wheel(struct game_win *w, int keys, int delta, int x, int y, int nc);
+void WIN_THIS win_on_l_button_down(struct game_win *w, int dbl, int x, int y, int keys, int nc);
+void WIN_THIS win_on_l_button_up(struct game_win *w, int x, int y, int keys, int nc);
+void WIN_THIS win_on_r_button_down(struct game_win *w, int dbl, int x, int y, int keys, int nc);
+void WIN_THIS win_on_r_button_up(struct game_win *w, int x, int y, int keys, int nc);
+int WIN_THIS win_on_sys_key(struct game_win *w, int vk, int down, int rep, int scan);
+void win_OnKey(int unused, int vk, int down, int rep, int scan);
+void win_OnChar(int unused, int ch, int rep);
+void win_OnSysKey(int unused, int vk, int down, int rep, int scan);
+void win_OnLButtonDown(int hwnd, int dbl, int x, int y, int keys);
+void win_OnLButtonUp(int hwnd, int x, int y, int keys);
+void win_OnRButtonDown(int hwnd, int dbl, int x, int y, int keys);
+void win_OnRButtonUp(int hwnd, int x, int y, int keys);

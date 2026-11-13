@@ -2350,6 +2350,17 @@ extern struct game_button_fonts *game_button_fonts;
 extern void(__attribute__((cdecl)) * *game_button_hooks)(void);  // [2]
 // Whether the mouse is inside the window that has it pressed.
 extern int32_t *game_win_press_inside;
+// A window being moved or sized with the mouse: the window (0x9b7aac), the frame hit code that
+// started it (0x9b7aa8), and where the mouse was (0x9b7ab0, two numbers).
+extern struct game_win **game_win_track;
+extern int32_t *game_win_track_code, *game_win_track_pos;
+// The functions the game may have set to hear of input (cdecl, each NULL if unset): [0] after every
+// key or button event (no arguments), [1] a key went down (its code), [2] the left and [3] the right
+// button went down (x, y). The array starts at 0x9b7a88.
+extern void **game_win_hooks;
+// A list of rectangles a window keeps behind its base fields at 0x8f4: the index of the last one
+// that holds the point, or -1; its fields at 0x14 and 0x10 go to the two pointers if given.
+extern int(__attribute__((thiscall)) * game_spot_check)(void *list, int x, int y, int *field14, int *field10);
 // The colour table (or NULL) that a window copied from its parent is darkened with (0x9b3390).
 extern const uint8_t **game_win_tint;
 
@@ -2464,6 +2475,8 @@ extern int(__attribute__((stdcall)) * game_set_cursor_pos)(int x, int y);
 extern int(__attribute__((stdcall)) * game_get_cursor_pos)(int32_t *point);
 extern int(__attribute__((stdcall)) * game_show_window)(uint32_t hwnd, int cmd);
 extern int(__attribute__((stdcall)) * game_get_system_metrics)(int index);
+extern unsigned(__attribute__((stdcall)) * game_map_virtual_key)(unsigned code, unsigned type);
+extern intptr_t(__attribute__((stdcall)) * game_def_window_proc)(uint32_t hwnd, unsigned msg, uintptr_t wparam, intptr_t lparam);
 extern int(__attribute__((stdcall)) * game_is_zoomed)(uint32_t hwnd);
 extern int(__attribute__((stdcall)) * game_get_window_rect)(uint32_t hwnd, int32_t *rect);
 

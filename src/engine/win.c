@@ -34,6 +34,20 @@
 // of these; the names are the inventory's, and the Buffer copies go the way the original has
 // them (out of the Buffer called on, into the other).
 //
+// Input. How mouse and key events reach a window is in the section "Mouse and key events": the
+// one-event functions (left down, left up, right click, down and up; key click, down and up), the raw
+// events a window is given (mouse move and wheel, the buttons, a system key), and the game's own
+// calls that find the window under the mouse or the one with the keys (OnKey, OnChar, OnSysKey and
+// the four button ones). They call the virtual functions, callbacks and hooks of the game's own
+// windows, which draw and open windows, so in shadow mode the game's calls run the original and the
+// sweep checks Chiron's code over scratch windows (with logging stand-ins for all of them and
+// windows with a list of regions behind them). A system key and the keys asked of MapVirtualKey go
+// through the Windows-call journal. Left with the original: the window procedure (WinProc) and the
+// mouse functions it calls that draw the cursor, move or size a window by hand and flip the screen
+// (OnMouseMove, update_cursor, do_tracking), the key functions that drain the message queue or run
+// the cheat code (Win_on_key, Win_on_char), the palette and activation handlers, and the dialog
+// list's set-up and removal (they allocate); the scroll wheel handlers that call the Scroll class.
+//
 // Left with the original: Win_on_paint (paints the window's background into the game's window
 // through GDI and its DC), Win_flip, Win_update_back_to_window and
 // Win_update_window_to_buffer (they blit to the window or make Buffers), Win_window_line_raw
@@ -1310,6 +1324,397 @@ void WIN_THIS win_on_nc_paint(struct game_win *w, const int32_t *rect, int which
     buffer_set_clip(game_win_back, game_win_back->full);
 }
 
+// ---- Mouse and key events --------------------------------------------------------------------
+//
+// How input reaches a window. The game's window procedure finds the window under the mouse (or
+// the one that has the keys) and calls the virtual function of it that takes the raw event
+// (slots 0x138 to 0x150: key, char, system key, the buttons going down and up); those (the
+// win_on_* functions below) keep the mouse state, and call the one-event functions
+// (win_left_down_event and the rest), which call the program's own function for the event. The
+// subclass's handler is a virtual function (slots 0x3c to 0x100); an event first goes to a
+// plain callback a window may have (0x408 to 0x434, called with the window made the current
+// one, in the global `cur`), and the object the window has for the event (0x1c to 0x6c) is let
+// go after it: it is asked if it is to be kept (slot 0x5c) and freed through slot 0x1c if not.
+// A window that is disabled (WIN_F_DISABLED) or busy (WIN_F2_BUSY) takes no event.
+//
+// A mouse event comes in two kinds: for the client area, or (`nc` set) for the frame, which has
+// slots and objects of its own and no callback.
+//
+// The functions below call the virtual functions of the game's own windows, which draw and open
+// windows, so in shadow mode the game's calls run the original, and the sweep checks Chiron's
+// code over scratch windows whose virtual functions, callbacks and hooks log what they get.
+//
+// Differences from OpenSMACX and Thinker: they have none of this part of the class laid out (the
+// slots are named by the vtable of BaseWin, whose handlers are named there: 0x4c on_left_click,
+// 0x50 on_left_down, 0x54 on_left_up, 0x58 on_right_click, 0x64 on_key_click, 0x70
+// on_left_double_click). Where the original would read through a null dialog window (a dialog
+// list with a count but no window) it crashes; Chiron's code leaves that part out.
+
+enum {
+    WIN_F_NC_HIT = 0x4000000,  // the frame has a hit test of its own (slot 0x12c) that decides what a click there is
+    WIN_F_NO_DBL = 0x200200,   // a disabled window, and one that takes no double click
+    // The virtual functions called here, by what they are told.
+    VT_KEY_CLICK = 0x64,
+    VT_KEY_DOWN = 0x68,
+    VT_KEY_UP = 0x6c,
+    VT_DEFAULT_BUTTON = 0xb0,  // told a key that stands for a button: -1 for return, -2 for escape
+    VT_PASS_FOCUS = 0x100,
+    VT_SET_FOCUS = 0x104,
+    VT_NC_HIT = 0x12c,
+    VT_OWN_REGIONS = 0xf4,  // whether the window keeps a list of regions at 0x8f4 to click in
+    VT_ON_KEY = 0x138,
+    VT_ON_CHAR = 0x13c,
+    VT_ON_SYS_KEY = 0x140,
+    VT_ON_L_DOWN = 0x144,
+    VT_ON_L_UP = 0x148,
+    VT_ON_R_DOWN = 0x14c,
+    VT_ON_R_UP = 0x150,
+    VT_REGION_CLICK = 0x160,
+};
+// What a mouse event calls: the callback, the slot and the object let go after, for the client
+// area and for the frame.
+struct mouse_ev {
+    int cb, slot, obj, slot_nc, obj_nc;
+};
+static const struct mouse_ev EV_MOVE = {0x408, 0x44, 0x1c, 0x7c, 0x4c}, EV_L_DBL = {0x40c, 0x70, 0x44, 0x98, 0x68},
+                             EV_R_DBL = {0x410, 0x74, 0x48, 0x9c, 0x6c}, EV_L_CLICK = {0x414, 0x4c, 0x20, 0x80, 0x50},
+                             EV_L_DOWN = {0x418, 0x50, 0x24, 0x84, 0x54}, EV_L_UP = {0x41c, 0x54, 0x28, 0x88, 0x58},
+                             EV_R_CLICK = {0x420, 0x58, 0x2c, 0x8c, 0x5c}, EV_R_DOWN = {0x424, 0x5c, 0x30, 0x90, 0x60},
+                             EV_R_UP = {0x428, 0x60, 0x34, 0x94, 0x64};
+enum { CB_KEY_CLICK = 0x42c, CB_KEY_DOWN = 0x430, CB_KEY_UP = 0x434, OBJ_KEY_CLICK = 0x38, OBJ_KEY_DOWN = 0x3c, OBJ_KEY_UP = 0x40 };
+
+static void *field_at(const struct game_win *w, int off) { return *(void **)((const uint8_t *)w + off); }
+typedef void (*cb2_t)(int, int);
+typedef int (*cbi_t)(int);
+typedef int (*cbi2_t)(int, int);
+typedef void (*hook2_t)(int, int);
+typedef void (*hook1_t)(int);
+typedef void (*hook0_t)(void);
+
+static int vcall4(struct game_win *w, int slot, int a, int b, int c, int d) {
+    return ((int(THISCALL *)(struct game_win *, int, int, int, int))game_win_slot(w, slot))(w, a, b, c, d);
+}
+static int vcall5(struct game_win *w, int slot, int a, int b, int c, int d, int e) {
+    return ((int(THISCALL *)(struct game_win *, int, int, int, int, int))game_win_slot(w, slot))(w, a, b, c, d, e);
+}
+
+// Let go of the object a window made for an event: kept if it says so (slot 0x5c), otherwise freed (0x1c).
+static void let_go(void *obj) {
+    if (!obj) return;
+    if (!vcall0(obj, 0x5c)) vcall0(obj, 0x1c);
+}
+static int takes_no_events(const struct game_win *w, uint32_t flags_mask) {
+    return (w->flags & flags_mask) || (w->flags2 & WIN_F2_BUSY);
+}
+static void hook_x_y(int index, int x, int y) {
+    void *h = game_win_hooks[index];
+    if (h) ((hook2_t)h)(x, y);
+}
+static void hook_after_input(void) {
+    void *h = game_win_hooks[0];
+    if (h) ((hook0_t)h)();
+}
+
+// A mouse event: for the client area the window is made the current one, its callback is called
+// (with x and y), then the handler and last the object the window has for it is let go; for the
+// frame there is no callback.
+static void mouse_event(struct game_win *w, uint32_t mask, int x, int y, int nc, const struct mouse_ev *e) {
+    if (takes_no_events(w, mask)) return;
+    if (!nc) {
+        *game_win_cur = w;
+        void *f = field_at(w, e->cb);
+        if (f) ((cb2_t)f)(x, y);
+        vcall2(w, e->slot, x, y);
+        let_go(field_at(w, e->obj));
+    } else {
+        vcall2(w, e->slot_nc, x, y);
+        let_go(field_at(w, e->obj_nc));
+    }
+}
+
+// The left button went down: as the others, but the game's hook for it (if set) is told after the
+// callback (and for the frame too), before the handler.
+void WIN_THIS win_left_down_event(struct game_win *w, int x, int y, int nc) {
+    if (takes_no_events(w, WIN_F_DISABLED)) return;
+    const struct mouse_ev *e = &EV_L_DOWN;
+    if (!nc) {
+        *game_win_cur = w;
+        void *f = field_at(w, e->cb);
+        if (f) ((cb2_t)f)(x, y);
+    }
+    hook_x_y(2, x, y);
+    if (!nc) {
+        vcall2(w, e->slot, x, y);
+        let_go(field_at(w, e->obj));
+    } else {
+        vcall2(w, e->slot_nc, x, y);
+        let_go(field_at(w, e->obj_nc));
+    }
+}
+void WIN_THIS win_left_up_event(struct game_win *w, int x, int y, int nc) { mouse_event(w, WIN_F_DISABLED, x, y, nc, &EV_L_UP); }
+void WIN_THIS win_right_click_event(struct game_win *w, int x, int y, int nc) {
+    mouse_event(w, WIN_F_DISABLED, x, y, nc, &EV_R_CLICK);
+}
+void WIN_THIS win_right_down_event(struct game_win *w, int x, int y, int nc) {
+    mouse_event(w, WIN_F_DISABLED, x, y, nc, &EV_R_DOWN);
+}
+void WIN_THIS win_right_up_event(struct game_win *w, int x, int y, int nc) { mouse_event(w, WIN_F_DISABLED, x, y, nc, &EV_R_UP); }
+
+// The window a dialog list's focus is on (none for an empty list).
+static struct game_win *dialog_cur(const struct game_win *w) { return w->dlg_head ? w->dlg_cur->win : NULL; }
+// Whether a key code is not one that makes a character (MapVirtualKey to a character answers 0;
+// only the low word counts, as the original tests the 16-bit register).
+static int key_is_no_char(int key) { return (uint16_t)game_map_virtual_key((unsigned)key & 0xfff8ffffu, 2) == 0; }
+
+// A key that acts as a click (enter, escape, tab and the others the window uses). Return and
+// escape (and the enter key of the number pad) tell the window that its default or cancel button
+// was pressed (slot 0xb0). In a dialog the key goes to the focus window first (tab passes the
+// focus on; for any other key, a window that uses it says so by answering nonzero, which ends it);
+// then the callback at 0x42c and the handler (slot 0x64) are called with (a, key) and what they
+// answer is added up.
+int WIN_THIS win_key_click_event(struct game_win *w, int a, int key) {
+    if (takes_no_events(w, WIN_F_DISABLED)) return 0;
+    if (key == 0xd || key == 0x1000d) vcall1(w, VT_DEFAULT_BUTTON, -1);
+    else if (key == 0x1b) vcall1(w, VT_DEFAULT_BUTTON, -2);
+    if (w->dlg_count) {
+        struct game_win *cur = dialog_cur(w);
+        if (key == 9) {
+            if (cur) vcall0(cur, VT_PASS_FOCUS);
+        } else if (cur && win_key_click_event(cur, a, key)) {
+            return 1;
+        }
+    }
+    int result = 0;
+    *game_win_cur = w;
+    void *f = field_at(w, CB_KEY_CLICK);
+    if (f) result = ((cbi2_t)f)(a, key);
+    result += vcall2(w, VT_KEY_CLICK, a, key);
+    let_go(field_at(w, OBJ_KEY_CLICK));
+    return result;
+}
+
+// A key pressed. In a dialog the focus window's scroll bars are offered it first (slot 0x64 with
+// (0, key): an answer of nonzero means it was used, which ends it), and a key that makes no
+// character is sent to the focus window as a click (once, for its two bars); then the focus
+// window gets the key pressed, and if it uses it that ends it. Then the window's own scroll bars
+// and the key as a click in the same way (a window with no bar gets the click, and if it uses it that ends it); and last the callback
+// (0x430) and the handler (slot 0x68), their answers added.
+int WIN_THIS win_key_down_event(struct game_win *w, int key) {
+    if (takes_no_events(w, WIN_F_DISABLED)) return 0;
+    int sent = 0;
+    if (w->dlg_count) {
+        struct game_win *cur = dialog_cur(w);
+        if (cur) {
+            if (cur->scroll_v) {
+                if (vcall2(&cur->scroll_v->win, VT_KEY_CLICK, 0, key)) return 1;
+                if (key_is_no_char(key)) {
+                    win_key_click_event(cur, 0, key);
+                    sent = 1;
+                }
+            }
+            if (cur->scroll_h) {
+                if (vcall2(&cur->scroll_h->win, VT_KEY_CLICK, 0, key)) return 1;
+                if (!sent && key_is_no_char(key)) win_key_click_event(cur, 0, key);
+            }
+            if (!cur->scroll_h && !cur->scroll_v && key_is_no_char(key)) win_key_click_event(cur, 0, key);
+            if (win_key_down_event(cur, key)) return 1;
+        }
+    }
+    if (w->scroll_v) {
+        if (vcall2(&w->scroll_v->win, VT_KEY_CLICK, 0, key)) return 1;
+        if (!sent && key_is_no_char(key)) {
+            win_key_click_event(w, 0, key);
+            sent = 1;
+        }
+    }
+    if (w->scroll_h) {
+        if (vcall2(&w->scroll_h->win, VT_KEY_CLICK, 0, key)) return 1;
+        if (!sent && key_is_no_char(key)) win_key_click_event(w, 0, key);
+    }
+    if (!w->scroll_h && !w->scroll_v && !sent && key_is_no_char(key) && win_key_click_event(w, 0, key)) return 1;
+    int result = 0;
+    *game_win_cur = w;
+    void *f = field_at(w, CB_KEY_DOWN);
+    if (f) result = ((cbi_t)f)(key);
+    result += vcall1(w, VT_KEY_DOWN, key);
+    let_go(field_at(w, OBJ_KEY_DOWN));
+    return result;
+}
+
+// A key let go: the focus window of a dialog first (it ends it if it uses it), then the callback
+// (0x434) and the handler (slot 0x6c), their answers added.
+int WIN_THIS win_key_up_event(struct game_win *w, int key) {
+    if (takes_no_events(w, WIN_F_DISABLED)) return 0;
+    if (w->dlg_count) {
+        struct game_win *cur = dialog_cur(w);
+        if (cur && win_key_up_event(cur, key)) return 1;
+    }
+    int result = 0;
+    *game_win_cur = w;
+    void *f = field_at(w, CB_KEY_UP);
+    if (f) result = ((cbi_t)f)(key);
+    result += vcall1(w, VT_KEY_UP, key);
+    let_go(field_at(w, OBJ_KEY_UP));
+    return result;
+}
+
+// ---- The raw events (slots 0x40 and 0x134 to 0x150) --------------------------------------------
+
+// The mouse moved over the window (`keys` is not used).
+void WIN_THIS win_on_mouse_move(struct game_win *w, int x, int y, int keys, int nc) {
+    mouse_event(w, WIN_F_DISABLED, x, y, nc, &EV_MOVE);
+}
+
+// The wheel turned by `delta` (its low word, in 120ths of a notch, signed): the handler (slot
+// 0x3c, or 0x78 for the frame) is told the notches, rounded towards zero. The key state and the
+// mouse's place the system gives are not used.
+void WIN_THIS win_on_mouse_wheel(struct game_win *w, int keys, int delta, int x, int y, int nc) {
+    int notches = (int16_t)delta / 120;
+    if (takes_no_events(w, WIN_F_DISABLED)) return;
+    vcall1(w, nc ? 0x78 : 0x3c, notches);
+}
+
+// A button went down: the window is brought to the front of those of its parent (or of the
+// top-level ones), a window of a dialog list takes the focus (slot 0x104 of its parent), and the
+// press is kept: the window, in the slot for the frame or the client area, with `press_inside` 1
+// for the left button and 0 for the right.
+static void button_pressed(struct game_win *w, int nc, int inside) {
+    if (w->parent) win_bring_child_to_top(w->parent, w);
+    else win_bring_parent_to_top(w);
+    if (w->parent) vcall1(w->parent, VT_SET_FOCUS, (int)(uintptr_t)w);
+    if (nc) *game_win_press2 = w, *game_win_press1 = NULL;
+    else *game_win_press1 = w, *game_win_press2 = NULL;
+    *game_win_press_inside = inside;
+}
+
+// The left button went down. A double click (the first number) is its own event (slot 0x70,
+// 0x98 for the frame, and a window that is disabled or takes none gets none); a window that
+// says (slot 0xf4) it keeps a list of regions at 0x8f4 is asked (slot 0x160) about the region
+// under the mouse and the down event isn't made if it answers 0. Then the down event.
+void WIN_THIS win_on_l_button_down(struct game_win *w, int dbl, int x, int y, int keys, int nc) {
+    button_pressed(w, nc, 1);
+    if (dbl) mouse_event(w, WIN_F_NO_DBL, x, y, nc, &EV_L_DBL);
+    if (vcall0(w, VT_OWN_REGIONS)) {
+        int field14;
+        if (game_spot_check((uint8_t *)w + 0x8f4, x, y, &field14, NULL) >= 0) {
+            if (!vcall2(w, VT_REGION_CLICK, field14, *(int *)((uint8_t *)w + field14 * 4 + 0x900))) return;
+        }
+    }
+    win_left_down_event(w, x, y, nc);
+}
+
+// The left button went up: if it was pressed in this window and is still inside it, a click
+// (slot 0x4c, 0x80 for the frame); then the up event if the window and what it hangs from are shown.
+void WIN_THIS win_on_l_button_up(struct game_win *w, int x, int y, int keys, int nc) {
+    struct game_win *pressed = *game_win_press1 ? *game_win_press1 : *game_win_press2;
+    *game_win_press1 = *game_win_press2 = NULL;
+    if (pressed == w) {
+        int32_t r[4] = {0, 0, w->inner[2] - w->inner[0], w->inner[3] - w->inner[1]};
+        if (in_box(x, y, r)) mouse_event(w, WIN_F_DISABLED, x, y, nc, &EV_L_CLICK);
+    }
+    if (!(w->flags2 & WIN_F2_VISIBLE)) return;
+    if (w->parent && !win_is_visible(w->parent)) return;
+    win_left_up_event(w, x, y, nc);
+}
+
+// The right button went down: kept as the left one is (but with the mouse taken to be outside), a
+// double click is its own event (slot 0x74, 0x9c for the frame), then the down event.
+void WIN_THIS win_on_r_button_down(struct game_win *w, int dbl, int x, int y, int keys, int nc) {
+    button_pressed(w, nc, 0);
+    if (dbl) mouse_event(w, WIN_F_NO_DBL, x, y, nc, &EV_R_DBL);
+    win_right_down_event(w, x, y, nc);
+}
+
+// The right button went up: a click if it was pressed here and is inside, then the up event.
+void WIN_THIS win_on_r_button_up(struct game_win *w, int x, int y, int keys, int nc) {
+    struct game_win *pressed = *game_win_press1 ? *game_win_press1 : *game_win_press2;
+    *game_win_press1 = *game_win_press2 = NULL;
+    if (pressed == w) {
+        int32_t r[4] = {0, 0, w->inner[2] - w->inner[0], w->inner[3] - w->inner[1]};
+        if (in_box(x, y, r)) win_right_click_event(w, x, y, nc);
+    }
+    win_right_up_event(w, x, y, nc);
+}
+
+// A system key (alt and another): posted to the game's window as a key message, and the default
+// answer to the system-key message returned. The window itself is not used.
+int WIN_THIS win_on_sys_key(struct game_win *w, int vk, int down, int rep, int scan) {
+    intptr_t lparam = (intptr_t)(((uint32_t)scan & 0xffff) << 16 | ((uint32_t)rep & 0xffff));
+    game_post_message((void *)(uintptr_t)*game_win_hwnd, down ? 0x100 : 0x101, (uintptr_t)vk, lparam);
+    return (int)game_def_window_proc(*game_win_hwnd, down ? 0x104 : 0x105, (uintptr_t)vk, lparam);
+}
+
+// ---- The game's own calls into the windows (what its window procedure calls) -----------------
+//
+// These find the window and call its raw event. They are C functions (the caller clears the
+// stack) given what the window procedure has: the ones called OnKey, OnChar and OnSysKey a first
+// argument that isn't used; those for the buttons a handle (not used) in front of the double-click
+// flag where there is one, then the point, then the key state.
+
+// A key: the window that has the keys is asked, then the game's key hook is told (when the key
+// went down), then its hook for every input.
+void win_OnKey(int unused, int vk, int down, int rep, int scan) {
+    struct game_win *k = win_get_key_window();
+    if (k) vcall4(k, VT_ON_KEY, vk, down, rep, scan);
+    if (game_win_hooks[1] && down) ((hook1_t)game_win_hooks[1])(vk);
+    hook_after_input();
+}
+void win_OnChar(int unused, int ch, int rep) {
+    struct game_win *k = win_get_key_window();
+    if (k) vcall2(k, VT_ON_CHAR, ch, rep);
+}
+void win_OnSysKey(int unused, int vk, int down, int rep, int scan) {
+    struct game_win *k = win_get_key_window();
+    if (k) vcall4(k, VT_ON_SYS_KEY, vk, down, rep, scan);
+}
+
+// Whether a hit on a window's frame, by its hit code (slot 0x12c), starts moving or sizing it:
+// code 2 (the caption) and 10 to 17 (the edges and corners).
+static int starts_tracking(int code) { return code == 2 || (code > 9 && code <= 0x11); }
+
+// The left button went down at a point (the window under it is looked for, and the point's
+// numbers become the place in its client area). A window with a frame that has a hit test of its
+// own (and any hit on a frame) is asked what was hit; a nonzero answer brings the window to the
+// front, and one that moves or sizes it is kept as the window being tracked (with the point and
+// the code) and ends the event. Otherwise the window is told (slot 0x144). The game's hooks follow,
+// also when no window was there.
+void win_OnLButtonDown(int hwnd, int dbl, int x, int y, int keys) {
+    struct game_win *w = win_get_mouse_window(&x, &y);
+    if (w) {
+        int code = 0;
+        if (*game_win_hit_nc || (w->flags & WIN_F_NC_HIT)) code = vcall2(w, VT_NC_HIT, x, y);
+        if (code) {
+            win_bring_to_top(w);
+            if (starts_tracking(code)) {
+                *game_win_track = w;
+                *game_win_track_code = code;
+                game_win_track_pos[0] = x, game_win_track_pos[1] = y;
+                return;
+            }
+        }
+        vcall5(w, VT_ON_L_DOWN, dbl, x, y, keys, *game_win_hit_nc);
+    }
+    hook_x_y(2, x, y);
+    hook_after_input();
+}
+// A button going up ends any tracking; the window under the mouse is told.
+void win_OnLButtonUp(int hwnd, int x, int y, int keys) {
+    *game_win_track = NULL;
+    struct game_win *w = win_get_mouse_window(&x, &y);
+    if (w) vcall4(w, VT_ON_L_UP, x, y, keys, *game_win_hit_nc);
+}
+void win_OnRButtonDown(int hwnd, int dbl, int x, int y, int keys) {
+    struct game_win *w = win_get_mouse_window(&x, &y);
+    if (w) vcall5(w, VT_ON_R_DOWN, dbl, x, y, keys, *game_win_hit_nc);
+    hook_x_y(3, x, y);
+    hook_after_input();
+}
+void win_OnRButtonUp(int hwnd, int x, int y, int keys) {
+    *game_win_track = NULL;
+    struct game_win *w = win_get_mouse_window(&x, &y);
+    if (w) vcall4(w, VT_ON_R_UP, x, y, keys, *game_win_hit_nc);
+}
+
 // ---- Shadow checks -------------------------------------------------------------------------
 
 typedef struct game_win *winp;
@@ -1651,6 +2056,7 @@ static int THISCALL stub_0xf0(struct game_win *w, int buf, int which) { return v
 // Whether the window draws its frame itself: a plain question, from a flag the sweep sets at random.
 static int THISCALL stub_0xf4(struct game_win *w) { return (w->flags >> 7) & 1; }
 static void stub_callback(int a, int b) { vrec(0x400, NULL, a, b, 0); }
+static void fill_event_stubs(void);
 static void fill_stub_vtable(void) {
     stub_vtable[WIN_VT_NC_HEIGHT / 4] = (void *)stub_nc_height;
     stub_vtable[0x8 / 4] = (void *)stub_0x8;
@@ -1667,6 +2073,88 @@ static void fill_stub_vtable(void) {
     stub_vtable[0xf0 / 4] = (void *)stub_0xf0;
     stub_vtable[0xf4 / 4] = (void *)stub_0xf4;
     stub_vtable[0xfc / 4] = (void *)stub_0xfc;
+    fill_event_stubs();
+}
+
+// The stand-ins for the slots the event functions call (see "Mouse and key events"). Each logs its
+// call (see vlog); the ones the original reads an answer from give one that depends on the
+// arguments, so each answer is met. The callbacks and the game's hooks log too.
+#define STUB4(slot)                                                                                    \
+    static int THISCALL stub_##slot(struct game_win *w, int a, int b, int c, int d) {                 \
+        return vrec(slot, w, a, b, c * 3 + d), slot + 1;                                              \
+    }
+#define STUB5(slot)                                                                                    \
+    static int THISCALL stub_##slot(struct game_win *w, int a, int b, int c, int d, int e) {          \
+        return vrec(slot, w, a, b, c * 7 + d * 3 + e), slot + 1;                                      \
+    }
+STUB1(0x3c) STUB2(0x44) STUB2(0x4c) STUB2(0x50) STUB2(0x54) STUB2(0x58) STUB2(0x5c) STUB2(0x60) STUB2(0x70) STUB2(0x74)
+STUB1(0x78) STUB2(0x7c) STUB2(0x80) STUB2(0x84) STUB2(0x88) STUB2(0x8c) STUB2(0x90) STUB2(0x94) STUB2(0x98) STUB2(0x9c)
+STUB1(0xb0) STUB0(0x100) STUB1(0x104) STUB4(0x138) STUB2(0x13c) STUB4(0x140) STUB5(0x144) STUB4(0x148) STUB5(0x14c) STUB4(0x150)
+// The key slots: whether the key was used (a scroll bar's, asked with (0, key)), and what the handler answers.
+static int THISCALL stub_0x64(struct game_win *w, int a, int b) { return vrec(0x64, w, a, b, 0), (a * 5 + b) % 4 == 0 ? 0 : 0x65; }
+static int THISCALL stub_0x68(struct game_win *w, int key) { return vrec(0x68, w, key, 0, 0), key % 3; }
+static int THISCALL stub_0x6c(struct game_win *w, int key) { return vrec(0x6c, w, key, 0, 0), key & 1; }
+// What a hit on the frame is: a code from the point, so each of them turns up (0, the caption's 2, the edges 10 to 17, and the rest).
+static int THISCALL stub_0x12c(struct game_win *w, int x, int y) {
+    static const int codes[16] = {0, 2, 0, 10, 5, 0x11, 0, 9, 3, 0x10, 2, 0, 0x12, 1, 0xc, 0};
+    return vrec(0x12c, w, x, y, 0), codes[(x * 3 + y) & 15];
+}
+// Whether the region's click is used.
+static int THISCALL stub_0x160(struct game_win *w, int a, int b) { return vrec(0x160, w, a, b, 0), (a + b) & 1; }
+
+// The objects a window lets go after an event: kept or not as the sweep sets, and freeing is logged.
+static struct stub_link {
+    void **vtable;
+    int keep;
+} links[4];
+static void *link_vtable[0x80 / 4];
+static int THISCALL stub_link_keep(struct stub_link *l) { return l->keep; }
+static int THISCALL stub_link_free(struct stub_link *l) { return vrec(0x1c, l, 0, 0, 0), 0; }
+
+// The callbacks: nine for the mouse (the ones after the first a window may have) and three for keys, and the game's four hooks.
+#define CB2(n) \
+    static void cb2_##n(int a, int b) { vrec(0x2000 + n, NULL, a, b, 0); }
+CB2(0) CB2(1) CB2(2) CB2(3) CB2(4) CB2(5) CB2(6) CB2(7) CB2(8)
+static void (*const cb2_table[9])(int, int) = {cb2_0, cb2_1, cb2_2, cb2_3, cb2_4, cb2_5, cb2_6, cb2_7, cb2_8};
+static int cbi_key_click(int a, int b) { return vrec(0x2010, NULL, a, b, 0), (a + b) & 3; }
+static int cbi_key_down(int a) { return vrec(0x2011, NULL, a, 0, 0), a & 3; }
+static int cbi_key_up(int a) { return vrec(0x2012, NULL, a, 0, 0), (a >> 1) & 3; }
+static void hook_after(void) { vrec(0x2020, NULL, 0, 0, 0); }
+static void hook_key(int a) { vrec(0x2021, NULL, a, 0, 0); }
+static void hook_left(int x, int y) { vrec(0x2022, NULL, x, y, 0); }
+static void hook_right(int x, int y) { vrec(0x2023, NULL, x, y, 0); }
+
+// A window's callbacks and objects for events, at random.
+static void random_event_fields(struct game_win *w) {
+    uint8_t *p = (uint8_t *)w;
+    for (int i = 0; i < 9; i++) *(void **)(p + 0x408 + 4 * i) = rnd_to(3) ? (void *)cb2_table[i] : NULL;
+    *(void **)(p + 0x42c) = rnd_to(3) ? (void *)cbi_key_click : NULL;
+    *(void **)(p + 0x430) = rnd_to(3) ? (void *)cbi_key_down : NULL;
+    *(void **)(p + 0x434) = rnd_to(3) ? (void *)cbi_key_up : NULL;
+    for (int off = 0x1c; off <= 0x6c; off += 4) *(void **)(p + off) = rnd_to(3) ? (void *)&links[rnd_to(4)] : NULL;
+}
+
+// Windows with room behind them for the list of regions a subclass keeps at 0x8f4 (the entries at
+// 0x980, the answers at 0x900), for the left button's down event, which asks it.
+static struct fat_win {
+    struct game_win w;
+    uint8_t sub[0xa00 - sizeof(struct game_win)];
+} fat[3];
+_Static_assert(offsetof(struct fat_win, sub) == 0x444, "the sub-class part follows the Win");
+
+static void fill_event_stubs(void) {
+    void **v = stub_vtable;
+    v[0x3c / 4] = (void *)stub_0x3c, v[0x44 / 4] = (void *)stub_0x44, v[0x4c / 4] = (void *)stub_0x4c, v[0x50 / 4] = (void *)stub_0x50;
+    v[0x54 / 4] = (void *)stub_0x54, v[0x58 / 4] = (void *)stub_0x58, v[0x5c / 4] = (void *)stub_0x5c, v[0x60 / 4] = (void *)stub_0x60;
+    v[0x64 / 4] = (void *)stub_0x64, v[0x68 / 4] = (void *)stub_0x68, v[0x6c / 4] = (void *)stub_0x6c, v[0x70 / 4] = (void *)stub_0x70;
+    v[0x74 / 4] = (void *)stub_0x74, v[0x78 / 4] = (void *)stub_0x78, v[0x7c / 4] = (void *)stub_0x7c, v[0x80 / 4] = (void *)stub_0x80;
+    v[0x84 / 4] = (void *)stub_0x84, v[0x88 / 4] = (void *)stub_0x88, v[0x8c / 4] = (void *)stub_0x8c, v[0x90 / 4] = (void *)stub_0x90;
+    v[0x94 / 4] = (void *)stub_0x94, v[0x98 / 4] = (void *)stub_0x98, v[0x9c / 4] = (void *)stub_0x9c, v[0xb0 / 4] = (void *)stub_0xb0;
+    v[0x100 / 4] = (void *)stub_0x100, v[0x104 / 4] = (void *)stub_0x104, v[0x12c / 4] = (void *)stub_0x12c;
+    v[0x138 / 4] = (void *)stub_0x138, v[0x13c / 4] = (void *)stub_0x13c, v[0x140 / 4] = (void *)stub_0x140;
+    v[0x144 / 4] = (void *)stub_0x144, v[0x148 / 4] = (void *)stub_0x148, v[0x14c / 4] = (void *)stub_0x14c;
+    v[0x150 / 4] = (void *)stub_0x150, v[0x160 / 4] = (void *)stub_0x160;
+    link_vtable[0x5c / 4] = (void *)stub_link_keep, link_vtable[0x1c / 4] = (void *)stub_link_free;
 }
 
 enum { NBUF = 40 };
@@ -1763,6 +2251,9 @@ struct win_globals {
     int32_t vlog_n;
     int32_t mouse_pos[2], hit_nc, back_off[2], overlay_on, overlay_pos[2], overlay_size[2];
     struct game_buffer *back_alt;
+    struct game_win *track;
+    int32_t track_code, track_pos[2], press_inside;
+    void *hooks[4];
 };
 
 static void globals_save(struct win_globals *g) {
@@ -1782,6 +2273,8 @@ static void globals_save(struct win_globals *g) {
     memcpy(g->mouse_pos, game_win_mouse_pos, 8), g->hit_nc = *game_win_hit_nc, memcpy(g->back_off, game_win_back_off, 8);
     g->overlay_on = *game_win_overlay_on, memcpy(g->overlay_pos, game_win_overlay_pos, 8), memcpy(g->overlay_size, game_win_overlay_size, 8);
     g->back_alt = *game_win_back_alt;
+    g->track = *game_win_track, g->track_code = *game_win_track_code, memcpy(g->track_pos, game_win_track_pos, 8);
+    g->press_inside = *game_win_press_inside, memcpy(g->hooks, game_win_hooks, sizeof g->hooks);
 }
 
 static void globals_restore(const struct win_globals *g) {
@@ -1801,6 +2294,8 @@ static void globals_restore(const struct win_globals *g) {
     memcpy(game_win_mouse_pos, g->mouse_pos, 8), *game_win_hit_nc = g->hit_nc, memcpy(game_win_back_off, g->back_off, 8);
     *game_win_overlay_on = g->overlay_on, memcpy(game_win_overlay_pos, g->overlay_pos, 8), memcpy(game_win_overlay_size, g->overlay_size, 8);
     *game_win_back_alt = g->back_alt;
+    *game_win_track = g->track, *game_win_track_code = g->track_code, memcpy(game_win_track_pos, g->track_pos, 8);
+    *game_win_press_inside = g->press_inside, memcpy(game_win_hooks, g->hooks, sizeof g->hooks);
 }
 
 static struct game_win *any_pool(void) { return rnd_to(8) == 0 ? NULL : PW(rnd_to(POOL)); }
@@ -1935,6 +2430,238 @@ static void sweep_virtual(struct game_win *w) {
     *game_win_capture = rnd_to(2) ? w : any_pool();
     *game_win_hover = rnd_to(2) ? w : any_pool();
     check_win_show_maximize(w);
+}
+
+// ---- Sweep: the events -------------------------------------------------------------------------
+//
+// The functions that give events to windows call the virtual functions, callbacks and hooks of the
+// game's own windows, which draw and open windows, so in shadow mode the game's calls of them run the
+// original (as with the drawing functions), and these checks run over the scratch windows, whose
+// slots, callbacks and hooks are stand-ins that log what they get. What they leave behind is the
+// log, the current window, the mouse presses and the lists a window is brought to the front in.
+
+static void writes_event(struct hook_writes *w) {
+    writes_vlog(w);
+    hooks_writes_add(w, game_win_cur, 4);
+}
+// The two presses and whether the mouse is inside (the three words at 0x9b7acc, one after the other).
+static void writes_press(struct hook_writes *w) { hooks_writes_add(w, game_win_press1, 12); }
+// What the game's calls leave: also the key window and the mouse's, the tracking, the lists, and
+// every scratch window's own fields (the front of a list it is in is one of them). The globals the
+// mouse state is kept in lie together (0x9b7aa4 to 0x9b7ad8: the frame hit, the tracking, the
+// current window, the capture and hover windows, the focus, the key window, the presses).
+static void writes_dispatch(struct hook_writes *w) {
+    writes_vlog(w);
+    hooks_writes_add(w, game_win_hit_nc, 0x34);
+    hooks_writes_add(w, game_win_mouse_pos, 8);
+    writes_zorder(w);
+    writes_parents(w, 0);
+    hooks_writes_add(w, pool_ex, sizeof pool_ex);
+}
+
+#define PASS_CHECK_T(ret, name, params, args, writes, fmt, ...) \
+    PASS_T(ret, name, params, args)                             \
+    SHADOW_WRITER_BODY(ret, name, params, args, writes, fmt, __VA_ARGS__)
+// The same for the C functions (the caller clears the stack).
+#define PASS_CHECK_C(ret, name, params, args, writes, fmt, ...)                       \
+    SHADOW_DECLARE(ret, name, params)                                                   \
+    static ret shadow_##name params {                                                   \
+        if (!hooks_nested && !shadow_bypass()) stats_##name.calls++, shadow_tick(WIN);  \
+        return orig_##name args;                                                        \
+    }                                                                                   \
+    SHADOW_WRITER_BODY(ret, name, params, args, writes, fmt, __VA_ARGS__)
+
+PASS_CHECK_T(void, win_left_down_event, (struct game_win * w, int x, int y, int nc), (w, x, y, nc), writes_event(&w_),
+             "%d, %d, %d, %d", P(w), x, y, nc)
+PASS_CHECK_T(void, win_left_up_event, (struct game_win * w, int x, int y, int nc), (w, x, y, nc), writes_event(&w_),
+             "%d, %d, %d, %d", P(w), x, y, nc)
+PASS_CHECK_T(void, win_right_click_event, (struct game_win * w, int x, int y, int nc), (w, x, y, nc), writes_event(&w_),
+             "%d, %d, %d, %d", P(w), x, y, nc)
+PASS_CHECK_T(void, win_right_down_event, (struct game_win * w, int x, int y, int nc), (w, x, y, nc), writes_event(&w_),
+             "%d, %d, %d, %d", P(w), x, y, nc)
+PASS_CHECK_T(void, win_right_up_event, (struct game_win * w, int x, int y, int nc), (w, x, y, nc), writes_event(&w_),
+             "%d, %d, %d, %d", P(w), x, y, nc)
+PASS_CHECK_T(int, win_key_click_event, (struct game_win * w, int a, int key), (w, a, key), writes_event(&w_), "%d, %d, %d", P(w), a,
+             key)
+PASS_CHECK_T(int, win_key_down_event, (struct game_win * w, int key), (w, key), writes_event(&w_), "%d, %d", P(w), key)
+PASS_CHECK_T(int, win_key_up_event, (struct game_win * w, int key), (w, key), writes_event(&w_), "%d, %d", P(w), key)
+PASS_CHECK_T(void, win_on_mouse_move, (struct game_win * w, int x, int y, int keys, int nc), (w, x, y, keys, nc),
+             writes_event(&w_), "%d, %d, %d, %d", P(w), x, y, nc)
+PASS_CHECK_T(void, win_on_mouse_wheel, (struct game_win * w, int keys, int delta, int x, int y, int nc), (w, keys, delta, x, y, nc),
+             writes_event(&w_), "%d, %d, %d", P(w), delta, nc)
+PASS_CHECK_T(void, win_on_l_button_down, (struct game_win * w, int dbl, int x, int y, int keys, int nc), (w, dbl, x, y, keys, nc),
+             (writes_event(&w_), writes_press(&w_), writes_siblings(&w_, w)), "%d, %d, %d, %d, %d", P(w), dbl, x, y, nc)
+PASS_CHECK_T(void, win_on_l_button_up, (struct game_win * w, int x, int y, int keys, int nc), (w, x, y, keys, nc),
+             (writes_event(&w_), writes_press(&w_)), "%d, %d, %d, %d", P(w), x, y, nc)
+PASS_CHECK_T(void, win_on_r_button_down, (struct game_win * w, int dbl, int x, int y, int keys, int nc), (w, dbl, x, y, keys, nc),
+             (writes_event(&w_), writes_press(&w_), writes_siblings(&w_, w)), "%d, %d, %d, %d, %d", P(w), dbl, x, y, nc)
+PASS_CHECK_T(void, win_on_r_button_up, (struct game_win * w, int x, int y, int keys, int nc), (w, x, y, keys, nc),
+             (writes_event(&w_), writes_press(&w_)), "%d, %d, %d, %d", P(w), x, y, nc)
+PASS_CHECK_T(int, win_on_sys_key, (struct game_win * w, int vk, int down, int rep, int scan), (w, vk, down, rep, scan), (void)0,
+             "%d, %d, %d, %d, %d", P(w), vk, down, rep, scan)
+
+PASS_CHECK_C(void, win_OnKey, (int unused, int vk, int down, int rep, int scan), (unused, vk, down, rep, scan), writes_dispatch(&w_),
+             "%d, %d, %d, %d", vk, down, rep, scan)
+PASS_CHECK_C(void, win_OnChar, (int unused, int ch, int rep), (unused, ch, rep), writes_dispatch(&w_), "%d, %d", ch, rep)
+PASS_CHECK_C(void, win_OnSysKey, (int unused, int vk, int down, int rep, int scan), (unused, vk, down, rep, scan),
+             writes_dispatch(&w_), "%d, %d, %d, %d", vk, down, rep, scan)
+PASS_CHECK_C(void, win_OnLButtonDown, (int hwnd, int dbl, int x, int y, int keys), (hwnd, dbl, x, y, keys), writes_dispatch(&w_),
+             "%d, %d, %d, %d", dbl, x, y, keys)
+PASS_CHECK_C(void, win_OnLButtonUp, (int hwnd, int x, int y, int keys), (hwnd, x, y, keys), writes_dispatch(&w_), "%d, %d, %d", x, y,
+             keys)
+PASS_CHECK_C(void, win_OnRButtonDown, (int hwnd, int dbl, int x, int y, int keys), (hwnd, dbl, x, y, keys), writes_dispatch(&w_),
+             "%d, %d, %d, %d", dbl, x, y, keys)
+PASS_CHECK_C(void, win_OnRButtonUp, (int hwnd, int x, int y, int keys), (hwnd, x, y, keys), writes_dispatch(&w_), "%d, %d, %d", x, y,
+             keys)
+
+// Key codes of the kinds the functions tell apart (return, escape, tab, letters and digits, a key
+// the system gives no character for, and the shift, control and alt flags on top), and at random.
+static int random_key(void) {
+    static const int keys[] = {0xd, 0x1b, 0x1000d, 9, 0x41, 0x5a, 0x30, 0x39, 0x20, 0x25, 0x70, 0x2e, 0x111, 0x10041, 0x2001b, 0x4000d};
+    if (rnd_to(3)) return keys[rnd_to((int)(sizeof keys / sizeof *keys))];
+    return rnd_to(0x130) | (rnd_to(3) ? 0 : 0x10000 << rnd_to(3));
+}
+static void random_hooks(void) {
+    game_win_hooks[0] = rnd_to(2) ? (void *)hook_after : NULL;
+    game_win_hooks[1] = rnd_to(2) ? (void *)hook_key : NULL;
+    game_win_hooks[2] = rnd_to(2) ? (void *)hook_left : NULL;
+    game_win_hooks[3] = rnd_to(2) ? (void *)hook_right : NULL;
+}
+// A window's dialog list: empty, or with a focus window of another that has no list of its own (the
+// original goes through the focus window without looking, so it must be one).
+static void random_dialog(struct game_win *w) {
+    if (rnd_to(3) == 0) {
+        w->dlg_count = 0;
+        return;
+    }
+    struct game_win *cur = PW(rnd_to(POOL));
+    if (cur == w) cur = PW(rnd_to(POOL) | 1);
+    if (cur == w) cur = PW(0);
+    if (cur == w) return;
+    cur->dlg_count = 0;
+    nodes[0].win = cur;
+    w->dlg_head = rnd_to(8) ? &nodes[0] : NULL;
+    if (!w->dlg_head) {
+        w->dlg_count = 0;  // the original would crash
+        return;
+    }
+    w->dlg_cur = &nodes[0];
+    w->dlg_count = 1 + rnd_to(2);
+}
+static void build_fat(void) {
+    for (int i = 0; i < 3; i++) {
+        struct game_win *w = &fat[i].w;
+        memset(&fat[i], 0, sizeof fat[i]);
+        w->vtable = stub_vtable;
+        w->root = w;
+        for (unsigned b = 0; b < sizeof FLAG_BITS / sizeof *FLAG_BITS; b++)
+            if (rnd_to(3) == 0) w->flags |= FLAG_BITS[b];
+        for (unsigned b = 0; b < sizeof FLAG2_BITS / sizeof *FLAG2_BITS; b++)
+            if (rnd_to(2) == 0) w->flags2 |= FLAG2_BITS[b];
+        for (int k = 0; k < 4; k++) w->inner[k] = rnd_to(300) - 40;
+        w->parent = rnd_to(4) ? PW(rnd_to(POOL)) : NULL;
+        if (w->parent && rnd_to(2) && w->parent->n_children < 149) w->parent->children[w->parent->n_children++] = w;
+        // The list of regions: up to four, and what each answers to.
+        int32_t *list = (int32_t *)(fat[i].sub + (0x8f4 - 0x444));
+        list[0] = (int32_t)(uintptr_t)(fat[i].sub + (0x980 - 0x444));
+        list[2] = rnd_to(5);
+        int32_t *entries = (int32_t *)fat[i].sub + (0x980 - 0x444) / 4;
+        for (int e = 0; e < 4; e++) {
+            entries[e * 6 + 0] = rnd_to(100) - 20, entries[e * 6 + 1] = rnd_to(100) - 20;
+            entries[e * 6 + 2] = entries[e * 6 + 0] + rnd_to(120), entries[e * 6 + 3] = entries[e * 6 + 1] + rnd_to(120);
+            entries[e * 6 + 4] = rnd_to(50), entries[e * 6 + 5] = rnd_to(16);
+        }
+        int32_t *answers = (int32_t *)fat[i].sub + (0x900 - 0x444) / 4;
+        for (int e = 0; e < 16; e++) answers[e] = rnd_to(50);
+    }
+}
+
+// Every event function over the scratch windows and three that keep a list of regions, with
+// callbacks, objects (kept or not), hooks and dialog lists at random.
+static void sweep_events(void) {
+    for (int i = 0; i < 4; i++) links[i].vtable = link_vtable, links[i].keep = rnd_to(2);
+    build_fat();
+    random_globals();
+    for (int k = 0; k < 3 * POOL + 3; k++) {
+        struct game_win *w = k < 3 * POOL ? PW(k % POOL) : &fat[k - 3 * POOL].w;
+        random_event_fields(w);
+        random_hooks();
+        int wide = w->inner[2] - w->inner[0], high = w->inner[3] - w->inner[1];
+        int x = rnd_to(3) ? rnd_to(240) - 60 : rnd_to((wide > 0 ? wide : 1) + 6) - 3;
+        int y = rnd_to(3) ? rnd_to(240) - 60 : rnd_to((high > 0 ? high : 1) + 6) - 3;
+        int nc = rnd_to(2), keys = rnd_to(64);
+        check_win_left_down_event(w, x, y, nc);
+        check_win_left_up_event(w, x, y, nc);
+        check_win_right_click_event(w, x, y, nc);
+        check_win_right_down_event(w, x, y, nc);
+        check_win_right_up_event(w, x, y, nc);
+        check_win_on_mouse_move(w, x, y, keys, nc);
+        check_win_on_mouse_wheel(w, keys, (int)rnd(), x, y, nc);
+        check_win_on_mouse_wheel(w, keys, rnd_to(600) - 300, x, y, nc ^ 1);
+        // The buttons: pressed in this window or another (or none), and let go inside and outside.
+        for (int p = 0; p < 4; p++) {
+            *game_win_press1 = rnd_to(3) == 0 ? w : any_pool();
+            *game_win_press2 = rnd_to(3) == 0 ? w : any_pool();
+            int ix = rnd_to(2) ? x : rnd_to((wide > 0 ? wide : 1)), iy = rnd_to(2) ? y : rnd_to((high > 0 ? high : 1));
+            check_win_on_l_button_up(w, ix, iy, keys, rnd_to(2));
+            *game_win_press1 = rnd_to(3) == 0 ? w : any_pool();
+            *game_win_press2 = rnd_to(3) == 0 ? w : any_pool();
+            check_win_on_r_button_up(w, ix, iy, keys, rnd_to(2));
+        }
+        check_win_on_r_button_down(w, rnd_to(2), x, y, keys, nc);
+        check_win_on_r_button_down(w, 1, x, y, keys, nc ^ 1);
+        // The left button down asks the list of regions, which only the extra-large windows have.
+        if (k >= 3 * POOL) {
+            for (int p = 0; p < 6; p++) check_win_on_l_button_down(w, rnd_to(2), rnd_to(120) - 20, rnd_to(120) - 20, keys, rnd_to(2));
+        } else {
+            w->flags &= ~0x80u;  // the pool's windows have no list behind them
+            check_win_on_l_button_down(w, rnd_to(2), x, y, keys, nc);
+        }
+        check_win_on_sys_key(w, random_key(), rnd_to(2), rnd_to(300), rnd_to(300));
+        check_win_on_sys_key(w, random_key(), rnd_to(2), (int)rnd(), (int)rnd());
+        for (int j = 0; j < 3; j++) {
+            int key = random_key();
+            random_dialog(w);
+            check_win_key_click_event(w, rnd_to(3), key);
+            random_dialog(w);
+            check_win_key_down_event(w, key);
+            random_dialog(w);
+            check_win_key_up_event(w, key);
+        }
+    }
+}
+
+// The game's own calls into the windows, with the mouse over the scratch windows (the Buffers they
+// are hit-tested by are needed) pressed, captured and hovered at random, a modal window or none,
+// and the game's hooks, a tracked window and the key windows at random.
+static void sweep_dispatch(void) {
+    for (int k = 0; k < 60; k++) {
+        random_globals();
+        random_hooks();
+        for (int i = 0; i < 4; i++) links[i].keep = rnd_to(2);
+        for (int i = 0; i < POOL; i++) random_event_fields(PW(i));
+        *game_win_press1 = rnd_to(6) == 0 ? any_pool() : NULL;
+        *game_win_press2 = rnd_to(6) == 0 ? any_pool() : NULL;
+        *game_win_capture = rnd_to(6) == 0 ? any_pool() : NULL;
+        *game_win_hover = rnd_to(6) == 0 ? any_pool() : NULL;
+        *game_win_modal = rnd_to(3) == 0 ? any_pool() : NULL;
+        *game_win_modal_prev = (int32_t)(uintptr_t)(rnd_to(2) ? any_pool() : NULL);
+        *game_win_parent_n = rnd_to(9);
+        for (int i = 0; i < *game_win_parent_n; i++) game_win_parents[i] = PW(rnd_to(POOL));
+        *game_win_track = rnd_to(3) == 0 ? any_pool() : NULL;
+        int dbl = rnd_to(2), keys = rnd_to(64);
+        int x = rnd_to(340) - 30, y = rnd_to(300) - 30;
+        check_win_OnLButtonDown(0, dbl, x, y, keys);
+        x = rnd_to(340) - 30, y = rnd_to(300) - 30;
+        check_win_OnLButtonUp(0, x, y, keys);
+        x = rnd_to(340) - 30, y = rnd_to(300) - 30;
+        check_win_OnRButtonDown(0, dbl, x, y, keys);
+        x = rnd_to(340) - 30, y = rnd_to(300) - 30;
+        check_win_OnRButtonUp(0, x, y, keys);
+        check_win_OnKey(0, random_key(), rnd_to(2), rnd_to(5), rnd_to(256));
+        check_win_OnChar(0, rnd_to(256), rnd_to(5));
+        check_win_OnSysKey(0, random_key(), rnd_to(2), rnd_to(5), rnd_to(256));
+    }
 }
 
 // ---- Sweep: drawing and the mouse's window ---------------------------------------------------
@@ -2276,6 +3003,9 @@ static void win_sweep(void) {
         }
         // The functions that call through the vtable and Windows, on windows of every shape.
         for (int k = 0; k < 2 * POOL; k++) sweep_virtual(PW(k % POOL));
+        // The events (the dispatch needs the Buffers the mouse's window is hit-tested by).
+        sweep_events();
+        if (nbuf_state > 0) sweep_dispatch();
         // The lists a window leaves: one in them, one not, and the same twice over.
         for (int k = 0; k < 6; k++) {
             check_win_remove_parent(*game_win_parent_n && rnd_to(4) ? game_win_parents[rnd_to(*game_win_parent_n)] : any_pool());
@@ -2376,5 +3106,41 @@ static const struct hook win_hooks[] = {
     HOOK(0x5f37c0, win_draw_nc_to, 0x83, 0xec, 0x40, 0x53, 0x55, 0x56, 0x57),
     // sub esp, 8; push ebx; push esi; mov esi, ecx; test BYTE PTR [esi+0x98], 0x11
     HOOK(0x5f5810, win_on_nc_paint, 0x83, 0xec, 0x08, 0x53, 0x56, 0x8b, 0xf1, 0xf6, 0x86, 0x98, 0x00, 0x00, 0x00, 0x11),
+    // The events. push ebx; push esi; mov esi, ecx; push edi
+    HOOK(0x5ee750, win_left_down_event, 0x53, 0x56, 0x8b, 0xf1, 0x57),
+    // push esi; mov esi, ecx; test DWORD PTR [esi+0x98], 0x200000
+    HOOK(0x5ee810, win_left_up_event, 0x56, 0x8b, 0xf1, 0xf7, 0x86, 0x98, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00),
+    HOOK(0x5ee8b0, win_right_click_event, 0x56, 0x8b, 0xf1, 0xf7, 0x86, 0x98, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00),
+    HOOK(0x5ee950, win_right_down_event, 0x56, 0x8b, 0xf1, 0xf7, 0x86, 0x98, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00),
+    HOOK(0x5ee9f0, win_right_up_event, 0x56, 0x8b, 0xf1, 0xf7, 0x86, 0x98, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00),
+    // push ebx; push ebp; push esi; mov esi, ecx; push edi
+    HOOK(0x5eea90, win_key_click_event, 0x53, 0x55, 0x56, 0x8b, 0xf1, 0x57),
+    // push ebx; push ebp; push esi; push edi; mov edi, ecx
+    HOOK(0x5eeb90, win_key_down_event, 0x53, 0x55, 0x56, 0x57, 0x8b, 0xf9),
+    // push ebx; push esi; mov esi, ecx; push edi; xor edi, edi
+    HOOK(0x5eedc0, win_key_up_event, 0x53, 0x56, 0x8b, 0xf1, 0x57, 0x33, 0xff),
+    HOOK(0x5f6320, win_on_mouse_move, 0x56, 0x8b, 0xf1, 0xf7, 0x86, 0x98, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00),
+    // push esi; mov eax, 0x88888889 (the division of the wheel's turn by 120)
+    HOOK(0x5f62d0, win_on_mouse_wheel, 0x56, 0xb8, 0x89, 0x88, 0x88, 0x88),
+    // push ecx; push ebx; push ebp; push esi; mov esi, ecx
+    HOOK(0x5f63c0, win_on_l_button_down, 0x51, 0x53, 0x55, 0x56, 0x8b, 0xf1),
+    // sub esp, 0x10; mov eax, [0x9b7acc]
+    HOOK(0x5f6550, win_on_l_button_up, 0x83, 0xec, 0x10, 0xa1, 0xcc, 0x7a, 0x9b, 0x00),
+    // push ebx; push ebp; push esi; mov esi, ecx; xor ebx, ebx
+    HOOK(0x5f6710, win_on_r_button_down, 0x53, 0x55, 0x56, 0x8b, 0xf1, 0x33, 0xdb),
+    HOOK(0x5f6880, win_on_r_button_up, 0x83, 0xec, 0x10, 0xa1, 0xcc, 0x7a, 0x9b, 0x00),
+    // mov eax, [esp+8]; push esi; mov esi, [esp+0x14]
+    HOOK(0x5f6230, win_on_sys_key, 0x8b, 0x44, 0x24, 0x08, 0x56, 0x8b, 0x74, 0x24, 0x14),
+    // mov ecx, [0x9b7ae0] (the modal window)
+    HOOK(0x5f15c0, win_OnKey, 0x8b, 0x0d, 0xe0, 0x7a, 0x9b, 0x00),
+    HOOK(0x5f1660, win_OnChar, 0x8b, 0x0d, 0xe0, 0x7a, 0x9b, 0x00),
+    HOOK(0x5f16d0, win_OnSysKey, 0x8b, 0x0d, 0xe0, 0x7a, 0x9b, 0x00),
+    // push ecx; push ebx; push ebp; lea eax, [esp+0x1c]
+    HOOK(0x5f2330, win_OnLButtonDown, 0x51, 0x53, 0x55, 0x8d, 0x44, 0x24, 0x1c),
+    // lea eax, [esp+0xc]; lea ecx, [esp+8]
+    HOOK(0x5f2570, win_OnLButtonUp, 0x8d, 0x44, 0x24, 0x0c, 0x8d, 0x4c, 0x24, 0x08),
+    // lea eax, [esp+0x10]; lea ecx, [esp+0xc]
+    HOOK(0x5f25c0, win_OnRButtonDown, 0x8d, 0x44, 0x24, 0x10, 0x8d, 0x4c, 0x24, 0x0c),
+    HOOK(0x5f2620, win_OnRButtonUp, 0x8d, 0x44, 0x24, 0x0c, 0x8d, 0x4c, 0x24, 0x08),
 };
 struct hook_module win_module = {"win", win_hooks, HOOK_COUNT(win_hooks), win_sweep, NULL, -1};

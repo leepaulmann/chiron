@@ -1,0 +1,33 @@
+# Mouse and key traffic on the first turn, loaded from the game's autosave: the mouse moving over
+# the map and a window's buttons (hover), a double click on the map, keys sent to windows (Tab, the
+# arrow keys, a function key, Escape) and the windows that open and close with them. Leave time after
+# each step; the snaps check what the events did to the screen. (Return in the note opens the base
+# screen, whose leader portrait animates on a timer of its own that snapcheck can't hold still: not used.)
+25 load
+42 snap note
+44 move 300 300
+45 move 362 734          # over the note's Close button
+46 move 366 730
+47 snap note-hover
+48 key Tab               # the focus moves on in the dialog
+50 snap note-tab
+52 click 362 734         # the note's Close
+56 snap map
+58 move 640 360
+59 move 700 380
+60 dblclick 640 360      # a double click on the map
+66 snap map-dblclick
+68 key Left
+69 key Up
+70 key Right
+71 key Down
+75 snap map-arrows
+77 key F2
+81 snap lab
+83 move 636 520          # over the lab summary's Close
+84 move 640 524
+85 key Tab
+87 snap lab-tab
+89 key Escape            # closes it
+93 snap map-again
+96 close

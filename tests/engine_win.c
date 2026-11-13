@@ -8,14 +8,14 @@
 #include "../src/engine/game.h"
 #include "../src/engine/win.h"
 
-static int failures;
+static int failures, line_;
 static void check_(const char *what, long got, long want) {
     if (got != want) {
-        printf("FAIL %s = %ld, expected %ld\n", what, got, want);
+        printf("FAIL line %d: %s = %ld, expected %ld\n", line_, what, got, want);
         failures++;
     }
 }
-#define EXPECT(expr, want) check_(#expr, (long)(expr), (long)(want))
+#define EXPECT(expr, want) (line_ = __LINE__, check_(#expr, (long)(expr), (long)(want)))
 
 static struct game_win *modal, *modal_focus, *focus, *def_focus, *key, *opaque;
 static struct game_win *modals[16], *parents[44], *zorder[514];
@@ -142,7 +142,7 @@ static void fill_vtable(void) {
     vtable[0xf8 / 4] = (void *)stub_0xf8, vtable[0x108 / 4] = (void *)stub_0x108, vtable[0x10c / 4] = (void *)stub_0x10c;
     vtable[0x128 / 4] = (void *)stub_0x128b;
 }
-static void expect_call(int i, int slot, void *w, int a, int b, int c) {
+static void expect_call_(int i, int slot, void *w, int a, int b, int c) {
     char what[64];
     snprintf(what, sizeof what, "call %d slot", i);
     check_(what, i < nvlog ? vlog_[i].slot : -1, slot);
@@ -153,6 +153,7 @@ static void expect_call(int i, int slot, void *w, int a, int b, int c) {
     snprintf(what, sizeof what, "call %d c", i), check_(what, vlog_[i].c, c);
 }
 
+#define expect_call(...) (line_ = __LINE__, expect_call_(__VA_ARGS__))
 static int cursor[2], cursor_set[2], cursor_sets, shown_cmd, shown_hwnd, shown, swapped, zoomed, got_cursor;
 static int16_t keys[4];
 static int STD set_cursor_pos_(int x, int y) { return cursor_set[0] = x, cursor_set[1] = y, cursor_sets++, 7; }
@@ -165,6 +166,474 @@ static int16_t STD key_state_(int k) { return keys[k]; }
 static struct game_win *cur_, *capture_, *hover_, *press1_, *press2_, *prev_focus_;
 static uint32_t hwnd_;
 static int32_t screen_w_, screen_h_, pic_normal_, pic_zoomed_;
+
+// ---- Mouse and key events (win.c): stand-ins for the slots, callbacks, hooks and Windows calls ----
+#define ES1(slot) \
+    static int WIN_THIS es_##slot(struct game_win *w, int a) { return vrec(slot, w, a, 0, 0), 0; }
+#define ES2(slot) \
+    static int WIN_THIS es_##slot(struct game_win *w, int a, int b) { return vrec(slot, w, a, b, 0), 0; }
+#define ES4(slot) \
+    static int WIN_THIS es_##slot(struct game_win *w, int a, int b, int c, int d) { return vrec(slot, w, a, b, c * 3 + d), 0; }
+#define ES5(slot)                                                                                   \
+    static int WIN_THIS es_##slot(struct game_win *w, int a, int b, int c, int d, int e) {         \
+        return vrec(slot, w, a, b, c * 7 + d * 3 + e), 0;                                          \
+    }
+ES1(0x3c) ES2(0x44) ES2(0x4c) ES2(0x50) ES2(0x54) ES2(0x58) ES2(0x5c) ES2(0x60) ES2(0x70) ES2(0x74) ES1(0x78) ES2(0x7c) ES2(0x80)
+ES2(0x84) ES2(0x88) ES2(0x8c) ES2(0x90) ES2(0x94) ES2(0x98) ES2(0x9c) ES1(0xb0) ES1(0x104) ES4(0x138) ES2(0x13c) ES4(0x140)
+ES5(0x144) ES4(0x148) ES5(0x14c) ES4(0x150)
+static int key_ret, scroll_ret, nc_code, spot_ret, spot_field, region_ret, own_regions;
+static int WIN_THIS es_0x100(struct game_win *w) { return vrec(0x100, w, 0, 0, 0), 0; }
+static int WIN_THIS es_0x64(struct game_win *w, int a, int b) { return vrec(0x64, w, a, b, 0), key_ret; }
+static int WIN_THIS es_0x68(struct game_win *w, int a) { return vrec(0x68, w, a, 0, 0), key_ret; }
+static int WIN_THIS es_0x6c(struct game_win *w, int a) { return vrec(0x6c, w, a, 0, 0), key_ret; }
+static int WIN_THIS es_0x12c(struct game_win *w, int x, int y) { return vrec(0x12c, w, x, y, 0), nc_code; }
+static int WIN_THIS es_0xf4(struct game_win *w) { return own_regions; }
+static int WIN_THIS es_0x160(struct game_win *w, int a, int b) { return vrec(0x160, w, a, b, 0), region_ret; }
+static int WIN_THIS sc_0x64(struct game_win *w, int a, int b) { return vrec(0x64, w, a, b, 0), scroll_ret; }
+static struct link_ {
+    void **vtable;
+    int keep;
+} L1, L2;
+static void *link_vt[0x80 / 4], *ev_vtable[0x180 / 4], *sc_vtable[0x180 / 4];
+static int WIN_THIS link_keep(struct link_ *l) { return l->keep; }
+static int WIN_THIS link_free(struct link_ *l) { return vrec(0x1c, l, 0, 0, 0), 0; }
+#define ECB(n) \
+    static void ecb_##n(int a, int b) { vrec(0x2000 + n, NULL, a, b, 0); }
+ECB(0) ECB(1) ECB(2) ECB(3) ECB(4) ECB(5) ECB(6) ECB(7) ECB(8)
+static int ecb_key_click(int a, int b) { return vrec(0x2010, NULL, a, b, 0), 100; }
+static int ecb_key_down(int a) { return vrec(0x2011, NULL, a, 0, 0), 200; }
+static int ecb_key_up(int a) { return vrec(0x2012, NULL, a, 0, 0), 300; }
+static void ehook_after(void) { vrec(0x2020, NULL, 0, 0, 0); }
+static void ehook_key(int a) { vrec(0x2021, NULL, a, 0, 0); }
+static void ehook_left(int x, int y) { vrec(0x2022, NULL, x, y, 0); }
+static void ehook_right(int x, int y) { vrec(0x2023, NULL, x, y, 0); }
+static void(*const ecb_table[9])(int, int) = {ecb_0, ecb_1, ecb_2, ecb_3, ecb_4, ecb_5, ecb_6, ecb_7, ecb_8};
+static void *ehooks[4];
+static int mvk_calls;
+static unsigned STD mvk_(unsigned code, unsigned type) {
+    mvk_calls++;
+    return type == 2 && ((code >= 0x41 && code <= 0x5a) || (code >= 0x30 && code <= 0x39) || code == 0x20) ? code : 0;
+}
+static struct {
+    uint32_t hwnd;
+    unsigned msg;
+    uintptr_t wp;
+    intptr_t lp;
+} posts[4], defs[4];
+static int nposts, ndefs;
+static int STD post_(void *wnd, unsigned msg, uintptr_t wp, intptr_t lp) {
+    if (nposts < 4) posts[nposts].hwnd = (uint32_t)(uintptr_t)wnd, posts[nposts].msg = msg, posts[nposts].wp = wp, posts[nposts].lp = lp;
+    return nposts++, 1;
+}
+static intptr_t STD defproc_(uint32_t hwnd, unsigned msg, uintptr_t wp, intptr_t lp) {
+    if (ndefs < 4) defs[ndefs].hwnd = hwnd, defs[ndefs].msg = msg, defs[ndefs].wp = wp, defs[ndefs].lp = lp;
+    return ndefs++, 0x1234;
+}
+static int WIN_THIS spot_(void *list, int x, int y, int *f14, int *f10) {
+    vrec(0x3000, list, x, y, 0);
+    if (spot_ret >= 0 && f14) *f14 = spot_field;
+    return spot_ret;
+}
+static void put(struct game_win *w, int off, void *v) { *(void **)((uint8_t *)w + off) = v; }
+static void ev_window(struct game_win *w) {
+    memset(w, 0, sizeof *w);
+    w->vtable = ev_vtable;
+    w->root = w;
+    w->flags2 = WIN_F2_VISIBLE;
+    w->inner[2] = 50, w->inner[3] = 40;
+    for (int i = 0; i < 9; i++) put(w, 0x408 + 4 * i, (void *)ecb_table[i]);
+}
+
+static int32_t t_mouse_pos[2], t_hit_nc;
+static void test_events(void) {
+    game_win_mouse_pos = t_mouse_pos, game_win_hit_nc = &t_hit_nc;
+    static struct game_win E, D, X, P;
+    static struct game_win_scroll S;
+    static struct {
+        struct game_win w;
+        uint8_t sub[0x600];
+    } F;
+    static struct game_win_node node;
+    int32_t track_pos[2] = {0, 0}, track_code = 0, press_inside = 7;
+    struct game_win *track = NULL;
+    // The slots the events call (the ones a window may leave to its callbacks come from `fill`).
+    ev_vtable[0x3c / 4] = (void *)es_0x3c, ev_vtable[0x44 / 4] = (void *)es_0x44, ev_vtable[0x4c / 4] = (void *)es_0x4c;
+    ev_vtable[0x50 / 4] = (void *)es_0x50, ev_vtable[0x54 / 4] = (void *)es_0x54, ev_vtable[0x58 / 4] = (void *)es_0x58;
+    ev_vtable[0x5c / 4] = (void *)es_0x5c, ev_vtable[0x60 / 4] = (void *)es_0x60, ev_vtable[0x64 / 4] = (void *)es_0x64;
+    ev_vtable[0x68 / 4] = (void *)es_0x68, ev_vtable[0x6c / 4] = (void *)es_0x6c, ev_vtable[0x70 / 4] = (void *)es_0x70;
+    ev_vtable[0x74 / 4] = (void *)es_0x74, ev_vtable[0x78 / 4] = (void *)es_0x78, ev_vtable[0x7c / 4] = (void *)es_0x7c;
+    ev_vtable[0x80 / 4] = (void *)es_0x80, ev_vtable[0x84 / 4] = (void *)es_0x84, ev_vtable[0x88 / 4] = (void *)es_0x88;
+    ev_vtable[0x8c / 4] = (void *)es_0x8c, ev_vtable[0x90 / 4] = (void *)es_0x90, ev_vtable[0x94 / 4] = (void *)es_0x94;
+    ev_vtable[0x98 / 4] = (void *)es_0x98, ev_vtable[0x9c / 4] = (void *)es_0x9c, ev_vtable[0xb0 / 4] = (void *)es_0xb0;
+    ev_vtable[0xf4 / 4] = (void *)es_0xf4, ev_vtable[0x100 / 4] = (void *)es_0x100, ev_vtable[0x104 / 4] = (void *)es_0x104;
+    ev_vtable[0x12c / 4] = (void *)es_0x12c, ev_vtable[0x138 / 4] = (void *)es_0x138, ev_vtable[0x13c / 4] = (void *)es_0x13c;
+    ev_vtable[0x140 / 4] = (void *)es_0x140, ev_vtable[0x144 / 4] = (void *)es_0x144, ev_vtable[0x148 / 4] = (void *)es_0x148;
+    ev_vtable[0x14c / 4] = (void *)es_0x14c, ev_vtable[0x150 / 4] = (void *)es_0x150, ev_vtable[0x160 / 4] = (void *)es_0x160;
+    sc_vtable[0x64 / 4] = (void *)sc_0x64;
+    link_vt[0x5c / 4] = (void *)link_keep, link_vt[0x1c / 4] = (void *)link_free;
+    L1.vtable = L2.vtable = link_vt;
+    game_win_track = &track, game_win_track_code = &track_code, game_win_track_pos = track_pos, game_win_press_inside = &press_inside;
+    game_win_hooks = ehooks;
+    game_map_virtual_key = mvk_, game_post_message = post_, game_def_window_proc = defproc_, game_spot_check = spot_;
+    game_win_hwnd = &hwnd_;
+    hwnd_ = 0x55;
+    ehooks[0] = (void *)ehook_after, ehooks[1] = (void *)ehook_key, ehooks[2] = (void *)ehook_left, ehooks[3] = (void *)ehook_right;
+    key_ret = scroll_ret = nc_code = own_regions = region_ret = 0;
+    spot_ret = -1;
+
+    // The left button's down event: callback, the game's hook, handler, then the object is let go (unless it says to keep it).
+    ev_window(&E);
+    put(&E, 0x24, &L1), put(&E, 0x54, &L2);
+    L1.keep = L2.keep = 0;
+    cur_ = NULL, nvlog = 0;
+    win_left_down_event(&E, 3, 4, 0);
+    EXPECT(cur_ == &E, 1), EXPECT(nvlog, 4);
+    expect_call(0, 0x2004, NULL, 3, 4, 0), expect_call(1, 0x2022, NULL, 3, 4, 0), expect_call(2, 0x50, &E, 3, 4, 0);
+    expect_call(3, 0x1c, &L1, 0, 0, 0);
+    L1.keep = 1, cur_ = NULL, nvlog = 0;
+    win_left_down_event(&E, 3, 4, 0);
+    EXPECT(nvlog, 3);
+    nvlog = 0, cur_ = NULL;  // the frame: no callback, the other slot and object, the hook still
+    win_left_down_event(&E, 5, 6, 1);
+    EXPECT(cur_ == NULL, 1), EXPECT(nvlog, 3);
+    expect_call(0, 0x2022, NULL, 5, 6, 0), expect_call(1, 0x84, &E, 5, 6, 0), expect_call(2, 0x1c, &L2, 0, 0, 0);
+    ehooks[2] = NULL, nvlog = 0;
+    win_left_down_event(&E, 1, 2, 0);
+    EXPECT(nvlog, 2);
+    ehooks[2] = (void *)ehook_left;
+    E.flags = WIN_F_DISABLED, nvlog = 0;  // disabled or busy windows are given nothing
+    win_left_down_event(&E, 1, 2, 0), win_left_up_event(&E, 1, 2, 0), win_right_click_event(&E, 1, 2, 1);
+    win_right_down_event(&E, 1, 2, 1), win_right_up_event(&E, 1, 2, 0), win_on_mouse_move(&E, 1, 2, 0, 0);
+    win_on_mouse_wheel(&E, 0, 120, 0, 0, 0);
+    EXPECT(nvlog, 0);
+    E.flags = 0, E.flags2 = WIN_F2_VISIBLE | WIN_F2_BUSY;
+    win_left_down_event(&E, 1, 2, 0), win_left_up_event(&E, 1, 2, 0), win_right_down_event(&E, 1, 2, 1);
+    EXPECT(win_key_click_event(&E, 0, 0xd) + win_key_down_event(&E, 3) + win_key_up_event(&E, 3), 0), EXPECT(nvlog, 0);
+    E.flags2 = WIN_F2_VISIBLE;
+
+    // The others: the callback after the one for the last, the slot, the object; each for the frame as well.
+    L1.keep = 0;
+    put(&E, 0x28, &L1), put(&E, 0x58, &L2), put(&E, 0x2c, &L1), put(&E, 0x5c, &L2), put(&E, 0x30, &L1), put(&E, 0x60, &L2);
+    put(&E, 0x34, &L1), put(&E, 0x64, &L2), put(&E, 0x1c, &L1), put(&E, 0x4c, &L2);
+    static const struct {
+        void WIN_THIS (*fn)(struct game_win *, int, int, int);
+        int cb, slot, slot_nc;
+    } evs[] = {{win_left_up_event, 5, 0x54, 0x88}, {win_right_click_event, 6, 0x58, 0x8c}, {win_right_down_event, 7, 0x5c, 0x90},
+               {win_right_up_event, 8, 0x60, 0x94}};
+    for (int i = 0; i < 4; i++) {
+        cur_ = NULL, nvlog = 0;
+        evs[i].fn(&E, 9, 8, 0);
+        EXPECT(cur_ == &E, 1), EXPECT(nvlog, 3);
+        expect_call(0, 0x2000 + evs[i].cb, NULL, 9, 8, 0), expect_call(1, evs[i].slot, &E, 9, 8, 0), expect_call(2, 0x1c, &L1, 0, 0, 0);
+        cur_ = NULL, nvlog = 0;
+        evs[i].fn(&E, 9, 8, 1);
+        EXPECT(cur_ == NULL, 1), EXPECT(nvlog, 2);
+        expect_call(0, evs[i].slot_nc, &E, 9, 8, 0), expect_call(1, 0x1c, &L2, 0, 0, 0);
+    }
+    cur_ = NULL, nvlog = 0;
+    win_on_mouse_move(&E, 2, 3, 99, 0);
+    EXPECT(nvlog, 3), expect_call(0, 0x2000, NULL, 2, 3, 0), expect_call(1, 0x44, &E, 2, 3, 0), expect_call(2, 0x1c, &L1, 0, 0, 0);
+    nvlog = 0;
+    win_on_mouse_move(&E, 2, 3, 99, 1);
+    EXPECT(nvlog, 2), expect_call(0, 0x7c, &E, 2, 3, 0), expect_call(1, 0x1c, &L2, 0, 0, 0);
+
+    // The wheel: whole notches towards zero from the low word, for the client area or the frame.
+    nvlog = 0;
+    win_on_mouse_wheel(&E, 0, 240, 0, 0, 0), win_on_mouse_wheel(&E, 0, -130, 0, 0, 1), win_on_mouse_wheel(&E, 0, -119, 0, 0, 0);
+    win_on_mouse_wheel(&E, 0, 0x7fff0000 | 120, 0, 0, 1), win_on_mouse_wheel(&E, 0, 0xffff8000 + 0x10000, 0, 0, 0);
+    EXPECT(nvlog, 5);
+    expect_call(0, 0x3c, &E, 2, 0, 0), expect_call(1, 0x78, &E, -1, 0, 0), expect_call(2, 0x3c, &E, 0, 0, 0);
+    expect_call(3, 0x78, &E, 1, 0, 0), expect_call(4, 0x3c, &E, -273, 0, 0);
+
+    // Keys. The key as a click: return and the pad's enter, escape, others; the callback and handler answers are added.
+    L1.keep = L2.keep = 1;
+    nvlog = 0, key_ret = 5, L1.keep = 0;  // the object is freed
+    put(&E, 0x42c, (void *)ecb_key_click), put(&E, 0x38, &L1);
+    EXPECT(win_key_click_event(&E, 7, 0xd), 105), EXPECT(nvlog, 4);
+    expect_call(0, 0xb0, &E, -1, 0, 0), expect_call(1, 0x2010, NULL, 7, 0xd, 0), expect_call(2, 0x64, &E, 7, 0xd, 0), expect_call(3, 0x1c, &L1, 0, 0, 0);
+    L1.keep = 1;
+    nvlog = 0;
+    EXPECT(win_key_click_event(&E, 7, 0x1b), 105), expect_call(0, 0xb0, &E, -2, 0, 0);
+    nvlog = 0;
+    EXPECT(win_key_click_event(&E, 7, 0x1000d), 105), expect_call(0, 0xb0, &E, -1, 0, 0);
+    nvlog = 0;
+    EXPECT(win_key_click_event(&E, 7, 0x41), 105), EXPECT(nvlog, 2), expect_call(0, 0x2010, NULL, 7, 0x41, 0);
+    put(&E, 0x42c, NULL);
+    // In a dialog: tab passes the focus on, another key goes to the focus window first.
+    ev_window(&D);
+    node.win = &D, E.dlg_head = E.dlg_cur = &node, E.dlg_count = 1;
+    nvlog = 0, cur_ = NULL;
+    EXPECT(win_key_click_event(&E, 7, 9), 5), EXPECT(nvlog, 2), expect_call(0, 0x100, &D, 0, 0, 0), expect_call(1, 0x64, &E, 7, 9, 0);
+    nvlog = 0;
+    EXPECT(win_key_click_event(&E, 7, 0x41), 1), EXPECT(nvlog, 1), expect_call(0, 0x64, &D, 7, 0x41, 0);  // used: ends it
+    key_ret = 0, nvlog = 0;
+    EXPECT(win_key_click_event(&E, 7, 0x41), 0), EXPECT(nvlog, 2), expect_call(0, 0x64, &D, 7, 0x41, 0), expect_call(1, 0x64, &E, 7, 0x41, 0);
+    E.dlg_count = 0;
+
+    // A key pressed: a key that makes a character isn't a click; one that makes none is, from the window if it has no bars.
+    key_ret = 0, nvlog = 0, mvk_calls = 0;
+    put(&E, 0x430, (void *)ecb_key_down), put(&E, 0x3c, &L2), L2.keep = 1;
+    EXPECT(win_key_down_event(&E, 0x41), 200), EXPECT(mvk_calls, 1), EXPECT(nvlog, 2);
+    expect_call(0, 0x2011, NULL, 0x41, 0, 0), expect_call(1, 0x68, &E, 0x41, 0, 0);
+    nvlog = 0, mvk_calls = 0;
+    EXPECT(win_key_down_event(&E, 0x10025), 200), EXPECT(mvk_calls, 1), EXPECT(nvlog, 3);  // the flags are taken off first
+    expect_call(0, 0x64, &E, 0, 0x10025, 0), expect_call(1, 0x2011, NULL, 0x10025, 0, 0), expect_call(2, 0x68, &E, 0x10025, 0, 0);
+    key_ret = 3, nvlog = 0;
+    EXPECT(win_key_down_event(&E, 0x25), 1), EXPECT(nvlog, 1);  // the click uses it
+    // With bars: each is offered the key (an answer of nonzero ends it) and the click is sent once.
+    ev_window(&D);
+    memset(&S, 0, sizeof S), S.win.vtable = sc_vtable;
+    E.scroll_v = E.scroll_h = &S;
+    key_ret = 0, scroll_ret = 0, nvlog = 0, mvk_calls = 0;
+    EXPECT(win_key_down_event(&E, 0x25), 200), EXPECT(mvk_calls, 1), EXPECT(nvlog, 5);
+    expect_call(0, 0x64, &S.win, 0, 0x25, 0), expect_call(1, 0x64, &E, 0, 0x25, 0), expect_call(2, 0x64, &S.win, 0, 0x25, 0);
+    expect_call(3, 0x2011, NULL, 0x25, 0, 0), expect_call(4, 0x68, &E, 0x25, 0, 0);
+    scroll_ret = 1, nvlog = 0;
+    EXPECT(win_key_down_event(&E, 0x25), 1), EXPECT(nvlog, 1);
+    E.scroll_v = NULL, scroll_ret = 0, nvlog = 0, mvk_calls = 0;  // only the horizontal bar: the click comes after its question
+    EXPECT(win_key_down_event(&E, 0x25), 200), EXPECT(mvk_calls, 1);
+    expect_call(0, 0x64, &S.win, 0, 0x25, 0), expect_call(1, 0x64, &E, 0, 0x25, 0);
+    E.scroll_h = NULL;
+    // In a dialog the focus window is given it first (its bars, its click, then the key itself).
+    ev_window(&D);
+    D.scroll_v = &S;
+    E.dlg_count = 1;
+    nvlog = 0, mvk_calls = 0, key_ret = 0;
+    EXPECT(win_key_down_event(&E, 0x25), 200), EXPECT(mvk_calls, 2), EXPECT(nvlog, 7);
+    // The focus window's bar, its click, then (the key down for it, which does the same again) its handler; then the
+    // window's own, which sends no click of its own (the focus window's was one, once for the whole key).
+    expect_call(0, 0x64, &S.win, 0, 0x25, 0), expect_call(1, 0x64, &D, 0, 0x25, 0), expect_call(2, 0x64, &S.win, 0, 0x25, 0);
+    expect_call(3, 0x64, &D, 0, 0x25, 0), expect_call(4, 0x68, &D, 0x25, 0, 0), expect_call(5, 0x2011, NULL, 0x25, 0, 0);
+    expect_call(6, 0x68, &E, 0x25, 0, 0);
+    key_ret = 4, nvlog = 0;  // the focus window uses it: ends it
+    EXPECT(win_key_down_event(&E, 0x25), 1);
+    EXPECT(nvlog, 5);
+    key_ret = 0, nvlog = 0;
+    EXPECT(win_key_down_event(&E, 0x41), 200), EXPECT(nvlog, 5), expect_call(0, 0x64, &S.win, 0, 0x41, 0), expect_call(1, 0x64, &S.win, 0, 0x41, 0);
+    expect_call(2, 0x68, &D, 0x41, 0, 0);
+    D.scroll_v = NULL;
+
+    // A key let go: the focus window of a dialog first.
+    put(&E, 0x434, (void *)ecb_key_up), put(&E, 0x40, &L2);
+    nvlog = 0;
+    EXPECT(win_key_up_event(&E, 9), 300), EXPECT(nvlog, 3);
+    expect_call(0, 0x6c, &D, 9, 0, 0), expect_call(1, 0x2012, NULL, 9, 0, 0), expect_call(2, 0x6c, &E, 9, 0, 0);
+    key_ret = 2, nvlog = 0;
+    EXPECT(win_key_up_event(&E, 9), 1), EXPECT(nvlog, 1);
+    E.dlg_count = 0;
+    key_ret = 2, nvlog = 0;
+    EXPECT(win_key_up_event(&E, 9), 302), EXPECT(nvlog, 2);
+
+    // A system key goes to the game's window as a key message, and the default's answer is given back.
+    nposts = ndefs = 0;
+    EXPECT(win_on_sys_key(&E, 0x41, 1, 3, 0x1e), 0x1234);
+    EXPECT(nposts, 1), EXPECT(ndefs, 1);
+    EXPECT(posts[0].hwnd, 0x55), EXPECT(posts[0].msg, 0x100), EXPECT(posts[0].wp, 0x41), EXPECT(posts[0].lp, 0x1e0003);
+    EXPECT(defs[0].hwnd, 0x55), EXPECT(defs[0].msg, 0x104), EXPECT(defs[0].wp, 0x41), EXPECT(defs[0].lp, 0x1e0003);
+    win_on_sys_key(&E, 0x42, 0, 0x10005, 0x1ffff);
+    EXPECT(posts[1].msg, 0x101), EXPECT(defs[1].msg, 0x105), EXPECT(posts[1].lp, 0xffff0005);
+
+    // The left button going down. E hangs from P with X in front of it: it comes to the front, takes the focus
+    // of P's dialog list, and the press is kept (for the client area or the frame).
+    {
+        ev_window(&P), ev_window(&X), ev_window(&E);
+        E.parent = X.parent = P.parent = NULL;
+        P.children[0] = &X, P.children[1] = &E, P.n_children = 2, E.parent = X.parent = &P;
+        E.flags = WIN_F_CHILD;
+        put(&E, 0x24, &L1), put(&E, 0x44, &L1), put(&E, 0x68, &L2), put(&E, 0x54, &L2);
+        L1.keep = L2.keep = 1;
+        lists();
+        press1_ = press2_ = NULL, press_inside = 7, nvlog = 0, cur_ = NULL;
+        win_on_l_button_down(&E, 0, 4, 5, 0, 0);
+        EXPECT(P.children[0] == &E, 1), EXPECT(P.children[1] == &X, 1);
+        EXPECT(press1_ == &E, 1), EXPECT(press2_ == NULL, 1), EXPECT(press_inside, 1);
+        expect_call(0, 0x104, &P, (int)(uintptr_t)&E, 0, 0);  // told to give the focus (a stand-in is its own)
+        expect_call(1, 0x2004, NULL, 4, 5, 0), expect_call(2, 0x2022, NULL, 4, 5, 0), expect_call(3, 0x50, &E, 4, 5, 0);
+        EXPECT(nvlog, 4);
+        // A double click (not taken by a window that takes none) comes first; the frame has its own.
+        nvlog = 0;
+        win_on_l_button_down(&E, 1, 4, 5, 0, 1);
+        EXPECT(press2_ == &E, 1), EXPECT(press1_ == NULL, 1);
+        expect_call(1, 0x98, &E, 4, 5, 0), expect_call(2, 0x2022, NULL, 4, 5, 0), expect_call(3, 0x84, &E, 4, 5, 0);
+        EXPECT(nvlog, 4);
+        nvlog = 0;
+        win_on_l_button_down(&E, 1, 4, 5, 0, 0);
+        expect_call(1, 0x2001, NULL, 4, 5, 0), expect_call(2, 0x70, &E, 4, 5, 0), expect_call(3, 0x2004, NULL, 4, 5, 0);
+        EXPECT(nvlog, 6);
+        E.flags = WIN_F_CHILD | 0x200;  // takes no double click
+        nvlog = 0;
+        win_on_l_button_down(&E, 1, 4, 5, 0, 0);
+        expect_call(1, 0x2004, NULL, 4, 5, 0), EXPECT(nvlog, 4);
+        // A window with a list of regions: asked which region the mouse is in; the click's answer decides the event.
+        own_regions = 1, spot_ret = -1, nvlog = 0;
+        win_on_l_button_down(&E, 0, 4, 5, 0, 0);
+        EXPECT(nvlog, 5);  // the focus, the question of the list, and the event
+        ev_window(&X);
+        F.w = E, F.w.parent = NULL;
+        *(int32_t *)(F.sub + (0x900 + 3 * 4 - 0x444)) = 0x7777;
+        spot_ret = 2, spot_field = 3, region_ret = 0, nvlog = 0;
+        win_on_l_button_down(&F.w, 0, 4, 5, 0, 0);
+        EXPECT(nvlog, 2);  // the question and the click, which uses it up
+        expect_call(0, 0x3000, (uint8_t *)&F.w + 0x8f4, 4, 5, 0), expect_call(1, 0x160, &F.w, 3, 0x7777, 0);
+        region_ret = 1, nvlog = 0;
+        win_on_l_button_down(&F.w, 0, 4, 5, 0, 0);
+        EXPECT(nvlog, 5);
+        own_regions = 0, E.flags = WIN_F_CHILD;
+
+        // A window with no parent comes to the front of the top-level ones.
+        E.parent = NULL, X.parent = NULL;
+        lists();
+        parents[0] = &X, parents[1] = &P, parents[2] = &E, parent_n = 3;
+        win_on_l_button_down(&E, 0, 1, 1, 0, 0);
+        EXPECT(parents[0] == &E, 1), EXPECT(parents[1] == &X, 1), EXPECT(parents[2] == &P, 1);
+        E.flags |= WIN_F_ALWAYS_TOP;  // one that keeps its place is not moved
+        parents[0] = &X, parents[1] = &P, parents[2] = &E;
+        win_on_l_button_down(&E, 0, 1, 1, 0, 0);
+        EXPECT(parents[0] == &X, 1), EXPECT(parents[2] == &E, 1);
+        E.flags = 0;
+        P.children[0] = &X, P.children[1] = &E, P.n_children = 2, E.parent = X.parent = &P;
+        win_on_r_button_down(&E, 0, 4, 5, 0, 0);  // the right button: the same, but the mouse is not inside
+        EXPECT(P.children[0] == &E, 1), EXPECT(press1_ == &E, 1), EXPECT(press_inside, 0);
+        put(&E, 0x30, &L1), put(&E, 0x60, &L2), put(&E, 0x48, &L1), put(&E, 0x6c, &L2);
+        nvlog = 0;
+        win_on_r_button_down(&E, 1, 4, 5, 0, 1);
+        EXPECT(press2_ == &E, 1), EXPECT(press1_ == NULL, 1);
+        expect_call(1, 0x9c, &E, 4, 5, 0), expect_call(2, 0x90, &E, 4, 5, 0), EXPECT(nvlog, 3);
+        nvlog = 0;
+        win_on_r_button_down(&E, 1, 4, 5, 0, 0);
+        expect_call(1, 0x2002, NULL, 4, 5, 0), expect_call(2, 0x74, &E, 4, 5, 0), expect_call(3, 0x2007, NULL, 4, 5, 0);
+        expect_call(4, 0x5c, &E, 4, 5, 0), EXPECT(nvlog, 5);
+    }
+
+    // The left button going up: a click if the press was here and the mouse still is, then the up event if shown.
+    {
+        ev_window(&E), ev_window(&P);
+        put(&E, 0x20, &L1), put(&E, 0x28, &L1), put(&E, 0x50, &L2), put(&E, 0x58, &L2), put(&E, 0x2c, &L1), put(&E, 0x5c, &L2);
+        put(&E, 0x34, &L1), put(&E, 0x64, &L2);
+        L1.keep = 1;
+        press1_ = &E, press2_ = NULL, nvlog = 0;
+        win_on_l_button_up(&E, 10, 10, 0, 0);
+        EXPECT(press1_ == NULL, 1), EXPECT(press2_ == NULL, 1), EXPECT(nvlog, 4);
+        expect_call(0, 0x2003, NULL, 10, 10, 0), expect_call(1, 0x4c, &E, 10, 10, 0), expect_call(2, 0x2005, NULL, 10, 10, 0);
+        expect_call(3, 0x54, &E, 10, 10, 0);
+        press1_ = NULL, press2_ = &E, nvlog = 0;  // pressed in the frame counts the same
+        win_on_l_button_up(&E, 10, 10, 0, 1);
+        EXPECT(nvlog, 2), expect_call(0, 0x80, &E, 10, 10, 0), expect_call(1, 0x88, &E, 10, 10, 0);
+        press1_ = &E, nvlog = 0;  // outside: no click, but the up event
+        win_on_l_button_up(&E, 50, 10, 0, 0);
+        EXPECT(nvlog, 2), expect_call(0, 0x2005, NULL, 50, 10, 0);
+        press1_ = &E, nvlog = 0;
+        win_on_l_button_up(&E, -1, 10, 0, 0);
+        EXPECT(nvlog, 2);
+        press1_ = &X, nvlog = 0;  // another window had it: no click
+        win_on_l_button_up(&E, 10, 10, 0, 0);
+        EXPECT(nvlog, 2), expect_call(0, 0x2005, NULL, 10, 10, 0);
+        press1_ = NULL, press2_ = &E, nvlog = 0;
+        win_on_l_button_up(&E, 10, 10, 0, 0);  // pressed in the frame, let go in the client area: still it
+        EXPECT(nvlog, 4);
+        E.flags2 = 0, nvlog = 0, press1_ = &E;  // not shown: no up event
+        win_on_l_button_up(&E, 10, 10, 0, 0);
+        EXPECT(nvlog, 2);
+        E.flags2 = WIN_F2_VISIBLE, E.parent = &P, P.flags2 = 0, nvlog = 0, press1_ = NULL;  // what it hangs from is hidden
+        win_on_l_button_up(&E, 10, 10, 0, 0);
+        EXPECT(nvlog, 0);
+        P.flags2 = WIN_F2_VISIBLE, nvlog = 0;
+        win_on_l_button_up(&E, 10, 10, 0, 0);
+        EXPECT(nvlog, 2);
+        E.parent = NULL;
+        // The right button: a click if inside (no matter the frame), always the up event.
+        press1_ = &E, nvlog = 0;
+        win_on_r_button_up(&E, 10, 10, 0, 0);
+        EXPECT(press1_ == NULL, 1), EXPECT(nvlog, 4);
+        expect_call(0, 0x2006, NULL, 10, 10, 0), expect_call(1, 0x58, &E, 10, 10, 0), expect_call(2, 0x2008, NULL, 10, 10, 0);
+        expect_call(3, 0x60, &E, 10, 10, 0);
+        press1_ = &E, nvlog = 0;
+        win_on_r_button_up(&E, 99, 10, 0, 1);
+        EXPECT(nvlog, 1), expect_call(0, 0x94, &E, 99, 10, 0);
+    }
+
+    // The game's calls: the key window is told keys (and the hooks), the window under the mouse the buttons.
+    {
+        ev_window(&E);
+        E.parent = NULL;
+        modal = NULL, modal_focus = NULL, focus = &E, def_focus = NULL;
+        nvlog = 0;
+        win_OnKey(0, 0x41, 1, 2, 3);
+        EXPECT(key == &E, 1), EXPECT(nvlog, 3);
+        expect_call(0, 0x138, &E, 0x41, 1, 9), expect_call(1, 0x2021, NULL, 0x41, 0, 0), expect_call(2, 0x2020, NULL, 0, 0, 0);
+        nvlog = 0;
+        win_OnKey(0, 0x41, 0, 2, 3);
+        EXPECT(nvlog, 2), expect_call(1, 0x2020, NULL, 0, 0, 0);
+        win_OnChar(0, 0x61, 4);
+        win_OnSysKey(0, 0x12, 1, 5, 6);
+        EXPECT(nvlog, 4), expect_call(2, 0x13c, &E, 0x61, 4, 0), expect_call(3, 0x140, &E, 0x12, 1, 5 * 3 + 6);
+        focus = NULL;  // nobody has the keys: only the hooks
+        nvlog = 0;
+        win_OnKey(0, 0x41, 1, 2, 3);
+        win_OnChar(0, 1, 1), win_OnSysKey(0, 1, 1, 1, 1);
+        EXPECT(nvlog, 2), expect_call(0, 0x2021, NULL, 0x41, 0, 0), expect_call(1, 0x2020, NULL, 0, 0, 0);
+        ehooks[0] = ehooks[1] = NULL;
+        nvlog = 0;
+        win_OnKey(0, 0x41, 1, 2, 3);
+        EXPECT(nvlog, 0);
+        ehooks[0] = (void *)ehook_after, ehooks[1] = (void *)ehook_key;
+
+        // The mouse: E is pressed, so it is the window under the mouse, and the point is in its client area.
+        parents[0] = &E, parent_n = 1, modal = NULL, capture_ = hover_ = press2_ = NULL;
+        t_mouse_pos[0] = t_mouse_pos[1] = 0;
+        press1_ = &E;
+        int32_t px = 30, py = 25;
+        win_get_mouse_window(&px, &py);
+        press1_ = &E, nvlog = 0, track = NULL;
+        win_OnLButtonDown(0, 1, 30, 25, 8);
+        EXPECT(nvlog, 3), expect_call(0, 0x144, &E, 1, px, py * 7 + 8 * 3 + t_hit_nc);
+        expect_call(1, 0x2022, NULL, px, py, 0), expect_call(2, 0x2020, NULL, 0, 0, 0);
+        press1_ = &E, nvlog = 0, track = &E;
+        win_OnLButtonUp(0, 30, 25, 4);
+        EXPECT(track == NULL, 1), EXPECT(nvlog, 1), expect_call(0, 0x148, &E, px, py, 4 * 3 + t_hit_nc);
+        press1_ = &E, nvlog = 0, track = &E;
+        win_OnRButtonUp(0, 30, 25, 4);
+        EXPECT(track == NULL, 1), EXPECT(nvlog, 1), expect_call(0, 0x150, &E, px, py, 4 * 3 + t_hit_nc);
+        press1_ = &E, nvlog = 0;
+        win_OnRButtonDown(0, 0, 30, 25, 4);
+        EXPECT(nvlog, 3), expect_call(0, 0x14c, &E, 0, px, py * 7 + 4 * 3 + t_hit_nc);
+        expect_call(1, 0x2023, NULL, px, py, 0), expect_call(2, 0x2020, NULL, 0, 0, 0);
+        // Nothing under the mouse: only the hooks.
+        press1_ = NULL, parent_n = 0, nvlog = 0;
+        win_OnLButtonDown(0, 0, 500, 500, 0);
+        EXPECT(nvlog, 2), expect_call(0, 0x2022, NULL, 500, 500, 0);
+        win_OnLButtonUp(0, 500, 500, 0);
+        EXPECT(nvlog, 2);
+        // A hit on a frame that has a hit test: a nonzero code brings the window to the front, and a code
+        // that moves or sizes it starts tracking, which ends the event.
+        parents[0] = &X, parents[1] = &E, parent_n = 2, press1_ = &E, E.flags = 0x4000000, nc_code = 2;
+        px = 30, py = 25;
+        press1_ = NULL, E.flags2 = WIN_F2_VISIBLE, E.inner[0] = E.inner[1] = 0, E.inner[2] = 50, E.inner[3] = 40;
+        X.inner[2] = 5, X.inner[3] = 5;
+        parents[0] = &X, parents[1] = &E;
+        nvlog = 0, track = NULL;
+        win_OnLButtonDown(0, 0, 30, 25, 0);
+        EXPECT(track == &E, 1), EXPECT(track_code, 2), EXPECT(track_pos[0], 30), EXPECT(track_pos[1], 25);
+        EXPECT(parents[0] == &E, 1), EXPECT(nvlog, 1), expect_call(0, 0x12c, &E, 30, 25, 0);
+        nc_code = 0x11, track = NULL, nvlog = 0, parents[0] = &X, parents[1] = &E;
+        win_OnLButtonDown(0, 0, 30, 25, 0);
+        EXPECT(track == &E, 1), EXPECT(track_code, 0x11);
+        nc_code = 9, track = NULL, nvlog = 0, parents[0] = &X, parents[1] = &E;  // 9 and 18 do not
+        win_OnLButtonDown(0, 0, 30, 25, 0);
+        EXPECT(track == NULL, 1), EXPECT(parents[0] == &E, 1), EXPECT(nvlog, 4);
+        nc_code = 0x12, nvlog = 0;
+        win_OnLButtonDown(0, 0, 30, 25, 0);
+        EXPECT(track == NULL, 1), EXPECT(nvlog, 4);
+        nc_code = 0, nvlog = 0, parents[0] = &X, parents[1] = &E;  // no code: not moved
+        win_OnLButtonDown(0, 0, 30, 25, 0);
+        EXPECT(parents[0] == &X, 1), EXPECT(nvlog, 4);
+        E.flags = 0;  // and without the flag (and not in the frame), it isn't asked
+        nc_code = 2, nvlog = 0, track = NULL;
+        win_OnLButtonDown(0, 0, 30, 25, 0);
+        EXPECT(track == NULL, 1), EXPECT(nvlog, 3);
+        ehooks[2] = (void *)ehook_left, ehooks[3] = (void *)ehook_right;
+    }
+}
 
 int main(void) {
     game_win_modal = &modal, game_win_modal_focus = &modal_focus, game_win_focus = &focus, game_win_def_focus = &def_focus;
@@ -1100,6 +1569,8 @@ int main(void) {
         EXPECT(hpx(&dest_, ox + 1, oy), 9);
         back_alt_ = NULL;
     }
+
+    test_events();
 
     if (failures) return 1;
     printf("engine_win: ok\n");
