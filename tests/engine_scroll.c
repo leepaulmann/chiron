@@ -169,6 +169,217 @@ static void draw_tests(void) {
     EXPECT(B->bar[0], 12), EXPECT(B->bar[2], 22);
 }
 
+// ---- ListBox layout and redraw ----
+
+// Text measured by a stand-in (6 pixels a character), on a font 10 high with 8 above the baseline.
+static void *l_selected;
+static int l_fake_dc;
+static void *l_dc_slot, *l_default_font;
+static int32_t l_slack;
+static struct font lfont;
+static void *__attribute__((stdcall)) l_select_object(void *dc, void *obj) {
+    void *old = l_selected;
+    l_selected = obj;
+    return old;
+}
+static void *__attribute__((stdcall)) l_stock_object(int which) { return (void *)(intptr_t)(0x1000 + which); }
+static int __attribute__((stdcall)) l_text_extent(void *dc, const char *s, int n, int32_t *size) {
+    size[0] = n * 6, size[1] = 10;
+    return 1;
+}
+static int back_answer, hook_answer;
+static int THIS s_0x28(void *o, int win) { return rec(0x28, o, win, 0, 0), back_answer; }
+static int __attribute__((cdecl)) back_hook(void *w, int a, int b, int c) { return rec(0x401, w, a, b, c), hook_answer; }
+static int item_answer;
+static int32_t item_seen[4];
+static int THIS s_0x2c(void *o, int win, int id, int state, const int32_t *r) {
+    rec(0x2c, o, id, state, 0);
+    memcpy(item_seen, r, sizeof item_seen);
+    return item_answer;
+}
+static int __attribute__((cdecl)) item_fn(void *w, int id, int pos, int x, int y, int h) {
+    return rec(0x402, w, id, pos, x * 10000 + y * 100 + h), 0;
+}
+static int stop_after;
+static int __attribute__((cdecl)) text_fn(void *w, int id, int pos, const int32_t *r, const char *text) {
+    return rec(0x403, w, id, pos, r[0] * 10000 + r[1] * 100 + r[3]), stop_after;
+}
+static uint8_t lpix[DW * DH + 8];
+static int __attribute__((stdcall)) l_intersect(int32_t *out, const int32_t *a, const int32_t *b) {
+    int32_t r[4] = {a[0] > b[0] ? a[0] : b[0], a[1] > b[1] ? a[1] : b[1], a[2] < b[2] ? a[2] : b[2], a[3] < b[3] ? a[3] : b[3]};
+    if (r[0] >= r[2] || r[1] >= r[3]) return memset(out, 0, 16), 0;
+    return memcpy(out, r, 16), 1;
+}
+static int __attribute__((stdcall)) l_equal(const int32_t *a, const int32_t *b) { return !memcmp(a, b, 16); }
+static void *l_ddraw;
+
+static void lb_tests(void) {
+    game_select_object = l_select_object, game_get_stock_object = l_stock_object, game_get_text_extent = l_text_extent;
+    l_dc_slot = &l_fake_dc, game_font_dc = &l_dc_slot;
+    l_default_font = &lfont, game_font_default = &l_default_font;
+    game_font_slack = &l_slack;
+    lfont.first = -1, lfont.hfont = (void *)1, lfont.ascent = 8, lfont.height = 10;
+    static int32_t row_counter, bar_width = 7;
+    game_listbox_row = &row_counter, game_listbox_bar = &bar_width;
+    static int32_t cur_box;
+    game_listbox_cur = &cur_box;
+    game_intersect_rect = l_intersect, game_equal_rect = l_equal, game_ddraw = &l_ddraw;
+    vt[0x28 / 4] = s_0x28, vt[0x2c / 4] = s_0x2c;
+
+    // The layout: the widest text ("Alpha", 5 characters of 6) and the margins make a column; an item is a line
+    // high and a gap; the rows are as many as items (at most the rows allowed); the box wants 5 items shown, so
+    // it has a bar below (flag 2) which takes its width from the box's.
+    make_list(2);
+    struct game_dlg *d = dlg();
+    uint8_t *lw = lwin();
+    struct game_buffer *buf = (struct game_buffer *)(lw + 0x444);
+    *(struct font **)((uint8_t *)buf + 0x52c) = &lfont;
+    DLG_F(d, 0x70) = DLG_F(d, 0x74) = DLG_F(d, 0x78) = (int32_t)(intptr_t)&lfont;
+    DLG_F(d, 0x50) = 5, DLG_F(d, 0x48) = -1, DLG_F(d, 0x44) = 2, DLG_F(d, 0x40) = 1, DLG_F(d, 0x4c) = 1;
+    LB()->f2c = 1, LB()->f20 = 5, LB()->flags = 9;
+    EXPECT(listbox_calculate_dimensions(LB()), 0);
+    EXPECT(DLG_F(d, 0x58), 2), EXPECT(DLG_F(d, 0x68), 8), EXPECT(DLG_F(d, 0x60), 18), EXPECT(DLG_F(d, 0x54), 1);
+    EXPECT(DLG_F(d, 0x64), 36), EXPECT(DLG_F(d, 0x5c), 38 + 7), EXPECT(LB()->visible, 2), EXPECT(LB()->flags, 2);
+    // A window with the flag that keeps the bar out of it (0x40) doesn't give up room for one.
+    make_list(2);
+    *(struct font **)((uint8_t *)buf + 0x52c) = &lfont;
+    DLG_F(d, 0x70) = DLG_F(d, 0x74) = DLG_F(d, 0x78) = (int32_t)(intptr_t)&lfont;
+    DLG_F(d, 0x50) = 5, DLG_F(d, 0x48) = -1, DLG_F(d, 0x44) = 2, DLG_F(d, 0x40) = 1, DLG_F(d, 0x4c) = 1;
+    LB()->f2c = 1, LB()->f20 = 5, ((struct game_win *)lw)->flags = 0x40;
+    EXPECT(listbox_calculate_dimensions(LB()), 0);
+    EXPECT(DLG_F(d, 0x5c), 38), EXPECT(LB()->flags, 2);
+    // A height asked for and two columns: the rows are what the height holds, the columns share the width.
+    make_list(2);
+    *(struct font **)((uint8_t *)buf + 0x52c) = &lfont;
+    DLG_F(d, 0x70) = DLG_F(d, 0x74) = DLG_F(d, 0x78) = (int32_t)(intptr_t)&lfont;
+    DLG_F(d, 0x20) = 3, DLG_F(d, 0x2c) = 100, DLG_F(d, 0x30) = 40, DLG_F(d, 0x50) = 5, DLG_F(d, 0x48) = 9, DLG_F(d, 0x44) = 2;
+    DLG_F(d, 0x40) = 1, DLG_F(d, 0x4c) = 2, DLG_F(d, 0x38) = 3, DLG_F(d, 0x3c) = 4;
+    LB()->f2c = 0, LB()->f20 = 1;
+    EXPECT(listbox_calculate_dimensions(LB()), 0);
+    // (a height of 40 less the margins and plus a gap, over an item 9 high: (40 - 4 - 3 + 2) / 9 = 3 rows)
+    EXPECT(DLG_F(d, 0x58), 3), EXPECT(DLG_F(d, 0x54), 2), EXPECT(DLG_F(d, 0x5c), 100), EXPECT(DLG_F(d, 0x60), 40);
+    EXPECT(DLG_F(d, 0x68), 7), EXPECT(LB()->visible, 6), EXPECT(LB()->flags, 0);
+    EXPECT(DLG_F(d, 0x64), (100 - 2 + 2) / 2 - 2);
+    make_list(0);
+    EXPECT(listbox_calculate_dimensions(LB()), 7);
+
+    // The redraw: nothing without a parent; the screen's function and then the parent may draw the background
+    // (the window is filled with its colour if neither does, or takes the parent's pixels if it can be seen
+    // through); then the frame, and the items from the first shown, column by column (each asks the parent
+    // for its background: the items here have no text).
+    make_list(2);
+    d = dlg();
+    for (int i = 0; i < 2; i++) memset(items[i] + 4, 0, sizeof(char *));
+    memset(&par, 0, sizeof par);
+    par.win.vtable = vt;
+    hand_buffer(&par.buf, pix_parent);
+    for (int i = 0; i < DW * DH; i++) pix_parent[i] = (uint8_t)(i % 100 + 20);
+    struct game_win *win = (struct game_win *)lw;
+    win->vtable = vt, win->parent = &par.win;
+    hand_buffer(buf, lpix);
+    *(struct font **)((uint8_t *)buf + 0x52c) = &lfont;
+    DLG_F(d, 0x6c) = 7, DLG_F(d, 0xb4) = 1, DLG_F(d, 0xac) = 11, DLG_F(d, 0xb0) = 12, DLG_F(d, 0x54) = 1, DLG_F(d, 0x58) = 2;
+    DLG_F(d, 0x40) = 1, DLG_F(d, 0x38) = 1, DLG_F(d, 0x64) = 30, DLG_F(d, 0x68) = 4, DLG_F(d, 0x44) = 1, DLG_F(d, 0x4c) = 2;
+    DLG_F(d, 0xf0) = -1;
+    item_answer = 1, back_answer = 0, ncalls = 0, cur = NULL;
+    listbox_on_redraw(lw);
+    EXPECT(cur == &par.win, 1), EXPECT(ncalls, 3), expect_call(0, 0x28, &par.win, (int)(intptr_t)win, 0, 0);
+    expect_call(1, 0x2c, &par.win, 100, 0, 0), expect_call(2, 0x2c, &par.win, 101, 0, 0), EXPECT(row_counter, 2);
+    // (item 1, in the second row: the gap and the row's height below the top margin)
+    EXPECT(item_seen[0], 1), EXPECT(item_seen[1], 6), EXPECT(item_seen[2], 29), EXPECT(item_seen[3], 10);
+    EXPECT(lpix[0] == 11 || lpix[0] == 12, 1), EXPECT(lpix[5 * DW + 5], 7), EXPECT(lpix[DW + 1], 7);
+    // See-through: the parent's pixels at its place.
+    hand_buffer(buf, lpix);
+    win->flags = 0x80000;
+    listbox_on_redraw(lw);
+    EXPECT(lpix[5 * DW + 5], pix_parent[5 * DW + 5]);
+    // The parent draws the background: nothing is filled or copied.
+    hand_buffer(buf, lpix);
+    back_answer = 1, ncalls = 0;
+    listbox_on_redraw(lw);
+    EXPECT(lpix[5 * DW + 5], 0), EXPECT(ncalls, 3);
+    // A function the screen set: told the Win and three zeros first; if it draws, the parent isn't asked.
+    LB()->f38 = (void *)back_hook, hook_answer = 1, back_answer = 0, ncalls = 0, win->flags = 0;
+    hand_buffer(buf, lpix);
+    listbox_on_redraw(lw);
+    expect_call(0, 0x401, lw, 0, 0, 0), EXPECT(lpix[5 * DW + 5], 0);
+    hook_answer = 0, ncalls = 0;
+    listbox_on_redraw(lw);
+    expect_call(1, 0x28, &par.win, (int)(intptr_t)win, 0, 0), EXPECT(lpix[5 * DW + 5], 7);
+    LB()->f38 = NULL;
+    // Two columns of two rows, three items short: the second column keeps asking for items past the end.
+    DLG_F(d, 0x54) = 2, ncalls = 0;
+    listbox_on_redraw(lw);
+    EXPECT(ncalls, 3), EXPECT(row_counter, 4);
+    // The first item shown is where the drawing starts.
+    DLG_F(d, 0x54) = 1, LB()->top = 1, ncalls = 0;
+    listbox_on_redraw(lw);
+    EXPECT(ncalls, 2), expect_call(1, 0x2c, &par.win, 101, 0, 0), EXPECT(row_counter, 1);
+    // No parent, nothing; no items, just the frame.
+    win->parent = NULL, ncalls = 0, cur = NULL;
+    listbox_on_redraw(lw);
+    EXPECT(ncalls, 0), EXPECT(cur == NULL, 1);
+    win->parent = &par.win, d->count = 0, d->head = NULL;
+    hand_buffer(buf, lpix);
+    listbox_on_redraw(lw);
+    EXPECT(lpix[0] == 11 || lpix[0] == 12, 1);
+
+    // Drawing an item: one column takes each item below the rows the ones before it took; a selected item (the
+    // Dialog's position, or the item's own flag if the box asks for those) is asked for with state 2, filled
+    // if the box has the dialog's focus, and framed; the screen's functions are told.
+    make_list(2);
+    d = dlg();
+    for (int i = 0; i < 2; i++) memset(items[i] + 4, 0, sizeof(char *));
+    win = (struct game_win *)lw;
+    win->vtable = vt, win->parent = &par.win, win->flags = 0x1000;
+    *(struct font **)((uint8_t *)buf + 0x52c) = &lfont;
+    DLG_F(d, 0x6c) = 7, DLG_F(d, 0xb4) = 0, DLG_F(d, 0x40) = 1, DLG_F(d, 0x38) = 2, DLG_F(d, 0x64) = 30, DLG_F(d, 0x68) = 4;
+    DLG_F(d, 0x44) = 1, DLG_F(d, 0x4c) = 1, DLG_F(d, 0xf0) = 1, DLG_F(d, 0xec) = -1;
+    *(int32_t *)(items[0] + 0xc) = 2, *(int32_t *)(items[1] + 0xc) = 1;
+    LB()->f10 = -1, LB()->f14 = 9, LB()->f24 = 11, LB()->f28 = 12, LB()->f2c = 2;
+    hand_buffer(buf, lpix);
+    item_answer = 1, ncalls = 0, fill_rects = 0;
+    listbox_draw_item(LB(), 1);
+    // (item 0 took two rows of 4 and a gap: item 1 is 5 * 2 below the margin, one row high: 5 - 1 = 4 deep)
+    EXPECT(ncalls, 1), expect_call(0, 0x2c, &par.win, 101, 1, 0);
+    EXPECT(item_seen[0], 1), EXPECT(item_seen[1], 12), EXPECT(item_seen[2], 29), EXPECT(item_seen[3], 16), EXPECT(fill_rects, 0);
+    listbox_draw_item(LB(), 0);
+    EXPECT(item_seen[1], 2), EXPECT(item_seen[3], 2 + 5 * 2 - 1), EXPECT(calls[1].b, 0);
+    ncalls = 0;
+    listbox_draw_item(LB(), 2), listbox_draw_item(LB(), -1);
+    EXPECT(ncalls, 0);
+    // Selected, the parent leaving the background to the box: the window is filled, the focus fill asked for
+    // (the colour 9, the item's rectangle) and the frame drawn, two thick.
+    DLG_F(d, 0xec) = 1, item_answer = 0, ncalls = 0, hand_buffer(buf, lpix);
+    DLG_F(d, 0x4c) = 2, DLG_F(d, 0x58) = 2, DLG_F(d, 0x38) = 1;
+    listbox_draw_item(LB(), 1);
+    expect_call(0, 0x2c, &par.win, 101, 2, 0);
+    EXPECT(fill_rects, 1), EXPECT(fill_color, 9), EXPECT(fill_rect_seen[0], 1), EXPECT(fill_rect_seen[1], 6), EXPECT(fill_rect_seen[3], 10);
+    EXPECT(lpix[6 * DW + 1] == 11 || lpix[6 * DW + 1] == 12, 1), EXPECT(lpix[7 * DW + 3] == 11 || lpix[7 * DW + 3] == 12, 1);
+    EXPECT(lpix[7 * DW + 2], 7);  // (the fill shows at the second frame's corner; it is clipped to the item)
+    // The box's own flag instead: item 0 is selected if its second field says so.
+    LB()->f4 = 1, *(int32_t *)(items[0] + 8) = 1, *(int32_t *)(items[1] + 8) = 0;
+    ncalls = 0;
+    listbox_draw_item(LB(), 0), listbox_draw_item(LB(), 1);
+    EXPECT(calls[0].b, 2), EXPECT(calls[1].b, 1);
+    // The functions a screen set: the first is told after the item (the Win, id, position and place), the second
+    // too and, if it answers nonzero, draws the rest.
+    LB()->f4 = 0, DLG_F(d, 0xec) = -1, row_counter = 3;
+    LB()->f30 = (int32_t)(intptr_t)item_fn, LB()->f34 = (int32_t)(intptr_t)text_fn, stop_after = 1, ncalls = 0, fill_rects = 0;
+    DLG_F(d, 0xec) = 0;
+    listbox_draw_item(LB(), 0);
+    EXPECT(ncalls, 3), expect_call(1, 0x402, lw, 100, 3, 10000 + 1 * 100 + 4), expect_call(2, 0x403, lw, 100, 0, 10000 + 1 * 100 + 5);
+    EXPECT(*game_listbox_cur == (int32_t)(intptr_t)LB(), 1), EXPECT(fill_rects, 0);
+    stop_after = 0, ncalls = 0;
+    listbox_draw_item(LB(), 0);
+    EXPECT(fill_rects, 1);
+    LB()->f30 = LB()->f34 = 0;
+    // A function at 0x38 that draws: the parent isn't asked and nothing is filled.
+    LB()->f38 = (void *)back_hook, hook_answer = 1, ncalls = 0, fill_rects = 0;
+    listbox_draw_item(LB(), 0);
+    EXPECT(ncalls, 1), EXPECT(calls[0].slot, 0x401), EXPECT(calls[0].a, 100), EXPECT(calls[0].b, 3), EXPECT(fill_rects, 0);
+}
+
 int main(void) {
     static struct game_scroll scroll_b;
     B = &scroll_b;
@@ -457,6 +668,7 @@ int main(void) {
     EXPECT(stringbox_on_link_clicked(&sb, 3, 4), 1), EXPECT(ncalls, 0);
 
     draw_tests();
+    lb_tests();
     if (failures) printf("%d failures\n", failures);
     else printf("ok\n");
     return failures != 0;

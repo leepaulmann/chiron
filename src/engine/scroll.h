@@ -43,6 +43,9 @@ void SCROLL_THIS listbox_on_right_double_click(void *w, int x, int y);
 void SCROLL_THIS listbox_on_left_double_click(void *w, int x, int y);
 void SCROLL_THIS listbox_on_mousewheel(void *w, int delta);
 void SCROLL_THIS listbox_on_mouse_leave(void *w, int x, int y);
+int SCROLL_THIS listbox_calculate_dimensions(struct game_listbox *l);
+void SCROLL_THIS listbox_on_redraw(void *w);
+void SCROLL_THIS listbox_draw_item(struct game_listbox *l, int pos);
 
 // StringBox.
 void SCROLL_THIS stringbox_on_scrolled(struct game_stringbox *b, int a, int pos);

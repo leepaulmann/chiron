@@ -62,3 +62,25 @@ void BUTTON_THIS graphic_win_fill(struct game_win *w, int color);
 void BUTTON_THIS image_button_on_redraw(struct game_button *b);
 void BUTTON_THIS checkbtn_on_redraw(struct game_check_button *c);
 void BUTTON_THIS push_button_on_redraw(struct game_push_button *p);
+
+// A field of the Dialog part by its offset (the layout is in button.c).
+#define DLG_F(d, off) (*(int32_t *)((uint8_t *)(d) + (off)))
+// What a CheckBox's, RadioButton's and ListBox's layouts begin with: the Buffer's text colours and Fonts as
+// the Dialog part says, and the widest item (the cursor goes round the ring; with `wrap` each item's line
+// count is set from its width over that).
+void dlg_text_setup(struct game_buffer *buf, struct game_dlg *d);
+void dlg_measure(struct game_buffer *buf, struct game_dlg *d, int wrap, int *widest);
+
+// FlatButton's redraw; CheckBox's and RadioButton's layout, item drawing and redraw (the redraws take the
+// Win, as the handlers do).
+void BUTTON_THIS flat_button_on_redraw(struct game_flat_button *f);
+int BUTTON_THIS checkbox_calculate_dimensions(void *cb);
+int BUTTON_THIS radio_calculate_dimensions(void *rb);
+void BUTTON_THIS checkbox_draw_item(void *cb, int pos, int checked, int unused);
+void BUTTON_THIS radio_draw_item(void *rb, int pos, int selected);
+void BUTTON_THIS checkbox_on_redraw(void *w);
+void BUTTON_THIS radio_on_redraw(void *w);
+
+// The sweeps' Buffer with a device context and a Font (see button.c), or NULL before the game has fonts.
+struct font;
+struct game_buffer *button_sweep_buffer(struct font **font);

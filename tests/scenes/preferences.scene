@@ -1,0 +1,21 @@
+# The Preferences dialog (MENU, GAME, Preferences...): pages of CheckBox items (their layout, the check
+# pictures and the text drawn beside them), the buttons that choose the page (FlatButtons), and on the
+# Audio/Visual page the volume bars. The page as it opens, two boxes clicked (each turns over and redraws
+# its items), then the Adv., Audio/Visual and Map pages, and Cancel. Leave time after each step; the snaps
+# take 2 s each.
+25 load
+46 click 63 538           # MENU
+50 click 27 358           # GAME
+54 click 190 410          # Preferences...
+60 snap open
+64 click 500 198          # Design units automatically
+68 click 500 270          # Autosave each turn
+72 snap clicked
+76 click 301 192          # Adv. Preferences
+80 snap advanced
+84 click 301 258          # Audio/Visual Preferences
+88 snap audio-visual
+92 click 301 280          # Map Preferences
+96 snap map
+100 click 301 520         # Cancel
+106 close

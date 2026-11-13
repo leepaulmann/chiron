@@ -7,17 +7,16 @@
 //
 // Here are the functions that change a bar's state, colours and pictures, its thumb, the mouse, the
 // wheel, the keyboard and the arrows (as far as they change state), a resize, and its redraw; the
-// ListBox's selection, double clicks, wheel and mouse leave, and its search by text; and two of
-// StringBox's. Where the original calls through a vtable (a screen subclasses a bar's parent to hear
+// ListBox's selection, double clicks, wheel and mouse leave, its search by text, its layout
+// (calculate_dimensions) and its drawing (on_redraw and draw_item); and two of StringBox's. Where the original calls through a vtable (a screen subclasses a bar's parent to hear
 // of it; the redraw is slot 0xf8) or through a function pointer a screen set, so does this.
 //
 // Left to the original: the constructors, destructors, close and init functions (they build
 // objects on the game's heap and keep an exception frame; the init_vert, init_horz and _nc ones
 // only call init), on_mouse_move and on_button_pressed (the first reads timeGetTime and posts a
 // message, the second also sleeps: timing no check can put back), on_left_click (which does
-// nothing). ListBox: attach, item and calculate_dimensions (the heap, and text metrics through a
-// device context), and everything that draws an item (draw_item, on_redraw, on_scrolling,
-// on_mouse_move, on_left_down, on_key_down, UNK1) or reads the keyboard through Windows. StringBox:
+// nothing). ListBox: attach and item (the heap), and on_scrolling, on_mouse_move, on_left_down,
+// on_key_down and UNK1, which draw or read the keyboard through Windows. StringBox:
 // everything but on_scrolled and on_link_clicked (its strings are on the heap).
 //
 // Differences from OpenSMACX and Thinker: neither lays the Scroll out; the inventory's UNK1 and UNK2
@@ -47,6 +46,8 @@
 #include "game.h"
 #include "hooks.h"
 #include "scroll.h"
+#include "strlist.h"
+#include "text.h"
 #include "shadow.h"
 #include "sprite.h"
 #include "win.h"
@@ -71,6 +72,8 @@ enum {
     VT_LIST_ID = 0xd8,      // the same (id)
     VT_LIST_DOUBLE_A = 0xdc,  // a double click on an item (id, from the right button)
     VT_LIST_DOUBLE_B = 0xe0,  // the same, before (id)
+    VT_ITEM_BACK = 0x2c,    // the parent: draw a list box item's background (Win, id, state, rectangle), or answer 0
+    VT_WIN_BACK = 0x28,     // the parent: draw a list box's background (its Win), or answer 0
     VT_PARENT_COPY = 0xf4,
     VT_REDRAW = 0xf8,
     VT_LINK = 0x160,        // the parent: a link in a StringBox was clicked
@@ -597,6 +600,279 @@ int SCROLL_THIS stringbox_on_link_clicked(struct game_stringbox *b, int a, int c
     return 1;
 }
 
+// ---- ListBox: layout and redraw ---------------------------------------------------------------------------------
+//
+// The Dialog part's numbers are those of the CheckBox's and RadioButton's layout (see button.c: 0x20 flags,
+// 0x24 and 0x28 where the box's pixels are in its parent, 0x2c and 0x30 the width and height asked for, 0x34 the
+// width of what an item has before its text, 0x38 and 0x3c the margins above and below, 0x40 the margin at
+// the sides, 0x44 the gap, 0x48 the item height asked for or -1, 0x4c the columns asked for, 0x50 the most rows,
+// then what the layout makes: 0x54 columns, 0x58 rows, 0x5c and 0x60 the box's width and height, 0x64 and 0x68
+// an item's), and the list box's own: 0x6c the background colour, 0xac and 0xb0 the two colours of the frame
+// drawn round it, 0xb4 how many frames (each a pixel inside the last). In the object: 0xc its flags (1 when
+// the columns need a scroll bar to the side of them, 2 when the rows need one below), 0x18 the first item
+// shown, 0x1c how many show, 0x20 how many items the box is meant to show, 0x2c a margin, 0x38 a function a
+// screen may set to draw the background itself.
+
+static struct game_buffer *lb_buf(struct game_listbox *l) { return (struct game_buffer *)((uint8_t *)lb_win(l) + 0x444); }
+
+// Lay the items out: the width of a column from the widest text (or the width asked for), the height of
+// an item, how many columns and rows there are and how much room they and the scroll bar take. The
+// scroll bar's size is a global the game keeps. 7 if there are no items. Neither OpenSMACX nor
+// Thinker has this.
+int SCROLL_THIS listbox_calculate_dimensions(struct game_listbox *l) {
+    struct game_dlg *d = lb_dlg(l);
+    struct game_win *win = lb_win(l);
+    struct game_buffer *buf = lb_buf(l);
+    if (!d->count) return 7;
+    l->flags = 0;
+    dlg_text_setup(buf, d);
+    DLG_F(d, 0x58) = d->count < DLG_F(d, 0x50) ? d->count : DLG_F(d, 0x50);
+    int widest = 0;
+    dlg_measure(buf, d, 0, &widest);
+    if (!widest) widest = DLG_F(d, 0x2c);
+    DLG_F(d, 0x64) = DLG_F(d, 0x44) + 2 * l->f2c + 2 + DLG_F(d, 0x34) + widest;
+    DLG_F(d, 0x68) = DLG_F(d, 0x48) == -1 ? buffer_text_line_height(buf) + DLG_F(d, 0x44) : DLG_F(d, 0x48);
+    if ((DLG_F(d, 0x20) & 2) && DLG_F(d, 0x2c)) {
+        DLG_F(d, 0x5c) = DLG_F(d, 0x2c);
+        DLG_F(d, 0x54) = DLG_F(d, 0x4c);
+        if (DLG_F(d, 0x54) == 1) DLG_F(d, 0x64) = DLG_F(d, 0x5c) - 2 * DLG_F(d, 0x40);
+        else DLG_F(d, 0x64) -= DLG_F(d, 0x44);
+    } else {
+        int cols = DLG_F(d, 0x4c);
+        if (cols == 1) {
+            int t = DLG_F(d, 0x64) + 2 * DLG_F(d, 0x40);
+            DLG_F(d, 0x5c) = DLG_F(d, 0x2c) > t ? DLG_F(d, 0x2c) : t;
+            DLG_F(d, 0x64) = DLG_F(d, 0x5c) - 2 * DLG_F(d, 0x40);
+        } else {
+            DLG_F(d, 0x64) = (DLG_F(d, 0x5c) - 2 * DLG_F(d, 0x40) + DLG_F(d, 0x44)) / cols - DLG_F(d, 0x44);
+            int v = (DLG_F(d, 0x64) + DLG_F(d, 0x44)) * cols + 2 * DLG_F(d, 0x40) - DLG_F(d, 0x44);
+            DLG_F(d, 0x5c) = DLG_F(d, 0x2c) > v ? DLG_F(d, 0x2c) : v;
+        }
+        DLG_F(d, 0x54) = DLG_F(d, 0x4c);
+    }
+    if ((DLG_F(d, 0x20) & 1) && DLG_F(d, 0x30)) {
+        DLG_F(d, 0x60) = DLG_F(d, 0x30);
+        DLG_F(d, 0x58) = (DLG_F(d, 0x60) - DLG_F(d, 0x3c) - DLG_F(d, 0x38) + DLG_F(d, 0x44)) / DLG_F(d, 0x68);
+        if (!(win->flags & 0x40) && DLG_F(d, 0x58) * DLG_F(d, 0x54) < l->f20) {
+            if (DLG_F(d, 0x54) > 1) {
+                DLG_F(d, 0x60) = DLG_F(d, 0x30) - *game_listbox_bar;
+                DLG_F(d, 0x58) = DLG_F(d, 0x60) / DLG_F(d, 0x68);
+            } else {
+                DLG_F(d, 0x5c) = DLG_F(d, 0x2c) - *game_listbox_bar;
+                DLG_F(d, 0x54) = 1;
+            }
+        }
+    } else {
+        DLG_F(d, 0x60) = DLG_F(d, 0x68) * DLG_F(d, 0x58) - DLG_F(d, 0x44) + DLG_F(d, 0x3c) + DLG_F(d, 0x38);
+    }
+    DLG_F(d, 0x68) -= DLG_F(d, 0x44);
+    int fit = (DLG_F(d, 0x60) - DLG_F(d, 0x3c) - DLG_F(d, 0x38) + DLG_F(d, 0x44)) / (DLG_F(d, 0x68) + DLG_F(d, 0x44));
+    if (d->count <= fit) {
+        if (DLG_F(d, 0x20) & 2) DLG_F(d, 0x64) = (DLG_F(d, 0x5c) - 2 * DLG_F(d, 0x40) + DLG_F(d, 0x44)) / DLG_F(d, 0x54) - DLG_F(d, 0x44);
+        else DLG_F(d, 0x64) = DLG_F(d, 0x5c) - 2 * DLG_F(d, 0x40);
+    }
+    l->visible = DLG_F(d, 0x58) * DLG_F(d, 0x54);
+    if (l->f20 > l->visible) {
+        if (DLG_F(d, 0x54) > 1) {
+            if (!(win->flags & 0x40)) DLG_F(d, 0x60) += *game_listbox_bar;
+            l->flags |= 1;
+        } else {
+            if (!(win->flags & 0x40)) DLG_F(d, 0x5c) += *game_listbox_bar;
+            if (DLG_F(d, 0x20) & 2) DLG_F(d, 0x64) -= *game_listbox_bar / DLG_F(d, 0x54);
+            l->flags |= 2;
+        }
+    }
+    return 0;
+}
+
+// The redraw (the Win's slot, so it gets the Win, 0x48 into the box): the clip is the whole Buffer, then a
+// function a screen set (called with the Win and three zeros) or else the parent (slot 0x28) may draw the
+// background; if neither does, it is copied from the parent's Buffer where the window is see-through
+// (flag 0x80000) and has a parent, and filled with the colour otherwise. Then the frames, and the items
+// from the first shown, column by column: as many as there are rows in a column (a column that has run out
+// of items goes on calling for ones past the end, which draw nothing). Nothing is drawn without a parent.
+void SCROLL_THIS listbox_on_redraw(void *w) {
+    struct game_listbox *l = (struct game_listbox *)((uint8_t *)w - 0x48);
+    struct game_win *win = lb_win(l);
+    struct game_win *parent = win->parent;
+    if (!parent) return;
+    *game_win_cur = parent;
+    struct game_buffer *buf = lb_buf(l);
+    struct game_dlg *d = lb_dlg(l);
+    buffer_set_clip(buf, buf->full);
+    int drawn = 0;
+    if (l->f38) drawn = ((int(__attribute__((cdecl)) *)(void *, int, int, int))l->f38)(win, 0, 0, 0);
+    if (!drawn) drawn = vcall1(parent, VT_WIN_BACK, (int)(intptr_t)win);
+    if (!drawn) {
+        if ((win->flags & 0x80000) && win->parent)
+            buffer_copy_full((struct game_buffer *)((uint8_t *)win->parent + 0x444), buf, DLG_F(d, 0x24), DLG_F(d, 0x28), 0, 0, buf->width,
+                             -buf->neg_height);
+        else graphic_win_fill(win, DLG_F(d, 0x6c));
+    }
+    int32_t r[4] = {buf->full[0], buf->full[1], buf->full[2], buf->full[3]};
+    for (int i = 0; i < DLG_F(d, 0xb4); i++) {
+        buffer_box_rect(buf, r, DLG_F(d, 0xac), DLG_F(d, 0xb0));
+        r[0]++, r[1]++, r[2]--, r[3]--;
+    }
+    if (!d->count) return;
+    strlist_seek_pos((struct game_strlist *)((uint8_t *)d + 0xbc), l->top - 1);
+    *game_listbox_row = 0;
+    for (int col = 0; col < DLG_F(d, 0x54); col++) {
+        for (int row = 0; row < DLG_F(d, 0x58); row++) {
+            listbox_draw_item(l, l->top + *game_listbox_row);
+            ++*game_listbox_row;
+            if (*game_listbox_row == d->count - l->top) break;
+        }
+    }
+}
+
+// ---- ListBox: drawing an item -----------------------------------------------------------------------------------
+//
+// More of the object: 0x4 whether the items keep a selected flag of their own (at 0x8 of the item; else the
+// Dialog's selected position is the one), 0x10 the colour of the text of a selected item (-1 for the
+// background's), 0x14 the colour a selected item is filled with when the box has the dialog's focus (-1 for
+// none), 0x24 and 0x28 the colours of the frame round a selected item, which is 0x2c pixels thick, and
+// 0x30, 0x34 and 0x38 three functions a screen may set. An item has its text at 0x4 and how many rows it takes
+// at 0xc; the box's rows are drawn from the top margin down, an item below the ones before it by what they
+// take (with one column) or in the column its position says and at the row in it (with more).
+
+static struct game_strlist *lb_list(struct game_dlg *d) { return (struct game_strlist *)((uint8_t *)d + 0xbc); }
+static struct game_list_item *lb_item(struct game_strlist *s) { return (struct game_list_item *)s->cur->item; }
+static int lb_rows(struct game_strlist *s) { return s->head ? lb_item(s)->rows : 0; }
+static int vcall4(void *o, int slot, int a, int b, int c, int d) {
+    return ((int(THISCALL *)(void *, int, int, int, int))vslot(o, slot))(o, a, b, c, d);
+}
+
+// The item's text, in what the rectangle `r` leaves after the frame of a selected item and the picture's
+// width: wrapped if the item takes more than one row, else on one line; what follows a `|` is on the right.
+static void lb_item_text(struct game_listbox *l, struct game_buffer *buf, struct game_dlg *d, int32_t *r) {
+    struct game_strlist *s = lb_list(d);
+    int edge = l->f2c + 1;
+    r[2] -= edge;
+    r[0] += DLG_F(d, 0x34) + edge;
+    buffer_set_clip(buf, r);
+    char *text = s->head ? lb_item(s)->text : NULL;
+    char *bar = text ? strchr(text, '|') : NULL;
+    int rows = lb_rows(s);
+    if (bar) *bar = 0;
+    if (rows > 1) buffer_wrap_2(buf, text, r);
+    else if (text) buffer_write_l_4(buf, text, r, (int)strlen(text));
+    if (bar) {
+        *bar = '|';
+        buffer_write_right_l_6(buf, bar + 1, r, (int)strlen(bar + 1));
+    }
+    r[0] -= edge + DLG_F(d, 0x34);
+    r[2] += edge;
+    buffer_set_clip(buf, r);
+}
+
+// Draw item `pos` (nothing for a negative one or one past the last). Its rectangle is worked out first
+// and made the clip. A function a screen set (0x38) may draw the item (given the Win, the item's id, the
+// first shown plus the draw counter, and the rectangle); if not, the parent may (slot 0x2c, with the Win,
+// the id, the state - 0 or 1 for the mouse over it, 2 for selected - and the rectangle), else the
+// window's pixels are taken from the parent's if it can be seen through (or filled), and the frame is drawn.
+// Then the other functions are told (0x30: the Win, id, first shown plus counter, left, top, height;
+// 0x34: the Win, id, position, rectangle and text, which may draw the rest itself). A selected item gets a
+// frame; an item in a box with the dialog's focus its fill colour first. The text colours and Fonts are those
+// of the layout, with the colours set again for the selection (the selected ones' text takes its colour from
+// the box or the background). Neither OpenSMACX nor
+// Thinker has this.
+void SCROLL_THIS listbox_draw_item(struct game_listbox *l, int pos) {
+    if (pos < 0) return;
+    struct game_dlg *d = lb_dlg(l);
+    struct game_win *win = lb_win(l);
+    struct game_buffer *buf = lb_buf(l);
+    struct game_strlist *s = lb_list(d);
+    int32_t r[4] = {DLG_F(d, 0x40), DLG_F(d, 0x38), DLG_F(d, 0x64) - DLG_F(d, 0x40), DLG_F(d, 0x38) + DLG_F(d, 0x68)};
+    int step = DLG_F(d, 0x68) + DLG_F(d, 0x44);
+    if (DLG_F(d, 0x4c) == 1) {
+        int before = 0;
+        strlist_seek_pos(s, l->top - 1);
+        for (int n = pos - l->top; n > 0; n--) {
+            strlist_next_entry(s);
+            if (s->cur) before += lb_rows(s);
+        }
+        r[1] += step * before, r[3] += step * before;
+        strlist_next_entry(s);
+        r[3] = step * (s->cur ? lb_rows(s) : 0) - DLG_F(d, 0x44) + r[1];
+    } else {
+        int rel = pos - l->top, rows = DLG_F(d, 0x58), colw = DLG_F(d, 0x64) + DLG_F(d, 0x44);
+        r[0] += colw * (rel / rows), r[2] += colw * (rel / rows);
+        r[1] = DLG_F(d, 0x38) + step * (rel % rows), r[3] += step * (rel % rows);
+    }
+    if (pos >= d->count) return;
+    int selected;
+    if (!l->f4) {
+        selected = DLG_F(d, 0xec) == pos;
+    } else {
+        strlist_seek_pos(s, pos);
+        selected = lb_item(s)->lines;
+    }
+    buffer_set_clip(buf, r);
+    int drawn = 0;
+    if (l->f38) {
+        int id = dialog_pos_to_id(d, pos);
+        drawn = ((int(__attribute__((cdecl)) *)(void *, int, int, int32_t *))(intptr_t)l->f38)(win, id, l->top + *game_listbox_row, r);
+    }
+    dlg_text_setup(buf, d);
+    if (!selected) {
+        buffer_set_text_color(buf, DLG_F(d, 0x7c), DLG_F(d, 0x88), DLG_F(d, 0x94), DLG_F(d, 0xa0));
+        buffer_set_text_color2(buf, DLG_F(d, 0x80), DLG_F(d, 0x8c), DLG_F(d, 0x98), DLG_F(d, 0xa4));
+        buffer_set_text_color3(buf, DLG_F(d, 0x84), DLG_F(d, 0x90), DLG_F(d, 0x9c), DLG_F(d, 0xa8));
+    } else {
+        buffer_set_clip(buf, r);
+        int c = l->f10 == -1 ? DLG_F(d, 0x6c) : l->f10;
+        buffer_set_text_color(buf, c, DLG_F(d, 0x88), DLG_F(d, 0x94), DLG_F(d, 0xa0));
+        buffer_set_text_color2(buf, c, DLG_F(d, 0x8c), DLG_F(d, 0x98), DLG_F(d, 0xa4));
+        buffer_set_text_color3(buf, c, DLG_F(d, 0x90), DLG_F(d, 0x9c), DLG_F(d, 0xa8));
+    }
+    int id = dialog_pos_to_id(d, pos);
+    if (!drawn) {
+        struct game_win *parent = win->parent;
+        if (parent) {
+            drawn = vcall4(parent, VT_ITEM_BACK, (int)(intptr_t)win, id, selected ? 2 : DLG_F(d, 0xf0) == pos, (int)(intptr_t)r);
+            if (!drawn) {
+                if ((win->flags & 0x80000) && win->parent)
+                    buffer_copy_full((struct game_buffer *)((uint8_t *)win->parent + 0x444), buf, DLG_F(d, 0x24), DLG_F(d, 0x28), 0, 0,
+                                     buf->width, -buf->neg_height);
+                else graphic_win_fill(win, DLG_F(d, 0x6c));
+            }
+        }
+        if (!drawn) {
+            int32_t f[4] = {buf->full[0], buf->full[1], buf->full[2], buf->full[3]};
+            for (int i = 0; i < DLG_F(d, 0xb4); i++) {
+                buffer_box_rect(buf, f, DLG_F(d, 0xac), DLG_F(d, 0xb0));
+                f[0]++, f[1]++, f[2]--, f[3]--;
+            }
+        }
+    }
+    strlist_seek_pos(s, pos);
+    if (l->f30) {
+        *game_listbox_cur = (int32_t)(intptr_t)l;
+        ((void(__attribute__((cdecl)) *)(void *, int, int, int, int, int))(intptr_t)l->f30)(win, id, l->top + *game_listbox_row, r[0], r[1],
+                                                                                               r[3] - r[1]);
+    }
+    if (l->f34) {
+        char *text = s->head ? lb_item(s)->text : NULL;
+        if (((int(__attribute__((cdecl)) *)(void *, int, int, int32_t *, char *))(intptr_t)l->f34)(win, id, pos, r, text)) return;
+    }
+    if (!selected) {
+        lb_item_text(l, buf, d, r);
+        return;
+    }
+    if (!drawn && win_is_dialog_focus(win)) {
+        buffer_set_clip(buf, r);
+        if (l->f14 != -1) game_graphic_win_fill_rect(win, r, l->f14);
+    }
+    lb_item_text(l, buf, d, r);
+    if (!drawn) {
+        for (int i = 0; i < l->f2c; i++) {
+            buffer_box_rect(buf, r, l->f24, l->f28);
+            r[0]++, r[1]++, r[2]--, r[3]--;
+        }
+    }
+}
+
 // ---- Shadow checks -------------------------------------------------------------------------------------------------
 
 #define P(p) ((int)(uintptr_t)(p))
@@ -793,6 +1069,12 @@ static int THISCALL stub_0x70(void *o, int a, int b) { return vrec(0x70, o, a, b
 static int THISCALL stub_0xf4(void *o) { return vrec(0xf4, o, 0, 0, 0), (((struct game_win *)o)->flags & 1) != 0; }
 // A sound that is busy every other time it is asked.
 static int THISCALL stub_0x5c(void *o) { return vrec(0x5c, o, 0, 0, 0), vlog.n & 1; }
+// The parent's slot for a list box's background answers 0 and 1 by turns, so both ways are taken.
+static int THISCALL stub_0x28(void *o, int a) { return vrec(0x28, o, a, 0, 0), vlog.n & 1; }
+// ... and for an item's (the original ListBox_draw_item asks, with the Win, the item's id, the state and its rectangle).
+static int THISCALL stub_0x2c(void *o, int a, int b, int c, const int32_t *r) {
+    return vrec(0x2c, o, a * 3 + b, c, r[0] * 31 + r[1] * 131 + r[2] * 1031 + r[3] * 10007), vlog.n & 1;
+}
 static void *stub_vt[0x180 / 4];
 static void fill_stub_vt(void) {
     stub_vt[0xc / 4] = (void *)stub_0xc, stub_vt[0x10 / 4] = (void *)stub_0x10, stub_vt[0x1c / 4] = (void *)stub_0x1c;
@@ -801,6 +1083,8 @@ static void fill_stub_vt(void) {
     stub_vt[0xd4 / 4] = (void *)stub_0xd4, stub_vt[0xd8 / 4] = (void *)stub_0xd8, stub_vt[0xdc / 4] = (void *)stub_0xdc;
     stub_vt[0xe0 / 4] = (void *)stub_0xe0, stub_vt[0xf4 / 4] = (void *)stub_0xf4, stub_vt[0xf8 / 4] = (void *)stub_0xf8;
     stub_vt[0x160 / 4] = (void *)stub_0x160;
+    stub_vt[0x28 / 4] = (void *)stub_0x28;
+    stub_vt[0x2c / 4] = (void *)stub_0x2c;
 }
 static void cb_click(int id, int pos) { vrec(0x401, NULL, id, pos, 0); }
 static void cb_drag(int id, int pos) { vrec(0x402, NULL, id, pos, 0); }
@@ -884,6 +1168,80 @@ static void build(void) {
 
 // The drawing function on a scratch bar with a Buffer of its own (hand-built pixels in static memory), a
 // parent with a Buffer, and sprites of a few colours.
+// The ListBox's layout calls no parent and is checked as it is called, on the Dialog part's numbers, the
+// cursor and the box's flags and count, and on the Buffer's object and device context (the text colours and
+// Fonts it sets). Its redraw calls the screen's function and the parent, and draws the items with
+// the ListBox_draw_item, which calls the screen's functions and the parent too, so the game's calls run the
+// original and the sweep checks them on scratch boxes (LX, below).
+static void writes_text_state(struct hook_writes *w, struct game_buffer *b) {
+    hooks_writes_add(w, game_flying_text, (size_t)((uint8_t *)game_font_slack + 4 - (uint8_t *)game_flying_text));
+    int32_t mem = *(int32_t *)((uint8_t *)b + 0x64), now = *(int32_t *)((uint8_t *)b + 0x60);
+    hooks_writes_dc(w, (void *)(intptr_t)mem);
+    if (now != mem) hooks_writes_dc(w, (void *)(intptr_t)now);
+    if (game_font_dc) hooks_writes_dc(w, *game_font_dc);
+}
+static void writes_lb_layout(struct hook_writes *w, struct game_listbox *l) {
+    struct game_dlg *d = lb_dlg(l);
+    struct game_buffer *buf = lb_buf(l);
+    hooks_writes_add(w, (uint8_t *)d + 0x34, 0xd4 - 0x34);
+    hooks_writes_add(w, &l->flags, 4);
+    hooks_writes_add(w, &l->visible, 4);
+    hooks_writes_add(w, buf, sizeof *buf);
+    hooks_writes_dc(w, (void *)(intptr_t) * (int32_t *)((uint8_t *)buf + 0x64));
+}
+SHADOW_WRITER_T(SCROLL, int, listbox_calculate_dimensions, (struct game_listbox * l), (l), writes_lb_layout(&w_, l), "%d", P(l))
+
+// The scratch list boxes: the vbtable pointer, the Win at 0x48 (with a real Buffer) and the Dialog at 0xa60, a
+// ring of items with texts, and a parent with a Buffer.
+enum { LXT = 56 };
+static struct {
+    uint8_t obj[LBSIZE];
+    int32_t vbt[4];
+    struct game_list_item item[NN];
+    struct game_dlg_node node[NN];
+    char text[NN][LXT];
+    struct {
+        struct game_win win;
+        struct game_buffer buf;
+    } parent;
+    uint8_t pix[72 * 48 + 16];
+} LX;
+// The item drawing makes the item's rectangle the clip, which makes a clip region (a handle, at 0x70 of the
+// Buffer, that a check's two runs can't be given alike), so the region isn't compared; the sweep drops it
+// (and the device context's) after each check.
+static void writes_lb_buffer(struct hook_writes *w, struct game_buffer *b) {
+    hooks_writes_add(w, b, 0x70);
+    hooks_writes_add(w, (uint8_t *)b + 0x74, sizeof *b - 0x74);
+    if (!b->bits || b->dd) return;
+    int64_t rows = -(int64_t)b->neg_height, pitch = b->pitch;
+    if (rows <= 0 || pitch == 0) return;
+    uint8_t *a = b->bits, *c = b->bits + pitch * (rows - 1);
+    hooks_writes_add(w, a < c ? a : c, (size_t)((pitch < 0 ? -pitch : pitch) * rows));
+}
+static void lb_drop_region(struct game_listbox *l) {
+    struct game_buffer *buf = lb_buf(l);
+    int32_t *region = (int32_t *)((uint8_t *)buf + 0x70), dc = *(int32_t *)((uint8_t *)buf + 0x64);
+    if (!*region) return;
+    if (dc) game_select_clip_rgn((void *)(intptr_t)dc, NULL);
+    game_delete_object((void *)(intptr_t)*region);
+    *region = 0;
+}
+static void writes_lb_draw(struct hook_writes *w, struct game_listbox *l) {
+    struct game_buffer *buf = lb_buf(l);
+    writes_lb_buffer(w, buf);
+    writes_text_state(w, buf);
+    writes_vlog(w);
+    hooks_writes_add(w, game_win_cur, 4);
+    hooks_writes_add(w, game_listbox_row, 4);
+    hooks_writes_add(w, game_listbox_cur, 4);
+    hooks_writes_add(w, l, 0x48);
+    hooks_writes_add(w, (uint8_t *)lb_dlg(l) + 0x34, 0xd4 - 0x34);
+    hooks_writes_add(w, LX.text, sizeof LX.text);
+    hooks_writes_add(w, LX.item, sizeof LX.item);
+}
+SWEEP_ONLY(void, listbox_on_redraw, (void *w), (w), (writes_lb_draw(&w_, (struct game_listbox *)((uint8_t *)w - 0x48))), "%d", P(w))
+SWEEP_ONLY(void, listbox_draw_item, (struct game_listbox * l, int pos), (l, pos), (writes_lb_draw(&w_, l)), "%d, %d", P(l), pos)
+
 enum { DWID = 60, DHGT = 40, PWID = 90, PHGT = 60 };
 static struct {
     struct game_scroll bar;
@@ -959,6 +1317,94 @@ static void draw_sweep(void) {
     *game_win_hwnd = hwnd;
     *game_win_tint = tint;
     *game_palette_copy = pal;
+}
+
+// The list boxes: a Buffer with a device context and a Font, items of the texts below, and every number the
+// layout reads varied; the layout is checked and then the redraw on what it made, with the first item shown,
+// the frames, the flags of the window and the function a screen may set changed between redraws.
+static const char *const WORDS[] = {"Ok", "Alpha", "An item with enough words in it to be wide", "", "x", "WWWW MMMM",
+                                    "Wide wide wide wide wide wide wide"};
+// The function a screen may set for a list box: told the Win, and (from the item drawing) an item's id, its
+// place and a rectangle, whose contents are logged and not its address.
+static int cdecl_lb_back(void *w, int a, int b, const int32_t *r) {
+    return vrec(0x401, w, a, b, r ? r[0] * 31 + r[1] * 131 + r[2] * 1031 + r[3] * 10007 : 0), vlog.n & 1;
+}
+static int cdecl_lb_item(void *w, int a, int b, int c, int d, int e) {
+    return vrec(0x402, w, a, b, c * 31 + d * 131 + e * 1031), vlog.n & 1;
+}
+static int cdecl_lb_text(void *w, int a, int b, const int32_t *r, const char *text) {
+    return vrec(0x403, w, a * 3 + b, r[0] * 31 + r[1] * 131 + r[2] * 1031 + r[3] * 10007, text ? text[0] : -1), vlog.n & 1;
+}
+static void lx_build(struct game_buffer *big, struct font *font) {
+    memset(LX.obj, 0, sizeof LX.obj);
+    int32_t *vb = LX.vbt;
+    vb[1] = 0x48, vb[2] = 0xa60;
+    *(int32_t **)LX.obj = vb;
+    struct game_listbox *l = (struct game_listbox *)LX.obj;
+    struct game_win *win = lb_win(l);
+    win->vtable = stub_vt;
+    win->parent = rnd_to(10) ? &LX.parent.win : NULL;
+    win->flags = (rnd_to(2) ? 0x80000 : 0) | (rnd_to(3) == 0 ? 0x40 : 0);
+    memcpy(lb_buf(l), big, sizeof *big);
+    struct game_dlg *d = lb_dlg(l);
+    int n = rnd_to(NN + 1);
+    for (int i = 0; i < n; i++) {
+        snprintf(LX.text[i], LXT, "%s", WORDS[rnd_to(7)]);
+        LX.item[i].text = LX.text[i], LX.item[i].lines = 1;
+        LX.node[i].pad8 = (int32_t)(intptr_t)&LX.item[i], LX.node[i].key = 10 + i;
+        LX.node[i].next = &LX.node[(i + 1) % n], LX.node[i].prev = &LX.node[(i + n - 1) % n];
+    }
+    d->head = n ? LX.node : NULL, d->cur = n ? &LX.node[rnd_to(n)] : NULL, d->count = n, d->idx = n ? rnd_to(n) : 0;
+    l->top = n ? rnd_to(n + 2) - 1 : 0, l->f20 = rnd_to(NN + 3), l->f2c = rnd_to(5);
+    l->f38 = rnd_to(2) ? (void *)cdecl_lb_back : NULL;
+    l->f4 = rnd_to(2), l->f10 = rnd_to(3) ? rnd_to(256) : -1, l->f14 = rnd_to(3) ? rnd_to(256) : -1;
+    l->f24 = rnd_to(256), l->f28 = rnd_to(256);
+    l->f30 = rnd_to(2) ? (int32_t)(intptr_t)cdecl_lb_item : 0, l->f34 = rnd_to(2) ? (int32_t)(intptr_t)cdecl_lb_text : 0;
+    for (int i = 0; i < n; i++) LX.item[i].rows = 1 + rnd_to(3), LX.item[i].lines = rnd_to(2);
+    DLG_F(d, 0x20) = rnd_to(4), DLG_F(d, 0x24) = rnd_to(10), DLG_F(d, 0x28) = rnd_to(10);
+    DLG_F(d, 0x2c) = rnd_to(3) ? 40 + rnd_to(60) : 0, DLG_F(d, 0x30) = rnd_to(3) ? 20 + rnd_to(40) : 0;
+    DLG_F(d, 0x34) = rnd_to(8), DLG_F(d, 0x38) = rnd_to(4), DLG_F(d, 0x3c) = rnd_to(4), DLG_F(d, 0x40) = rnd_to(4);
+    DLG_F(d, 0x44) = rnd_to(4), DLG_F(d, 0x48) = rnd_to(2) ? -1 : 8 + rnd_to(10), DLG_F(d, 0x4c) = 1 + rnd_to(3);
+    DLG_F(d, 0x50) = 1 + rnd_to(5), DLG_F(d, 0x5c) = 30 + rnd_to(60);
+    DLG_F(d, 0x70) = DLG_F(d, 0x74) = DLG_F(d, 0x78) = (int32_t)(intptr_t)font;
+    for (int o = 0x7c; o <= 0xa8; o += 4) DLG_F(d, o) = rnd_to(256);
+    DLG_F(d, 0x6c) = rnd_to(256), DLG_F(d, 0xac) = rnd_to(256), DLG_F(d, 0xb0) = rnd_to(256), DLG_F(d, 0xb4) = rnd_to(4);
+    DLG_F(d, 0xec) = rnd_to(NN + 2) - 1, DLG_F(d, 0xf0) = rnd_to(NN + 2) - 1;
+}
+
+static void lx_sweep(struct game_buffer *big, struct font *font) {
+    int32_t row = *game_listbox_row, cur = *game_listbox_cur, bar = *game_listbox_bar;
+    memset(&LX, 0, sizeof LX);
+    hand_buffer(&LX.parent.buf, LX.pix, 72, 48);
+    LX.parent.win.vtable = stub_vt;
+    for (int round = 0; round < 30; round++) {
+        for (int i = 0; i < 72 * 48; i++) LX.pix[i] = (uint8_t)rnd();
+        *game_listbox_bar = rnd_to(12);
+        lx_build(big, font);
+        struct game_listbox *l = (struct game_listbox *)LX.obj;
+        struct game_dlg *d = lb_dlg(l);
+        check_listbox_calculate_dimensions(l);
+        if (DLG_F(d, 0x58) <= 0) DLG_F(d, 0x58) = 1;  // (the original divides by the rows)
+        if (DLG_F(d, 0x64) < 12) DLG_F(d, 0x64) = 12 + rnd_to(30);  // (the cells the drawing sees have some size)
+        if (DLG_F(d, 0x68) < 4) DLG_F(d, 0x68) = 4 + rnd_to(10);
+        for (int j = 0; j < 4; j++) {
+            *game_win_cur = NULL;
+            *game_listbox_row = rnd_to(3);
+            check_listbox_on_redraw((uint8_t *)lb_win(l));
+            lb_drop_region(l);
+            for (int pos = -1; pos < d->count + 2; pos++) check_listbox_draw_item(l, pos), lb_drop_region(l);
+            l->top = d->count ? rnd_to(d->count + 2) - 1 : 0;
+            l->f38 = rnd_to(2) ? (void *)cdecl_lb_back : NULL;
+            lb_win(l)->flags ^= 0x80000;
+            DLG_F(d, 0xb4) = rnd_to(4), DLG_F(d, 0x6c) = rnd_to(256), DLG_F(d, 0xac) = rnd_to(256), DLG_F(d, 0xb0) = rnd_to(256);
+            DLG_F(d, 0x24) = rnd_to(10), DLG_F(d, 0x28) = rnd_to(10);
+            DLG_F(d, 0x54) = 1 + rnd_to(3), DLG_F(d, 0x58) = 1 + rnd_to(4), DLG_F(d, 0x4c) = 1 + rnd_to(3);
+            DLG_F(d, 0x64) = 12 + rnd_to(30), DLG_F(d, 0x68) = 4 + rnd_to(10);
+            DLG_F(d, 0xec) = rnd_to(NN + 2) - 1, DLG_F(d, 0xf0) = rnd_to(NN + 2) - 1, l->f4 = rnd_to(2);
+            for (int i = 0; i < d->count; i++) LX.item[i].rows = 1 + rnd_to(3), LX.item[i].lines = rnd_to(2);
+        }
+    }
+    *game_listbox_row = row, *game_listbox_cur = cur, *game_listbox_bar = bar;
 }
 
 static void scroll_sweep(void) {
@@ -1042,6 +1488,9 @@ static void scroll_sweep(void) {
         }
     }
     draw_sweep();
+    struct font *lx_font;
+    struct game_buffer *lx_buf = button_sweep_buffer(&lx_font);
+    if (lx_buf) lx_sweep(lx_buf, lx_font);
     *game_win_capture = capture, *game_win_hover = hover, *game_win_cur = cur;
     *game_scroll_by_key = by_key, *game_listbox_right = right;
     hooks_sweeping = sweeping;
@@ -1081,6 +1530,9 @@ static const struct hook scroll_hooks[] = {
     HOOK(0x60c710, listbox_on_left_double_click, 0x56, 0x8b, 0xf1, 0x57, 0x8b, 0x46, 0xb8),
     HOOK(0x60cb70, listbox_on_mousewheel, 0x8b, 0x44, 0x24, 0x04, 0x56),
     HOOK(0x60ce10, listbox_on_mouse_leave, 0x8b, 0x41, 0xb8, 0x8b, 0x50, 0x08),
+    HOOK(0x60a1e0, listbox_calculate_dimensions, 0x53, 0x56, 0x8b, 0xf1, 0x33, 0xdb, 0x8b, 0x0e),
+    HOOK(0x60b530, listbox_draw_item, 0x8b, 0x44, 0x24, 0x04, 0x83, 0xec, 0x28, 0x53, 0x55, 0x56),
+    HOOK(0x60c350, listbox_on_redraw, 0x83, 0xec, 0x14, 0x53, 0x55, 0x56, 0x8b, 0xf1),
     HOOK(0x629d20, stringbox_on_scrolled, 0x8b, 0x44, 0x24, 0x08, 0x8b, 0x11),
     HOOK(0x432720, stringbox_on_link_clicked, 0x55, 0x8b, 0xec, 0x56, 0x8b, 0xf1),
 };

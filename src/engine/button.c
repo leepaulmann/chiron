@@ -11,15 +11,16 @@
 //
 // Drawing: a button draws into its own Buffer after taking what is behind it (GraphicWin_fill, which
 // belongs to the Win class but is only called by the buttons and a few more; it is here because
-// win.c is another file's). ImageButton's, PushButton's and CheckButton's redraws are here.
+// win.c is another file's). ImageButton's, PushButton's, FlatButton's and CheckButton's redraws are
+// here, and the CheckBox's and RadioButton's layout (calculate_dimensions), item drawing (draw_item)
+// and redraw, whose text comes from the Dialog's string list (the list box's are in scroll.c).
 //
 // Left to the original: the constructors and destructors (they build objects on the game's heap
 // and keep an exception frame), set_name, set_bubble_text and init (they copy text onto the heap),
 // everything that starts or stops a Time object (a multimedia timer, which the journal can't put
 // back): left_down, left_up, mouse_move, timer_callback and its daemon, and right_click; the
-// FlatButton's redraw and mouse functions, the CheckBox's and RadioButton's drawing (draw_item,
-// calculate_dimensions, on_redraw, on_left_down, on_key_down), whose text comes from the Dialog's
-// string list on the game's heap.
+// FlatButton's mouse functions (they start the bubble's timer) and the CheckBox's and RadioButton's
+// on_left_down and on_key_down.
 //
 // Differences from OpenSMACX and Thinker: neither lays the CheckBox or RadioButton out. The
 // functions the inventory calls CheckBox_item and the like are the Dialog list's own with a
@@ -52,6 +53,7 @@
 #include "hooks.h"
 #include "shadow.h"
 #include "sprite.h"
+#include "strlist.h"
 #include "text.h"
 #include "win.h"
 
@@ -66,6 +68,9 @@ enum {
     VT_SOUND_PLAY = 0x1c,    // a sound object: start it
     VT_MOUSE_MOVE = 0x44,
     VT_SOUND_BUSY = 0x5c,    // a sound object: whether it is playing
+    VT_FLAT_TEXT = 0x14,     // the parent: draw a FlatButton's name (button, name, id), or answer 0
+    VT_WIN_BACK = 0x28,      // the parent: draw a box's background (its Win), or answer 0
+    VT_ITEM_BACK = 0x2c,     // the parent: draw a box item's background (Win, id, state, rectangle), or answer 0
     VT_BUTTON_CLICK = 0xb0,  // the parent: a button was clicked, with its id
     VT_BUTTON_SET = 0xb4,    // the parent: a button's state was set (id, state)
     VT_GROUP_USER = 0xb8,    // the parent: a group's selection changed (user, old id, new id)
@@ -80,6 +85,9 @@ static void *vslot(void *o, int slot) { return *(void **)((uint8_t *)*(void ***)
 static int vcall0(void *o, int slot) { return ((int(THISCALL *)(void *))vslot(o, slot))(o); }
 static int vcall1(void *o, int slot, int a) { return ((int(THISCALL *)(void *, int))vslot(o, slot))(o, a); }
 static int vcall2(void *o, int slot, int a, int b) { return ((int(THISCALL *)(void *, int, int))vslot(o, slot))(o, a, b); }
+static int vcall4(void *o, int slot, int a, int b, int c, int d) {
+    return ((int(THISCALL *)(void *, int, int, int, int))vslot(o, slot))(o, a, b, c, d);
+}
 static int vcall3(void *o, int slot, int a, int b, int c) {
     return ((int(THISCALL *)(void *, int, int, int))vslot(o, slot))(o, a, b, c);
 }
@@ -621,6 +629,306 @@ void BUTTON_THIS push_button_on_redraw(struct game_push_button *p) {
     if (b->name) buffer_write_cent_l_7(buf, b->name, r, (int)strlen(b->name));
 }
 
+// ---- FlatButton ---------------------------------------------------------------------------------------
+//
+// A FlatButton looks one of three ways (0 as it lies, 1 changed, 2 pressed or down; the field at
+// 0xab8 can force one) and for each has a text colour and, in order of preference, a picture centred
+// in it, a frame of the box class, or the eight sprites of a frame (the same pieces and order as a
+// PushButton's, see push_frame); with none of them it is a plain border like a PushButton's.
+
+// The name: the parent may draw it (its slot 0x14, with the button, the name and the id); otherwise it is
+// wrapped and centred in the rectangle `r` (less 3 on each side) if it fits, or else written from the left
+// in what is left after the dots (a string the game keeps) and the dots after it. (OpenSMACX and Thinker
+// don't have this function's drawing.)
+static void flat_name(struct game_button *b, struct game_buffer *buf, int32_t *r) {
+    struct game_win *parent = b->win.parent;
+    if (!parent) return;
+    if (vcall3(parent, VT_FLAT_TEXT, (int)(intptr_t)b, (int)(intptr_t)b->name, b->id)) return;
+    int wide = r[2] - r[0] - 6;
+    int h = buffer_wrap_height(buf, b->name, wide);
+    h = h - buffer_text_line_height(buf) + buffer_text_height(buf);
+    int y = (r[3] - r[1] - h) / 2 + r[1];
+    if (y >= 0 && (*(int32_t *)((uint8_t *)buf + 0x18) >= 2 || buffer_text_width(buf, b->name) <= wide)) {
+        buffer_wrap_cent_4(buf, b->name, r[0] + 3, y, wide);
+        return;
+    }
+    r[0] += 3, r[2] -= 3;
+    r[2] -= buffer_text_width(buf, game_flat_dots_a);
+    buffer_set_clip(buf, r);
+    if (b->name) buffer_write_l_4(buf, b->name, r, (int)strlen(b->name));
+    buffer_set_clip(buf, buf->full);
+    int w = r[2] - r[0];
+    r[0] += w, r[2] += w;
+    buffer_write_l_4(buf, game_flat_dots_b, r, (int)strlen(game_flat_dots_b));
+}
+
+void BUTTON_THIS flat_button_on_redraw(struct game_flat_button *f) {
+    struct game_button *b = &f->base;
+    struct game_win *parent = b->win.parent;
+    *game_win_cur = parent;
+    if (!*game_win_hwnd) return;
+    if (!parent) return;
+    struct game_buffer *buf = &b->buf;
+    buffer_sync_to_palette(buf, *game_palette_copy);
+    int32_t r[4] = {buf->full[0], buf->full[1], buf->full[2], buf->full[3]};
+    graphic_win_fill(&b->win, *game_flat_fill);
+    int look = (int)(intptr_t)b->picture;
+    if (look < 0 || look >= 3) look = (b->pressed || b->state) ? 2 : b->changed != 0;
+    int w = buf->width, nh = buf->neg_height;
+    if (f->pic[look]) {
+        struct game_sprite *s = f->pic[look];
+        sprite_draw_2(s, buf, s->key, (w - s->full_w) / 2, -((s->full_h + nh) / 2), 1, 1);
+    } else if (f->frame[look]) {
+        buffer_box_sprite(buf, r, f->frame[look]);
+    } else if (f->tl[look]) {
+        push_frame(buf, f->tl[look], f->tr[look], f->bl[look], f->br[look], f->left[look], f->right[look], f->top[look],
+                   f->bottom[look], f->mid[look], 0);
+    } else {
+        int frames = 0;
+        if (b->focus_a != -1) {
+            buffer_box_rect(buf, r, b->focus_a, b->focus_a);
+            shrink(r);
+            if (!(parent->flags & WIN_F_DIALOG) && win_is_dialog_focus(&b->win)) {
+                buffer_box_rect(buf, r, b->focus_a, b->focus_a);
+                shrink(r);
+                frames = 1;
+            }
+        }
+        if (!b->pressed) {
+            for (int i = frames; i < b->border_w; i++) buffer_box_rect(buf, r, b->border_a, b->border_b), shrink(r);
+        } else {
+            for (int i = frames; i < b->border_w; i++) buffer_box_rect(buf, r, b->border_b, b->border_a), shrink(r);
+            for (int k = 0; k < 4; k++) r[k] += b->border_w;
+        }
+    }
+    if (!b->name) return;
+    if (f->text_color[look] >= 0) button_set_text_color(b, f->text_color[look], -1, 1, 1);
+    flat_name(b, buf, r);
+}
+
+// ---- CheckBox and RadioButton: layout and drawing ----------------------------------------------------------
+//
+// The Dialog part of a CheckBox or RadioButton (see game_dlg; DF reads a field by its offset) holds what
+// the layout works from and leaves: 0x20 flags (1: the height is asked for, 2: the width), 0x24 and 0x28
+// where the box's pixels are in its parent, 0x2c and 0x30 the width and height asked for, 0x34 the width the
+// picture takes, 0x40 the margin, 0x44 the gap between items, 0x48 the item height asked for (-1 for the
+// pictures'), 0x4c the columns, 0x50 the most rows; then what it works out: 0x54 the columns, 0x58 the rows,
+// 0x5c and 0x60 the box's width and height, 0x64 and 0x68 an item's. 0x70 to 0x78 are the Fonts and 0x7c to
+// 0xa8 the colours for the Buffer's three colour settings (four numbers each, a setting to a column), 0xb8 the
+// focus frame's colour (-1 for none), 0xbc the string list of the items, and 0xf0 the item under the mouse. A
+// CheckBox's pictures for unchecked and checked are at 0x10 and 0x14 of the object, a RadioButton's at 0x4
+// and 0x8. Neither OpenSMACX nor Thinker has any of this.
+
+#define DF DLG_F
+static struct game_strlist *dlg_list(struct game_dlg *d) { return (struct game_strlist *)((uint8_t *)d + 0xbc); }
+static struct game_list_item *cur_item(struct game_strlist *l) { return l->head ? (struct game_list_item *)l->cur->item : NULL; }
+static char *cur_text(struct game_strlist *l) { return l->head ? cur_item(l)->text : NULL; }
+static int cur_lines(struct game_strlist *l) { return l->head ? cur_item(l)->lines : 0; }
+static struct game_buffer *box_buf(void *box, int32_t *vb) { return win_buf((uint8_t *)box + vb[1]); }
+
+// The Win's Buffer's text colours and Fonts as the Dialog part says (the CheckBox's, RadioButton's and
+// ListBox's layouts all begin this way).
+void dlg_text_setup(struct game_buffer *buf, struct game_dlg *d) {
+    buffer_set_text_color(buf, DF(d, 0x7c), DF(d, 0x88), DF(d, 0x94), DF(d, 0xa0));
+    buffer_set_text_color2(buf, DF(d, 0x80), DF(d, 0x8c), DF(d, 0x98), DF(d, 0xa4));
+    buffer_set_text_color3(buf, DF(d, 0x84), DF(d, 0x90), DF(d, 0x9c), DF(d, 0xa8));
+    buffer_set_font(buf, (struct font *)(intptr_t)DF(d, 0x70), (struct font *)(intptr_t)DF(d, 0x74),
+                    (struct font *)(intptr_t)DF(d, 0x78), NULL);
+}
+
+// The width of the picture, and the height of an item, if the Dialog part hasn't them already.
+static void dlg_picture_size(struct game_dlg *d, struct game_sprite *a, struct game_sprite *b) {
+    if (DF(d, 0x34) == 0 && a && b) DF(d, 0x34) = b->full_w > a->full_w ? b->full_w : a->full_w;
+    if (DF(d, 0x48) == -1) DF(d, 0x68) = a && b ? (a->full_h > b->full_h ? a->full_h : b->full_h) : 0;
+    else DF(d, 0x68) = DF(d, 0x48);
+}
+
+// Every item's text is measured as the cursor goes round the ring (it ends where it began), and the widest
+// is left in *widest, which starts as it was. With `wrap` (a RadioButton's) each item's line count is set to
+// its width over that, plus one.
+void dlg_measure(struct game_buffer *buf, struct game_dlg *d, int wrap, int *widest) {
+    struct game_strlist *l = dlg_list(d);
+    for (int i = 0; i < d->count; i++) {
+        strlist_next_entry(l);
+        int w = buffer_text_width(buf, l->cur ? cur_text(l) : NULL);
+        if (w > *widest) *widest = w;
+        if (wrap && l->head) cur_item(l)->lines = w / wrap + 1;
+    }
+}
+
+// What follows the item measuring, the same in both: an item's cell and height (the taller of the box's and
+// the text's), the box's width, and its height.
+static void dlg_finish(struct game_buffer *buf, struct game_dlg *d, int widest) {
+    DF(d, 0x64) = DF(d, 0x44) + DF(d, 0x34) + widest;
+    int h = DF(d, 0x68), th = buffer_text_height(buf);
+    DF(d, 0x68) = h > th ? h : th;
+    if ((DF(d, 0x20) & 2) && DF(d, 0x2c)) {
+        DF(d, 0x5c) = DF(d, 0x2c);
+        DF(d, 0x64) = (DF(d, 0x2c) - 2 * DF(d, 0x40)) / DF(d, 0x4c) - DF(d, 0x44);
+    } else {
+        int t = DF(d, 0x64) * DF(d, 0x4c) + 2 * DF(d, 0x40), u = 2 * DF(d, 0x40) + DF(d, 0x2c);
+        DF(d, 0x5c) = u > t ? u : t;
+        DF(d, 0x64) = (DF(d, 0x5c) - 2 * DF(d, 0x40)) / DF(d, 0x4c) - DF(d, 0x44);
+        DF(d, 0x5c) -= DF(d, 0x44);
+    }
+    DF(d, 0x54) = DF(d, 0x4c);
+    if ((DF(d, 0x20) & 1) && DF(d, 0x30)) {
+        DF(d, 0x60) = DF(d, 0x30);
+        DF(d, 0x58) = DF(d, 0x30) / DF(d, 0x68);
+    } else {
+        DF(d, 0x60) = (DF(d, 0x68) + DF(d, 0x44)) * DF(d, 0x58);
+    }
+}
+
+// Lay the items out in one column of as many rows as there are. 7 if there are none.
+int BUTTON_THIS checkbox_calculate_dimensions(void *cb) {
+    int32_t *vb = vbtable(cb);
+    struct game_dlg *d = cb_dlg(cb);
+    if (!d->count) return 7;
+    struct game_buffer *buf = box_buf(cb, vb);
+    dlg_text_setup(buf, d);
+    struct game_sprite *a = *(struct game_sprite **)((uint8_t *)cb + 0x10), *b = *(struct game_sprite **)((uint8_t *)cb + 0x14);
+    dlg_picture_size(d, a, b);
+    DF(d, 0x58) = d->count;
+    int widest = 0;
+    dlg_measure(buf, d, 0, &widest);
+    dlg_finish(buf, d, widest);
+    return 0;
+}
+
+// As a CheckBox's, but in as many columns as the most rows asked for needs (a column is as many items as
+// the number of items over the number of columns, and a column more if they don't all fit), and each
+// item's line count set from how often its text goes into the width a column leaves (100000 if the
+// width isn't asked for).
+int BUTTON_THIS radio_calculate_dimensions(void *rb) {
+    int32_t *vb = vbtable(rb);
+    struct game_dlg *d = cb_dlg(rb);
+    if (!d->count) return 7;
+    struct game_buffer *buf = box_buf(rb, vb);
+    dlg_text_setup(buf, d);
+    struct game_sprite *a = *(struct game_sprite **)((uint8_t *)rb + 0x4), *b = *(struct game_sprite **)((uint8_t *)rb + 0x8);
+    dlg_picture_size(d, a, b);
+    DF(d, 0x58) = d->count < DF(d, 0x50) ? d->count : DF(d, 0x50);
+    if (DF(d, 0x58) < d->count) {
+        DF(d, 0x4c) = d->count / DF(d, 0x58) + 1;
+        DF(d, 0x58) = d->count / DF(d, 0x4c);
+        if (DF(d, 0x4c) * DF(d, 0x58) < d->count) DF(d, 0x58)++;
+    }
+    int wrap = (DF(d, 0x20) & 2) && DF(d, 0x2c) ? DF(d, 0x2c) / DF(d, 0x4c) - 2 * DF(d, 0x40) - DF(d, 0x34) : 100000;
+    int widest = 0;
+    dlg_measure(buf, d, wrap, &widest);
+    dlg_finish(buf, d, widest);
+    return 0;
+}
+
+// Item `pos`, drawn into the box's Buffer. `hot` is whether it is checked (a CheckBox's) or selected, and
+// with it the picture for that. The place: the box's columns run down (as many rows as 0x58), and an
+// item that wraps to more lines than the item height holds pushes the ones after it down by the
+// difference; the list's cursor is walked to find the ones before it. If the parent doesn't draw the item's
+// background (its slot 0x2c, with the Win, the item's id, 0 or 1 for the mouse over it or 2 for hot, and
+// the rectangle) the item takes it from the parent's Buffer. Then the picture, the text (on the left of a
+// `|`, and what is right of that on the right; wrapped in the item's rectangle if it has more than one
+// line), and for a hot item in a window with the dialog's focus a dotted frame. `shift` is what the
+// CheckBox moves the text down by, the Font's 0x1c; a RadioButton doesn't.
+static void box_draw_item(void *box, int pos, int hot, struct game_sprite *off, struct game_sprite *on, int shift) {
+    int32_t *vb = vbtable(box);
+    struct game_win *win = (struct game_win *)((uint8_t *)box + vb[1]);
+    struct game_win *parent = win->parent;
+    if (!parent) return;
+    struct game_dlg *d = cb_dlg(box);
+    struct game_strlist *l = dlg_list(d);
+    struct game_buffer *buf = win_buf(win);
+    int extra = 0;
+    strlist_seek_pos(l, -1);
+    for (int n = pos; n > 0; n--) {
+        strlist_next_entry(l);
+        if (l->cur && cur_lines(l) > 1) {
+            int h = DF(d, 0x68), lines = cur_lines(l);
+            int tall = buffer_text_line_height(buf) * lines;
+            extra += (h > tall ? h : tall) - DF(d, 0x68);
+        }
+    }
+    int rows = DF(d, 0x58), col = pos / rows;
+    int x = (DF(d, 0x64) + DF(d, 0x44)) * col + DF(d, 0x40);
+    int y = extra + (pos - col * rows) * (DF(d, 0x68) + DF(d, 0x44)) + (DF(d, 0x44) >> 1);
+    if (!strlist_seek_pos(l, pos)) return;
+    int h = DF(d, 0x68), tall = buffer_text_line_height(buf) * cur_lines(l);
+    if (h <= tall) h = tall;
+    int32_t r[4] = {x, y, x + DF(d, 0x64), y + h};
+    int bottom = r[3];
+    int state = hot ? 2 : DF(d, 0xf0) == pos;
+    int id = dialog_pos_to_id(d, pos);
+    if (!vcall4(parent, VT_ITEM_BACK, (int)(intptr_t)win, id, state, (int)(intptr_t)r)) {
+        buffer_copy_full(win_buf(parent), buf, DF(d, 0x24) + x, DF(d, 0x28) + y, x, y, DF(d, 0x64), h);
+        if (on && off) {
+            struct game_sprite *s = hot ? on : off;
+            sprite_draw_2(s, buf, s->key, x, ((bottom - s->full_h - r[1]) >> 1) + y, 1, 1);
+        }
+    }
+    r[1] += shift ? *(int32_t *)(*(uint8_t **)((uint8_t *)buf + 0x52c) + 0x1c) : 0;
+    r[0] += DF(d, 0x34);
+    char *text = cur_text(l);
+    char *bar = text ? strchr(text, '|') : NULL;
+    int one = cur_lines(l) == 1;
+    if (bar) *bar = 0;
+    if (text) {
+        if (one) buffer_write_l_4(buf, text, r, (int)strlen(text));
+        else buffer_wrap_2(buf, text, r);
+    }
+    if (bar) {
+        *bar = '|';
+        buffer_write_right_l_6(buf, bar + 1, r, (int)strlen(bar + 1));
+    }
+    if (DF(d, 0xb8) != -1 && hot && win_is_dialog_focus(win)) {
+        int wide = r[2] - r[0];
+        r[0] = DF(d, 0x34), r[1] = y, r[2] = r[0] + wide, r[3] = bottom;
+        buffer_dotted_box_rect(buf, r, DF(d, 0xb8));
+    }
+}
+
+void BUTTON_THIS checkbox_draw_item(void *cb, int pos, int checked, int unused) {
+    (void)unused;
+    box_draw_item(cb, pos, checked, *(struct game_sprite **)((uint8_t *)cb + 0x10), *(struct game_sprite **)((uint8_t *)cb + 0x14), 1);
+}
+void BUTTON_THIS radio_draw_item(void *rb, int pos, int selected) {
+    box_draw_item(rb, pos, selected, *(struct game_sprite **)((uint8_t *)rb + 0x4), *(struct game_sprite **)((uint8_t *)rb + 0x8), 0);
+}
+
+// The box's redraw (the Win's slot): the parent may draw the background (slot 0x28 with the Win); if it
+// doesn't, it is copied from the parent's Buffer; then every item is drawn (a CheckBox's with its
+// checked bit and a flag that its object's field at 0x4 is the item; a RadioButton's with whether it is
+// the selected one), and a RadioButton's window is marked as changed (GraphicWin_soft_update_2).
+// Nothing is drawn without a parent.
+void BUTTON_THIS checkbox_on_redraw(void *w) {
+    void *cb = (uint8_t *)w - 0x1c;
+    int32_t *vb = vbtable(cb);
+    struct game_win *win = (struct game_win *)((uint8_t *)cb + vb[1]);
+    struct game_win *parent = win->parent;
+    if (!parent) return;
+    *game_win_cur = parent;
+    struct game_dlg *d = cb_dlg(cb);
+    if (!vcall1(parent, VT_WIN_BACK, (int)(intptr_t)win)) {
+        struct game_buffer *buf = win_buf(win);
+        buffer_copy_full(win_buf(parent), buf, DF(d, 0x24), DF(d, 0x28), 0, 0, buf->width, -buf->neg_height);
+    }
+    for (int i = 0; i < d->count; i++) checkbox_draw_item(cb, i, d->sel & bit(i), *(int32_t *)((uint8_t *)cb + 4) == i);
+}
+void BUTTON_THIS radio_on_redraw(void *w) {
+    void *rb = (uint8_t *)w - 0x18;
+    int32_t *vb = vbtable(rb);
+    struct game_win *win = (struct game_win *)((uint8_t *)rb + vb[1]);
+    struct game_win *parent = win->parent;
+    if (!parent) return;
+    *game_win_cur = parent;
+    struct game_dlg *d = cb_dlg(rb);
+    if (!vcall1(parent, VT_WIN_BACK, (int)(intptr_t)win)) {
+        struct game_buffer *buf = win_buf(win);
+        buffer_copy_full(win_buf(parent), buf, DF(d, 0x24), DF(d, 0x28), 0, 0, buf->width, -buf->neg_height);
+    }
+    for (int i = 0; i < d->count; i++) radio_draw_item(rb, i, DF(d, 0xec) == i);
+    graphic_win_soft_update_2(win);
+}
+
 // ---- Shadow checks -------------------------------------------------------------------------------------
 
 #define P(p) ((int)(uintptr_t)(p))
@@ -801,6 +1109,63 @@ DRAW_CHECKED(push_button_on_redraw, (struct game_push_button * p), (p), win_dd(&
 DRAW_CHECKED(checkbtn_on_redraw, (struct game_check_button * c), (c), win_dd(&c->win),
              (writes_pixels(&w_, &c->buf), writes_vlog(&w_)), "%d", P(c))
 
+// The FlatButton's redraw calls the parent (its slot 0x14 may draw the name), so the game's calls run the
+// original and the sweep checks it. The box functions (CheckBox's and RadioButton's drawing) likewise
+// call the parent's slots 0x28 and 0x2c and are checked in the sweep, on scratch boxes (X, below), which
+// write the Buffer, the device context text goes through, the list's cursor, the items' text (a `|`
+// in it is cut and put back) and line counts, and the parent's call log. The CheckBox's layout calls no
+// parent and is checked as it is called, on the Dialog part's numbers and cursor, and the Buffer's
+// object and device context (its text colours and Fonts).
+SWEEP_ONLY(void, flat_button_on_redraw, (struct game_flat_button * f), (f),
+           (writes_pixels(&w_, &f->base.buf), writes_text_state(&w_, &f->base.buf), writes_vlog(&w_), WRITES(game_win_cur, 4)), "%d",
+           P(f))
+
+static void writes_layout(struct hook_writes *w, void *box, int32_t *vb) {
+    struct game_dlg *d = cb_dlg(box);
+    struct game_buffer *buf = box_buf(box, vb);
+    hooks_writes_add(w, (uint8_t *)d + 0x34, 0xd4 - 0x34);
+    hooks_writes_add(w, buf, sizeof *buf);
+    hooks_writes_dc(w, (void *)(intptr_t) * (int32_t *)((uint8_t *)buf + 0x64));
+}
+SHADOW_WRITER_T(BUTTON, int, checkbox_calculate_dimensions, (void *cb), (cb), writes_layout(&w_, cb, vbtable(cb)), "%d", P(cb))
+
+// The scratch boxes: a CheckBox and a RadioButton laid out as the original does (the vbtable, the Win, the
+// Dialog), a list of items with texts, a parent with a Buffer, and pictures.
+enum { BXN = 6, BXT = 56 };
+static struct {
+    uint8_t obj[2][0xb40];
+    int32_t vbt[2][4];
+    struct game_list_item item[2][BXN];
+    struct game_dlg_node node[2][BXN];
+    char text[2][BXN][BXT];
+    struct {
+        struct game_win win;
+        struct game_buffer buf;
+    } parent;
+    uint8_t pix[72 * 48 + 16];
+    struct game_sprite spr[3];
+    uint8_t sdata[3][1024];
+} X;
+static void writes_box(struct hook_writes *w, void *box) {
+    int32_t *vb = vbtable(box);
+    struct game_buffer *buf = box_buf(box, vb);
+    writes_pixels(w, buf);
+    writes_text_state(w, buf);
+    writes_vlog(w);
+    hooks_writes_add(w, game_win_cur, 4);
+    hooks_writes_add(w, &cb_dlg(box)->cur, 12);
+    hooks_writes_add(w, X.text, sizeof X.text);
+    hooks_writes_add(w, X.item, sizeof X.item);
+    hooks_writes_add(w, (uint8_t *)cb_dlg(box) + 0x34, 0xd4 - 0x34);
+}
+SWEEP_ONLY(int, radio_calculate_dimensions, (void *rb), (rb), (writes_box(&w_, rb)), "%d", P(rb))
+SWEEP_ONLY(void, checkbox_draw_item, (void *cb, int pos, int checked, int unused), (cb, pos, checked, unused), (writes_box(&w_, cb)),
+           "%d, %d, %d", P(cb), pos, checked)
+SWEEP_ONLY(void, radio_draw_item, (void *rb, int pos, int selected), (rb, pos, selected), (writes_box(&w_, rb)), "%d, %d, %d", P(rb),
+           pos, selected)
+SWEEP_ONLY(void, checkbox_on_redraw, (void *w), (w), (writes_box(&w_, (uint8_t *)w - 0x1c)), "%d", P(w))
+SWEEP_ONLY(void, radio_on_redraw, (void *w), (w), (writes_box(&w_, (uint8_t *)w - 0x18)), "%d", P(w))
+
 // ---- Sweep ---------------------------------------------------------------------------------------------
 //
 // Scratch buttons, groups, parents and boxes in static memory (S), with a random state each round,
@@ -829,6 +1194,13 @@ static void vrec(int slot, const void *o, int a, int b, int c) {
 #define STUB3(slot) \
     static int THISCALL stub_##slot(void *o, int a, int b, int c) { return vrec(slot, o, a, b, c), slot + 1; }
 STUB0(0x10) STUB0(0x1c) STUB2(0x44) STUB1(0xb0) STUB2(0xb4) STUB3(0xb8) STUB2(0xbc) STUB0(0xf8)
+// The slots the FlatButton's name, a box's background and a box item's background go through: each answers
+// 0 and 1 by turns, so both ways are taken.
+static int THISCALL stub_0x14(void *o, int a, int b, int c) { return vrec(0x14, o, a, b, c), vlog.n & 1; }
+static int THISCALL stub_0x28(void *o, int a) { return vrec(0x28, o, a, 0, 0), vlog.n & 1; }
+static int THISCALL stub_0x2c(void *o, int a, int b, int c, const int32_t *r) {
+    return vrec(0x2c, o, a * 3 + b, c, r[0] * 31 + r[1] * 131 + r[2] * 1031 + r[3] * 10007), vlog.n & 1;
+}
 // A parent that lets a child copy from it half the time.
 static int THISCALL stub_0xf4(void *o) { return vrec(0xf4, o, 0, 0, 0), (vlog.n & 2) != 0; }
 // A sound that is busy every other time it is asked.
@@ -838,6 +1210,7 @@ static void fill_stub_vt(void) {
     stub_vt[0x10 / 4] = (void *)stub_0x10, stub_vt[0x1c / 4] = (void *)stub_0x1c, stub_vt[0x44 / 4] = (void *)stub_0x44;
     stub_vt[0x5c / 4] = (void *)stub_0x5c, stub_vt[0xb0 / 4] = (void *)stub_0xb0, stub_vt[0xb4 / 4] = (void *)stub_0xb4;
     stub_vt[0xb8 / 4] = (void *)stub_0xb8, stub_vt[0xbc / 4] = (void *)stub_0xbc, stub_vt[0xf8 / 4] = (void *)stub_0xf8, stub_vt[0xf4 / 4] = (void *)stub_0xf4;
+    stub_vt[0x14 / 4] = (void *)stub_0x14, stub_vt[0x28 / 4] = (void *)stub_0x28, stub_vt[0x2c / 4] = (void *)stub_0x2c;
 }
 static void cb_click(int id) { vrec(0x401, NULL, id, 0, 0); }
 static void cb_double(int id) { vrec(0x402, NULL, id, 0, 0); }
@@ -934,13 +1307,15 @@ static struct {
     struct game_button btn;
     struct game_check_button chk;
     struct game_push_button push;
+    struct game_flat_button flat;
+    struct game_box_frame frame[2];
     struct {
         struct game_win win;
         struct game_buffer buf;
     } parent;
     struct game_sprite spr[3];
     uint8_t sdata[3][1024];
-    uint8_t pix[4][PWID * PHGT + 16];
+    uint8_t pix[5][PWID * PHGT + 16];
     uint8_t tint[256];
 } D;
 
@@ -1028,6 +1403,40 @@ static void draw_sweep(struct game_buffer *real, int has_font) {
             if (rnd_to(5) == 0) pb->tl = NULL;
             if (pb->base.win.parent) pb->base.win.parent->flags = rnd_to(3) == 0 ? WIN_F_DIALOG : 0;
         }
+        // A FlatButton: one of the looks, with a picture, a frame, the eight sprites, or none of them, and a
+        // name (short or too long for it) when it has the real Buffer.
+        struct game_flat_button *fb = &D.flat;
+        static char flat_long[] = "A button name too long to fit";
+        for (int k = 0; k < 4; k++) {
+            fb->base.win.vtable = stub_vt, fb->base.win.parent = rnd_to(10) ? &D.parent.win : NULL;
+            fb->base.win.flags = (rnd_to(2) ? 0x80000 : 0) | (rnd_to(3) == 0 ? WIN_F_DIALOG : 0);
+            random_rect(fb->base.win.inner), random_rect(fb->base.win.outer);
+            if (fb->base.win.parent) fb->base.win.parent->flags = rnd_to(3) == 0 ? WIN_F_DIALOG : 0;
+            if (real_variant) memcpy(&fb->base.buf, real, sizeof *real);
+            else hand_buffer(&fb->base.buf, D.pix[4], DWID, DHGT);
+            fb->base.focus_a = rnd_to(3) ? rnd_to(256) : -1, fb->base.border_a = rnd_to(256), fb->base.border_b = rnd_to(256);
+            fb->base.border_w = rnd_to(4), fb->base.pressed = rnd_to(2), fb->base.state = rnd_to(2), fb->base.changed = rnd_to(2);
+            fb->base.picture = (void *)(intptr_t)(rnd_to(5) - 1);
+            fb->base.name = real_variant && rnd_to(3) ? (rnd_to(2) ? name : flat_long) : NULL;
+            fb->base.id = rnd_to(20);
+            for (int l = 0; l < 3; l++) {
+                fb->text_color[l] = rnd_to(3) ? rnd_to(256) : -1;
+                D.frame[0] = (struct game_box_frame){&D.spr[rnd_to(3)], &D.spr[rnd_to(3)], &D.spr[rnd_to(3)], &D.spr[rnd_to(3)],
+                                                      &D.spr[rnd_to(3)], &D.spr[rnd_to(3)], &D.spr[rnd_to(3)], &D.spr[rnd_to(3)], NULL, 0};
+                D.frame[1] = (struct game_box_frame){rnd_to(2) ? &D.spr[0] : NULL, NULL, NULL, &D.spr[1], NULL, &D.spr[2], NULL, NULL, NULL, 0};
+                fb->frame[l] = rnd_to(3) == 0 ? &D.frame[rnd_to(2)] : NULL;
+                fb->pic[l] = rnd_to(4) == 0 ? &D.spr[rnd_to(3)] : NULL;
+                struct game_sprite **parts[] = {&fb->left[l], &fb->right[l], &fb->top[l], &fb->bottom[l], &fb->tl[l],
+                                                &fb->tr[l], &fb->bl[l], &fb->br[l], &fb->mid[l]};
+                int all = rnd_to(2);
+                for (int i = 0; i < 9; i++) *parts[i] = rnd_to(3) && (all || rnd_to(5)) ? &D.spr[rnd_to(3)] : NULL;
+            }
+            if (fb->base.win.parent) {
+                *game_win_hwnd = rnd_to(8) ? 1 : 0;
+                check_flat_button_on_redraw(fb);
+                *game_win_hwnd = 1;
+            }
+        }
         for (int k = 0; k < 4; k++) {
             if (D.btn.win.parent) {
                 check_graphic_win_fill(&D.btn.win, rnd_to(256));
@@ -1047,10 +1456,116 @@ static void draw_sweep(struct game_buffer *real, int has_font) {
     *game_palette_copy = pal;
 }
 
+// The boxes: a CheckBox and a RadioButton on a real Buffer (a copy of one with a device context and a Font) with
+// items of the texts below (some with a `|`, long ones to wrap, one empty), a parent that draws the
+// background half the time, and every number the layout reads varied; the layout is checked first and the
+// drawing on what it made, then with the numbers changed so the drawing sees what the layout hasn't.
+static const char *const WORDS[] = {"Ok", "Alpha|Omega", "An item with enough words in it to wrap", "", "x|", "|y",
+                                    "Wide wide wide wide wide wide wide", "WWWW|MMMM"};
+static void box_build(int k, struct game_buffer *big, struct font *font) {
+    memset(X.obj[k], 0, sizeof X.obj[k]);
+    int32_t *vb = X.vbt[k];
+    vb[1] = k ? 0x18 : 0x1c, vb[2] = k ? 0xa30 : 0xa34;
+    *(int32_t **)X.obj[k] = vb;
+    struct game_win *win = (struct game_win *)(X.obj[k] + vb[1]);
+    win->vtable = stub_vt;
+    win->parent = rnd_to(10) ? &X.parent.win : NULL;
+    win->flags = rnd_to(3) == 0 ? WIN_F_DIALOG : 0;
+    memcpy(win_buf(win), big, sizeof *big);
+    struct game_sprite *off = rnd_to(5) ? &X.spr[rnd_to(3)] : NULL, *on = rnd_to(5) ? &X.spr[rnd_to(3)] : NULL;
+    memcpy(X.obj[k] + (k ? 0x4 : 0x10), &off, sizeof off), memcpy(X.obj[k] + (k ? 0x8 : 0x14), &on, sizeof on);
+    struct game_dlg *d = cb_dlg(X.obj[k]);
+    int n = rnd_to(BXN + 1);
+    for (int i = 0; i < n; i++) {
+        snprintf(X.text[k][i], BXT, "%s", WORDS[rnd_to(8)]);
+        X.item[k][i].text = X.text[k][i], X.item[k][i].lines = rnd_to(3);
+        X.node[k][i].pad8 = (int32_t)(intptr_t)&X.item[k][i], X.node[k][i].key = 10 + i;
+        X.node[k][i].next = &X.node[k][(i + 1) % n], X.node[k][i].prev = &X.node[k][(i + n - 1) % n];
+    }
+    d->head = n ? X.node[k] : NULL, d->cur = n ? &X.node[k][rnd_to(n)] : NULL, d->count = n, d->idx = n ? rnd_to(n) : 0;
+    DF(d, 0x20) = rnd_to(4), DF(d, 0x24) = rnd_to(10), DF(d, 0x28) = rnd_to(10);
+    DF(d, 0x2c) = rnd_to(3) ? 100 + rnd_to(60) : 0, DF(d, 0x30) = rnd_to(3) ? 10 + rnd_to(40) : 0;
+    DF(d, 0x34) = rnd_to(3) ? 6 + rnd_to(8) : 0, DF(d, 0x40) = rnd_to(4), DF(d, 0x44) = rnd_to(4);
+    DF(d, 0x48) = rnd_to(2) ? -1 : 8 + rnd_to(10), DF(d, 0x4c) = 1 + rnd_to(3), DF(d, 0x50) = 1 + rnd_to(3);
+    DF(d, 0x58) = 1 + rnd_to(3), DF(d, 0x5c) = rnd_to(50), DF(d, 0x64) = 10 + rnd_to(30), DF(d, 0x68) = 6 + rnd_to(10);
+    DF(d, 0x70) = DF(d, 0x74) = DF(d, 0x78) = (int32_t)(intptr_t)font;
+    for (int o = 0x7c; o <= 0xa8; o += 4) DF(d, o) = rnd_to(256);
+    if (k && (DF(d, 0x20) & 2) && DF(d, 0x2c)) {
+        // The width a RadioButton's items wrap to is never 0 (the original divides by it).
+        int rows = n < DF(d, 0x50) ? n : DF(d, 0x50), cols = DF(d, 0x4c);
+        if (rows && rows < n) cols = n / rows + 1;
+        int pic = DF(d, 0x34) ? DF(d, 0x34) : off && on ? (on->full_w > off->full_w ? on->full_w : off->full_w) : 0;
+        if (cols && DF(d, 0x2c) / cols - 2 * DF(d, 0x40) - pic == 0) DF(d, 0x2c) += cols;
+    }
+    DF(d, 0xb8) = rnd_to(3) ? rnd_to(256) : -1;
+    DF(d, 0xec) = k ? rnd_to(BXN + 2) - 1 : (int)rnd();
+    DF(d, 0xf0) = rnd_to(BXN + 2) - 1;
+}
+
+static void box_sweep(struct game_buffer *big, struct font *font) {
+    int32_t f1c = font->f1c;
+    struct game_buffer *saved_back = NULL;
+    (void)saved_back;
+    memset(&X, 0, sizeof X);
+    for (int i = 0; i < 3; i++) make_sprite(&X.spr[i], X.sdata[i]);
+    hand_buffer(&X.parent.buf, X.pix, 72, 48);
+    X.parent.win.vtable = stub_vt;
+    for (int round = 0; round < 30; round++) {
+        font->f1c = rnd_to(4);
+        for (int i = 0; i < 3; i++) make_sprite(&X.spr[i], X.sdata[i]);
+        for (int i = 0; i < 72 * 48; i++) X.pix[i] = (uint8_t)rnd();
+        for (int k = 0; k < 2; k++) {
+            box_build(k, big, font);
+            void *box = X.obj[k];
+            struct game_dlg *d = cb_dlg(box);
+            struct game_win *win = (struct game_win *)(X.obj[k] + X.vbt[k][1]);
+            if (k) check_radio_calculate_dimensions(box);
+            else check_checkbox_calculate_dimensions(box);
+            for (int j = 0; j < 3; j++) {
+                for (int pos = 0; pos < d->count + 2; pos++) {
+                    int hot = rnd_to(2);
+                    if (k) check_radio_draw_item(box, pos, hot);
+                    else check_checkbox_draw_item(box, pos, hot ? (int)rnd() | 1 : 0, 0);
+                }
+                *game_win_cur = NULL;
+                if (k) check_radio_on_redraw(win);
+                else check_checkbox_on_redraw(win);
+                // The numbers the drawing reads, changed.
+                DF(d, 0x24) = rnd_to(10), DF(d, 0x28) = rnd_to(10), DF(d, 0x34) = rnd_to(14), DF(d, 0x44) = rnd_to(4);
+                DF(d, 0x40) = rnd_to(4), DF(d, 0x58) = 1 + rnd_to(3), DF(d, 0x64) = 10 + rnd_to(30), DF(d, 0x68) = 6 + rnd_to(10);
+                DF(d, 0xb8) = rnd_to(3) ? rnd_to(256) : -1, DF(d, 0xf0) = rnd_to(BXN + 2) - 1;
+                DF(d, 0xec) = k ? rnd_to(BXN + 2) - 1 : (int)rnd();
+                win->flags ^= WIN_F_DIALOG;
+                for (int i = 0; i < d->count; i++) X.item[k][i].lines = rnd_to(3);
+                if (rnd_to(3) == 0) {
+                    uint8_t *spr = (uint8_t *)box + (k ? 0x4 : 0x10);
+                    struct game_sprite *s = rnd_to(2) ? &X.spr[rnd_to(3)] : NULL;
+                    memcpy(spr, &s, sizeof s);
+                }
+            }
+        }
+    }
+    font->f1c = f1c;
+}
+
+// A larger Buffer with a device context and a Font of its own, made once outside any check, for the sweeps of
+// what draws text in boxes (here and in scroll.c); NULL until the game has set up its fonts.
+static struct game_buffer big;
+static struct font sweep_font;
+static int sweep_fonted;
+struct game_buffer *button_sweep_buffer(struct font **font) {
+    if (!sweep_fonted) return NULL;
+    *font = &sweep_font;
+    return &big;
+}
+
 static void button_sweep(void) {
     static struct game_buffer real;
-    static struct font font_a, mine;
-    static int made, fonted;
+    static struct font font_a;
+    struct font *const mine_p = &sweep_font;
+#define mine (*mine_p)
+    static int made;
+#define fonted sweep_fonted
     int sweeping = hooks_sweeping;
     hooks_sweeping = 1;
     rng_state = 0x1f123bb5u ^ (uint32_t)*game_turn * 2654435761u;
@@ -1068,11 +1583,13 @@ static void button_sweep(void) {
         made = 1;
         game_buffer_ctor(&real);
         game_buffer_init(&real, 24, 8, 0, 0);
+        game_buffer_ctor(&big);
+        game_buffer_init(&big, 400, 200, 0, 0);
     }
     // (It stays for good, with a font of its own once the game has set up its fonts.)
     if (!fonted && real.bits && *game_font_default && *game_font_dc) {
         font_ctor(&mine), game_font_init(&mine, "Arial", 12, 0);
-        if (mine.hfont) buffer_set_font(&real, &mine, &mine, &mine, &mine), fonted = 1;
+        if (mine.hfont) buffer_set_font(&real, &mine, &mine, &mine, &mine), buffer_set_font(&big, &mine, &mine, &mine, &mine), fonted = 1;
     }
     for (int round = 0; round < 30; round++) {
         build();
@@ -1161,12 +1678,15 @@ static void button_sweep(void) {
         }
     }
     draw_sweep(&real, fonted);
+    if (fonted && big.bits) box_sweep(&big, &mine);
     *game_win_capture = capture, *game_win_hover = hover, *game_win_press1 = press1, *game_win_press2 = press2, *game_win_cur = cur;
     *game_win_press_inside = inside;
     game_button_hooks[0] = hooks[0], game_button_hooks[1] = hooks[1];
     *game_button_defaults = defaults;
     *game_button_fonts = fonts;
     hooks_sweeping = sweeping;
+#undef mine
+#undef fonted
 }
 
 // ---- Hooks ------------------------------------------------------------------------------------------------
@@ -1214,5 +1734,12 @@ static const struct hook button_hooks[] = {
     HOOK(0x633850, checkbtn_on_redraw, 0x83, 0xec, 0x10, 0x56, 0x8b, 0xf1, 0x57),
     HOOK(0x633920, checkbtn_on_left_click, 0x56, 0x8b, 0xf1, 0x57, 0x8b, 0xbe, 0xc4, 0x00, 0x00, 0x00),
     HOOK(0x633980, checkbtn_on_left_double_click, 0x8b, 0x81, 0x20, 0x0a, 0x00, 0x00, 0x85, 0xc0),
+    HOOK(0x607e50, flat_button_on_redraw, 0x83, 0xec, 0x14, 0x53, 0x55, 0x56, 0x8b, 0xf1),
+    HOOK(0x60ed10, checkbox_calculate_dimensions, 0x56, 0x8b, 0xf1, 0x8b, 0x0e),
+    HOOK(0x60d380, radio_calculate_dimensions, 0x53, 0x56, 0x8b, 0xf1, 0x33, 0xdb, 0x8b, 0x0e),
+    HOOK(0x60f030, checkbox_draw_item, 0x83, 0xec, 0x24, 0x53, 0x55, 0x56, 0x8b, 0xf1),
+    HOOK(0x60d750, radio_draw_item, 0x83, 0xec, 0x24, 0x53, 0x55, 0x56, 0x8b, 0xf1),
+    HOOK(0x60fab0, checkbox_on_redraw, 0x53, 0x56, 0x8b, 0xf1, 0x57, 0x8b, 0x46, 0xe4),
+    HOOK(0x60e220, radio_on_redraw, 0x53, 0x56, 0x57, 0x8b, 0xf9, 0x8b, 0x47, 0xe8),
 };
 struct hook_module button_module = {"button", button_hooks, HOOK_COUNT(button_hooks), button_sweep, NULL, -1};

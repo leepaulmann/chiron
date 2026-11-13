@@ -2421,6 +2421,42 @@ extern int(__attribute__((thiscall)) * game_spot_check)(void *list, int x, int y
 // The colour table (or NULL) that a window copied from its parent is darkened with (0x9b3390).
 extern const uint8_t **game_win_tint;
 
+// ---- FlatButton, CheckBox, RadioButton and ListBox drawing (button.c, scroll.c) ----
+// What a Dialog's string list node's item points to: the text at 0x4, and the number of lines the text
+// wraps to at 0x8 (the CheckBox's and ListBox's layout calculation sets it for a RadioButton).
+struct game_list_item {
+    int32_t f0;
+    char *text;
+    int32_t lines;
+    int32_t rows;  // 0xc: how many rows the item takes in a ListBox
+};
+_Static_assert(sizeof(struct game_list_item) == 0x10, "layout of a Dialog item");
+// A FlatButton is a BaseButton whose `picture` field (0xab8) says which of three looks to draw (0 as it lies,
+// 1 changed, 2 pressed or down; anything else lets the button work it out), and which has a text colour, a
+// frame, a picture and the eight pieces of a frame of sprites for each look, in this order.
+struct game_flat_button {
+    struct game_button base;  // (`picture` is the look, at 0xab8)
+    int32_t text_color[3];    // 0xabc: the name's colour, or -1
+    struct game_box_frame *frame[3];  // 0xac8
+    struct game_sprite *pic[3];       // 0xad4
+    struct game_sprite *left[3], *right[3], *top[3], *bottom[3];  // 0xae0
+    struct game_sprite *tl[3], *tr[3], *bl[3], *br[3], *mid[3];   // 0xb10
+};
+_Static_assert(sizeof(struct game_flat_button) == 0xb4c, "layout of the game's FlatButton");
+GAME_AT(struct game_flat_button, text_color, 0xabc);
+GAME_AT(struct game_flat_button, frame, 0xac8);
+GAME_AT(struct game_flat_button, pic, 0xad4);
+GAME_AT(struct game_flat_button, left, 0xae0);
+GAME_AT(struct game_flat_button, tl, 0xb10);
+GAME_AT(struct game_flat_button, mid, 0xb40);
+// The fill colour of a FlatButton (a byte at 0x696d14), and the two strings it ends a name too long for it
+// with (the first is measured, the second written), at 0x697090 and 0x697094.
+extern uint8_t *game_flat_fill;
+extern char *game_flat_dots_a, *game_flat_dots_b;
+// The ListBox's draw counter (0x9b8ee8: how many items its redraw has drawn), the box an item's
+// function (0x30) was last called for (0x9b8ee4), and the width the scroll bar takes from a box (0x9b8dd4).
+extern int32_t *game_listbox_row, *game_listbox_cur, *game_listbox_bar;
+
 // ---- The Scroll, ListBox and StringBox classes (scroll.c) ----
 // A scroll bar is a Win with a Buffer behind it like a button (GraphicWin, up to 0xa14), its own fields,
 // and two ImageButtons for the arrows (0xaac and 0x15f8, 0xb4c bytes each), then two functions a

@@ -165,6 +165,242 @@ static void draw_tests(void) {
     EXPECT(pix_own[0], 4), EXPECT(pix_own[1], 4), EXPECT(pix_own[DW], pix_parent[DW]);
 }
 
+#define win_buf_(w) ((struct game_buffer *)((uint8_t *)(w) + 0x444))
+
+// ---- FlatButton, CheckBox and RadioButton layout and drawing ----
+
+// Text measured by a stand-in (6 pixels a character), on a font 10 high with 8 above the baseline.
+static void *selected_font;
+static int fake_dc_;
+static void *dc_slot_, *default_font_slot_;
+static int32_t slack_;
+static void *__attribute__((stdcall)) t_select_object(void *dc, void *obj) {
+    void *old = selected_font;
+    selected_font = obj;
+    return old;
+}
+static void *__attribute__((stdcall)) t_stock_object(int which) { return (void *)(intptr_t)(0x1000 + which); }
+static int __attribute__((stdcall)) t_text_extent(void *dc, const char *s, int n, int32_t *size) {
+    size[0] = n * 6, size[1] = 10;
+    return 1;
+}
+static struct font tfont;
+
+// The slots a box's parent has: the background of the box and of an item (answering as `back_answer` and
+// `item_answer`) and the text of a FlatButton.
+static int back_answer, item_answer, flat_answer;
+static int32_t item_rect[4];
+static int THIS s_0x28(void *o, int win) { return rec(0x28, o, win, 0, 0), back_answer; }
+static int THIS s_0x2c(void *o, int win, int id, int state, const int32_t *r) {
+    rec(0x2c, o, id, state, 0);
+    memcpy(item_rect, r, sizeof item_rect);
+    return item_answer;
+}
+static int THIS s_0x14(void *o, int b, int name, int id) { return rec(0x14, o, b, id, 0), flat_answer; }
+
+// A CheckBox or RadioButton (k = 1) with the Win's Buffer a hand-built one, two pictures, and two items.
+static uint8_t tbox[2][0xb40];
+static int32_t tvbt[2][4];
+static struct game_list_item titems[2][3];
+static struct game_dlg_node tnodes[2][3];
+static char *ttext[3] = {"ab", "abcd|e", "x"};
+static uint8_t tpix[2][40 * 20 + 16], tpar_pix[40 * 20 + 16];
+static uint8_t sd_a[4] = {3, 9, 3, 9}, sd_b[4] = {4, 4, 9, 9};
+static struct game_sprite sp_a = {.data = sd_a, .key = 9, .stride = 2, .width = 2, .height = 2, .full_w = 2, .full_h = 2};
+static struct game_sprite sp_b = {.data = sd_b, .key = 9, .stride = 2, .width = 2, .height = 2, .full_w = 2, .full_h = 2};
+static struct {
+    struct game_win win;
+    struct game_buffer buf;
+} tpar;
+static void tbuf(struct game_buffer *b, uint8_t *p) {
+    memset(b, 0, sizeof *b), memset(p, 0, 40 * 20 + 16);
+    b->bits = p, b->width = 40, b->neg_height = -20, b->pitch = 40;
+    b->full[2] = 40, b->full[3] = 20, b->clip[2] = 40, b->clip[3] = 20;
+    *(struct font **)((uint8_t *)b + 0x52c) = &tfont;
+}
+static void make_tbox(int k, int n) {
+    uint8_t *obj = tbox[k];
+    memset(obj, 0, sizeof tbox[k]), memset(titems[k], 0, sizeof titems[k]), memset(tnodes[k], 0, sizeof tnodes[k]);
+    tvbt[k][1] = k ? 0x18 : 0x1c, tvbt[k][2] = k ? 0xa30 : 0xa34;
+    *(int32_t **)obj = tvbt[k];
+    struct game_win *win = (struct game_win *)(obj + tvbt[k][1]);
+    win->vtable = vt, win->parent = &tpar.win;
+    tbuf(win_buf_(win), tpix[k]);
+    struct game_sprite *a = &sp_a, *b = &sp_b;
+    memcpy(obj + (k ? 4 : 0x10), &a, sizeof a), memcpy(obj + (k ? 8 : 0x14), &b, sizeof b);
+    struct game_dlg *d = (struct game_dlg *)(obj + tvbt[k][2]);
+    for (int i = 0; i < n; i++) {
+        titems[k][i].text = ttext[i], titems[k][i].lines = 1;
+        tnodes[k][i].pad8 = (int32_t)(intptr_t)&titems[k][i], tnodes[k][i].key = 50 + i;
+        tnodes[k][i].next = &tnodes[k][(i + 1) % n], tnodes[k][i].prev = &tnodes[k][(i + n - 1) % n];
+    }
+    d->head = n ? tnodes[k] : NULL, d->cur = n ? tnodes[k] : NULL, d->count = n;
+    DLG_F(d, 0x48) = -1, DLG_F(d, 0x4c) = 1, DLG_F(d, 0x50) = 1, DLG_F(d, 0x40) = 1, DLG_F(d, 0x44) = 2, DLG_F(d, 0xb8) = -1;
+    DLG_F(d, 0x70) = DLG_F(d, 0x74) = DLG_F(d, 0x78) = (int32_t)(intptr_t)&tfont;
+    DLG_F(d, 0xf0) = -1;
+}
+
+static void box_tests(void) {
+    game_select_object = t_select_object, game_get_stock_object = t_stock_object, game_get_text_extent = t_text_extent;
+    dc_slot_ = &fake_dc_, game_font_dc = &dc_slot_;
+    default_font_slot_ = &tfont, game_font_default = &default_font_slot_;
+    game_font_slack = &slack_;
+    tfont.first = -1, tfont.hfont = (void *)1, tfont.ascent = 8, tfont.height = 10, tfont.f1c = 3;
+    vt[0x28 / 4] = s_0x28, vt[0x2c / 4] = s_0x2c, vt[0x14 / 4] = s_0x14;
+    memset(&tpar, 0, sizeof tpar);
+    tpar.win.vtable = vt;
+    tbuf(&tpar.buf, tpar_pix);
+    for (int i = 0; i < 40 * 20; i++) tpar_pix[i] = (uint8_t)(i % 200 + 20);
+
+    // The CheckBox's layout: the picture is as wide as the larger of the two, an item as high as the text, the
+    // box one column as wide as the longest text (6 characters of 6) and the gaps and margins make it; no
+    // items, nothing done.
+    make_tbox(0, 2);
+    struct game_dlg *d = (struct game_dlg *)(tbox[0] + tvbt[0][2]);
+    EXPECT(checkbox_calculate_dimensions(tbox[0]), 0);
+    EXPECT(DLG_F(d, 0x34), 2), EXPECT(DLG_F(d, 0x68), 10), EXPECT(DLG_F(d, 0x58), 2), EXPECT(DLG_F(d, 0x64), 38);
+    EXPECT(DLG_F(d, 0x5c), 40), EXPECT(DLG_F(d, 0x54), 1), EXPECT(DLG_F(d, 0x60), 24);
+    EXPECT(d->cur == tnodes[0], 1), EXPECT(d->idx, 0);
+    make_tbox(0, 0);
+    EXPECT(checkbox_calculate_dimensions(tbox[0]), 7);
+    // A height and a width asked for.
+    make_tbox(0, 2);
+    DLG_F(d, 0x20) = 3, DLG_F(d, 0x2c) = 60, DLG_F(d, 0x30) = 40;
+    EXPECT(checkbox_calculate_dimensions(tbox[0]), 0);
+    EXPECT(DLG_F(d, 0x5c), 60), EXPECT(DLG_F(d, 0x64), 60 - 2 - 2), EXPECT(DLG_F(d, 0x60), 40), EXPECT(DLG_F(d, 0x58), 40 / 10);
+
+    // The RadioButton's layout: one row at most, so a column of the items' number over the rows, plus one,
+    // and the rows of that; the lines of an item are its width over the width asked for (or 100000), plus one.
+    make_tbox(1, 2);
+    d = (struct game_dlg *)(tbox[1] + tvbt[1][2]);
+    EXPECT(radio_calculate_dimensions(tbox[1]), 0);
+    EXPECT(DLG_F(d, 0x4c), 3), EXPECT(DLG_F(d, 0x58), 1), EXPECT(DLG_F(d, 0x54), 3), EXPECT(DLG_F(d, 0x64), 38);
+    EXPECT(DLG_F(d, 0x5c), 120), EXPECT(DLG_F(d, 0x60), 12), EXPECT(titems[1][0].lines, 1), EXPECT(titems[1][1].lines, 1);
+    make_tbox(1, 2);
+    DLG_F(d, 0x20) = 2, DLG_F(d, 0x2c) = 100, DLG_F(d, 0x50) = 5;
+    EXPECT(radio_calculate_dimensions(tbox[1]), 0);
+    // (100 over 1 column, less the margins and picture: 100 - 2 - 2 = 96; "abcd|e" is 36 wide)
+    EXPECT(titems[1][0].lines, 1), EXPECT(DLG_F(d, 0x58), 2), EXPECT(DLG_F(d, 0x4c), 1);
+    DLG_F(d, 0x2c) = 30;
+    EXPECT(radio_calculate_dimensions(tbox[1]), 0);
+    EXPECT(titems[1][1].lines, 36 / (30 - 2 - 2) + 1);
+
+    // Drawing items (without text, which needs the whole text drawing): the position, the parent asked, the
+    // background taken from the parent, the picture for the state.
+    for (int k = 0; k < 2; k++) {
+        make_tbox(k, 2);
+        d = (struct game_dlg *)(tbox[k] + tvbt[k][2]);
+        for (int i = 0; i < 2; i++) titems[k][i].text = NULL;
+        EXPECT(k ? radio_calculate_dimensions(tbox[k]) : checkbox_calculate_dimensions(tbox[k]), 0);
+        struct game_win *win = (struct game_win *)(tbox[k] + tvbt[k][1]);
+        struct game_buffer *buf = win_buf_(win);
+        for (int i = 0; i < 2; i++) titems[k][i].text = NULL;
+        DLG_F(d, 0x58) = 2, DLG_F(d, 0x64) = 30, DLG_F(d, 0x24) = 3, DLG_F(d, 0x28) = 1;
+        item_answer = 0, ncalls = 0;
+        memset(tpix[k], 0, sizeof tpix[k]);
+        if (k) radio_draw_item(tbox[k], 1, 1);
+        else checkbox_draw_item(tbox[k], 1, 1, 0);
+        // (column 0, row 1: x = the margin 1, y = one row down (10 + 2) and half the gap (1))
+        EXPECT(ncalls, 1), expect_call(0, 0x2c, &tpar.win, 51, 2, 0);
+        EXPECT(item_rect[0], 1), EXPECT(item_rect[1], 13), EXPECT(item_rect[2], 1 + DLG_F(d, 0x64)), EXPECT(item_rect[3], 23);
+        // the parent's pixels at (3 + 1, 1 + 13), the checked picture (4 in its top left) at (1, 13 + (10 - 2) / 2)
+        EXPECT(tpix[k][15 * 40 + 6], tpar_pix[16 * 40 + 9]);
+        EXPECT(tpix[k][17 * 40 + 1], 4), EXPECT(tpix[k][17 * 40 + 2], 4), EXPECT(tpix[k][18 * 40 + 1], tpar_pix[19 * 40 + 4]);
+        // not hot, the mouse over it: state 1 and the unchecked picture
+        d->hover = 0, ncalls = 0;
+        memset(tpix[k], 0, sizeof tpix[k]);
+        if (k) radio_draw_item(tbox[k], 0, 0);
+        else checkbox_draw_item(tbox[k], 0, 0, 0);
+        expect_call(0, 0x2c, &tpar.win, 50, 1, 0);
+        EXPECT(tpix[k][(1 + 2 + 3) * 40 + 1], 3), EXPECT(item_rect[1], 0 + 1);
+        // the parent draws the background itself: nothing copied and no picture
+        item_answer = 1;
+        memset(tpix[k], 0, sizeof tpix[k]);
+        if (k) radio_draw_item(tbox[k], 0, 1);
+        else checkbox_draw_item(tbox[k], 0, 1, 0);
+        int any = 0;
+        for (int i = 0; i < 40 * 20; i++) any |= tpix[k][i];
+        EXPECT(any, 0);
+        // out of range, or no parent: nothing at all
+        ncalls = 0;
+        if (k) radio_draw_item(tbox[k], 2, 0), radio_draw_item(tbox[k], -3, 0);
+        else checkbox_draw_item(tbox[k], 2, 0, 0), checkbox_draw_item(tbox[k], -3, 0, 0);
+        EXPECT(ncalls, 0);
+        win->parent = NULL;
+        if (k) radio_draw_item(tbox[k], 0, 0);
+        else checkbox_draw_item(tbox[k], 0, 0, 0);
+        EXPECT(ncalls, 0);
+        (void)buf;
+    }
+    // The redraw: the parent asked for the background (slot 0x28), if it doesn't the parent's pixels are
+    // copied, and every item is drawn (each asks the parent).
+    for (int k = 0; k < 2; k++) {
+        make_tbox(k, 2);
+        d = (struct game_dlg *)(tbox[k] + tvbt[k][2]);
+        EXPECT(k ? radio_calculate_dimensions(tbox[k]) : checkbox_calculate_dimensions(tbox[k]), 0);
+        for (int i = 0; i < 2; i++) titems[k][i].text = NULL;
+        struct game_win *win = (struct game_win *)(tbox[k] + tvbt[k][1]);
+        d->sel = k ? 1 : 2;
+        back_answer = 0, item_answer = 1, ncalls = 0, cur = NULL;
+        memset(tpix[k], 0, sizeof tpix[k]);
+        if (k) radio_on_redraw(win);
+        else checkbox_on_redraw(win);
+        EXPECT(cur == &tpar.win, 1), EXPECT(ncalls, 3);
+        expect_call(0, 0x28, &tpar.win, (int)(intptr_t)win, 0, 0);
+        expect_call(1, 0x2c, &tpar.win, 50, 0, 0);
+        expect_call(2, 0x2c, &tpar.win, 51, k ? 2 : 2, 0);
+        EXPECT(tpix[k][5 * 40 + 7], tpar_pix[5 * 40 + 7]);
+        back_answer = 1, ncalls = 0;
+        memset(tpix[k], 0, sizeof tpix[k]);
+        if (k) radio_on_redraw(win);
+        else checkbox_on_redraw(win);
+        EXPECT(tpix[k][5 * 40 + 7], 0), EXPECT(ncalls, 3);
+        win->parent = NULL, ncalls = 0;
+        if (k) radio_on_redraw(win);
+        else checkbox_on_redraw(win);
+        EXPECT(ncalls, 0);
+    }
+
+    // FlatButton: its look (forced, or pressed or down, or changed) picks the picture, centred; without a name,
+    // nothing else is asked of the parent.
+    static struct game_flat_button fb;
+    static uint8_t fill_byte = 5;
+    static char dots_a[] = "...", dots_b[] = "...";
+    game_flat_fill = &fill_byte, game_flat_dots_a = dots_a, game_flat_dots_b = dots_b;
+    memset(&fb, 0, sizeof fb);
+    fb.base.win.vtable = vt, fb.base.win.parent = &tpar.win;
+    tbuf(&fb.base.buf, tpix[0]);
+    fb.base.focus_a = -1, fb.base.picture = (void *)(intptr_t)-1;
+    fb.pic[0] = &sp_a, fb.pic[1] = &sp_b, fb.pic[2] = &sp_a;
+    fb.text_color[0] = fb.text_color[1] = fb.text_color[2] = -1;
+    cur = NULL;
+    flat_button_on_redraw(&fb);
+    EXPECT(cur == &tpar.win, 1);
+    // (40 by 20: the 2 by 2 picture at (19, 9); the rest is the fill colour)
+    EXPECT(tpix[0][9 * 40 + 19], 3), EXPECT(tpix[0][0], 5);
+    memset(tpix[0], 0, sizeof tpix[0]);
+    fb.base.changed = 1;
+    flat_button_on_redraw(&fb);
+    EXPECT(tpix[0][9 * 40 + 19], 4);
+    fb.base.picture = (void *)(intptr_t)0;
+    memset(tpix[0], 0, sizeof tpix[0]);
+    flat_button_on_redraw(&fb);
+    EXPECT(tpix[0][9 * 40 + 19], 3);
+    fb.base.picture = (void *)(intptr_t)7, fb.base.pressed = 1;
+    memset(tpix[0], 0, sizeof tpix[0]);
+    flat_button_on_redraw(&fb);
+    EXPECT(tpix[0][9 * 40 + 19], 3);
+    // The plain border, and the parent drawing the name: asked with the button, the name and its id.
+    memset(&fb.pic, 0, sizeof fb.pic);
+    fb.base.pressed = 0, fb.base.changed = 0, fb.base.border_w = 1, fb.base.border_a = 11, fb.base.border_b = 12;
+    memset(tpix[0], 0, sizeof tpix[0]);
+    flat_button_on_redraw(&fb);
+    EXPECT(tpix[0][0] == 11 || tpix[0][0] == 12, 1), EXPECT(tpix[0][5 * 40 + 5], 5);
+    fb.base.name = "Hi", fb.base.id = 6, flat_answer = 1, ncalls = 0;
+    flat_button_on_redraw(&fb);
+    EXPECT(ncalls, 1), expect_call(0, 0x14, &tpar.win, (int)(intptr_t)&fb, 6, 0);
+}
+
 int main(void) {
     game_win_capture = &capture, game_win_hover = &hover, game_win_press1 = &press1, game_win_press2 = &press2, game_win_cur = &cur;
     game_win_press_inside = &inside, game_button_hooks = (void *)hooks, game_button_defaults = &defaults, game_button_fonts = &fonts;
@@ -318,6 +554,7 @@ int main(void) {
     EXPECT(c.state, 1), EXPECT(ncalls, 0);
 
     draw_tests();
+    box_tests();
     if (failures) printf("%d failures\n", failures);
     else printf("ok\n");
     return failures != 0;
