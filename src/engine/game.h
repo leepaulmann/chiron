@@ -2021,6 +2021,127 @@ extern int32_t *game_tex_tbl;
 // 0x9bc000 (they use 0x9bc008 to 0x9bc04c).
 extern uint8_t *game_poly_scratch;
 
+// ---- Windows (win.c) ----------------------------------------------------------
+//
+// The game's Win class (OpenSMACX's and Thinker's Win), the base of every window and widget. A
+// Win is an object on the game's heap with a vtable; only the top-level window has an HWND of its
+// own, and a child is drawn into its parent's buffers. Only the fields Chiron uses are named.
+//
+// Two rectangles (left, top, right, bottom) give its place: `outer` for a window with a frame
+// (flags2 bit 1) and `inner` for one without, which is the one a child's position is counted
+// from. `flags` and `flags2` hold the window's kind and state (WIN_F_* and WIN_F2_*).
+enum {
+    WIN_F_MARGIN_H = 0x4,       // the nonclient margin is added to the height
+    WIN_F_MARGIN_W = 0x8,       // and to the width
+    WIN_F_CAPTION = 0x10,       // has a caption bar
+    WIN_F_CHILD = 0x20,         // positioned relative to its parent
+    WIN_F_THICK = 0x400,        // has a thick border on all sides
+    WIN_F_DIALOG = 0x1000,      // a dialog: takes the focus of its parent's dialog list
+    WIN_F_PARENT_INNER = 0x8000,  // positioned from its parent's inner rectangle
+    WIN_F_DISABLED = 0x200000,
+    WIN_F_ALWAYS_TOP = 0x2000000,  // keeps its place in a list when another is brought to the front
+    WIN_F2_VISIBLE = 0x1,
+    WIN_F2_FRAME = 0x2,  // has a frame: placed by `outer`
+    WIN_F2_BUSY = 0x8,
+};
+// Slots of the Win vtable, by byte offset. Subclasses override them.
+enum { WIN_VT_DTOR = 0x0, WIN_VT_SHOW = 0x4, WIN_VT_HIDE = 0x8, WIN_VT_RESIZE = 0xc, WIN_VT_NC_HEIGHT = 0x16c };
+
+struct game_win;
+// A node of the dialog list a Win keeps: the window it names is at 0x4.
+struct game_win_node {
+    int32_t pad0;
+    struct game_win *win;
+    int32_t pad8, next, prev, pad14, pad18;
+};
+// A scroll bar is a Win with more behind it; the ones a Win points at (0x43c and 0x440).
+struct game_win_scroll {
+    uint8_t win[0xa2c];
+    int32_t pos;  // 0xa2c
+    GAME_PAD(0xa30, 0xa40);
+    int32_t paging;  // 0xa40
+    GAME_PAD(0xa44, 0x2144);
+    int32_t f2144, f2148;
+    GAME_PAD(0x214c, 0x2150);
+};
+struct game_win {
+    void **vtable;
+    GAME_PAD(0x4, 0x98);
+    uint32_t flags;   // 0x98
+    uint32_t flags2;  // 0x9c
+    GAME_PAD(0xa0, 0xa8);
+    struct game_win *root;  // 0xa8: itself for a top-level window or a widget
+    GAME_PAD(0xac, 0xc4);
+    struct game_win *parent;  // 0xc4
+    void *dlg_vtable;         // 0xc8: the dialog list
+    struct game_win_node *dlg_head;  // 0xcc
+    struct game_win_node *dlg_cur;   // 0xd0
+    int32_t dlg_count;               // 0xd4
+    GAME_PAD(0xd8, 0xf0);
+    struct game_win *nc_owner;  // 0xf0: the window whose NC_HEIGHT slot adds to a nonclient position
+    GAME_PAD(0xf4, 0x114);
+    int32_t caption_h;  // 0x114
+    int32_t border;     // 0x118
+    int32_t bottom;     // 0x11c: the bottom border, or -1 for the same as `border`
+    GAME_PAD(0x120, 0x13c);
+    int32_t inner[4];  // 0x13c
+    int32_t outer[4];  // 0x14c
+    GAME_PAD(0x15c, 0x16c);
+    int32_t title_h;       // 0x16c: the height of the caption area for a hit test
+    int32_t resize_border;  // 0x170
+    GAME_PAD(0x174, 0x1a4);
+    struct game_win *children[150];  // 0x1a4, front first
+    int32_t n_children;              // 0x3fc
+    GAME_PAD(0x400, 0x43c);
+    struct game_win_scroll *scroll_v, *scroll_h;  // 0x43c, 0x440
+};
+GAME_AT(struct game_win, flags, 0x98);
+GAME_AT(struct game_win, flags2, 0x9c);
+GAME_AT(struct game_win, root, 0xa8);
+GAME_AT(struct game_win, parent, 0xc4);
+GAME_AT(struct game_win, dlg_head, 0xcc);
+GAME_AT(struct game_win, dlg_cur, 0xd0);
+GAME_AT(struct game_win, dlg_count, 0xd4);
+GAME_AT(struct game_win, nc_owner, 0xf0);
+GAME_AT(struct game_win, caption_h, 0x114);
+GAME_AT(struct game_win, border, 0x118);
+GAME_AT(struct game_win, bottom, 0x11c);
+GAME_AT(struct game_win, inner, 0x13c);
+GAME_AT(struct game_win, outer, 0x14c);
+GAME_AT(struct game_win, title_h, 0x16c);
+GAME_AT(struct game_win, resize_border, 0x170);
+GAME_AT(struct game_win, children, 0x1a4);
+GAME_AT(struct game_win, n_children, 0x3fc);
+GAME_AT(struct game_win, scroll_v, 0x43c);
+GAME_AT(struct game_win, scroll_h, 0x440);
+_Static_assert(sizeof(struct game_win) == 0x444, "layout of the game's Win");
+GAME_AT(struct game_win_scroll, pos, 0xa2c);
+GAME_AT(struct game_win_scroll, paging, 0xa40);
+GAME_AT(struct game_win_scroll, f2144, 0x2144);
+GAME_AT(struct game_win_scroll, f2148, 0x2148);
+
+// The function in a Win's vtable at byte offset `slot`.
+static inline void *game_win_slot(const struct game_win *w, int slot) { return *(void **)((uint8_t *)w->vtable + slot); }
+
+// The Win class's globals. Modal windows are a stack: the window, and next to it what the
+// game kept of the one before (modal_prev holds the top entry's). The parent list is the
+// top-level windows, front first, and the z-order list the visible ones the game draws, back
+// to front; `opaque` is a window that hides all those under it.
+extern struct game_win **game_win_modal;      // the topmost modal window, or NULL
+extern int32_t *game_win_modal_n;
+extern struct game_win **game_win_modals;     // [modal_n]
+extern int32_t *game_win_modal_aux;           // [modal_n], the same stack's second column
+extern int32_t *game_win_modal_prev;
+extern struct game_win **game_win_modal_focus;
+extern struct game_win **game_win_focus, **game_win_def_focus, **game_win_key;
+extern struct game_win **game_win_parents;    // [parent_n]
+extern int32_t *game_win_parent_n;
+extern struct game_win **game_win_zorder;
+extern int32_t *game_win_z_n;
+extern struct game_win **game_win_opaque;
+extern int32_t *game_win_opaque_flag;
+extern int32_t *game_win_nc_margin;           // what WIN_F_MARGIN_H and WIN_F_MARGIN_W add
+
 // Point the variables above at a loaded terranx.exe.
 void game_bind(struct pe_image *exe);
 
