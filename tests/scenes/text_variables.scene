@@ -2,6 +2,9 @@
 # note, then the colony pod founds the first base (key B), whose screen has labels made from the base's
 # numbers ("Growth: 22 turns", "TURNS: 7", the energy and eco-damage lines), then the same screen a few
 # seconds on and after F2. Loaded from the game's autosave. Leave time after each step; the snaps take 2 s each.
+# The leaders' portraits in the base screen animate on their own slow clock.
+mask 266 625 310 678
+mask 702 624 760 680
 25 load
 42 snap note
 48 click 362 734         # the note's Close
