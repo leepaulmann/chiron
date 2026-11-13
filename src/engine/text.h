@@ -6,7 +6,7 @@
 #include "game.h"
 
 // A Font wraps a GDI font. The rest of the 0x28 bytes (height, ascent, the
-// face name) are only set by Font_init, which stays the original's.
+// face name) are set by Font_init (font.c).
 struct font {
     int32_t first;   // -1 while no font is set
     uint32_t flags;  // bit 0: the font came from a file

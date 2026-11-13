@@ -41,6 +41,7 @@ void surface_colors_changed(struct surface *s);
 // for the engine's shadow checks; NULL if hdc isn't a DC.
 void *gdi_dc_state(void *hdc, int *size);
 int gdi_dc_same(void *hdc_a, void *hdc_b);  // same state, bitmaps compared by content
+int gdi_font_same(void *hfont_a, void *hfont_b);  // the same LOGFONT (the face name up to its end)
 
 // Display settings reported to the game.
 extern int display_width, display_height, display_bpp;

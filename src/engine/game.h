@@ -1847,6 +1847,22 @@ extern void (*game_exit)(int code);
 extern int32_t *game_flying_x, *game_flying_y, *game_flying_left;
 extern char *game_flying_text;
 extern const char *game_flying_gap, *game_flying_pad_height, *game_flying_pad, *game_flying_pad_cent;
+// ---- The Font class's life (font.c) ------------------------------------------------------
+// What Font_init and its kin call, as imported (stdcall), the font class's use count (0x9bb48c),
+// the face the class makes the default font in, the extension of a font resource file, the
+// face the game names everywhere (a pointer variable), and the font file the game loads.
+extern void *(__attribute__((stdcall)) * game_create_font_indirect)(const void *logfont);
+extern int(__attribute__((stdcall)) * game_get_text_metrics)(void *dc, void *tm);
+extern int(__attribute__((stdcall)) * game_remove_font_resource)(const char *file);
+extern int(__attribute__((stdcall)) * game_add_font_resource)(const char *file);
+extern int(__attribute__((stdcall)) * game_create_scalable_font_resource)(int hidden, const char *fot, const char *ttf, const char *path);
+extern int(__attribute__((stdcall)) * game_post_message)(void *wnd, unsigned msg, uintptr_t wp, intptr_t lp);
+extern unsigned(__attribute__((stdcall)) * game_get_current_directory)(unsigned size, char *buf);
+extern int32_t *game_font_class_count;
+extern const char *game_fot_ext, *game_font_class_face;
+extern const char **game_font_face;
+extern const char *game_font_file;
+
 // ---- Sprites (sprite.c) ---------------------------------------------------------
 
 // The game's Sprite class (OpenSMACX calls it so): a keyed 8-bit image with

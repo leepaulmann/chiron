@@ -78,6 +78,7 @@ add_executable(chiron
   src/engine/sprite.c
   src/engine/texture.c
   src/engine/bufobj.c
+  src/engine/font.c
   src/engine/move.c
   src/engine/events.c
   src/engine/combat.c

@@ -203,6 +203,17 @@ int gdi_dc_same(void *hdc_a, void *hdc_b) {
     return !memcmp(&x, &y, sizeof x);
 }
 
+// Whether two font objects were made from the same LOGFONT, for checks that build two Fonts
+// side by side. The bytes of the face name after its end are leftovers and don't count.
+int gdi_font_same(void *ha, void *hb) {
+    struct font *a = gdi_obj(ha, GDI_FONT), *b = gdi_obj(hb, GDI_FONT);
+    if (!a || !b) return !a == !b;
+    LOGFONTA x = a->lf, y = b->lf;
+    if (strncmp(x.face, y.face, sizeof x.face)) return 0;
+    memset(x.face, 0, sizeof x.face), memset(y.face, 0, sizeof y.face);
+    return !memcmp(&x, &y, sizeof x);
+}
+
 HDC gdi_create_window_dc(HWND hwnd) { return new_dc(1, hwnd); }
 
 void gdi_release_window_dc(HDC hdc) {

@@ -98,6 +98,8 @@ extern void *(*hooks_dc_state)(void *hdc, int *size);
 // Set by the host: whether two DCs are in the same state, bitmaps compared by size, format
 // and content rather than identity (for checks that build two objects side by side).
 extern int (*hooks_dc_same)(void *a, void *b);
+// Set by the host: whether two GDI fonts were made from the same LOGFONT.
+extern int (*hooks_font_same)(void *a, void *b);
 
 void hooks_writes_add(struct hook_writes *w, void *p, size_t size);
 void hooks_writes_dc(struct hook_writes *w, void *hdc);  // nothing if hdc isn't a DC
