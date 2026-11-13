@@ -1810,6 +1810,33 @@ extern int32_t *game_font_slack;
 // The globals text drawing leaves behind: the table of hyperlink rectangles (three of 16 bytes and a colour for each link number), and the x
 // the last wrapped line ended at.
 extern int32_t *game_link_rects, *game_text_end_x;
+
+// ---- Drawing: a Buffer's life (bufobj.c) ----------------------------------------------
+// The Windows calls a Buffer makes when it is set up, cut to a clip rectangle and closed,
+// as imported (stdcall), and what else it uses: the DirectDraw object (NULL unless the game
+// draws through DirectDraw), the palette new Buffers take their colours from, the class's
+// virtual method table, the hot-spot list each Buffer holds (Spot), the value a new
+// Buffer's field 0x520 starts with, the C runtime's exit, and the message shown when a
+// DIB can't be made.
+extern void *(__attribute__((stdcall)) * game_create_compatible_dc)(void *dc);
+extern void *(__attribute__((stdcall)) * game_create_dib_section)(void *dc, void *info, int usage, void **bits, void *section, int offset);
+extern int(__attribute__((stdcall)) * game_delete_dc)(void *dc);
+extern int(__attribute__((stdcall)) * game_delete_object)(void *obj);
+extern void *(__attribute__((stdcall)) * game_create_rect_rgn_indirect)(const int32_t *rect);
+extern int(__attribute__((stdcall)) * game_select_clip_rgn)(void *dc, void *rgn);
+extern int(__attribute__((stdcall)) * game_set_text_align)(void *dc, int align);
+extern int(__attribute__((stdcall)) * game_intersect_rect)(int32_t *out, const int32_t *a, const int32_t *b);
+extern int(__attribute__((stdcall)) * game_equal_rect)(const int32_t *a, const int32_t *b);
+extern int(__attribute__((stdcall)) * game_set_rect)(int32_t *r, int l, int t, int rt, int b);
+extern int(__attribute__((stdcall)) * game_message_box_a)(void *wnd, const char *text, const char *title, int type);
+extern void **game_ddraw, **game_palette_now;
+extern void **game_buffer_vtable;
+extern int32_t *game_buffer_520_default;
+extern const char *game_dib_error_text, *game_dib_error_title;
+extern void(__attribute__((thiscall)) * game_spot_ctor)(void *spot);
+extern void(__attribute__((thiscall)) * game_spot_dtor)(void *spot);
+extern void(__attribute__((thiscall)) * game_spot_init)(void *spot, int n);
+extern void (*game_exit)(int code);
 // ---- Sprites (sprite.c) ---------------------------------------------------------
 
 // The game's Sprite class (OpenSMACX calls it so): a keyed 8-bit image with

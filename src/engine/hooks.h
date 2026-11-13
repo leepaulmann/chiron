@@ -95,6 +95,9 @@ extern void (*hooks_hold_time)(int hold);
 // size, or NULL if `hdc` isn't a DC. Text drawing changes it, so a check of a
 // function that draws text lists it with WRITES_DC.
 extern void *(*hooks_dc_state)(void *hdc, int *size);
+// Set by the host: whether two DCs are in the same state, bitmaps compared by size, format
+// and content rather than identity (for checks that build two objects side by side).
+extern int (*hooks_dc_same)(void *a, void *b);
 
 void hooks_writes_add(struct hook_writes *w, void *p, size_t size);
 void hooks_writes_dc(struct hook_writes *w, void *hdc);  // nothing if hdc isn't a DC

@@ -181,6 +181,28 @@ void *gdi_dc_state(void *hdc, int *size) {
     return dc;
 }
 
+// Whether two DCs are in the same state, taking two bitmaps of the same size and format,
+// with the same pixels and colours, as the same: for checks that build two objects side by
+// side, one with the game's code and one with Chiron's.
+int gdi_dc_same(void *hdc_a, void *hdc_b) {
+    struct dc *a = gdi_dc(hdc_a), *b = gdi_dc(hdc_b);
+    if (!a || !b) return !a == !b;
+    struct dc x = *a, y = *b;
+    if (!x.bitmap != !y.bitmap) return 0;
+    if (x.bitmap && x.bitmap != y.bitmap) {
+        const struct surface *s = &x.bitmap->s, *t = &y.bitmap->s;
+        if (s->width != t->width || s->height != t->height || s->bpp != t->bpp || s->stride != t->stride ||
+            s->bottom_up != t->bottom_up || s->ncolors != t->ncolors ||
+            memcmp(s->colors, t->colors, sizeof s->colors) || memcmp(s->masks, t->masks, sizeof s->masks) ||
+            x.bitmap->obj.stock != y.bitmap->obj.stock)
+            return 0;
+        if (s->bits && t->bits && memcmp(s->bits, t->bits, (size_t)s->stride * s->height)) return 0;
+        if (!s->bits != !t->bits) return 0;
+    }
+    x.bitmap = y.bitmap = NULL;
+    return !memcmp(&x, &y, sizeof x);
+}
+
 HDC gdi_create_window_dc(HWND hwnd) { return new_dc(1, hwnd); }
 
 void gdi_release_window_dc(HDC hdc) {
