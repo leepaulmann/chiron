@@ -162,7 +162,7 @@ def run(mode, steps, out, binary, timeout, save=None):
             script.append((float(at), action))
     script.sort(key=lambda t: t[0])
     script = [f"{at:g} {action}" for at, action in script]
-    env = dict(os.environ, CHIRON_USER_DIR=user, CHIRON_FIXED_TIME=FIXED_TIME,
+    env = dict(os.environ, CHIRON_USER_DIR=user, CHIRON_FIXED_TIME=FIXED_TIME, CHIRON_MUTE="1",
                CHIRON_SCRIPT="; ".join(script))
     env.pop("CHIRON_REIMPL", None)
     env.pop("CHIRON_SNAPSHOT", None)

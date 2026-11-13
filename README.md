@@ -91,7 +91,7 @@ saves the screen as it is presented (`tools/bmp2png.py` converts it),
 `CHIRON_SCRIPT="30 click 835 362; 50 close"` drives the game unattended
 (actions are `click X Y`, `dblclick X Y`, `move X Y`, `key NAME` or
 `key Ctrl+NAME`, `type TEXT` and `close`; `"40 every 1 key Return"` repeats a
-step). `CHIRON_SOAK=1` reports the turn,
+step). `CHIRON_SOAK=1` (silent, like `CHIRON_MUTE=1`) reports the turn,
 memory and CPU every 30 seconds; `CHIRON_SOAK=ai` also hands your faction to
 the AI so a game plays itself:
 

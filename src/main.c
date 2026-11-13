@@ -160,6 +160,9 @@ int main(int argc, char **argv) {
 
     if (audio_volume < 0) audio_volume = 0;
     if (audio_volume > 100) audio_volume = 100;
+    // Unattended runs are silent: soaks (CHIRON_SOAK) and anything that asks (CHIRON_MUTE,
+    // which tools/snapcheck.py sets). The sound is still mixed, so timing doesn't change.
+    if (getenv("CHIRON_SOAK") || getenv("CHIRON_MUTE")) audio_volume = 0;
     path_init(game_dir, user_dir);
     char exe_path[4096], hash[65];
     if (path_to_host(exe_name, exe_path, sizeof(exe_path)) || access(exe_path, R_OK)) {
