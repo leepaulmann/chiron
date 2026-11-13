@@ -12,15 +12,24 @@
 // original on one and Chiron's code on the other, and compares them: every field, with
 // handles and heap pointers compared by whether they are set, and the two DCs' state and
 // bitmaps by content (hooks_dc_same). In shadow mode the game's own calls run the original.
+//
+// The tiling functions (tile, tile_mask, tile_2, and box_sprite which draws a frame with them)
+// are here too: each cuts the drawing to a clip rectangle through buffer_set_clip, which makes
+// and frees a Windows region, so they are checked on twins as well (the pixels of both are
+// compared besides). They lay a picture (a Buffer, or a Sprite) over an area from a corner
+// that moves with the offset asked for, as many times as it takes to cover the area; the
+// drawing of each copy is the code of buffer.c and sprite.c.
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "buffer.h"
 #include "bufobj.h"
 #include "game.h"
 #include "hooks.h"
 #include "palette.h"
 #include "shadow.h"
+#include "sprite.h"
 
 #define BUFOBJ (&bufobj_module)
 extern struct hook_module bufobj_module;
@@ -35,6 +44,10 @@ SHADOW_DECLARE_T(int, buffer_init, (buffer_t * b, int w, int h, int flags, void 
 SHADOW_DECLARE_T(int, buffer_resize, (buffer_t * b, int w, int h))
 SHADOW_DECLARE_T(int, buffer_set_clip, (buffer_t * b, const int32_t *rect))
 SHADOW_DECLARE_T(int, buffer_set_clip_2, (buffer_t * b, int x, int y, int w, int h))
+SHADOW_DECLARE_T(int, buffer_tile_mask, (buffer_t * b, buffer_t *src, int sx, int sy, int x, int y, int w, int h, int key))
+SHADOW_DECLARE_T(int, buffer_tile, (buffer_t * b, buffer_t *src, int sx, int sy, int x, int y, int w, int h))
+SHADOW_DECLARE_T(int, buffer_tile_2, (buffer_t * b, struct game_sprite *spr, int sx, int sy, int x, int y, int w, int h))
+SHADOW_DECLARE_T(void, buffer_box_sprite, (buffer_t * b, const int32_t *rect, const struct game_box_frame *f))
 
 static int32_t *at(buffer_t *b, int offset) { return (int32_t *)((uint8_t *)b + offset); }
 
@@ -271,6 +284,137 @@ int THISCALL buffer_resize(buffer_t *b, int w, int h) {
     return buffer_init(b, w, h, *at(b, FLAGS), NULL);
 }
 
+// ---- Tiling ----------------------------------------------------------------------------------
+
+// What the three tiles share (they have returned 7 if there is nothing to draw on). The area (x, y, w, h) is cut to
+// the clip rectangle, which is set to what is left for the drawing and put back after; 0 at once
+// if nothing is left. A picture with no width or height ends it with the clip as it was set
+// (the original does not put it back). The copies lie in rows from (x - sx % tw, y - sy % th),
+// tw by th each, as many columns and rows as it takes to reach the right and bottom edges of
+// the area (the unclipped one), and draw() puts one at (x, y).
+typedef void (*tile_draw)(void *ctx, buffer_t *b, int x, int y);
+
+static int tile_run(buffer_t *b, int sx, int sy, int x, int y, int w, int h, int tw, int th, tile_draw draw, void *ctx) {
+    int32_t clip[4] = {at(b, CLIP)[0], at(b, CLIP)[1], at(b, CLIP)[2], at(b, CLIP)[3]};
+    int32_t area[4] = {x, y, x + w, y + h};
+    int right = x + w, bottom = y + h;
+    if (!game_intersect_rect(area, area, clip)) return 0;
+    buffer_set_clip(b, area);
+    if (!tw || !th) return 0;
+    int cols = w / tw;
+    if (cols * tw < w) cols++;
+    int rows = h / th;
+    if (rows * th < h) rows++;
+    x -= sx % tw;
+    y -= sy % th;
+    if (cols * tw + x < right) cols++;
+    if (rows * th + y < bottom) rows++;
+    for (int r = rows; r > 0; r--, y += th)
+        for (int c = cols, xx = x; c > 0; c--, xx += tw) draw(ctx, b, xx, y);
+    buffer_set_clip(b, clip);
+    return 0;
+}
+
+// A Buffer for a pattern is copied from, over the key colour of the area, or in full.
+struct tile_buffer {
+    buffer_t *src;
+    int key;
+};
+static void draw_mask(void *ctx, buffer_t *b, int x, int y) {
+    const struct tile_buffer *t = ctx;
+    buffer_copy_mask(t->src, b, 0, 0, x, y, t->src->width, -t->src->neg_height, t->key);
+}
+static void draw_full(void *ctx, buffer_t *b, int x, int y) {
+    const struct tile_buffer *t = ctx;
+    buffer_copy_full(t->src, b, 0, 0, x, y, t->src->width, -t->src->neg_height);
+}
+static void draw_sprite(void *ctx, buffer_t *b, int x, int y) {
+    struct game_sprite *s = ctx;
+    sprite_draw_2(s, b, s->key, x, y, 1, 1);
+}
+
+// The Buffer `src` laid over the area as many times as it takes, offset (sx, sy) into the
+// pattern, but only over the pixels of the area that are the key colour (a Buffer with the key
+// colour shows the pattern through).
+int THISCALL buffer_tile_mask(buffer_t *b, buffer_t *src, int sx, int sy, int x, int y, int w, int h, int key) {
+    if (!*at(b, BITS) && !*at(b, SURFACE)) return 7;
+    struct tile_buffer t = {src, key};
+    return tile_run(b, sx, sy, x, y, w, h, src->width, -src->neg_height, draw_mask, &t);
+}
+
+// The same with plain copies.
+int THISCALL buffer_tile(buffer_t *b, buffer_t *src, int sx, int sy, int x, int y, int w, int h) {
+    if (!*at(b, BITS) && !*at(b, SURFACE)) return 7;
+    struct tile_buffer t = {src, 0};
+    return tile_run(b, sx, sy, x, y, w, h, src->width, -src->neg_height, draw_full, &t);
+}
+
+// The same with a Sprite, drawn unscaled with its own key colour: the copies are as wide and
+// high as the sprite was before its margins were cut (it draws itself at its own offset).
+int THISCALL buffer_tile_2(buffer_t *b, struct game_sprite *spr, int sx, int sy, int x, int y, int w, int h) {
+    if (!*at(b, BITS) && !*at(b, SURFACE)) return 7;
+    return tile_run(b, sx, sy, x, y, w, h, spr->full_w, spr->full_h, draw_sprite, spr);
+}
+
+// Draws a frame in the rectangle (left, top, right, bottom): the corners at the corners, the
+// edge sprites tiled between them, and if there is a pattern it is laid over each sprite's
+// area (the key colour of the sprites shows it) and over the inside.
+void THISCALL buffer_box_sprite(buffer_t *b, const int32_t *rect, const struct game_box_frame *f) {
+    if (!rect || !f) return;
+    int left = rect[0], top = rect[1], right = rect[2], bottom = rect[3];
+    struct game_sprite *tl = f->top_left, *tr = f->top_right, *bl = f->bottom_left, *br = f->bottom_right;
+    // A corner sprite drawn at (cx, cy), and the pattern over it.
+#define CORNER(spr, cx_, cy_)                                                                               \
+    if (spr) {                                                                                              \
+        int cx = (cx_), cy = (cy_);                                                                         \
+        sprite_draw_2(spr, b, spr->key, cx, cy, 1, 1);                                                      \
+        if (f->fill) buffer_tile_mask(b, f->fill, cx, cy, cx, cy, spr->full_w, spr->full_h, f->fill_key);  \
+    }
+    CORNER(tl, left, top)
+    CORNER(tr, right - tr->full_w, top)
+    CORNER(bl, left, bottom - bl->full_h)
+    CORNER(br, right - br->full_w, bottom - br->full_h)
+#undef CORNER
+    // The edges, between the corners, each with the pattern over it.
+    if (f->top) {
+        int x = left, w = right - left, h = f->top->full_h;
+        if (tl) x += tl->full_w, w -= tl->full_w;
+        if (tr) w -= tr->full_w;
+        buffer_tile_2(b, f->top, 0, 0, x, top, w, h);
+        if (f->fill) buffer_tile_mask(b, f->fill, x, top, x, top, w, h, f->fill_key);
+    }
+    if (f->bottom) {
+        int x = left, w = right - left, h = f->bottom->full_h, y = bottom - h;
+        if (bl) x += bl->full_w, w -= bl->full_w;
+        if (br) w -= br->full_w;
+        buffer_tile_2(b, f->bottom, 0, 0, x, y, w, h);
+        if (f->fill) buffer_tile_mask(b, f->fill, x, y, x, y, w, h, f->fill_key);
+    }
+    if (f->left) {
+        int y = top, h = bottom - top, w = f->left->full_w;
+        if (tl) y += tl->full_h, h -= tl->full_h;
+        if (bl) h -= bl->full_h;
+        buffer_tile_2(b, f->left, 0, 0, left, y, w, h);
+        if (f->fill) buffer_tile_mask(b, f->fill, left, y, left, y, w, h, f->fill_key);
+    }
+    if (f->right) {
+        int x = right - f->right->full_w, y = top, h = bottom - top, w = f->right->full_w;
+        if (tr) y += tr->full_h, h -= tr->full_h;
+        if (br) h -= br->full_h;
+        buffer_tile_2(b, f->right, 0, 0, x, y, w, h);
+        if (f->fill) buffer_tile_mask(b, f->fill, x, y, x, y, w, h, f->fill_key);
+    }
+    // The inside.
+    if (f->fill) {
+        int x = left, y = top, w = right - left, h = bottom - top;
+        if (f->left) x += f->left->full_w, w -= f->left->full_w;
+        if (f->top) y += f->top->full_h, h -= f->top->full_h;
+        if (f->right) w -= f->right->full_w;
+        if (f->bottom) h -= f->bottom->full_h;
+        buffer_tile(b, f->fill, x, y, x, y, w, h);
+    }
+}
+
 // ---- Shadow mode ---------------------------------------------------------------------------
 
 // The game's calls run the original; the sweep checks Chiron's code on twin Buffers.
@@ -290,11 +434,17 @@ PASS_THROUGH(int, buffer_init, (buffer_t * b, int w, int h, int flags, void **su
 PASS_THROUGH(int, buffer_resize, (buffer_t * b, int w, int h), (b, w, h))
 PASS_THROUGH(int, buffer_set_clip, (buffer_t * b, const int32_t *rect), (b, rect))
 PASS_THROUGH(int, buffer_set_clip_2, (buffer_t * b, int x, int y, int w, int h), (b, x, y, w, h))
+PASS_THROUGH(int, buffer_tile_mask, (buffer_t * b, buffer_t *src, int sx, int sy, int x, int y, int w, int h, int key),
+             (b, src, sx, sy, x, y, w, h, key))
+PASS_THROUGH(int, buffer_tile, (buffer_t * b, buffer_t *src, int sx, int sy, int x, int y, int w, int h), (b, src, sx, sy, x, y, w, h))
+PASS_THROUGH(int, buffer_tile_2, (buffer_t * b, struct game_sprite *spr, int sx, int sy, int x, int y, int w, int h),
+             (b, spr, sx, sy, x, y, w, h))
+PASS_THROUGH(void, buffer_box_sprite, (buffer_t * b, const int32_t *rect, const struct game_box_frame *f), (b, rect, f))
 
 // Fields that hold a handle or a heap pointer: the twins' differ, so only whether each is set
 // is compared (the DCs and bitmaps behind them are compared by content).
 static int is_handle(int o) {
-    return o == BITS || o == DC_NOW || o == MEM_DC || o == REGION || o == OLD_BITMAP || o == DIB || o == SPOTS;
+    return o == BASE || o == BITS || o == DC_NOW || o == MEM_DC || o == REGION || o == OLD_BITMAP || o == DIB || o == SPOTS;
 }
 
 // The twins after the original ran on `a` and Chiron's code on `b`: NULL if they match.
@@ -344,6 +494,155 @@ static void random_rect(int32_t *r, int w, int h) {
     r[0] = rnd_to(w + 8) - 4, r[1] = rnd_to(h + 8) - 4;
     r[2] = r[0] + rnd_to(w + 4) - 2, r[3] = r[1] + rnd_to(h + 4) - 2;
     if (rnd_to(4) == 0) r[0] = 0, r[1] = 0, r[2] = w, r[3] = h;
+}
+
+// ---- The tiles' sweep ------------------------------------------------------------------------
+
+// The pixels of two Buffers, which the twin check of a drawing function compares as well.
+static const char *pixels_diff(buffer_t *a, buffer_t *b) {
+    if (!a->bits || !b->bits) return a->bits == b->bits ? NULL : "pixels (one has none)";
+    size_t n = (size_t)a->pitch * (size_t)-a->neg_height;
+    return memcmp(a->bits, b->bits, n) ? "pixels" : NULL;
+}
+
+// Two Buffers alike, made by the original and filled with the same pixels of a few colours.
+static void make_pair(buffer_t *a, buffer_t *b, int w, int h) {
+    memset(a, 0, sizeof *a), memset(b, 0, sizeof *b);
+    orig_buffer_ctor(a), orig_buffer_ctor(b);
+    orig_buffer_init(a, w, h, 0, NULL), orig_buffer_init(b, w, h, 0, NULL);
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) a->bits[y * a->pitch + x] = b->bits[y * b->pitch + x] = (uint8_t)rnd_to(5);
+}
+static void close_pair(buffer_t *a, buffer_t *b) { orig_buffer_dtor(a), orig_buffer_dtor(b); }
+
+// The tiles' twins: the Buffers drawn on and the pattern ones (read, but their locks move).
+static buffer_t td_a, td_b, ts_a, ts_b;
+static int td_w, td_h, ts_w, ts_h;
+
+static void make_tile_pairs(int w, int h, int sw, int sh) {
+    td_w = w, td_h = h, ts_w = sw, ts_h = sh;
+    make_pair(&td_a, &td_b, w, h);
+    make_pair(&ts_a, &ts_b, sw, sh);
+}
+
+// Compare the twins after one call of each; after a difference, build them again alike.
+static void tile_check(struct hook_stats *s, int got, int want, const char *what) {
+    const char *d = twin_diff(&td_a, &td_b, got, want);
+    if (!d) d = pixels_diff(&td_a, &td_b);
+    if (!d && (d = twin_diff(&ts_a, &ts_b, 0, 0))) {
+        static char msg[200];
+        snprintf(msg, sizeof msg, "pattern: %s", d);
+        d = msg;
+    }
+    if (!d) return;
+    hooks_mismatch(s, " (%s): %s", what, d);
+    close_pair(&td_a, &td_b), close_pair(&ts_a, &ts_b);
+    make_tile_pairs(td_w, td_h, ts_w, ts_h);
+}
+
+// A sprite of the size a picture would be before its margins are cut (full_w by full_h), with
+// pixels of a few colours around its key colour; a zero size now and then.
+static void make_tile_sprite(struct game_sprite *sp, uint8_t *data) {
+    memset(sp, 0, sizeof *sp);
+    int w = 1 + rnd_to(6), h = 1 + rnd_to(5);
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)rnd_to(5);
+    sp->data = data, sp->key = (uint8_t)rnd_to(5);
+    sp->width = sp->stride = w, sp->height = h;
+    sp->full_w = w + rnd_to(3), sp->full_h = h + rnd_to(3);
+    sp->left = rnd_to(2), sp->top = rnd_to(2);
+}
+
+// An area and offset on the Buffer drawn on: crossing every edge of the clip rectangle and the
+// Buffer, sometimes the whole of it, sometimes small, sometimes nothing.
+static void random_area(int *x, int *y, int *w, int *h, int *sx, int *sy) {
+    *x = rnd_to(td_w + 12) - 6, *y = rnd_to(td_h + 12) - 6;
+    *w = rnd_to(td_w + 8) - 1, *h = rnd_to(td_h + 8) - 1;
+    switch (rnd_to(6)) {
+    case 0: *x = 0, *y = 0, *w = td_w, *h = td_h; break;
+    case 1: *w = 1 + rnd_to(3), *h = 1 + rnd_to(3); break;
+    }
+    *sx = rnd_to(41) - 20, *sy = rnd_to(41) - 20;
+}
+
+// The clip rectangle of both drawn-on Buffers, by the original (the clip's own check is
+// elsewhere): the whole Buffer, or a rectangle cut out of it.
+static void random_clip(void) {
+    int32_t r[4];
+    if (rnd_to(3) == 0) r[0] = 0, r[1] = 0, r[2] = td_w, r[3] = td_h;
+    else random_rect(r, td_w, td_h);
+    orig_buffer_set_clip(&td_a, r), orig_buffer_set_clip(&td_b, r);
+}
+
+static void tiles_sweep(void) {
+    static struct game_sprite sp, frame_sp[8];
+    static uint8_t spdata[64], frame_data[8][64];
+    static uint8_t saved_scratch[sizeof(struct game_sprite_scratch)];
+    int32_t saved_scale[4];
+    float saved_ratio = *game_sprite_ratio;
+    memcpy(saved_scratch, game_sprite_scratch, sizeof saved_scratch);
+    memcpy(saved_scale, game_sprite_scale, sizeof saved_scale);
+    for (int round = 0; round < 6; round++) {
+        // Patterns smaller and larger than the area, drawn on a Buffer from 8 to 40 wide.
+        make_tile_pairs(8 + rnd_to(33), 8 + rnd_to(28), 1 + rnd_to(14), 1 + rnd_to(12));
+        for (int k = 0; k < 5; k++) {
+            int x, y, w, h, sx, sy, want, got;
+            random_clip();
+            random_area(&x, &y, &w, &h, &sx, &sy);
+            int key = rnd_to(5);
+            want = orig_buffer_tile_mask(&td_a, &ts_a, sx, sy, x, y, w, h, key);
+            got = buffer_tile_mask(&td_b, &ts_b, sx, sy, x, y, w, h, key);
+            tile_check(&stats_buffer_tile_mask, got, want, "tile_mask");
+            random_clip();
+            random_area(&x, &y, &w, &h, &sx, &sy);
+            want = orig_buffer_tile(&td_a, &ts_a, sx, sy, x, y, w, h);
+            got = buffer_tile(&td_b, &ts_b, sx, sy, x, y, w, h);
+            tile_check(&stats_buffer_tile, got, want, "tile");
+            random_clip();
+            random_area(&x, &y, &w, &h, &sx, &sy);
+            make_tile_sprite(&sp, spdata);
+            if (rnd_to(12) == 0) sp.full_w = 0;
+            if (rnd_to(12) == 0) sp.full_h = 0;
+            want = orig_buffer_tile_2(&td_a, &sp, sx, sy, x, y, w, h);
+            got = buffer_tile_2(&td_b, &sp, sx, sy, x, y, w, h);
+            tile_check(&stats_buffer_tile_2, got, want, "tile_2");
+            // A frame: sprites for most of the corners and edges, and a pattern for most.
+            random_clip();
+            struct game_box_frame fa = {0}, fb;
+            struct game_sprite **slot[8] = {&fa.top_left, &fa.top_right, &fa.bottom_left, &fa.bottom_right,
+                                            &fa.top, &fa.bottom, &fa.left, &fa.right};
+            for (int i = 0; i < 8; i++) {
+                make_tile_sprite(&frame_sp[i], frame_data[i]);
+                if (rnd_to(4)) *slot[i] = &frame_sp[i];
+            }
+            fa.fill = rnd_to(4) ? &ts_a : NULL, fa.fill_key = rnd_to(5);
+            fb = fa;
+            if (fb.fill) fb.fill = &ts_b;
+            int32_t rect[4];
+            random_rect(rect, td_w, td_h);
+            if (rnd_to(3) == 0) rect[0] = 0, rect[1] = 0, rect[2] = td_w, rect[3] = td_h;
+            orig_buffer_box_sprite(&td_a, rect, &fa);
+            buffer_box_sprite(&td_b, rect, &fb);
+            tile_check(&stats_buffer_box_sprite, 0, 0, "box_sprite");
+        }
+        close_pair(&td_a, &td_b), close_pair(&ts_a, &ts_b);
+    }
+    // A Buffer with no pixels.
+    {
+        static buffer_t a, b;
+        memset(&a, 0, sizeof a), memset(&b, 0, sizeof b);
+        orig_buffer_ctor(&a), orig_buffer_ctor(&b);
+        make_tile_pairs(10, 10, 3, 3);
+        int want = orig_buffer_tile_mask(&a, &ts_a, 0, 0, 1, 1, 4, 4, 0);
+        int got = buffer_tile_mask(&b, &ts_b, 0, 0, 1, 1, 4, 4, 0);
+        tile_check(&stats_buffer_tile_mask, got, want, "tile_mask, no pixels");
+        want = orig_buffer_tile(&a, &ts_a, 0, 0, 1, 1, 4, 4), got = buffer_tile(&b, &ts_b, 0, 0, 1, 1, 4, 4);
+        tile_check(&stats_buffer_tile, got, want, "tile, no pixels");
+        orig_buffer_dtor(&a), orig_buffer_dtor(&b);
+        close_pair(&td_a, &td_b), close_pair(&ts_a, &ts_b);
+    }
+    memcpy(game_sprite_scratch, saved_scratch, sizeof saved_scratch);
+    memcpy(game_sprite_scale, saved_scale, sizeof saved_scale);
+    *game_sprite_ratio = saved_ratio;
 }
 
 static void bufobj_sweep(void) {
@@ -400,6 +699,7 @@ static void bufobj_sweep(void) {
         buffer_dtor(&b);
         twin_check(&stats_buffer_dtor, &a, &b, 0, 0, "delete");
     }
+    tiles_sweep();
     hooks_sweeping = sweeping;
 }
 
@@ -411,5 +711,11 @@ static const struct hook bufobj_hooks[] = {
     HOOK(0x5d79c0, buffer_resize, 0x56, 0x8b, 0xf1, 0x8b, 0x06),            // push esi; mov esi, ecx; mov eax, [esi]
     HOOK(0x5d8000, buffer_set_clip, 0x83, 0xec, 0x40, 0x53, 0x55, 0x56),
     HOOK(0x5d8200, buffer_set_clip_2, 0x8b, 0x44, 0x24, 0x08, 0x83, 0xec, 0x10),
+    // sub esp, 0x24 or 0x28; push ebx, ebp, esi, edi
+    HOOK(0x5da6c0, buffer_tile_mask, 0x83, 0xec, 0x24, 0x53, 0x55, 0x56, 0x57),
+    HOOK(0x5da860, buffer_tile, 0x83, 0xec, 0x24, 0x53, 0x55, 0x56, 0x57),
+    HOOK(0x5da9f0, buffer_tile_2, 0x83, 0xec, 0x28, 0x53, 0x55, 0x56, 0x57),
+    // push ecx, ebx, ebp, esi, edi; mov edi, [esp+0x18]
+    HOOK(0x5e2dd3, buffer_box_sprite, 0x51, 0x53, 0x55, 0x56, 0x57, 0x8b, 0x7c, 0x24, 0x18),
 };
 struct hook_module bufobj_module = {"bufobj", bufobj_hooks, HOOK_COUNT(bufobj_hooks), bufobj_sweep, NULL, -1};

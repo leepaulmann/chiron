@@ -113,6 +113,71 @@ int main(void) {
     EXPECT(dcs, 0), EXPECT(deleted, 3), EXPECT(b.bits == NULL, 1), EXPECT(b.width, 0), EXPECT(AT(&b, 0x1c), 0);
     EXPECT(buffer_set_clip(&b, r), 7);  // no pixels
 
+    // Tiling. The drawn-on Buffer is 12 by 8 (the stand-in DIB), the pattern 3 by 2 pixels.
+    {
+        static int32_t copy_scratch[4], scale[4], min_size[2];
+        static struct game_sprite_scratch scratch;
+        static float ratio;
+        static double max_ratio = 4.0;
+        game_copy_rem = &copy_scratch[0], game_mask_units = &copy_scratch[1];
+        game_mask_gap_a = &copy_scratch[2], game_mask_gap_b = &copy_scratch[3];
+        game_sprite_scratch = &scratch, game_sprite_scale = scale, game_sprite_ratio = &ratio;
+        game_sprite_max_ratio = &max_ratio, game_sprite_min_size = min_size;
+        scale[0] = scale[1] = 1;
+        static uint8_t spix[8] = {1, 2, 3, 0, 4, 5, 6, 0};
+        static struct game_buffer pat;
+        memset(&pat, 0, sizeof pat);
+        pat.bits = spix, pat.width = 3, pat.neg_height = -2, pat.pitch = 4;
+        pat.full[2] = pat.clip[2] = 3, pat.full[3] = pat.clip[3] = 2;
+        buffer_ctor(&b);
+        EXPECT(buffer_init(&b, 12, 8, 0, NULL), 0);
+#define PX(x, y) dib_pixels[(y)*12 + (x)]
+        memset(dib_pixels, 0, sizeof dib_pixels);
+        // Tiles from the corner of the area, cut by the area's right and bottom edges.
+        EXPECT(buffer_tile(&b, &pat, 0, 0, 2, 1, 7, 3), 0);
+        EXPECT(PX(2, 1), 1), EXPECT(PX(4, 1), 3), EXPECT(PX(5, 1), 1), EXPECT(PX(8, 1), 1), EXPECT(PX(9, 1), 0);
+        EXPECT(PX(2, 2), 4), EXPECT(PX(2, 3), 1), EXPECT(PX(2, 4), 0), EXPECT(PX(1, 1), 0);
+        EXPECT(b.clip[0], 0), EXPECT(b.clip[2], 12), EXPECT(b.clip[3], 8);  // the clip comes back
+        // An offset into the pattern moves it back: sx 1 starts the tiles one pixel to the left.
+        memset(dib_pixels, 0, sizeof dib_pixels);
+        EXPECT(buffer_tile(&b, &pat, 1, 0, 2, 1, 4, 2), 0);
+        EXPECT(PX(2, 1), 2), EXPECT(PX(3, 1), 3), EXPECT(PX(4, 1), 1), EXPECT(PX(2, 2), 5);
+        // Cut to the clip rectangle as well.
+        memset(dib_pixels, 0, sizeof dib_pixels);
+        buffer_set_clip_2(&b, 3, 0, 2, 8);
+        EXPECT(buffer_tile(&b, &pat, 0, 0, 0, 0, 12, 8), 0);
+        EXPECT(PX(2, 0), 0), EXPECT(PX(3, 0), 1), EXPECT(PX(4, 0), 2), EXPECT(PX(5, 0), 0), EXPECT(b.clip[0], 3);
+        buffer_set_clip_2(&b, 0, 0, 12, 8);
+        // The masked tile puts the pattern over the key colour only.
+        memset(dib_pixels, 9, sizeof dib_pixels);
+        PX(2, 1) = 0;
+        EXPECT(buffer_tile_mask(&b, &pat, 0, 0, 2, 1, 4, 2, 0), 0);
+        EXPECT(PX(2, 1), 1), EXPECT(PX(3, 1), 9);
+        // An area that is nothing: 0 and nothing drawn.
+        EXPECT(buffer_tile(&b, &pat, 0, 0, 20, 20, 4, 4), 0), EXPECT(PX(0, 0), 9);
+        // The sprite tile: 2 by 2 pixels of 5, drawn at its own key colour 9 (not drawn).
+        static uint8_t five[4] = {5, 5, 5, 5};
+        static struct game_sprite sp = {.data = five, .key = 9, .stride = 2, .width = 2, .height = 2, .full_w = 2, .full_h = 2};
+        memset(dib_pixels, 0, sizeof dib_pixels);
+        EXPECT(buffer_tile_2(&b, &sp, 0, 0, 0, 0, 4, 4), 0);
+        EXPECT(PX(0, 0), 5), EXPECT(PX(3, 3), 5), EXPECT(PX(4, 0), 0), EXPECT(PX(0, 4), 0);
+        // A frame: a corner sprite, with and without the pattern inside.
+        static struct game_box_frame fr;
+        memset(&fr, 0, sizeof fr);
+        fr.top_left = &sp;
+        int32_t rect[4] = {1, 1, 9, 7};
+        memset(dib_pixels, 0, sizeof dib_pixels);
+        buffer_box_sprite(&b, rect, &fr);
+        EXPECT(PX(1, 1), 5), EXPECT(PX(2, 2), 5), EXPECT(PX(3, 3), 0);
+        fr.fill = &pat, fr.fill_key = 0;
+        memset(dib_pixels, 0, sizeof dib_pixels);
+        buffer_box_sprite(&b, rect, &fr);
+        EXPECT(PX(8, 6), 3), EXPECT(PX(1, 1), 5), EXPECT(PX(9, 6), 0);  // the pattern covers the corner too, from the origin
+        buffer_box_sprite(&b, NULL, &fr);
+        buffer_dtor(&b);
+        EXPECT(buffer_tile(&b, &pat, 0, 0, 0, 0, 4, 4), 7);
+    }
+
     if (failures) return 1;
     printf("engine_bufobj: ok\n");
     return 0;

@@ -114,6 +114,8 @@ SHADOW_DECLARE_T(void, texture_draw_3, (tex_t * t, buf_t *b, const int32_t *pts,
 SHADOW_DECLARE_T(void, texture_draw_trans_6, (tex_t * t, buf_t *b, const int32_t *pts, int n, const int32_t *uv, int color))
 SHADOW_DECLARE_T(void, texture_draw_upper_threshold_trans_2, (tex_t * t, buf_t *b, const int32_t *pts, int n, const int32_t *uv, int color))
 SHADOW_DECLARE_T(void, texture_draw_coast_2, (tex_t * t, buf_t *b, const int32_t *pts, const int32_t *z, const tex_t *over, const uint8_t *table, int n, const int32_t *uv, int color))
+SHADOW_DECLARE_T(int, texture_extract_2, (tex_t * t, buf_t *b, int x, int y, int w, int h, void *pool))
+SHADOW_DECLARE_T(int, texture_extract, (tex_t * t, buf_t *b, const int32_t *rect, void *unused))
 SHADOW_DECLARE_T(void, texture_draw_4, (tex_t * t, buf_t *b, const int32_t *pts, int32_t *z, int n, const int32_t *uv, int thr, int color))
 
 // ---- Edges ------------------------------------------------------------------------
@@ -848,6 +850,51 @@ void TEX_THIS texture_draw_coast_2(tex_t *t, buf_t *b, const int32_t *pts, const
     coast(&V_COAST_2, t, b, pts, z, over, table, n, uv, color, 1);
 }
 
+// ---- Cutting a texture out of a Buffer -----------------------------------------------------
+//
+// Makes the texture from the rectangle (x, y, w, h) of the Buffer: a block of the game's heap
+// holding the pixels row after row (what it held before is freed, unless it came from a pool),
+// the size, and the corners of the picture for a four-point polygon and an eight-point one
+// (the corners and the middles of the sides, in pixels). 0x10 if there is no Buffer, 3 if the
+// rectangle is past the Buffer, 7 if the corner has no pixels behind it, 4 if memory ran out.
+// A pool, and a Buffer drawing into a DirectDraw surface, are left to the original.
+int TEX_THIS texture_extract_2(tex_t *t, buf_t *b, int x, int y, int w, int h, void *pool) {
+    if (!b) return 0x10;
+    if (b->dd || pool) return orig_texture_extract_2(t, b, x, y, w, h, pool);
+    if (t->data && !t->ready) game_free(t->data), t->data = NULL;
+    t->pitch = 0, t->height = 0, t->ready = 0;
+    if (x + w > b->width || y + h > -b->neg_height) return 3;
+    t->height = h, t->pitch = w;
+    if (x >= b->width || y >= -b->neg_height) return 7;
+    b->base = b->bits;
+    if (!b->base) return 7;
+    b->locks++;
+    const uint8_t *src = b->base + (intptr_t)b->pitch * y + x;
+    t->data = game_mem_get((size_t)h * w);
+    if (!t->data) {
+        t->pitch = 0, t->height = 0, t->ready = 0;
+        unlock_dib(b);
+        return 4;
+    }
+    uint8_t *dst = t->data;
+    for (int r = h; r; r--, dst += w, src += b->pitch) memcpy(dst, src, (size_t)w);
+    unlock_dib(b);
+    int hw = w / 2 - 1, hh = h / 2 - 1;
+    const int32_t uv4[8] = {0, 0, w - 1, 0, w - 1, h - 1, 0, h - 1};
+    const int32_t uv8[16] = {0, 0, hw, 0, w - 1, 0, w - 1, hh, w - 1, h - 1, hw, h - 1, 0, h - 1, 0, hh};
+    memcpy(t->uv4, uv4, sizeof uv4);
+    memcpy(t->uv8, uv8, sizeof uv8);
+    return 0;
+}
+
+// The same for a rectangle (left, top, right, bottom); 0x10 if there is none. (The third
+// argument the game passes is not used.)
+int TEX_THIS texture_extract(tex_t *t, buf_t *b, const int32_t *rect, void *unused) {
+    (void)unused;
+    if (!rect) return 0x10;
+    return texture_extract_2(t, b, rect[0], rect[1], rect[2] - rect[0], rect[3] - rect[1], NULL);
+}
+
 // ---- Shadow checks ----------------------------------------------------------------
 //
 // A check puts back what a fill may write: the buffer object (its lock
@@ -1085,6 +1132,117 @@ static void sweep_fill(buf_t *b, int round) {
     }
 }
 
+// ---- Twin check of extract -------------------------------------------------------------------
+//
+// Extract allocates from the game's heap, which a check can't rewind, so the game's calls run the
+// original in shadow mode and the sweep makes two Buffers and two Textures alike, runs the
+// original on one and ours on the other, and compares every field of the texture (its pixels by
+// content), the Buffer's lock fields and pixels, and the result. The blocks are freed after.
+
+#define PASS_TEX(ret, name, params, args)                                      \
+    static ret TEX_THIS shadow_##name params {                                \
+        if (!hooks_nested && !shadow_bypass()) {                               \
+            stats_##name.calls++;                                              \
+            shadow_tick(TEXTURE);                                              \
+        }                                                                      \
+        return orig_##name args;                                               \
+    }
+PASS_TEX(int, texture_extract_2, (tex_t * t, buf_t *b, int x, int y, int w, int h, void *pool), (t, b, x, y, w, h, pool))
+PASS_TEX(int, texture_extract, (tex_t * t, buf_t *b, const int32_t *rect, void *unused), (t, b, rect, unused))
+
+// A texture as it was before: nothing, pixels of its own from the heap, pixels of a pool's (not
+// to be freed), or a stale size.
+static uint8_t pool_pixels[64];
+static void build_tex(tex_t *t, int variant, int w, int h) {
+    memset(t, 0, sizeof *t);
+    if (variant == 0) return;
+    t->pitch = w, t->height = h;
+    for (int i = 0; i < 16; i++) t->uv4[i % 8] = i, t->uv8[i] = -i;
+    if (variant == 1) t->data = game_mem_get((size_t)w * h), memset(t->data, 7, (size_t)w * h);
+    if (variant == 2) t->data = pool_pixels, t->ready = 1;
+}
+static void free_tex(tex_t *t) {
+    if (t->data && !t->ready && t->data != pool_pixels) game_free(t->data);  // (a failed cut leaves the pool pointer)
+    memset(t, 0, sizeof *t);
+}
+static const char *tex_diff(const tex_t *a, const tex_t *b) {
+    static char msg[100];
+    if (!a->data != !b->data) return "pixels set";
+    if (a->ready != b->ready) return "ready";
+    if (a->pitch != b->pitch || a->height != b->height) return "size";
+    const int32_t *x = a->uv4, *y = b->uv4;  // uv4 and uv8 follow each other
+    for (int i = 0; i < 24; i++)
+        if (x[i] != y[i]) {
+            snprintf(msg, sizeof msg, "field 0x%x = %d, original %d", 0xc + 4 * i, (int)y[i], (int)x[i]);
+            return msg;
+        }
+    if (a->data && !a->ready && memcmp(a->data, b->data, (size_t)a->pitch * a->height)) return "pixel contents";
+    return NULL;
+}
+
+static void buf_start(buf_t *b, uint8_t *pixels, int w, int h, int pitch, int locks) {
+    memset(b, 0, sizeof *b);
+    b->bits = pixels, b->width = w, b->neg_height = -h, b->pitch = pitch;
+    b->locks = locks, b->base = locks ? pixels : NULL;
+}
+
+static void extract_sweep(void) {
+    enum { PAD = 64, PIX = 28 * 20 + 2 * PAD };
+    static buf_t ba, bb;
+    static uint8_t pa[PIX], pb[PIX];
+    static tex_t ta, tb;
+    rng_state = 0x3c6ef372u ^ (uint32_t)*game_turn * 2654435761u;
+    if (!rng_state) rng_state = 1;
+    for (int i = 0; i < 64; i++) pool_pixels[i] = (uint8_t)rnd();
+    for (int round = 0; round < 30; round++) {
+        int W = 4 + rnd_to(20), H = 4 + rnd_to(14), pitch = (W + 3) & ~3;
+        for (int i = 0; i < PIX; i++) pa[i] = (uint8_t)rnd();
+        memcpy(pb, pa, sizeof pb);
+        for (int k = 0; k < 6; k++) {
+            int x, y, w, h;
+            switch (rnd_to(7)) {
+            case 0: x = 0, y = 0, w = W, h = H; break;
+            case 1: w = 1 + rnd_to(W), x = W - w, h = 1 + rnd_to(H), y = H - h; break;
+            case 2: x = 0, y = 0, w = 1 + rnd_to(W), h = 1 + rnd_to(H); break;
+            case 3: x = rnd_to(W + 4) - 2, y = rnd_to(H + 4) - 2, w = 1 + rnd_to(W + 2), h = 1 + rnd_to(H + 2); break;
+            case 4: x = rnd_to(W), y = rnd_to(H), w = 1, h = 1; break;
+            case 5: x = W + rnd_to(3), y = rnd_to(H), w = 1, h = 1; break;  // the corner is past the Buffer
+            default: x = rnd_to(W), y = rnd_to(H), w = 1 + rnd_to(W - x), h = 1 + rnd_to(H - y); break;
+            }
+            int variant = rnd_to(4), locks = rnd_to(4) == 0;
+            int sw = 1 + rnd_to(6), sh = 1 + rnd_to(6);
+            buf_start(&ba, pa + PAD, W, H, pitch, locks), buf_start(&bb, pb + PAD, W, H, pitch, locks);
+            build_tex(&ta, variant, sw, sh), build_tex(&tb, variant, sw, sh);
+            int want = orig_texture_extract_2(&ta, &ba, x, y, w, h, NULL);
+            int got = texture_extract_2(&tb, &bb, x, y, w, h, NULL);
+            const char *d = got != want ? "result" : tex_diff(&ta, &tb);
+            if (!d && (ba.locks != bb.locks || !ba.base != !bb.base)) d = "buffer lock";
+            if (!d && memcmp(pa, pb, sizeof pa)) d = "buffer pixels";
+            if (d) hooks_mismatch(&stats_texture_extract_2, " (%d, %d, %d, %d on %dx%d, start %d): %s", x, y, w, h, W, H, variant, d);
+            free_tex(&ta), free_tex(&tb);
+            // The wrapper takes a rectangle.
+            int32_t rect[4] = {x, y, x + w, y + h};
+            buf_start(&ba, pa + PAD, W, H, pitch, locks), buf_start(&bb, pb + PAD, W, H, pitch, locks);
+            build_tex(&ta, variant, sw, sh), build_tex(&tb, variant, sw, sh);
+            want = orig_texture_extract(&ta, &ba, rect, NULL);
+            got = texture_extract(&tb, &bb, rect, NULL);
+            if (got != want || tex_diff(&ta, &tb) || ba.locks != bb.locks)
+                hooks_mismatch(&stats_texture_extract, " (%d, %d, %d, %d on %dx%d)", x, y, w, h, W, H);
+            free_tex(&ta), free_tex(&tb);
+        }
+    }
+    // No rectangle, no Buffer, and a Buffer with no pixels.
+    buf_start(&ba, NULL, 8, 8, 8, 0), buf_start(&bb, NULL, 8, 8, 8, 0);
+    build_tex(&ta, 1, 2, 2), build_tex(&tb, 1, 2, 2);
+    int want = orig_texture_extract(&ta, &ba, NULL, NULL), got = texture_extract(&tb, &bb, NULL, NULL);
+    if (got != want) hooks_mismatch(&stats_texture_extract, " (no rectangle)");
+    want = orig_texture_extract_2(&ta, NULL, 0, 0, 2, 2, NULL), got = texture_extract_2(&tb, NULL, 0, 0, 2, 2, NULL);
+    if (got != want) hooks_mismatch(&stats_texture_extract_2, " (no buffer)");
+    want = orig_texture_extract_2(&ta, &ba, 0, 0, 2, 2, NULL), got = texture_extract_2(&tb, &bb, 0, 0, 2, 2, NULL);
+    if (got != want || tex_diff(&ta, &tb)) hooks_mismatch(&stats_texture_extract_2, " (no pixels)");
+    free_tex(&ta), free_tex(&tb);
+}
+
 static void texture_sweep(void) {
     static buf_t b;
     static uint8_t pixels[SPITCH * SH + 8];
@@ -1105,6 +1263,7 @@ static void texture_sweep(void) {
     sweep_everything = 0;
     memcpy(S8, saved_scratch, sizeof saved_scratch);
     memcpy(game_tex_tbl, saved_tbl, sizeof saved_tbl);
+    extract_sweep();
     hooks_sweeping = sweeping;
 }
 
@@ -1137,6 +1296,10 @@ static const struct hook texture_hooks[] = {
     // sub esp, 0x78; mov eax, [ebp+0x20]
     HOOK(0x624670, texture_draw_4, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x78, 0x8b, 0x45, 0x20),
     // mov eax, [0x9bb4b4]; push ebx; mov ebx, [esp+0xc]; push ebp; push esi
+    // mov eax, [esp+8]; test eax, eax
+    HOOK(0x6196d0, texture_extract, 0x8b, 0x44, 0x24, 0x08, 0x85, 0xc0),
+    // push ebx, ebp, esi, edi; mov edi, [esp+0x14]
+    HOOK(0x619710, texture_extract_2, 0x53, 0x55, 0x56, 0x57, 0x8b, 0x7c, 0x24, 0x14),
     HOOK(0x624d80, texture_setup_edge, 0xa1, 0xb4, 0xb4, 0x9b, 0x00, 0x53, 0x8b, 0x5c, 0x24, 0x0c, 0x55, 0x56),
     HOOK(0x61fc90, texture_setup_edge_gouraud, 0xa1, 0xb4, 0xb4, 0x9b, 0x00, 0x53, 0x8b, 0x5c, 0x24, 0x0c, 0x55, 0x56),
 };

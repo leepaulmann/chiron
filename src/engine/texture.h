@@ -33,3 +33,8 @@ void TEX_THIS texture_draw_trans_6(struct game_texture *t, struct game_buffer *b
 void TEX_THIS texture_draw_upper_threshold_trans_2(struct game_texture *t, struct game_buffer *b, const int32_t *pts, int n, const int32_t *uv, int color);
 void TEX_THIS texture_draw_coast_2(struct game_texture *t, struct game_buffer *b, const int32_t *pts, const int32_t *z, const struct game_texture *over, const uint8_t *table, int n, const int32_t *uv, int color);
 void TEX_THIS texture_draw_4(struct game_texture *t, struct game_buffer *b, const int32_t *pts, int32_t *z, int n, const int32_t *uv, int threshold, int color);
+
+// Cuts the rectangle of a Buffer out as the texture's pixels (a block of the game's heap) and
+// corner tables; see texture.c. The first takes the rectangle as left, top, width and height.
+int TEX_THIS texture_extract_2(struct game_texture *t, struct game_buffer *b, int x, int y, int w, int h, void *pool);
+int TEX_THIS texture_extract(struct game_texture *t, struct game_buffer *b, const int32_t *rect, void *unused);

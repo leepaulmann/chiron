@@ -1869,11 +1869,24 @@ _Static_assert(sizeof(struct game_sprite) == 0x2c, "layout of the game's Sprite"
 GAME_AT(struct game_sprite, data, 4);
 GAME_AT(struct game_sprite, key, 8);
 GAME_AT(struct game_sprite, stride, 0xc);
+GAME_AT(struct game_sprite, full_w, 0x18);
+GAME_AT(struct game_sprite, full_h, 0x1c);
 GAME_AT(struct game_sprite, width, 0x10);
 GAME_AT(struct game_sprite, height, 0x14);
 GAME_AT(struct game_sprite, left, 0x20);
 GAME_AT(struct game_sprite, top, 0x24);
 GAME_AT(struct game_sprite, shared, 0x28);
+
+// What Buffer_box_sprite draws a frame from: a sprite for each corner and each edge (any may be
+// missing), and a pattern Buffer to tile over the frame and inside it, its key colour the one the
+// pattern shows through.
+struct game_box_frame {
+    struct game_sprite *top_left, *top_right, *bottom_left, *bottom_right;
+    struct game_sprite *top, *bottom, *left, *right;
+    struct game_buffer *fill;
+    int32_t fill_key;
+};
+_Static_assert(sizeof(struct game_box_frame) == 0x28, "layout of the game's frame");
 
 // The scratch memory the sprite drawing code works in: the tables made from
 // the scale (how many pixels each source pixel makes, or how many source
@@ -1923,6 +1936,9 @@ extern int32_t *game_sprite_scale;
 extern float *game_sprite_ratio;
 extern double *game_sprite_max_ratio;
 extern int32_t *game_sprite_min_size;
+// The bytes of picture data the game's Sprites hold (0x9b6618): extract adds what it takes, and a
+// Sprite that frees its data takes it off.
+extern int32_t *game_sprite_bytes;
 
 // ---- Textures (texture.c) -------------------------------------------------------
 

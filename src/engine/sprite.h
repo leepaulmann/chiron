@@ -46,3 +46,8 @@ int SPRITE_THIS sprite_get_clipped_y_table_expand(struct game_sprite *s, const i
 int SPRITE_THIS sprite_get_clipped_x_table_shrink(struct game_sprite *s, const int32_t *orig, const int32_t *clip, int32_t *a3, int32_t *a4, int32_t *a5, int32_t *a6);
 int SPRITE_THIS sprite_get_clipped_y_table_shrink(struct game_sprite *s, const int32_t *orig, const int32_t *clip, int32_t *a3, int32_t *a4, int32_t *a5, int32_t *a6);
 int SPRITE_THIS sprite_change_color(struct game_sprite *s, int from, int to);
+
+// Cutting a sprite out of a Buffer, and copying one (see sprite.c); a pool is left to the original.
+int SPRITE_THIS sprite_extract_2(struct game_sprite *s, struct game_buffer *b, int key, int x, int y, int w, int h, void *pool);
+int SPRITE_THIS sprite_extract(struct game_sprite *s, struct game_buffer *b, int key, const int32_t *rect, void *pool);
+int SPRITE_THIS sprite_copy(struct game_sprite *s, struct game_sprite *dst);

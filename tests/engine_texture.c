@@ -1,6 +1,7 @@
 // Unit test for the Texture polygon fills, on a small made-up DIB buffer and
 // made-up textures: no game files needed.
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "../src/engine/game.h"
@@ -165,6 +166,34 @@ int main(void) {
     reset();
     texture_draw_coast(&st, &b, rect, z0, &over, ctab, 4, rect_uv);
     EXPECT(px(3, 3), 99);
+
+    // Cutting a texture out of the buffer: 6 by 4 pixels from (2, 3), row after row, with the
+    // corner tables for a four-point and an eight-point polygon.
+    {
+        game_mem_get = malloc;
+        game_free = free;
+        struct game_texture cut = {0};
+        reset();
+        for (int i = 0; i < PITCH * H; i++) pixels[i] = (uint8_t)i;
+        EXPECT(texture_extract_2(&cut, &b, 2, 3, 6, 4, NULL), 0);
+        EXPECT(cut.pitch, 6), EXPECT(cut.height, 4), EXPECT(cut.ready, 0);
+        EXPECT(cut.data[0], 3 * PITCH + 2), EXPECT(cut.data[6], 4 * PITCH + 2), EXPECT(cut.data[23], 6 * PITCH + 7);
+        EXPECT(cut.uv4[2], 5), EXPECT(cut.uv4[5], 3), EXPECT(cut.uv4[7], 3), EXPECT(cut.uv4[0], 0);
+        EXPECT(cut.uv8[2], 2), EXPECT(cut.uv8[7], 1), EXPECT(cut.uv8[8], 5), EXPECT(cut.uv8[9], 3), EXPECT(cut.uv8[15], 1);
+        EXPECT(b.locks, 0), EXPECT(b.base == NULL, 1);
+        // By rectangle, over what is there (freed); a missing rectangle or buffer is 0x10, a
+        // rectangle past the buffer 3 (with the old pixels gone), a corner outside 7.
+        int32_t rect[4] = {0, 0, 4, 2};
+        EXPECT(texture_extract(&cut, &b, rect, NULL), 0);
+        EXPECT(cut.pitch, 4), EXPECT(cut.height, 2), EXPECT(cut.data[4], PITCH);
+        EXPECT(texture_extract(&cut, &b, NULL, NULL), 0x10), EXPECT(texture_extract_2(&cut, NULL, 0, 0, 1, 1, NULL), 0x10);
+        EXPECT(texture_extract_2(&cut, &b, 10, 0, 8, 2, NULL), 3), EXPECT(cut.data == NULL, 1), EXPECT(cut.pitch, 0);
+        EXPECT(texture_extract_2(&cut, &b, W, 0, -2, 1, NULL), 7), EXPECT(cut.pitch, -2);
+        // Pixels that belong to a pool are not freed.
+        static uint8_t pool_block[16];
+        struct game_texture pooled = {.data = pool_block, .ready = 1};
+        EXPECT(texture_extract_2(&pooled, &b, 20, 0, 1, 1, NULL), 3), EXPECT(pooled.data == pool_block, 1);
+    }
 
     if (failures) return 1;
     puts("engine_texture ok");

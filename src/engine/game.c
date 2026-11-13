@@ -129,6 +129,7 @@ const char *game_flying_gap, *game_flying_pad_height, *game_flying_pad, *game_fl
 struct game_sprite_scratch *game_sprite_scratch;
 int32_t *game_sprite_scale, *game_sprite_min_size;
 float *game_sprite_ratio;
+int32_t *game_sprite_bytes;
 double *game_sprite_max_ratio;
 uint8_t *game_tex_scratch;
 int32_t *game_tex_tbl;
@@ -1394,6 +1395,7 @@ void game_bind(struct pe_image *exe) {
     game_sprite_scratch = (struct game_sprite_scratch *)code_at(exe, 0x9b3ab8);
     game_sprite_scale = (int32_t *)code_at(exe, 0x696d18);
     game_sprite_ratio = (float *)code_at(exe, 0x9b6624);
+    game_sprite_bytes = (int32_t *)code_at(exe, 0x9b6618);
     game_sprite_max_ratio = (double *)code_at(exe, 0x66fdc8);
     game_sprite_min_size = (int32_t *)code_at(exe, 0x9b661c);
     game_tex_scratch = code_at(exe, 0x9bb490);

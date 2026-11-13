@@ -25,10 +25,11 @@
 // draw_dest_unk2_2 (5e81bc) is draw_4 with a different test per pixel; its
 // unrolled loops disagree with each other (see OP_UNK2_FIRST), and the game
 // was not seen to call it, so the sweep is what checks it.
-// What is left to the original: the constructor, close, init, extract, copy,
+// What is left to the original: the constructor, close, init,
 // create_blank, save and load (they allocate from the game's heap or read and
 // write files), the draws of a sprite loaded by name (they go through the
 // game's resource code), and the draws into a DirectDraw surface.
+// Extract and copy allocate too, so they are checked on twin sprites (see below), and a pool is left to the original.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -522,6 +523,157 @@ int SPRITE_THIS sprite_change_color(sprite_t *s, int from, int to) {
     return 0;
 }
 
+// ---- Cutting a sprite out of a Buffer, and copying one ------------------------------
+
+SHADOW_DECLARE_T(int, sprite_extract_2, (sprite_t * s, buffer_t *b, int key, int x, int y, int w, int h, void *pool))
+SHADOW_DECLARE_T(int, sprite_extract, (sprite_t * s, buffer_t *b, int key, const int32_t *rect, void *pool))
+SHADOW_DECLARE_T(int, sprite_copy, (sprite_t * s, sprite_t *dst))
+
+// The Buffer's pixel pointer for (x, y), locking it (the original's Buffer method: 0, and no
+// lock, if the point is past the right or bottom edge or there are no pixels).
+static uint8_t *lock_at(buffer_t *b, int x, int y) {
+    if (x >= b->width || y >= -b->neg_height) return NULL;
+    b->base = b->bits;
+    if (!b->base) return NULL;
+    b->locks++;
+    return b->base + (intptr_t)b->pitch * y + x;
+}
+static void unlock_n(buffer_t *b, int n) {
+    b->locks -= n;
+    if (b->locks <= 0) b->base = NULL, b->locks = 0;
+}
+
+// What a sprite lets go of before it holds something new: its pixels, unless they belong to
+// another (the bytes the game counts for sprites go down with them), and its name; then the
+// size, margins and sharing are cleared (the key colour and a shared pixel pointer stay).
+static void release(sprite_t *s) {
+    if (!s->shared && s->data) {
+        *game_sprite_bytes -= s->height * s->width;
+        game_free(s->data);
+        s->data = NULL;
+    }
+    if (s->name) game_free(s->name), s->name = NULL;
+    s->stride = s->width = s->height = s->full_w = s->full_h = s->left = s->top = s->shared = 0;
+}
+
+// Cuts the rectangle (x, y, w, h) of the Buffer out as a sprite: the rows and columns around
+// the edge that are all the key colour are left off (top and left say how many), and the
+// pixels that remain are copied to a block of the game's heap. 3 for no Buffer, an empty
+// rectangle or one past the Buffer; 7 if the corner has no pixels behind it; 9 if every pixel
+// is the key colour (the sprite is then empty); 4 if memory ran out. The early returns of 3
+// leave the Buffer locked, as the original does. A sprite pool, and a Buffer drawing into a
+// DirectDraw surface, are left to the original.
+int SPRITE_THIS sprite_extract_2(sprite_t *s, buffer_t *b, int key, int x, int y, int w, int h, void *pool) {
+    if (!b) return 3;
+    if (b->dd || pool) return orig_sprite_extract_2(s, b, key, x, y, w, h, pool);
+    b->base = b->bits;
+    if (!b->base) return 3;
+    b->locks++;
+    release(s);
+    if (!w || !h) return 3;
+    if (x + w > b->width || y + h > -b->neg_height) return 3;
+    uint8_t k = (uint8_t)key;
+    s->key = k;
+    s->full_w = w;
+    s->full_h = h;
+    uint8_t *p = lock_at(b, x, y);
+    if (!p) {
+        unlock_n(b, 1);
+        return 7;
+    }
+    int pitch = b->pitch;
+    // Rows at the top that are all the key colour.
+    s->top = 0;
+    for (int r = 0; r < h; r++) {
+        for (int c = 0; c < w; c++)
+            if (p[c] != k) goto top_done;
+        p += pitch;
+        s->top++;
+    }
+top_done:
+    if (s->top == h) {
+        unlock_n(b, 2);
+        return 9;
+    }
+    unlock_n(b, 1);
+    uint8_t *last = lock_at(b, x, y + h - 1);
+    s->height = h - s->top;
+    // Rows at the bottom.
+    {
+        uint8_t *q = last - 1;
+        for (int r = 0; r < h; r++) {
+            for (int c = w; c > 0; c--)
+                if (q[c] != k) goto bottom_done;
+            q -= pitch;
+            s->height--;
+        }
+    }
+bottom_done:
+    if (!s->height) {
+        unlock_n(b, 2);
+        return 9;
+    }
+    unlock_n(b, 1);
+    // Columns at the left: the fewest key pixels at the start of any row that is left.
+    uint8_t *row = lock_at(b, x, y + s->top);
+    s->left = w;
+    for (int r = s->height; r > 0; r--, row += pitch) {
+        int c = 0;
+        while (c < w && row[c] == k) c++;
+        if (c < s->left) s->left = c;
+    }
+    unlock_n(b, 1);
+    // And at the right.
+    row = lock_at(b, x, y + s->top);
+    int right = w;
+    for (int r = s->height; r > 0; r--, row += pitch) {
+        int n = 0;
+        for (int c = w; c > 0 && row[c - 1] == k; c--) n++;
+        if (n < right) right = n;
+    }
+    unlock_n(b, 1);
+    s->width = w - s->left - right;
+    if (!s->width) {
+        unlock_n(b, 1);
+        return 9;
+    }
+    s->data = game_mem_get((size_t)s->width * s->height);
+    if (!s->data) {
+        s->stride = s->width = s->height = s->full_w = s->full_h = s->left = s->top = s->shared = 0;
+        unlock_n(b, 1);
+        return 4;
+    }
+    s->shared = 0;
+    *game_sprite_bytes += s->width * s->height;
+    uint8_t *src = lock_at(b, x + s->left, y + s->top);
+    uint8_t *dst = s->data;
+    for (int r = s->height; r; r--, dst += s->width, src += pitch) memcpy(dst, src, (size_t)s->width);
+    s->stride = s->width;
+    unlock_n(b, 2);
+    return 0;
+}
+
+// The same for a rectangle (left, top, right, bottom); 3 if there is none.
+int SPRITE_THIS sprite_extract(sprite_t *s, buffer_t *b, int key, const int32_t *rect, void *pool) {
+    if (!rect) return 3;
+    return sprite_extract_2(s, b, key, rect[0], rect[1], rect[2] - rect[0], rect[3] - rect[1], pool);
+}
+
+// Copies this sprite's picture to a block of the game's heap for `dst`, which lets go of what it
+// held. 7 if this sprite has no picture, 4 if memory ran out. (The bytes the game counts for
+// sprites are not added to, as the original does not; they are taken off for what `dst` held.)
+int SPRITE_THIS sprite_copy(sprite_t *s, sprite_t *dst) {
+    if (!s->data) return 7;
+    release(dst);
+    size_t n = (size_t)s->height * s->stride;
+    dst->data = game_mem_get(n);
+    if (!dst->data) return 4;
+    memcpy(dst->data, s->data, n);
+    dst->width = s->width, dst->height = s->height, dst->full_w = s->full_w, dst->full_h = s->full_h;
+    dst->left = s->left, dst->top = s->top, dst->key = s->key, dst->shared = 0, dst->stride = s->stride;
+    return 0;
+}
+
 // ---- Shadow checks -------------------------------------------------------------
 //
 // A check puts back what a draw may write: the buffer object (its lock
@@ -743,6 +895,195 @@ static void reset_sprite(sprite_t *s, uint8_t *data) {
     s->left = rnd_to(8) - 2, s->top = rnd_to(8) - 2;
 }
 
+// ---- Twin check of extract and copy ---------------------------------------------------------
+//
+// These allocate from the game's heap, which a check can't rewind, so the game's calls run the
+// original in shadow mode and the sweep makes two Buffers and two Sprites alike, runs the
+// original on one set and ours on the other, and compares: every field of the sprite (a heap
+// block by whether it is set, and by its contents), the Buffer's lock fields and pixels, the
+// bytes the game counts for sprites, and the return value. The blocks are freed after.
+
+#define PASS_SPR(ret, name, params, args)                                      \
+    static ret THISCALL shadow_##name params {                                \
+        if (!hooks_nested && !shadow_bypass()) {                               \
+            stats_##name.calls++;                                              \
+            shadow_tick(SPRITE);                                               \
+        }                                                                      \
+        return orig_##name args;                                               \
+    }
+PASS_SPR(int, sprite_extract_2, (sprite_t * s, buffer_t *b, int key, int x, int y, int w, int h, void *pool), (s, b, key, x, y, w, h, pool))
+PASS_SPR(int, sprite_extract, (sprite_t * s, buffer_t *b, int key, const int32_t *rect, void *pool), (s, b, key, rect, pool))
+PASS_SPR(int, sprite_copy, (sprite_t * s, sprite_t *dst), (s, dst))
+
+// A sprite as it was before: nothing; its own pixels and a name from the heap; pixels that belong
+// to another; or only a stale size and key. `n` pixels of `v`.
+struct spr_start {
+    int variant, w, h, key, v;
+};
+static uint8_t shared_pixels[64];
+static void build_sprite(sprite_t *s, const struct spr_start *st) {
+    memset(s, 0, sizeof *s);
+    s->key = (uint8_t)st->key;
+    if (st->variant == 0) return;
+    s->width = st->w, s->stride = st->w, s->height = st->h, s->full_w = st->w + 1, s->full_h = st->h + 1;
+    s->left = 1, s->top = 2;
+    if (st->variant == 2) {
+        s->data = shared_pixels, s->shared = 1;
+        return;
+    }
+    if (st->variant == 3) return;
+    s->data = game_mem_get((size_t)st->w * st->h);
+    memset(s->data, st->v, (size_t)st->w * st->h);
+    s->name = game_mem_get(8);
+    memcpy(s->name, "sprite", 7);
+    *game_sprite_bytes += st->w * st->h;
+}
+static void free_sprite(sprite_t *s) {
+    if (!s->shared && s->data && s->data != shared_pixels) game_free(s->data);  // (a failed cut leaves the shared pointer)
+    if (s->name) game_free(s->name);
+    memset(s, 0, sizeof *s);
+}
+
+// NULL if the twins match.
+static const char *sprite_diff(const sprite_t *a, const sprite_t *b) {
+    static char msg[100];
+    if (!a->name != !b->name) return "name set";
+    if (!a->data != !b->data) return "pixels set";
+    if (a->key != b->key) return "key";
+    const int32_t *x = &a->stride, *y = &b->stride;
+    for (int i = 0; i < 8; i++)
+        if (x[i] != y[i]) {
+            snprintf(msg, sizeof msg, "field 0x%x = %d, original %d", 0xc + 4 * i, (int)y[i], (int)x[i]);
+            return msg;
+        }
+    if (a->data && a->shared && a->data != b->data) return "shared pixels";
+    if (a->data && !a->shared && memcmp(a->data, b->data, (size_t)a->width * a->height)) return "pixel contents";
+    return NULL;
+}
+
+static void buffer_start(buffer_t *b, uint8_t *pixels, int w, int h, int locks) {
+    memset(b, 0, sizeof *b);
+    b->bits = pixels;
+    b->width = w, b->neg_height = -h, b->pitch = (w + 3) & ~3;
+    b->full[2] = w, b->full[3] = h, b->clip[2] = w, b->clip[3] = h;
+    b->locks = locks, b->base = locks ? pixels : NULL;
+}
+
+enum { PAD = 64, PIX = 28 * 20 + 2 * PAD };
+
+static void extract_sweep(void) {
+    static buffer_t ba, bb;
+    static uint8_t pa[PIX], pb[PIX];
+    static sprite_t sa, sb, ca, cb;
+    int32_t saved_bytes = *game_sprite_bytes;
+    rng_state = 0x1f3d5b79u ^ (uint32_t)*game_turn * 2654435761u;
+    if (!rng_state) rng_state = 1;
+    for (int i = 0; i < 64; i++) shared_pixels[i] = (uint8_t)rnd();
+    for (int round = 0; round < 40; round++) {
+        int W = 4 + rnd_to(20), H = 4 + rnd_to(14), pitch = (W + 3) & ~3, k0 = rnd_to(4);
+        for (int i = 0; i < PIX; i++) pa[i] = (uint8_t)(rnd_to(2) ? k0 : rnd_to(5));
+        // A picture of a few pixels in a field of the key colour, or all key, or no key at all.
+        int mode = rnd_to(6);
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) {
+                uint8_t *p = pa + PAD + y * pitch + x;
+                if (mode == 0) *p = (uint8_t)k0;
+                else if (mode == 1) *p = (uint8_t)(k0 + 1 + rnd_to(3));
+                else *p = (uint8_t)k0;
+            }
+        if (mode >= 2) {
+            int bx = rnd_to(W), by = rnd_to(H), bw = 1 + rnd_to(W - bx), bh = 1 + rnd_to(H - by);
+            for (int y = by; y < by + bh; y++)
+                for (int x = bx; x < bx + bw; x++) pa[PAD + y * pitch + x] = (uint8_t)(k0 + 1 + rnd_to(3));
+        }
+        memcpy(pb, pa, sizeof pb);
+        for (int k = 0; k < 6; k++) {
+            int x, y, w, h;
+            switch (rnd_to(9)) {
+            case 0: x = 0, y = 0, w = W, h = H; break;
+            case 1: x = 0, y = rnd_to(H), w = 1 + rnd_to(W), h = 1 + rnd_to(H - y); break;
+            case 2: w = 1 + rnd_to(W), x = W - w, y = rnd_to(H), h = 1 + rnd_to(H - y); break;
+            case 3: x = rnd_to(W), y = 0, w = 1 + rnd_to(W - x), h = 1 + rnd_to(H); break;
+            case 4: h = 1 + rnd_to(H), y = H - h, x = rnd_to(W), w = 1 + rnd_to(W - x); break;
+            case 5: x = rnd_to(W + 4) - 2, y = rnd_to(H + 4) - 2, w = rnd_to(W + 3), h = rnd_to(H + 3); break;
+            case 6: x = rnd_to(W), y = rnd_to(H), w = 1, h = 1; break;
+            case 7: x = rnd_to(W), y = rnd_to(H), w = 0, h = 1 + rnd_to(3); break;
+            default: x = rnd_to(W), y = rnd_to(H), w = 1 + rnd_to(W - x), h = 1 + rnd_to(H - y); break;
+            }
+            int key = rnd_to(5) ? k0 : rnd_to(6);
+            struct spr_start st = {rnd_to(4), 1 + rnd_to(6), 1 + rnd_to(6), rnd_to(5), rnd_to(256)};
+            int locks = rnd_to(4) == 0;
+            buffer_start(&ba, pa + PAD, W, H, locks), buffer_start(&bb, pb + PAD, W, H, locks);
+            build_sprite(&sa, &st);
+            int32_t before = *game_sprite_bytes;
+            build_sprite(&sb, &st);
+            int32_t built = *game_sprite_bytes;
+            *game_sprite_bytes = built;
+            int want = orig_sprite_extract_2(&sa, &ba, key, x, y, w, h, NULL);
+            int32_t bytes_a = *game_sprite_bytes;
+            *game_sprite_bytes = built;
+            int got = sprite_extract_2(&sb, &bb, key, x, y, w, h, NULL);
+            int32_t bytes_b = *game_sprite_bytes;
+            (void)before;
+            const char *d = NULL;
+            char msg[120];
+            if (got != want) snprintf(msg, sizeof msg, "= %d, original %d", got, want), d = msg;
+            else if (bytes_a != bytes_b) snprintf(msg, sizeof msg, "sprite bytes %d, original %d", bytes_b, bytes_a), d = msg;
+            else if ((d = sprite_diff(&sa, &sb))) {}
+            else if (ba.locks != bb.locks || !ba.base != !bb.base) d = "buffer lock";
+            else if (memcmp(pa, pb, sizeof pa)) d = "buffer pixels";
+            if (d) hooks_mismatch(&stats_sprite_extract_2, " (%d, %d, %d, %d, %d on %dx%d, start %d): %s", key, x, y, w, h, W, H, st.variant, d);
+            // The wrapper takes a rectangle.
+            int32_t rect[4] = {x, y, x + w, y + h};
+            free_sprite(&sa), free_sprite(&sb);
+            *game_sprite_bytes = saved_bytes;
+            build_sprite(&sa, &st), build_sprite(&sb, &st);
+            built = *game_sprite_bytes;
+            buffer_start(&ba, pa + PAD, W, H, locks), buffer_start(&bb, pb + PAD, W, H, locks);
+            want = orig_sprite_extract(&sa, &ba, key, rect, NULL);
+            *game_sprite_bytes = built;
+            got = sprite_extract(&sb, &bb, key, rect, NULL);
+            if (got != want || sprite_diff(&sa, &sb) || ba.locks != bb.locks)
+                hooks_mismatch(&stats_sprite_extract, " (%d, %d, %d, %d, %d on %dx%d): %s", key, x, y, w, h, W, H,
+                               got != want ? "result" : "sprite or buffer");
+            // Copy what was cut to another sprite that held something.
+            struct spr_start dt = {rnd_to(4), 1 + rnd_to(6), 1 + rnd_to(6), rnd_to(5), rnd_to(256)};
+            build_sprite(&ca, &dt), build_sprite(&cb, &dt);
+            built = *game_sprite_bytes;
+            want = orig_sprite_copy(&sa, &ca);
+            bytes_a = *game_sprite_bytes;
+            *game_sprite_bytes = built;
+            got = sprite_copy(&sb, &cb);
+            if (got != want || bytes_a != *game_sprite_bytes || (d = sprite_diff(&ca, &cb)))
+                hooks_mismatch(&stats_sprite_copy, " (copy of %dx%d over start %d): %s", sa.width, sa.height, dt.variant,
+                               got != want ? "result" : d ? d : "sprite bytes");
+            free_sprite(&sa), free_sprite(&sb), free_sprite(&ca), free_sprite(&cb);
+            *game_sprite_bytes = saved_bytes;
+            // Both of the buffers back as they were.
+            memcpy(pb, pa, sizeof pb);
+        }
+    }
+    // A Buffer with no pixels, and none at all.
+    {
+        struct spr_start st = {1, 3, 3, 1, 5};
+        buffer_start(&ba, pa + PAD, 8, 8, 0), buffer_start(&bb, pb + PAD, 8, 8, 0);
+        ba.bits = bb.bits = NULL;
+        build_sprite(&sa, &st), build_sprite(&sb, &st);
+        int want = orig_sprite_extract_2(&sa, &ba, 1, 0, 0, 4, 4, NULL), got = sprite_extract_2(&sb, &bb, 1, 0, 0, 4, 4, NULL);
+        if (got != want || sprite_diff(&sa, &sb)) hooks_mismatch(&stats_sprite_extract_2, " (no pixels)");
+        want = orig_sprite_extract_2(&sa, NULL, 1, 0, 0, 4, 4, NULL), got = sprite_extract_2(&sb, NULL, 1, 0, 0, 4, 4, NULL);
+        if (got != want) hooks_mismatch(&stats_sprite_extract_2, " (no buffer)");
+        free_sprite(&sa), free_sprite(&sb);
+        struct spr_start none = {0, 0, 0, 0, 0};
+        build_sprite(&sa, &none), build_sprite(&sb, &none);
+        want = orig_sprite_copy(&sa, &ca), got = sprite_copy(&sb, &cb);
+        if (got != want) hooks_mismatch(&stats_sprite_copy, " (empty source)");
+        want = orig_sprite_extract(&sa, &ba, 1, NULL, NULL), got = sprite_extract(&sb, &bb, 1, NULL, NULL);
+        if (got != want) hooks_mismatch(&stats_sprite_extract, " (no rectangle)");
+    }
+    *game_sprite_bytes = saved_bytes;
+}
+
 static void sprite_sweep(void) {
     static buffer_t b;
     static sprite_t sp;
@@ -840,6 +1181,7 @@ static void sprite_sweep(void) {
     memcpy(SC, saved_scratch, sizeof saved_scratch);
     memcpy(game_sprite_scale, saved_scale, sizeof saved_scale);
     *game_sprite_ratio = saved_ratio;
+    extract_sweep();
     hooks_sweeping = sweeping;
 }
 
@@ -872,5 +1214,11 @@ static const struct hook sprite_hooks[] = {
     HOOK(0x5eacff, sprite_get_clipped_y_table_shrink, 0x8b, 0x54, 0x24, 0x08, 0x56, 0x8b, 0x74, 0x24, 0x08, 0x57),
     // push ebp; mov ebp, esp; sub esp, 0xc; mov eax, [ecx+4]; push esi
     HOOK(0x5ead9f, sprite_change_color, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x0c, 0x8b, 0x41, 0x04, 0x56),
+    // mov eax, [esp+0xc]; test eax, eax
+    HOOK(0x5e3960, sprite_extract, 0x8b, 0x44, 0x24, 0x0c, 0x85, 0xc0),
+    // sub esp, 8; push ebx, ebp, esi; mov esi, ecx
+    HOOK(0x5e39a0, sprite_extract_2, 0x83, 0xec, 0x08, 0x53, 0x55, 0x56, 0x8b, 0xf1),
+    // push ebx, ebp, esi, edi; mov edi, ecx; xor ebp, ebp
+    HOOK(0x5eae4f, sprite_copy, 0x53, 0x55, 0x56, 0x57, 0x8b, 0xf9, 0x33, 0xed),
 };
 struct hook_module sprite_module = {"sprite", sprite_hooks, HOOK_COUNT(sprite_hooks), sprite_sweep, NULL, -1};

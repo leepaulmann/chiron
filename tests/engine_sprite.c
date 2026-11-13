@@ -1,6 +1,7 @@
 // Unit test for the Sprite drawing functions, on a small made-up DIB buffer and
 // made-up sprites: no game files needed.
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "../src/engine/game.h"
@@ -199,6 +200,49 @@ int main(void) {
     EXPECT(sprite_change_color(&spr, 9, 4), 0);
     EXPECT(data[1], 4), EXPECT(data[5], 4), EXPECT(data[0], 1);
     EXPECT(sprite_change_color(&empty, 9, 4), 7);
+
+    // Cutting a sprite out of the buffer: a 3 by 2 picture of 1 2 3 / 4 key 5 in a field of the
+    // key colour 7, from a rectangle that has two empty rows above it, three columns to the right
+    // of it, and so on.
+    {
+        static int32_t bytes;
+        game_sprite_bytes = &bytes;
+        game_mem_get = malloc;
+        game_free = free;
+        struct game_sprite out;
+        memset(&out, 0, sizeof out);
+        reset();
+        memset(pixels, 7, sizeof pixels);
+        static const uint8_t pic[6] = {1, 2, 3, 4, 7, 5};
+        for (int i = 0; i < 6; i++) pixels[(3 + i / 3) * PITCH + 4 + i % 3] = pic[i];
+        EXPECT(sprite_extract_2(&out, &b, 7, 2, 1, 8, 6, NULL), 0);
+        EXPECT(out.left, 2), EXPECT(out.top, 2), EXPECT(out.width, 3), EXPECT(out.height, 2), EXPECT(out.stride, 3);
+        EXPECT(out.full_w, 8), EXPECT(out.full_h, 6), EXPECT(out.key, 7), EXPECT(out.shared, 0);
+        EXPECT(memcmp(out.data, pic, 6), 0), EXPECT(bytes, 6);
+        EXPECT(b.locks, 0), EXPECT(b.base == NULL, 1);
+        // The same by rectangle, over the sprite that is there: its pixels are let go.
+        int32_t rect[4] = {2, 1, 10, 7};
+        EXPECT(sprite_extract(&out, &b, 7, rect, NULL), 0);
+        EXPECT(out.width, 3), EXPECT(bytes, 6), EXPECT(sprite_extract(&out, &b, 7, NULL, NULL), 3);
+        // A copy has its own block, and does not count in the bytes.
+        struct game_sprite cp;
+        memset(&cp, 0, sizeof cp);
+        EXPECT(sprite_copy(&out, &cp), 0);
+        EXPECT(cp.data != out.data, 1), EXPECT(memcmp(cp.data, pic, 6), 0), EXPECT(cp.left, 2), EXPECT(cp.key, 7);
+        EXPECT(bytes, 6);
+        EXPECT(sprite_copy(&empty, &cp), 7);
+        free(cp.data);
+        // Nothing but the key colour: 9, no pixels. A rectangle past the buffer: 3, and the
+        // buffer is left locked. No pixels behind the corner: 7.
+        EXPECT(sprite_extract_2(&out, &b, 7, 0, 0, 3, 1, NULL), 9);
+        EXPECT(out.data == NULL, 1), EXPECT(bytes, 0), EXPECT(b.locks, 0);
+        EXPECT(sprite_extract_2(&out, &b, 7, 6, 0, 8, 2, NULL), 3);
+        EXPECT(b.locks, 1), EXPECT(sprite_extract_2(&out, &b, 7, 0, 0, 0, 2, NULL), 3);
+        b.locks = 0;
+        EXPECT(sprite_extract_2(&out, NULL, 7, 0, 0, 2, 2, NULL), 3);
+        b.bits = NULL;
+        EXPECT(sprite_extract_2(&out, &b, 7, 0, 0, 2, 2, NULL), 3);
+    }
 
     if (failures) return 1;
     puts("sprite: all passed");
