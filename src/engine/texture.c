@@ -114,6 +114,9 @@ SHADOW_DECLARE_T(void, texture_draw_3, (tex_t * t, buf_t *b, const int32_t *pts,
 SHADOW_DECLARE_T(void, texture_draw_trans_6, (tex_t * t, buf_t *b, const int32_t *pts, int n, const int32_t *uv, int color))
 SHADOW_DECLARE_T(void, texture_draw_upper_threshold_trans_2, (tex_t * t, buf_t *b, const int32_t *pts, int n, const int32_t *uv, int color))
 SHADOW_DECLARE_T(void, texture_draw_coast_2, (tex_t * t, buf_t *b, const int32_t *pts, const int32_t *z, const tex_t *over, const uint8_t *table, int n, const int32_t *uv, int color))
+SHADOW_DECLARE_T(void *, texture_ctor, (tex_t * t))
+SHADOW_DECLARE_T(void, texture_dtor, (tex_t * t))
+SHADOW_DECLARE_T(void, texture_close, (tex_t * t))
 SHADOW_DECLARE_T(int, texture_extract_2, (tex_t * t, buf_t *b, int x, int y, int w, int h, void *pool))
 SHADOW_DECLARE_T(int, texture_extract, (tex_t * t, buf_t *b, const int32_t *rect, void *unused))
 SHADOW_DECLARE_T(void, texture_draw_4, (tex_t * t, buf_t *b, const int32_t *pts, int32_t *z, int n, const int32_t *uv, int thr, int color))
@@ -858,6 +861,22 @@ void TEX_THIS texture_draw_coast_2(tex_t *t, buf_t *b, const int32_t *pts, const
 // (the corners and the middles of the sides, in pixels). 0x10 if there is no Buffer, 3 if the
 // rectangle is past the Buffer, 7 if the corner has no pixels behind it, 4 if memory ran out.
 // A pool, and a Buffer drawing into a DirectDraw surface, are left to the original.
+// A new Texture holds nothing (its corner coordinates are left as they were). Returns itself.
+void *TEX_THIS texture_ctor(tex_t *t) {
+    t->data = NULL, t->pitch = 0, t->height = 0, t->ready = 0;
+    return t;
+}
+// The picture is freed unless it is another's (extract sets `ready` for a picture it was given),
+// and then the pointer is cleared; one that is not freed is left in the pointer.
+void TEX_THIS texture_dtor(tex_t *t) {
+    if (t->data && !t->ready) game_free(t->data), t->data = NULL;
+}
+// The same, and the size and `ready` are cleared whatever happened.
+void TEX_THIS texture_close(tex_t *t) {
+    texture_dtor(t);
+    t->pitch = 0, t->height = 0, t->ready = 0;
+}
+
 int TEX_THIS texture_extract_2(tex_t *t, buf_t *b, int x, int y, int w, int h, void *pool) {
     if (!b) return 0x10;
     if (b->dd || pool) return orig_texture_extract_2(t, b, x, y, w, h, pool);
@@ -1147,6 +1166,9 @@ static void sweep_fill(buf_t *b, int round) {
         }                                                                      \
         return orig_##name args;                                               \
     }
+PASS_TEX(void *, texture_ctor, (tex_t * t), (t))
+PASS_TEX(void, texture_dtor, (tex_t * t), (t))
+PASS_TEX(void, texture_close, (tex_t * t), (t))
 PASS_TEX(int, texture_extract_2, (tex_t * t, buf_t *b, int x, int y, int w, int h, void *pool), (t, b, x, y, w, h, pool))
 PASS_TEX(int, texture_extract, (tex_t * t, buf_t *b, const int32_t *rect, void *unused), (t, b, rect, unused))
 
@@ -1231,6 +1253,26 @@ static void extract_sweep(void) {
             free_tex(&ta), free_tex(&tb);
         }
     }
+    // The lifecycle: a Texture of every kind of start, made new, closed or deleted (with its
+    // corner coordinates left as they were: both start from the same bytes).
+    for (int round = 0; round < 24; round++) {
+        int variant = rnd_to(4), w = 1 + rnd_to(6), h = 1 + rnd_to(6);
+        build_tex(&ta, variant, w, h), build_tex(&tb, variant, w, h);
+        int kind = rnd_to(3);
+        void *wa = NULL, *gb = NULL;
+        struct hook_stats *st = kind == 0 ? &stats_texture_ctor : kind == 1 ? &stats_texture_dtor : &stats_texture_close;
+        if (kind == 0) {
+            wa = orig_texture_ctor(&ta);
+            gb = texture_ctor(&tb);
+            if ((wa == &ta) != (gb == &tb)) hooks_mismatch(st, " (result)");
+        } else if (kind == 1) {
+            orig_texture_dtor(&ta), texture_dtor(&tb);
+        } else {
+            orig_texture_close(&ta), texture_close(&tb);
+        }
+        if (tex_diff(&ta, &tb)) hooks_mismatch(st, " (start %d): %s", variant, tex_diff(&ta, &tb));
+        free_tex(&ta), free_tex(&tb);
+    }
     // No rectangle, no Buffer, and a Buffer with no pixels.
     buf_start(&ba, NULL, 8, 8, 8, 0), buf_start(&bb, NULL, 8, 8, 8, 0);
     build_tex(&ta, 1, 2, 2), build_tex(&tb, 1, 2, 2);
@@ -1268,6 +1310,11 @@ static void texture_sweep(void) {
 }
 
 static const struct hook texture_hooks[] = {
+    // mov eax, ecx; xor ecx, ecx; mov [eax], ecx
+    HOOK(0x619650, texture_ctor, 0x8b, 0xc1, 0x33, 0xc9, 0x89, 0x08),
+    // push esi; mov esi, ecx; mov eax, [esi]; test eax, eax
+    HOOK(0x619660, texture_dtor, 0x56, 0x8b, 0xf1, 0x8b, 0x06, 0x85, 0xc0),
+    HOOK(0x619690, texture_close, 0x56, 0x8b, 0xf1, 0x8b, 0x06, 0x85, 0xc0),
     // push ebp; mov ebp, esp; sub esp, 0x84; push ebx; push esi; mov esi, [ebp+8]
     HOOK(0x6198e0, texture_draw_trans, 0x55, 0x8b, 0xec, 0x81, 0xec, 0x84, 0x00, 0x00, 0x00, 0x53, 0x56, 0x8b, 0x75, 0x08),
     // push ebp; mov ebp, esp; sub esp, 0x84; push ebx; push esi; push edi

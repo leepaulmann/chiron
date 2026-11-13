@@ -244,6 +244,35 @@ int main(void) {
         EXPECT(sprite_extract_2(&out, &b, 7, 0, 0, 2, 2, NULL), 3);
     }
 
+    // The lifecycle: new, named, closed (the key colour stays), the bytes counted along.
+    {
+        static int32_t bytes;
+        game_sprite_bytes = &bytes;
+        game_mem_get = malloc;
+        game_free = free;
+        bytes = 100;
+        struct game_sprite sp;
+        memset(&sp, 0x5a, sizeof sp);
+        EXPECT(sprite_ctor(&sp) == &sp, 1), EXPECT(bytes, 100 + 0x2c), EXPECT(sp.key, 9), EXPECT(sp.name == NULL, 1);
+        EXPECT(sp.data == NULL, 1), EXPECT(sp.width, 0), EXPECT(sp.shared, 0), EXPECT(sp.left, 0);
+        bytes = 100;
+        EXPECT(sprite_init(&sp, NULL, 1, 1), 0x10);
+        EXPECT(sprite_init(&sp, "tiles.pcx", 12, 7), 0);
+        EXPECT(strcmp(sp.name, "tiles.pcx"), 0), EXPECT(sp.width, 12), EXPECT(sp.stride, 12), EXPECT(sp.full_w, 12);
+        EXPECT(sp.height, 7), EXPECT(sp.full_h, 7), EXPECT(sp.data == NULL, 1), EXPECT(bytes, 100);
+        sp.key = 3;
+        sp.data = malloc(6), sp.width = 3, sp.height = 2, bytes = 106;
+        EXPECT(sprite_init(&sp, "x", 1, 2), 0);  // the pixels go, and the bytes with them
+        EXPECT(bytes, 100), EXPECT(sp.data == NULL, 1), EXPECT(strcmp(sp.name, "x"), 0);
+        sprite_close(&sp);
+        EXPECT(sp.name == NULL, 1), EXPECT(sp.width, 0), EXPECT(sp.full_h, 0), EXPECT(sp.key, 3);
+        // Pixels that are another's are neither freed nor counted, and the pointer stays.
+        static uint8_t other[4];
+        sp.data = other, sp.shared = 1, sp.width = 2, sp.height = 2;
+        sprite_close(&sp);
+        EXPECT(sp.data == other, 1), EXPECT(sp.shared, 0), EXPECT(bytes, 100);
+    }
+
     if (failures) return 1;
     puts("sprite: all passed");
     return 0;

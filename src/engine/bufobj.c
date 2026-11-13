@@ -40,6 +40,7 @@ typedef struct game_buffer buffer_t;
 SHADOW_DECLARE_T(void *, buffer_ctor, (buffer_t * b))
 SHADOW_DECLARE_T(void, buffer_dtor, (buffer_t * b))
 SHADOW_DECLARE_T(void, buffer_close, (buffer_t * b))
+SHADOW_DECLARE_T(void, buffer_clear_links, (buffer_t * b))
 SHADOW_DECLARE_T(int, buffer_init, (buffer_t * b, int w, int h, int flags, void **surface))
 SHADOW_DECLARE_T(int, buffer_resize, (buffer_t * b, int w, int h))
 SHADOW_DECLARE_T(int, buffer_set_clip, (buffer_t * b, const int32_t *rect))
@@ -182,6 +183,15 @@ void THISCALL buffer_close(buffer_t *b) {
     *at(b, BITS) = 0;
     reset_text(b);
     *at(b, FLAGS) = 0;
+}
+
+// Forget the hot spots and the blocks of heap hung on the Buffer (20 of them): the spot list is
+// made new, as init does it, and every block is freed. Surfaces make no difference to it.
+void THISCALL buffer_clear_links(buffer_t *b) {
+    game_spot_init(at(b, SPOTS), 0x28);
+    *at(b, SPOT_COUNT) = 0;
+    for (int i = 0; i < 20; i++)
+        if (*at(b, HEAP + 4 * i)) game_free((void *)(intptr_t)*at(b, HEAP + 4 * i)), *at(b, HEAP + 4 * i) = 0;
 }
 
 void THISCALL buffer_dtor(buffer_t *b) {
@@ -430,6 +440,7 @@ void THISCALL buffer_box_sprite(buffer_t *b, const int32_t *rect, const struct g
 PASS_THROUGH(void *, buffer_ctor, (buffer_t * b), (b))
 PASS_THROUGH(void, buffer_dtor, (buffer_t * b), (b))
 PASS_THROUGH(void, buffer_close, (buffer_t * b), (b))
+PASS_THROUGH(void, buffer_clear_links, (buffer_t * b), (b))
 PASS_THROUGH(int, buffer_init, (buffer_t * b, int w, int h, int flags, void **surface), (b, w, h, flags, surface))
 PASS_THROUGH(int, buffer_resize, (buffer_t * b, int w, int h), (b, w, h))
 PASS_THROUGH(int, buffer_set_clip, (buffer_t * b, const int32_t *rect), (b, rect))
@@ -685,6 +696,18 @@ static void bufobj_sweep(void) {
                 want = orig_buffer_resize(&a, rw, rh), got = buffer_resize(&b, rw, rh);
                 twin_check(&stats_buffer_resize, &a, &b, got, want, "resize");
             }
+            if (k == 2) {
+                // Blocks of heap hung on both, in some of the slots, and a count of spots.
+                for (int i = 0; i < 20; i++)
+                    if (rnd_to(3) == 0) {
+                        void *x = game_mem_get(16), *y = game_mem_get(16);
+                        *at(&a, HEAP + 4 * i) = (int32_t)(intptr_t)x, *at(&b, HEAP + 4 * i) = (int32_t)(intptr_t)y;
+                    }
+                *at(&a, SPOT_COUNT) = *at(&b, SPOT_COUNT) = rnd_to(4);
+                orig_buffer_clear_links(&a);
+                buffer_clear_links(&b);
+                twin_check(&stats_buffer_clear_links, &a, &b, 0, 0, "clear_links");
+            }
             if (k == 4) {
                 orig_buffer_close(&a);
                 buffer_close(&b);
@@ -708,6 +731,8 @@ static const struct hook bufobj_hooks[] = {
     HOOK(0x5d7410, buffer_dtor, 0x6a, 0xff, 0x68, 0x76, 0x2b, 0x66, 0x00),
     HOOK(0x5d7470, buffer_close, 0x53, 0x55, 0x56, 0x8b, 0xf1, 0x57),       // push ebx, ebp, esi; mov esi, ecx
     HOOK(0x5d7670, buffer_init, 0x83, 0xec, 0x74, 0x8b, 0x84, 0x24, 0x80, 0x00, 0x00, 0x00),
+    // push esi; mov esi, ecx; push edi; push 0x28
+    HOOK(0x5def90, buffer_clear_links, 0x56, 0x8b, 0xf1, 0x57, 0x6a, 0x28),
     HOOK(0x5d79c0, buffer_resize, 0x56, 0x8b, 0xf1, 0x8b, 0x06),            // push esi; mov esi, ecx; mov eax, [esi]
     HOOK(0x5d8000, buffer_set_clip, 0x83, 0xec, 0x40, 0x53, 0x55, 0x56),
     HOOK(0x5d8200, buffer_set_clip_2, 0x8b, 0x44, 0x24, 0x08, 0x83, 0xec, 0x10),

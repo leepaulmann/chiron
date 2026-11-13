@@ -192,6 +192,32 @@ int main(void) {
     EXPECT(buffer_copy_full(&b, &sb, W + 1, 0, 0, 0, 1, 1), 0);
     b.bits = NULL;
     EXPECT(buffer_copy_full(&b, &sb, 0, 0, 0, 0, 1, 1), 7);
+    // Locking the pixels for the caller, and the address of one.
+    reset();
+    EXPECT(buffer_get_data(&b) == (int)(intptr_t)pixels, 1), EXPECT(b.locks, 1), EXPECT(b.base == pixels, 1);
+    EXPECT(buffer_get_data_2(&b, 3, 2) == (int)(intptr_t)(pixels + 2 * PITCH + 3), 1), EXPECT(b.locks, 2);
+    EXPECT(buffer_get_data_2(&b, W, 0), 0), EXPECT(buffer_get_data_2(&b, 0, H), 0), EXPECT(b.locks, 2);
+    buffer_free_data(&b, 1);
+    EXPECT(b.locks, 1), EXPECT(b.base == pixels, 1);
+    buffer_free_data(&b, 1);
+    EXPECT(b.locks, 0), EXPECT(b.base == NULL, 1);
+    b.bits = NULL;
+    EXPECT(buffer_get_data(&b), 0), EXPECT(b.locks, 0), EXPECT(buffer_get_data_2(&b, 1, 1), 0), EXPECT(b.locks, 0);
+    buffer_free_data(&b, 3);
+    EXPECT(b.locks, 0);
+    reset();
+    // The wrappers copy from the place they copy to.
+    reset();
+    for (int i = 0; i < PITCH * H; i++) pixels[i] = (uint8_t)(i + 1);
+    memset(spix, 0, sizeof spix);
+    EXPECT(buffer_copy(&b, &sb, 2, 1, 3, 2), 0);
+    EXPECT(spix[1 * 8 + 2], px(2, 1)), EXPECT(spix[2 * 8 + 4], px(4, 2)), EXPECT(spix[1 * 8 + 5], 0), EXPECT(spix[0], 0);
+    memset(spix, 0, sizeof spix);
+    const int32_t crect[4] = {1, 2, 4, 4};
+    EXPECT(buffer_copy_2(&b, &sb, crect), 0);
+    EXPECT(spix[2 * 8 + 1], px(1, 2)), EXPECT(spix[3 * 8 + 3], px(3, 3)), EXPECT(spix[2 * 8 + 4], 0), EXPECT(spix[4 * 8 + 1], 0);
+    EXPECT(buffer_copy(&b, NULL, 0, 0, 1, 1), 3);
+    EXPECT(buffer_poly_stub(&b, 1, 2, 3), 8), EXPECT(buffer_poly_stub_2(&b, 1, 2, 3, 4), 8);
 
     // The masked copy replaces the key colour in the other buffer with this buffer's pixels.
     reset();
@@ -259,6 +285,8 @@ int main(void) {
     EXPECT(b.locks, 0), EXPECT(b.base == NULL, 1);
     EXPECT(POLY(0x38), 4), EXPECT(POLY(0x08), 5), EXPECT(POLY(0x40), PITCH), EXPECT(POLY(0x44), W - 1), EXPECT(POLY(0x48), H - 1);
     EXPECT(POLY(0x10), 2), EXPECT(POLY(0x3c), 4), EXPECT(POLY(0x0c) != 0, 1);
+    reset();
+    EXPECT(buffer_poly(&b, sq, 4, 5), 0), EXPECT(count(5), 6 * 4);
     // The last column and the last row of the clip rectangle are not drawn.
     reset();
     b.clip[0] = 3, b.clip[1] = 2, b.clip[2] = 6, b.clip[3] = 5;

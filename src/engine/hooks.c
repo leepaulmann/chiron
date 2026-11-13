@@ -17,13 +17,14 @@ int hooks_nested;
 
 // Each module defines its hooks and sweep.
 extern struct hook_module sprite_module;
+extern struct hook_module bufdraw_module;
 extern struct hook_module texture_module;
 extern struct hook_module bufobj_module;
 extern struct hook_module font_module;
 extern struct hook_module tech_module, map_module, mapgen_module, base_module, production_module, upkeep_module, social_module,
     faction_module, strategy_module, build_module, veh_module, spot_module, council_module, path_module, score_module, move_module, combat_module, events_module, ai_module, setup_module, probe_module, save_module, rules_module, diplomacy_module, palette_module, buffer_module, text_module, quiet_module;
 static struct hook_module *const modules[] = {&tech_module, &map_module, &mapgen_module, &base_module, &production_module,
-                                              &upkeep_module, &social_module, &faction_module, &strategy_module, &build_module, &veh_module, &spot_module, &council_module, &path_module, &score_module, &move_module, &combat_module, &events_module, &ai_module, &setup_module, &probe_module, &save_module, &rules_module, &diplomacy_module, &palette_module, &buffer_module, &text_module, &sprite_module, &texture_module, &bufobj_module, &font_module, &quiet_module};
+                                              &upkeep_module, &social_module, &faction_module, &strategy_module, &build_module, &veh_module, &spot_module, &council_module, &path_module, &score_module, &move_module, &combat_module, &events_module, &ai_module, &setup_module, &probe_module, &save_module, &rules_module, &diplomacy_module, &palette_module, &buffer_module, &text_module, &sprite_module, &texture_module, &bufobj_module, &bufdraw_module, &font_module, &quiet_module};
 
 #define N_MODULES (sizeof(modules) / sizeof(modules[0]))
 

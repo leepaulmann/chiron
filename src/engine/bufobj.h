@@ -20,3 +20,4 @@ int __attribute__((thiscall)) buffer_tile_mask(struct game_buffer *b, struct gam
 int __attribute__((thiscall)) buffer_tile(struct game_buffer *b, struct game_buffer *src, int sx, int sy, int x, int y, int w, int h);
 int __attribute__((thiscall)) buffer_tile_2(struct game_buffer *b, struct game_sprite *spr, int sx, int sy, int x, int y, int w, int h);
 void __attribute__((thiscall)) buffer_box_sprite(struct game_buffer *b, const int32_t *rect, const struct game_box_frame *f);
+void __attribute__((thiscall)) buffer_clear_links(struct game_buffer *b);

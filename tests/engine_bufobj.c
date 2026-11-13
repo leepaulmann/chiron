@@ -105,6 +105,17 @@ int main(void) {
     EXPECT(b.clip[2], 0);  // emptied
     EXPECT(buffer_set_clip(&b, NULL), 3);
 
+    // Clearing the links: the spot list is made new, its count 0, every block hung on it freed.
+    {
+        int inits = spot_inits, before = frees;
+        AT(&b, 0x4ac) = 5, AT(&b, 0x4bc) = 0x1000, AT(&b, 0x4bc + 4 * 7) = 0x2000, AT(&b, 0x4bc + 4 * 19) = 0x3000;
+        buffer_clear_links(&b);
+        EXPECT(spot_inits, inits + 1), EXPECT(AT(&b, 0x4b8), 0x28), EXPECT(AT(&b, 0x4ac), 0), EXPECT(frees, before + 3);
+        EXPECT(AT(&b, 0x4bc), 0), EXPECT(AT(&b, 0x4bc + 4 * 7), 0), EXPECT(AT(&b, 0x4bc + 4 * 19), 0);
+        buffer_clear_links(&b);
+        EXPECT(frees, before + 3);
+    }
+
     // A new size closes and starts again.
     EXPECT(buffer_resize(&b, 8, 8), 0);
     EXPECT(dcs, 1), EXPECT(dibs, 2), EXPECT(b.pitch, 8), EXPECT(deleted, 2);

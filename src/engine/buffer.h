@@ -31,5 +31,13 @@ int __attribute__((thiscall)) buffer_change_color_2(struct game_buffer *b, const
 int __attribute__((thiscall)) buffer_change_color_3(struct game_buffer *b, int x, int y, int w, int h, int from, int to);
 // Flat polygon fills (plain C calls): a polygon of n corners (x, y pairs) in one colour, or
 // with each pixel looked up in a table.
+int __attribute__((thiscall)) buffer_copy(struct game_buffer *d, struct game_buffer *s, int x, int y, int w, int h);
+int __attribute__((thiscall)) buffer_copy_2(struct game_buffer *d, struct game_buffer *s, const int32_t *rect);
+int __attribute__((thiscall)) buffer_get_data(struct game_buffer *b);
+int __attribute__((thiscall)) buffer_get_data_2(struct game_buffer *b, int x, int y);
+void __attribute__((thiscall)) buffer_free_data(struct game_buffer *b, int n);
+int __attribute__((thiscall)) buffer_poly(struct game_buffer *b, const int32_t *pts, int n, int color);
+int __attribute__((thiscall)) buffer_poly_stub(struct game_buffer *b, int a1, int a2, int a3);
+int __attribute__((thiscall)) buffer_poly_stub_2(struct game_buffer *b, int a1, int a2, int a3, int a4);
 int buffer_polygon(struct game_buffer *b, const int32_t *pts, int n, int color);
 int buffer_polygon_dest(struct game_buffer *b, const int32_t *pts, int n, const uint8_t *table);

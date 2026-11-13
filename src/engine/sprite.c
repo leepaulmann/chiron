@@ -528,6 +528,9 @@ int SPRITE_THIS sprite_change_color(sprite_t *s, int from, int to) {
 SHADOW_DECLARE_T(int, sprite_extract_2, (sprite_t * s, buffer_t *b, int key, int x, int y, int w, int h, void *pool))
 SHADOW_DECLARE_T(int, sprite_extract, (sprite_t * s, buffer_t *b, int key, const int32_t *rect, void *pool))
 SHADOW_DECLARE_T(int, sprite_copy, (sprite_t * s, sprite_t *dst))
+SHADOW_DECLARE_T(void *, sprite_ctor, (sprite_t * s))
+SHADOW_DECLARE_T(void, sprite_close, (sprite_t * s))
+SHADOW_DECLARE_T(int, sprite_init, (sprite_t * s, const char *name, int w, int h))
 
 // The Buffer's pixel pointer for (x, y), locking it (the original's Buffer method: 0, and no
 // lock, if the point is past the right or bottom edge or there are no pixels).
@@ -554,6 +557,35 @@ static void release(sprite_t *s) {
     }
     if (s->name) game_free(s->name), s->name = NULL;
     s->stride = s->width = s->height = s->full_w = s->full_h = s->left = s->top = s->shared = 0;
+}
+
+// A new sprite holds nothing; its key colour is 9. The game counts 0x2c bytes for the sprite itself.
+void *SPRITE_THIS sprite_ctor(sprite_t *s) {
+    s->name = NULL;
+    *game_sprite_bytes += 0x2c;
+    s->data = NULL;
+    s->stride = s->width = s->height = s->full_w = s->full_h = s->left = s->top = 0;
+    s->key = 9;
+    s->shared = 0;
+    return s;
+}
+// Lets go of the pixels (unless they belong to another) and the name, and clears the size,
+// margins and sharing. The key colour stays, and so does a shared pixel pointer.
+void SPRITE_THIS sprite_close(sprite_t *s) { release(s); }
+// Makes the sprite one with a name only: whatever it held is let go, the name is copied to a block
+// of the game's heap, and the sizes given are noted but no pixels made (a sprite "loaded by name"
+// is drawn through the game's resource code). 0x10 for no name, 4 if the heap gave nothing.
+int SPRITE_THIS sprite_init(sprite_t *s, const char *name, int w, int h) {
+    if (!name) return 0x10;
+    release(s);
+    size_t n = strlen(name) + 1;
+    s->name = game_mem_get(n);
+    if (!s->name) return 4;
+    s->name[0] = 0;
+    strcpy(s->name, name);
+    s->stride = s->width = s->full_w = w;
+    s->height = s->full_h = h;
+    return 0;
 }
 
 // Cuts the rectangle (x, y, w, h) of the Buffer out as a sprite: the rows and columns around
@@ -682,7 +714,8 @@ int SPRITE_THIS sprite_copy(sprite_t *s, sprite_t *dst) {
 // are named here; for a sweep's scratch buffer everything is, to catch a
 // stray write as well.
 
-static int sweep_everything;
+int sprite_sweep_everything;
+#define sweep_everything sprite_sweep_everything
 
 // The scratch, less four words (0x9b3ac0, 0x9b3ac4, 0x9b3ad0, 0x9b53e4): the
 // original's dest draws keep a loop counter, a jump address into their
@@ -735,6 +768,9 @@ static void writes_draw(struct hook_writes *w, const sprite_t *s, buffer_t *b, i
     writes_pixels(w, b, c[0], c[1], c[2], c[3]);
 }
 
+// For the Buffer draws (bufdraw.c), which are checked on what the sprite draw they make would write.
+void sprite_writes_draw(struct hook_writes *w, const sprite_t *s, buffer_t *b, int x, int y) { writes_draw(w, s, b, x, y); }
+
 #define DETAIL game_sprite_scale[0], game_sprite_scale[1], s->width, s->height, s->left, s->top, b ? b->clip[0] : 0, b ? b->clip[1] : 0, b ? b->clip[2] : 0, b ? b->clip[3] : 0
 #define SPR_WRITER(fn, params, args, writes, fmt, ...)                       \
     SHADOW_WRITER_BODY(int, fn, params, args, writes, fmt, __VA_ARGS__)      \
@@ -781,6 +817,9 @@ static void writes_wrapped(struct hook_writes *w, const sprite_t *s, buffer_t *b
     game_sprite_scale[0] = num, game_sprite_scale[1] = den;
     writes_draw(w, s, b, x, y);
     game_sprite_scale[0] = n0, game_sprite_scale[1] = d0;
+}
+void sprite_writes_wrapped(struct hook_writes *w, const sprite_t *s, buffer_t *b, int x, int y, int num, int den) {
+    writes_wrapped(w, s, b, x, y, num, den);
 }
 #define WRAP_FMT "%d, %d, %d scale %d/%d sprite %dx%d+%d+%d clip %d,%d,%d,%d"
 #define WDETAIL num, den, s->width, s->height, s->left, s->top, b ? b->clip[0] : 0, b ? b->clip[1] : 0, b ? b->clip[2] : 0, b ? b->clip[3] : 0
@@ -911,6 +950,9 @@ static void reset_sprite(sprite_t *s, uint8_t *data) {
         }                                                                      \
         return orig_##name args;                                               \
     }
+PASS_SPR(void *, sprite_ctor, (sprite_t * s), (s))
+PASS_SPR(void, sprite_close, (sprite_t * s), (s))
+PASS_SPR(int, sprite_init, (sprite_t * s, const char *name, int w, int h), (s, name, w, h))
 PASS_SPR(int, sprite_extract_2, (sprite_t * s, buffer_t *b, int key, int x, int y, int w, int h, void *pool), (s, b, key, x, y, w, h, pool))
 PASS_SPR(int, sprite_extract, (sprite_t * s, buffer_t *b, int key, const int32_t *rect, void *pool), (s, b, key, rect, pool))
 PASS_SPR(int, sprite_copy, (sprite_t * s, sprite_t *dst), (s, dst))
@@ -1063,6 +1105,53 @@ static void extract_sweep(void) {
             memcpy(pb, pa, sizeof pb);
         }
     }
+    // The lifecycle: ctor on the same garbage, close and init on sprites of every start (with a name
+    // too, whatever the start).
+    for (int round = 0; round < 40; round++) {
+        struct spr_start st = {rnd_to(4), 1 + rnd_to(6), 1 + rnd_to(6), rnd_to(5), rnd_to(256)};
+        int kind = rnd_to(3);
+        if (kind == 0) {  // the same stale bytes in both
+            memset(&sa, 0x5a, sizeof sa), memset(&sb, 0x5a, sizeof sb);
+            int32_t before = *game_sprite_bytes;
+            void *wa = orig_sprite_ctor(&sa);
+            int32_t bytes_a = *game_sprite_bytes;
+            *game_sprite_bytes = before;
+            void *gb = sprite_ctor(&sb);
+            if (memcmp(&sa, &sb, sizeof sa) || (wa == &sa) != (gb == &sb) || bytes_a != *game_sprite_bytes)
+                hooks_mismatch(&stats_sprite_ctor, " (bytes %d, original %d)", (int)*game_sprite_bytes, (int)bytes_a);
+            *game_sprite_bytes = before;
+            memset(&sa, 0, sizeof sa), memset(&sb, 0, sizeof sb);
+            continue;
+        }
+        build_sprite(&sa, &st);
+        build_sprite(&sb, &st);
+        if (!sa.name && rnd_to(2)) {  // a name on a sprite that has none, to be let go
+            sa.name = game_mem_get(6), sb.name = game_mem_get(6);
+            memcpy(sa.name, "named", 6), memcpy(sb.name, "named", 6);
+        }
+        int32_t built = *game_sprite_bytes;
+        const char *nm = rnd_to(8) == 0 ? NULL : rnd_to(2) ? "tiles" : "a longer sprite name.pcx";
+        int w = rnd_to(40), h = rnd_to(40), want = 0, got = 0, init = kind == 2;
+        if (init) {
+            want = orig_sprite_init(&sa, nm, w, h);
+        } else {
+            orig_sprite_close(&sa);
+        }
+        int32_t bytes_a = *game_sprite_bytes;
+        *game_sprite_bytes = built;
+        if (init) {
+            got = sprite_init(&sb, nm, w, h);
+        } else {
+            sprite_close(&sb);
+        }
+        const char *d = got != want ? "result" : bytes_a != *game_sprite_bytes ? "sprite bytes" : sprite_diff(&sa, &sb);
+        if (!d && init && sa.name && strcmp(sa.name, sb.name)) d = "name";
+        if (d)
+            hooks_mismatch(init ? &stats_sprite_init : &stats_sprite_close, " (start %d, name %s): %s", st.variant,
+                           nm ? nm : "none", d);
+        free_sprite(&sa), free_sprite(&sb);
+        *game_sprite_bytes = saved_bytes;
+    }
     // A Buffer with no pixels, and none at all.
     {
         struct spr_start st = {1, 3, 3, 1, 5};
@@ -1212,6 +1301,12 @@ static const struct hook sprite_hooks[] = {
     // mov edx, [esp+8]; push esi; mov esi, [esp+8]; push edi
     HOOK(0x5eac6f, sprite_get_clipped_x_table_shrink, 0x8b, 0x54, 0x24, 0x08, 0x56, 0x8b, 0x74, 0x24, 0x08, 0x57),
     HOOK(0x5eacff, sprite_get_clipped_y_table_shrink, 0x8b, 0x54, 0x24, 0x08, 0x56, 0x8b, 0x74, 0x24, 0x08, 0x57),
+    // mov eax, ecx; xor ecx, ecx; mov [eax], ecx; mov edx, [0x9b6618]
+    HOOK(0x5e37e0, sprite_ctor, 0x8b, 0xc1, 0x33, 0xc9, 0x89, 0x08),
+    // push esi; mov esi, ecx; push edi; xor edi, edi; cmp [esi+0x28], edi
+    HOOK(0x5e3820, sprite_close, 0x56, 0x8b, 0xf1, 0x57, 0x33, 0xff, 0x39, 0x7e, 0x28),
+    // push ebx, esi, edi; mov edi, [esp+0x10]; xor ebx, ebx
+    HOOK(0x5e3890, sprite_init, 0x53, 0x56, 0x57, 0x8b, 0x7c, 0x24, 0x10, 0x33, 0xdb),
     // push ebp; mov ebp, esp; sub esp, 0xc; mov eax, [ecx+4]; push esi
     HOOK(0x5ead9f, sprite_change_color, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x0c, 0x8b, 0x41, 0x04, 0x56),
     // mov eax, [esp+0xc]; test eax, eax

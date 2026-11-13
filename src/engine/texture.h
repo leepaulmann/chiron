@@ -38,3 +38,8 @@ void TEX_THIS texture_draw_4(struct game_texture *t, struct game_buffer *b, cons
 // corner tables; see texture.c. The first takes the rectangle as left, top, width and height.
 int TEX_THIS texture_extract_2(struct game_texture *t, struct game_buffer *b, int x, int y, int w, int h, void *pool);
 int TEX_THIS texture_extract(struct game_texture *t, struct game_buffer *b, const int32_t *rect, void *unused);
+
+// A Texture made new, deleted (its picture freed unless it is another's) and closed (and its size cleared too).
+void *TEX_THIS texture_ctor(struct game_texture *t);
+void TEX_THIS texture_dtor(struct game_texture *t);
+void TEX_THIS texture_close(struct game_texture *t);

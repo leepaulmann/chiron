@@ -51,3 +51,14 @@ int SPRITE_THIS sprite_change_color(struct game_sprite *s, int from, int to);
 int SPRITE_THIS sprite_extract_2(struct game_sprite *s, struct game_buffer *b, int key, int x, int y, int w, int h, void *pool);
 int SPRITE_THIS sprite_extract(struct game_sprite *s, struct game_buffer *b, int key, const int32_t *rect, void *pool);
 int SPRITE_THIS sprite_copy(struct game_sprite *s, struct game_sprite *dst);
+
+// What the draw of a sprite writes, for a check of a function that draws through one (bufdraw.c).
+struct hook_writes;
+extern int sprite_sweep_everything;
+void sprite_writes_draw(struct hook_writes *w, const struct game_sprite *s, struct game_buffer *b, int x, int y);
+void sprite_writes_wrapped(struct hook_writes *w, const struct game_sprite *s, struct game_buffer *b, int x, int y, int num, int den);
+
+// A sprite made new (key colour 9), closed (what it held let go) and made one with a name only.
+void *SPRITE_THIS sprite_ctor(struct game_sprite *s);
+void SPRITE_THIS sprite_close(struct game_sprite *s);
+int SPRITE_THIS sprite_init(struct game_sprite *s, const char *name, int w, int h);

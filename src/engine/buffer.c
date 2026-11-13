@@ -64,6 +64,14 @@ SHADOW_DECLARE_T(int, buffer_put_pixel, (buffer_t * b, int x, int y, int color))
 SHADOW_DECLARE_T(int, buffer_fill_rect, (buffer_t * b, const int32_t *rect, int color))
 SHADOW_DECLARE_T(int, buffer_fill_all, (buffer_t * b, int color))
 SHADOW_DECLARE_T(int, buffer_fill, (buffer_t * b, int x, int y, int w, int h, int color))
+SHADOW_DECLARE_T(int, buffer_copy, (buffer_t * d, buffer_t *s, int x, int y, int w, int h))
+SHADOW_DECLARE_T(int, buffer_copy_2, (buffer_t * d, buffer_t *s, const int32_t *rect))
+SHADOW_DECLARE_T(int, buffer_get_data, (buffer_t * b))
+SHADOW_DECLARE_T(int, buffer_get_data_2, (buffer_t * b, int x, int y))
+SHADOW_DECLARE_T(void, buffer_free_data, (buffer_t * b, int n))
+SHADOW_DECLARE_T(int, buffer_poly, (buffer_t * b, const int32_t *pts, int n, int color))
+SHADOW_DECLARE_T(int, buffer_poly_stub, (buffer_t * b, int a1, int a2, int a3))
+SHADOW_DECLARE_T(int, buffer_poly_stub_2, (buffer_t * b, int a1, int a2, int a3, int a4))
 
 // A horizontal line from x1 up to and including x2 (either way round; one
 // pixel long draws nothing), clipped. Dotted, only every other pixel from
@@ -734,6 +742,51 @@ int buffer_polygon_dest(buffer_t *b, const int32_t *pts, int n, const uint8_t *t
     return poly_fill(b, pts, n, (uint32_t)(uintptr_t)table, 1);
 }
 
+// The copy of a rectangle, from the same place in `s` as it goes to here: buffer_copy_full with
+// its source corner the same as its own.
+int __attribute__((thiscall)) buffer_copy(buffer_t *d, buffer_t *s, int x, int y, int w, int h) {
+    return buffer_copy_full(d, s, x, y, x, y, w, h);
+}
+// The same for a rectangle (left, top, right, bottom) given by its corners.
+int __attribute__((thiscall)) buffer_copy_2(buffer_t *d, buffer_t *s, const int32_t *rect) {
+    return buffer_copy_full(d, s, rect[0], rect[1], rect[0], rect[1], rect[2] - rect[0], rect[3] - rect[1]);
+}
+// Lock the pixels for the caller: the address of the first pixel, or 0 with none. (The address
+// is returned as an int, which is what it is in the 32-bit game.) A DIB's pixels are always there:
+// a lock only counts, and the original's draws count the same way.
+int __attribute__((thiscall)) buffer_get_data(buffer_t *b) {
+    if (b->dd) return orig_buffer_get_data(b);
+    b->base = b->bits;
+    if (b->bits) b->locks++;
+    return (int)(intptr_t)b->bits;
+}
+// The address of the pixel at (x, y), locking the pixels as get_data does; 0 if the pixel is
+// beyond the right or bottom edge (not checked for the left or top), or there are no pixels.
+int __attribute__((thiscall)) buffer_get_data_2(buffer_t *b, int x, int y) {
+    if (x >= b->width || y >= -b->neg_height) return 0;
+    if (b->dd) return orig_buffer_get_data_2(b, x, y);
+    b->base = b->bits;
+    if (!b->bits) return 0;
+    b->locks++;
+    return (int)((uintptr_t)b->base + (uintptr_t)(b->pitch * y) + (uintptr_t)x);
+}
+// Let go of `n` locks: the pixels are no longer the caller's once the count is not above 0.
+void __attribute__((thiscall)) buffer_free_data(buffer_t *b, int n) {
+    if (b->dd) {
+        orig_buffer_free_data(b, n);
+        return;
+    }
+    b->locks -= n;
+    if (b->locks <= 0) b->base = NULL, b->locks = 0;
+}
+// The flat polygon fill as a method.
+int __attribute__((thiscall)) buffer_poly(buffer_t *b, const int32_t *pts, int n, int color) {
+    return buffer_polygon(b, pts, n, color);
+}
+// Two methods the game leaves empty: they answer 8 and do nothing (no Buffer is read).
+int __attribute__((thiscall)) buffer_poly_stub(buffer_t *b, int a1, int a2, int a3) { return 8; }
+int __attribute__((thiscall)) buffer_poly_stub_2(buffer_t *b, int a1, int a2, int a3, int a4) { return 8; }
+
 // ---- Shadow checks -----------------------------------------------------------
 //
 // A check puts back what a call may write: the object (its lock fields) and
@@ -918,6 +971,44 @@ POLY_WRITER(buffer_polygon, (buffer_t * b, const int32_t *pts, int n, int color)
 POLY_WRITER(buffer_polygon_dest, (buffer_t * b, const int32_t *pts, int n, const uint8_t *table), (b, pts, n, table), "%d, %d",
             n, table != NULL)
 
+// The lock functions write the object's lock fields.
+BUF_WRITER(int, buffer_get_data, (buffer_t * b), (b), hooks_writes_add(&w_, (void *)b, sizeof *b), "%d", b->locks)
+BUF_WRITER(int, buffer_get_data_2, (buffer_t * b, int x, int y), (b, x, y), hooks_writes_add(&w_, (void *)b, sizeof *b),
+           "%d, %d, locks %d", x, y, b->locks)
+BUF_WRITER(void, buffer_free_data, (buffer_t * b, int n), (b, n), hooks_writes_add(&w_, (void *)b, sizeof *b),
+           "%d, locks %d", n, b->locks)
+BUF2_WRITER(int, buffer_copy, (buffer_t * d, buffer_t *s, int x, int y, int w, int h), (d, s, x, y, w, h),
+            writes_mask(&w_, d, s, x, y, x, y, w, h), s == d, "%d, %d, %d, %d", x, y, w, h)
+BUF2_WRITER(int, buffer_copy_2, (buffer_t * d, buffer_t *s, const int32_t *rect), (d, s, rect),
+            writes_mask(&w_, d, s, rect[0], rect[1], rect[0], rect[1], rect[2] - rect[0], rect[3] - rect[1]), s == d,
+            "%d, %d, %d, %d", rect[0], rect[1], rect[2], rect[3])
+SHADOW_WRITER_BODY(int, buffer_poly, (buffer_t * b, const int32_t *pts, int n, int color), (b, pts, n, color),
+                   writes_poly(&w_, b, pts, n), "%d, %d", n, color)
+static int THISCALL shadow_buffer_poly(buffer_t *b, const int32_t *pts, int n, int color) {
+    if (hooks_nested || (b && b->dd)) return orig_buffer_poly(b, pts, n, color);
+    if (shadow_bypass()) return buffer_poly(b, pts, n, color);
+    stats_buffer_poly.calls++;
+    shadow_tick(BUFFER);
+    return check_buffer_poly(b, pts, n, color);
+}
+// The stubs write nothing; the check is of the answer.
+SHADOW_WRITER_BODY(int, buffer_poly_stub, (buffer_t * b, int a1, int a2, int a3), (b, a1, a2, a3), (void)0, "%d", a1)
+static int THISCALL shadow_buffer_poly_stub(buffer_t *b, int a1, int a2, int a3) {
+    if (hooks_nested) return orig_buffer_poly_stub(b, a1, a2, a3);
+    if (shadow_bypass()) return buffer_poly_stub(b, a1, a2, a3);
+    stats_buffer_poly_stub.calls++;
+    shadow_tick(BUFFER);
+    return check_buffer_poly_stub(b, a1, a2, a3);
+}
+SHADOW_WRITER_BODY(int, buffer_poly_stub_2, (buffer_t * b, int a1, int a2, int a3, int a4), (b, a1, a2, a3, a4), (void)0, "%d", a1)
+static int THISCALL shadow_buffer_poly_stub_2(buffer_t *b, int a1, int a2, int a3, int a4) {
+    if (hooks_nested) return orig_buffer_poly_stub_2(b, a1, a2, a3, a4);
+    if (shadow_bypass()) return buffer_poly_stub_2(b, a1, a2, a3, a4);
+    stats_buffer_poly_stub_2.calls++;
+    shadow_tick(BUFFER);
+    return check_buffer_poly_stub_2(b, a1, a2, a3, a4);
+}
+
 // ---- Sweep -------------------------------------------------------------------
 
 enum { SW = 61, SH = 40, SPITCH = 64 };  // not a multiple of 4 wide, so the ragged ends are used
@@ -1025,6 +1116,19 @@ static void sweep_polygons(buffer_t *b, int k, int color) {
     }
     check_buffer_polygon(b, NULL, n, color);
     check_buffer_polygon_dest(b, pts, 0, table);
+    check_buffer_poly(b, pts, n, color);
+    check_buffer_poly(b, NULL, n, color);
+    // The locks, with the Buffer locked already or not, with and without pixels.
+    for (int k = 0; k < 4; k++) {
+        check_buffer_get_data(b);
+        check_buffer_get_data_2(b, coord(SW), coord(SH));
+        check_buffer_get_data_2(b, 0, 0);
+        check_buffer_get_data_2(b, SW - 1, SH - 1);
+        check_buffer_free_data(b, k);
+        check_buffer_free_data(b, 1);
+    }
+    check_buffer_poly_stub(b, n, color, 3);
+    check_buffer_poly_stub_2(b, n, color, 3, 4);
 }
 
 static void buffer_sweep(void) {
@@ -1068,12 +1172,19 @@ static void buffer_sweep(void) {
         for (int k = 0; k < 6; k++) {
             int x = coord(SW), y = coord(SH), sx = coord(SBW), sy = coord(SBH), cw = rnd_to(SW + 8) - 4, ch = rnd_to(SH + 8) - 4;
             check_buffer_copy_full(&b, &sb, x, y, sx, sy, cw, ch);
+            check_buffer_copy(&b, &sb, x, y, cw, ch);
+            {
+                int32_t rr[4] = {x, y, x + cw, y + ch};
+                check_buffer_copy_2(&b, &sb, rr);
+            }
             if (k & 1) check_buffer_copy_mask(&b, &sb, x, y, sx, sy, cw, ch, rnd_to(4));
         }
         check_buffer_copy_full(&b, NULL, 1, 1, 1, 1, 3, 3);
+        check_buffer_copy(&b, NULL, 1, 1, 3, 3);
         check_buffer_copy_mask(&b, NULL, 1, 1, 1, 1, 3, 3, 0);
         sb.bits = NULL;
         check_buffer_copy_full(&b, &sb, 1, 1, 1, 1, 3, 3);
+        check_buffer_copy(&b, &sb, 1, 1, 3, 3);
         check_buffer_copy_mask(&b, &sb, 1, 1, 1, 1, 3, 3, 0);
         check_buffer_fill_rect(&b, NULL, 3);
         check_buffer_hline(&b, 5, 5, 5, 1);
@@ -1135,6 +1246,21 @@ static const struct hook buffer_hooks[] = {
     // sub esp, 0x48; push ebx; push esi; mov esi, [ebp+0xc]
     HOOK(0x626620, buffer_polygon, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x48, 0x53, 0x56, 0x8b, 0x75, 0x0c),
     HOOK(0x626e10, buffer_polygon_dest, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x48, 0x53, 0x56, 0x8b, 0x75, 0x0c),
+    // mov eax, [esp+0xc]; mov edx, [esp+8]; push eax; mov eax, [esp+8]
+    HOOK(0x5d95b0, buffer_copy, 0x8b, 0x44, 0x24, 0x14, 0x8b, 0x54, 0x24, 0x10, 0x50),
+    // mov eax, [esp+8]; push esi; push edi; mov edx, [eax+4]
+    HOOK(0x5d95e0, buffer_copy_2, 0x8b, 0x44, 0x24, 0x08, 0x56, 0x57, 0x8b, 0x50, 0x04),
+    // mov eax, [esp+0xc]; mov edx, [esp+8]; push eax; mov eax, [esp+8]
+    // sub esp, 0x6c; push esi; mov esi, ecx; mov ecx, [esi+0x58]
+    HOOK(0x5e3373, buffer_get_data, 0x83, 0xec, 0x6c, 0x56, 0x8b, 0xf1, 0x8b, 0x4e, 0x58),
+    // sub esp, 0x6c; push ebx; mov ebx, [esp+0x74]
+    HOOK(0x5e33f3, buffer_get_data_2, 0x83, 0xec, 0x6c, 0x53, 0x8b, 0x5c, 0x24, 0x74),
+    // push esi; mov esi, ecx; push edi; xor edi, edi
+    HOOK(0x5e34a3, buffer_free_data, 0x56, 0x8b, 0xf1, 0x57, 0x33, 0xff),
+    HOOK(0x5da680, buffer_poly, 0x8b, 0x44, 0x24, 0x0c, 0x8b, 0x54, 0x24, 0x08, 0x50),
+    // mov eax, 8; ret 0xc and ret 0x10
+    HOOK(0x5da6a0, buffer_poly_stub, 0xb8, 0x08, 0x00, 0x00, 0x00, 0xc2, 0x0c, 0x00),
+    HOOK(0x5da6b0, buffer_poly_stub_2, 0xb8, 0x08, 0x00, 0x00, 0x00, 0xc2, 0x10, 0x00),
 };
 // The palette's sweep runs with this one: the game seldom calls its functions.
 extern struct hook_module palette_module;

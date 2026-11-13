@@ -1955,6 +1955,10 @@ extern int32_t *game_sprite_min_size;
 // The bytes of picture data the game's Sprites hold (0x9b6618): extract adds what it takes, and a
 // Sprite that frees its data takes it off.
 extern int32_t *game_sprite_bytes;
+// The Sprite the game points at a Buffer's pixels to draw the Buffer as one (0x9b3a50), and the key
+// colour a Buffer's draws use when asked for -1 (0x696d14, a byte).
+extern struct game_sprite *game_buffer_sprite;
+extern uint8_t *game_default_key;
 
 // ---- Textures (texture.c) -------------------------------------------------------
 

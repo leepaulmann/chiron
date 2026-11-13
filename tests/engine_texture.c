@@ -195,6 +195,28 @@ int main(void) {
         EXPECT(texture_extract_2(&pooled, &b, 20, 0, 1, 1, NULL), 3), EXPECT(pooled.data == pool_block, 1);
     }
 
+    // The lifecycle: new holds nothing (the corners are left); a picture is freed unless it is
+    // another's; close clears the size as well.
+    {
+        game_free = free;
+        struct game_texture t;
+        memset(&t, 0x5a, sizeof t);
+        EXPECT(texture_ctor(&t) == &t, 1), EXPECT(t.data == NULL, 1), EXPECT(t.pitch, 0), EXPECT(t.ready, 0);
+        EXPECT(t.uv4[0], 0x5a5a5a5a);
+        t.data = malloc(8), t.pitch = 4, t.height = 2;
+        texture_dtor(&t);
+        EXPECT(t.data == NULL, 1), EXPECT(t.pitch, 4);
+        static uint8_t pool[4];
+        t.data = pool, t.ready = 1;
+        texture_dtor(&t);
+        EXPECT(t.data == pool, 1), EXPECT(t.ready, 1);
+        texture_close(&t);
+        EXPECT(t.data == pool, 1), EXPECT(t.pitch, 0), EXPECT(t.height, 0), EXPECT(t.ready, 0);
+        t.data = malloc(8), t.pitch = 4, t.height = 2;
+        texture_close(&t);
+        EXPECT(t.data == NULL, 1), EXPECT(t.pitch, 0);
+    }
+
     if (failures) return 1;
     puts("engine_texture ok");
     return 0;
