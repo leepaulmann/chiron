@@ -1,0 +1,38 @@
+# The production picker opened for a line of the queue and closed the other ways: OK, a double click on a cell (which answers as the
+# button for it does here), the right-click menu's first line, and Escape. See prodpicker_slot.scene for how it is opened.
+# The leaders' portraits in the base screen animate on their own slow clock.
+mask 266 625 310 678
+mask 702 624 760 680
+mask 318 98 708 295      # the map of the base screen, whose terrain can come out in two looks
+25 load
+48 click 362 734         # the note's Close
+55 key b                 # found a base where the colony pod stands
+64 key Return            # its base screen
+68 state pp_sel 0x6b27b8 12
+68 state pp_mode 0x6a8ba8 16
+72 click 190 605         # the first line of the queue
+76 move 600 420
+80 snap open
+82 click 510 120         # Network Node
+86 snap marked
+88 click 355 515         # OK
+96 snap ok
+98 click 190 605         # the line again
+104 snap open-again
+106 dblclick 646 120     # Stockpile Energy
+114 snap double
+116 click 190 605
+122 snap open-third
+124 rclick 240 120       # the Scout Patrol, and its menu
+130 snap menu
+132 click 285 132        # its first line
+140 snap menu-chosen
+142 click 190 605
+148 snap open-fourth
+150 key Escape           # not used by the window
+154 snap key-escape
+156 click 252 515        # HELP
+164 snap help
+166 key Escape
+172 snap after-help
+174 close

@@ -146,10 +146,19 @@ struct open_entry {
     const char *name;
     uint32_t addr;
     int args[4];
+    int (*host)(int, int, int, int);  // a step of the host's own, run instead of calling the game
 };
+// A scene's own step: the techs 0 up to `count` given to a faction by setting their bits (no New Tech window), so that a base has more to
+// build than a screenful. (Both modes do the same, and the faction's table is part of the state compared.)
+static int give_techs(int faction, int count, int unused, int unused2) {
+    (void)unused, (void)unused2;
+    for (int t = 0; t < count && t < TECH_COUNT; t++) game_tech_achieved[t] |= (uint8_t)(1u << (faction & 7));
+    return count;
+}
 static const struct open_entry open_table[] = {
-    {"hall_of_fame", 0x44ae50, {0}},  // void hall_of_fame(int final): 0 only shows the list
-    {"tech_pick", 0x5beb70, {1, 1, -1, 0}},  // int tech_pick(faction, unk, other, label): the research picker for faction 1 (the player in the scenes' save); unk is set because the save plays blind research, which has no picker
+    {"hall_of_fame", 0x44ae50, {0}, NULL},  // void hall_of_fame(int final): 0 only shows the list
+    {"tech_pick", 0x5beb70, {1, 1, -1, 0}, NULL},  // int tech_pick(faction, unk, other, label): the research picker for faction 1 (the player in the scenes' save); unk is set because the save plays blind research, which has no picker
+    {"give_techs", 0, {1, 40}, give_techs},  // the techs 0 to 39 for faction 1: more than a screenful to build
 };
 
 static const struct open_entry *pending;
@@ -169,6 +178,7 @@ void scene_poll(void) {
     pending = NULL;
     fprintf(stderr, "chiron: script: opening %s\n", e->name);
     typedef int (*fn4)(int, int, int, int);
-    open_result = ((fn4)game_at(e->addr))(e->args[0], e->args[1], e->args[2], e->args[3]);
+    fn4 fn = e->host ? e->host : (fn4)game_at(e->addr);
+    open_result = fn(e->args[0], e->args[1], e->args[2], e->args[3]);
     fprintf(stderr, "chiron: script: %s answered %d\n", e->name, open_result);
 }

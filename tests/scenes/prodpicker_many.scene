@@ -1,0 +1,68 @@
+# The production picker with more choices than it shows (the scene gives the faction the techs 0 to 39 first): twenty cells, four
+# rows of five, and a scroll bar at the right. The current production (the colony pod) is marked. The cursor keys move the mark and
+# scroll the view a row when it goes past the first or last row shown; Page Up, Page Down, Home and End move the view and mark; the mouse
+# wheel and the scroll bar's arrows and track scroll it; a click on a cell marks it. The picker's own fields (the cell marked, the
+# first shown, the grid, the scroll position) are state compared besides the pictures. Leave time after each step; the snaps take 2 s.
+# The leaders' portraits in the base screen animate on their own slow clock.
+mask 266 625 310 678
+mask 702 624 760 680
+25 load
+48 click 362 734         # the note's Close
+55 key b                 # found a base where the colony pod stands
+64 key Return            # its base screen
+66 open give_techs
+68 state pp_sel 0x6b27b8 12
+68 state pp_grid 0x6b2854 32
+68 state pp_mode 0x6a8ba8 16
+68 state pp_scroll 0x6afb90 4
+72 click 175 723         # CHANGE
+76 move 600 420          # off the button, over an empty place
+80 snap open
+82 key Down              # the second row
+86 snap key-down
+88 key Down
+92 key Down              # the last row shown
+96 snap key-down-last-row
+98 key Down              # past it: the view scrolls a row
+102 snap key-down-scrolls
+104 key Up               # back into view
+108 snap key-up
+110 key Up
+114 key Up
+118 key Up               # above the first shown: the view scrolls back
+122 snap key-up-scrolls
+124 key Right
+128 snap key-right
+130 key Left
+134 key Left
+138 snap key-left
+140 key PageDown         # a page of the scroll bar's (its paging is a row less than the rows shown)
+146 snap key-pagedown
+148 key PageDown
+154 snap key-pagedown-2
+156 key PageUp
+162 snap key-pageup
+164 key End              # the last choice, scrolled to the end
+170 snap key-end
+172 key Down             # no row below: nothing
+176 snap key-down-end
+178 key Home             # the first choice, scrolled back to the start
+184 snap key-home
+186 key Up               # in the first row: nothing
+190 snap key-up-home
+192 wheel -1              # the wheel scrolls the view a row
+198 snap wheel-down
+200 wheel -3
+206 snap wheel-down-3
+208 wheel 2
+214 snap wheel-up-2
+216 click 876 488         # the scroll bar's down arrow
+222 snap bar-down
+224 click 876 98          # its up arrow
+230 snap bar-up
+232 click 876 400         # the track below the thumb
+238 snap bar-track
+240 click 242 228         # a click marks a cell
+244 snap click-cell
+246 click 664 515         # CANCEL
+254 close

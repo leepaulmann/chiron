@@ -458,17 +458,19 @@ static void release_keys(void) {
     held_key = held_mod = 0;
 }
 
-static void push_click(int x, int y, int clicks) {
+static void push_click_button(int x, int y, int clicks, int button) {
     SDL_Event e = {.type = SDL_MOUSEMOTION};
     e.motion.x = x, e.motion.y = y;
     SDL_PushEvent(&e);
     e = (SDL_Event){.type = SDL_MOUSEBUTTONDOWN};
-    e.button.button = SDL_BUTTON_LEFT, e.button.state = SDL_PRESSED, e.button.clicks = clicks;
+    e.button.button = button, e.button.state = SDL_PRESSED, e.button.clicks = clicks;
     e.button.x = x, e.button.y = y;
     SDL_PushEvent(&e);
     e.type = SDL_MOUSEBUTTONUP, e.button.state = SDL_RELEASED;
     SDL_PushEvent(&e);
 }
+
+static void push_click(int x, int y, int clicks) { push_click_button(x, y, clicks, SDL_BUTTON_LEFT); }
 
 // scene.c: a scene's snap (the game's state), state and open steps
 void scene_write_state(const char *frame_path);
@@ -481,6 +483,13 @@ static void run_action(const char *step) {
     char name[64];
     if (sscanf(step, " click %d %d", &x, &y) == 2) {
         push_click(x, y, 1);
+    } else if (sscanf(step, " rclick %d %d", &x, &y) == 2) {
+        push_click_button(x, y, 1, SDL_BUTTON_RIGHT);
+    } else if (sscanf(step, " wheel %d", &x) == 1) {
+        // Notches of the wheel (positive away from the user), at the mouse's last place.
+        SDL_Event e = {.type = SDL_MOUSEWHEEL};
+        e.wheel.y = x;
+        SDL_PushEvent(&e);
     } else if (sscanf(step, " move %d %d", &x, &y) == 2) {
         SDL_Event e = {.type = SDL_MOUSEMOTION};
         e.motion.x = x, e.motion.y = y;

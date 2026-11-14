@@ -1,0 +1,42 @@
+# The production picker (ProdPicker) opened from the base screen's CHANGE button, loaded from the game's autosave: the colony pod
+# founds the first base (key B), its base screen (Return) shows the production at the bottom left. The picker is a grid of five cells
+# to a row over the base screen, four of them filled at this stage of the game, a row of buttons at the foot. A click marks a cell
+# (a unit's picture is drawn by the game, a facility's by Chiron), the cursor keys move the mark within the cells, Home goes to the first
+# and End to the last. Leave time after each step; the snaps take 2 s each.
+# The leaders' portraits in the base screen animate on their own slow clock.
+mask 266 625 310 678
+mask 702 624 760 680
+25 load
+48 click 362 734         # the note's Close
+55 key b                 # found a base where the colony pod stands
+64 key Return            # its base screen
+68 state pp_sel 0x6b27b8 12
+68 state pp_grid 0x6b2854 32
+68 state pp_mode 0x6a8ba8 16
+72 click 175 723         # CHANGE
+76 move 600 420          # off the button (its bubble comes later), over an empty cell
+80 snap open
+82 move 380 120          # over the second cell: nothing happens
+86 snap hover
+88 click 510 120         # a click marks the third cell
+92 snap click-third
+94 key Right             # the fourth
+98 snap key-right
+100 key Right            # the last of the row has no cell: the mark stays on the last cell with a tech
+104 snap key-right-end
+106 key Left
+110 snap key-left
+112 key Home             # the first
+116 snap key-home
+118 key End              # the last choice
+122 snap key-end
+124 key Down             # nothing below it
+128 snap key-down
+130 key Up               # nothing above it
+134 snap key-up
+136 key Left             # the keypad's 4 does the same: not sent here
+140 click 240 120         # the first cell
+144 snap click-first
+146 key Escape            # not used by the window
+150 snap key-escape
+152 close

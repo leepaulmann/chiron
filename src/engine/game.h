@@ -1476,6 +1476,31 @@ extern int (*game_mandate_color)(int category);
 extern int(__attribute__((thiscall)) * game_stringlist_load)(void *list, const char *file, const char *label, int a, int b);
 extern void(__attribute__((thiscall)) * game_datalink_exec)(void *datalinks, int kind, int id);
 extern void (*game_open_help)(void);
+// What the production picker (src/ui/prodpicker.c) calls that is not reimplemented: the prototype list's sort (by faction) and a design's
+// change that makes the other bases look again (synch_proto), the unit picture drawer (veh_draw: buffer, the unit, x, y, and three
+// numbers it is given as 1, 0xcc and 0) and the model drawer's calls (build a model from a unit, its constructor and destructor,
+// clearing, aiming, the view, scale and angle, and drawing into a Buffer), the base screen's slide and scroll show and hide (the window
+// and, for a scroll, the scroll bar), the window's hide, a PullDown's line and showing, and a Scroll's set-up.
+extern void (*game_proto_sort)(int faction);
+extern void (*game_synch_proto)(int proto);
+extern int (*game_veh_draw)(void *buf, int veh, int x, int y, int a, int b, int c);
+extern void (*game_vehdraw_construct_vehicle)(int veh, void *model);
+extern void *(__attribute__((thiscall)) * game_model_ctor)(void *model);
+extern void(__attribute__((thiscall)) * game_model_dtor)(void *model);
+extern void(__attribute__((thiscall)) * game_model_reset)(void *model);
+extern void (*game_model_aim)(void *a, void *b);
+extern void(__attribute__((thiscall)) * game_model_set_view)(void *model, const float *vec, void *b);
+extern void(__attribute__((thiscall)) * game_model_set_scale)(void *model, float scale);
+extern void(__attribute__((thiscall)) * game_model_set_angle)(void *model, float angle, int a, int b);
+extern void(__attribute__((thiscall)) * game_model_draw)(void *model, void *buf, int x, int y, int z);
+extern void (*game_slide_show)(void *win, int a);
+extern void (*game_slide_hide)(void *win, int a);
+extern void (*game_scroll_show)(void *win, void *scroll);
+extern void (*game_scroll_hide)(void *win, void *scroll);
+extern void(__attribute__((thiscall)) * game_win_hide)(void *win);
+extern int(__attribute__((thiscall)) * game_pulldown_add_item)(void *pd, int id, const char *text);
+extern int(__attribute__((thiscall)) * game_pulldown_show)(void *pd, int x, int y, int unk);
+extern int(__attribute__((thiscall)) * game_scroll_init)(void *scroll, int a, int b, int c, int d, void *parent, int id, int flags);
 extern void(__attribute__((thiscall)) * game_diplo_pop_start)(void *pop, int faction);
 extern void (*game_introduce)(int faction, int other);
 extern void (*game_report_intel)(int faction);

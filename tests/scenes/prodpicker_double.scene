@@ -1,0 +1,17 @@
+# The production picker closed with a double click on a cell: the click marks it, and the window ends as OK does; the production changes
+# to it. See prodpicker.scene.
+# The leaders' portraits in the base screen animate on their own slow clock.
+mask 266 625 310 678
+mask 702 624 760 680
+mask 318 98 708 295      # the map of the base screen, whose terrain can come out in two looks
+25 load
+48 click 362 734         # the note's Close
+55 key b                 # found a base where the colony pod stands
+64 key Return            # its base screen
+68 state pp_sel 0x6b27b8 12
+72 click 175 723         # CHANGE
+76 move 600 420
+80 snap open
+82 dblclick 510 120      # the third cell
+92 snap chosen
+94 close

@@ -1,0 +1,20 @@
+# The production picker closed with OK: the mark moved to the third cell (Network Node) with a click, OK chooses it and the base screen's
+# production changes (the base is part of the state compared). See prodpicker.scene for how it is opened. Leave time after each step; the
+# snaps take 2 s each.
+# The leaders' portraits in the base screen animate on their own slow clock.
+mask 266 625 310 678
+mask 702 624 760 680
+mask 318 98 708 295      # the map of the base screen, whose terrain can come out in two looks
+25 load
+48 click 362 734         # the note's Close
+55 key b                 # found a base where the colony pod stands
+64 key Return            # its base screen
+68 state pp_sel 0x6b27b8 12
+72 click 175 723         # CHANGE
+76 move 600 420
+80 snap open
+82 click 510 120         # the third cell
+86 snap marked
+88 click 561 515         # OK
+96 snap ok
+98 close

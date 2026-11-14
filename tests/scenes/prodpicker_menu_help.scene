@@ -1,0 +1,22 @@
+# The right-click menu's "Help" on the Scout Patrol: what the window answers with its help action opens, then Escape. See prodpicker.scene
+# and prodpicker_menu.scene.
+# The leaders' portraits in the base screen animate on their own slow clock.
+mask 266 625 310 678
+mask 702 624 760 680
+mask 318 98 708 295      # the map of the base screen, whose terrain can come out in two looks
+mask 355 192 668 495      # the design workshop (the help of a unit design) with its turning model
+25 load
+48 click 362 734         # the note's Close
+55 key b                 # found a base where the colony pod stands
+64 key Return            # its base screen
+68 state pp_sel 0x6b27b8 12
+72 click 175 723         # CHANGE
+76 move 600 420
+80 snap open
+82 rclick 240 120        # the Scout Patrol
+88 snap menu
+90 click 265 208         # Help
+98 snap help
+100 key Escape
+106 snap after-escape
+108 close

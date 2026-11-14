@@ -1,0 +1,36 @@
+# The production picker opened for a line of the base's queue (a click on the queue's first line): the buttons at the foot are HELP, OK,
+# REPLACE, INSERT, DELETE and CANCEL, and the costs are counted without what the base has already made. Insert puts the marked
+# choice into the queue, Replace changes the line's, Delete takes it out, and Cancel leaves it; the base (its queue) is part of
+# the state compared. See prodpicker.scene for the rest. Leave time after each step; the snaps take 2 s each.
+# The leaders' portraits in the base screen animate on their own slow clock.
+mask 266 625 310 678
+mask 702 624 760 680
+mask 318 98 708 295      # the map of the base screen, whose terrain can come out in two looks
+25 load
+48 click 362 734         # the note's Close
+55 key b                 # found a base where the colony pod stands
+64 key Return            # its base screen
+68 state pp_sel 0x6b27b8 12
+68 state pp_mode 0x6a8ba8 16
+72 click 190 605         # the first line of the queue
+76 move 600 420
+80 snap open
+82 click 510 120         # Network Node
+86 snap marked
+88 click 561 515         # INSERT
+96 snap inserted
+98 click 190 605         # the first line again, now holding it
+104 snap open-filled
+106 click 377 120        # Colony Pod
+110 snap marked-again
+112 click 459 515        # REPLACE
+120 snap replaced
+122 click 190 605
+128 snap open-replaced
+130 click 664 515        # DELETE
+138 snap deleted
+140 click 190 605
+146 snap open-empty
+148 click 767 515        # CANCEL
+154 snap cancelled
+156 close

@@ -1,0 +1,26 @@
+# The production picker's right-click menu left without a choice (a click outside it, an empty cell's right click first), and then the
+# keys still working. See prodpicker.scene and prodpicker_menu.scene.
+# The leaders' portraits in the base screen animate on their own slow clock.
+mask 266 625 310 678
+mask 702 624 760 680
+25 load
+48 click 362 734         # the note's Close
+55 key b                 # found a base where the colony pod stands
+64 key Return            # its base screen
+68 state pp_sel 0x6b27b8 12
+68 state pp_grid 0x6b2854 32
+72 click 175 723         # CHANGE
+76 move 600 420
+80 snap open
+82 rclick 377 120        # the Colony Pod
+88 snap menu
+90 click 800 420         # outside the menu: it closes without a choice
+98 snap dismissed
+100 key Right
+104 snap key-right
+106 rclick 780 340       # an empty cell: it is marked, and the menu opens
+112 snap menu-empty
+114 click 800 90          # outside again
+122 snap dismissed-empty
+124 click 664 515        # CANCEL
+132 close

@@ -103,6 +103,7 @@ add_executable(chiron
   src/ui/pickwin.c
   src/ui/picktech.c
   src/ui/selpart.c
+  src/ui/prodpicker.c
   src/loader/pe.c
   src/loader/teb.c
   src/loader/thunks.c

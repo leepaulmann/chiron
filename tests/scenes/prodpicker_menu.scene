@@ -1,0 +1,30 @@
+# The production picker's right-click menu: a right click marks the cell under the mouse and opens a menu there ("Set production", "Add
+# to queue", "Obsolete" for a design that may be hidden, "Cancel all obsolete", "Help"). Obsolete hides the design (a bit in its prototype,
+# which is state compared) and the list is made again without it; Cancel all obsolete brings the hidden designs back. See
+# prodpicker.scene for how it is opened. Leave time after each step; the snaps take 2 s each.
+# The leaders' portraits in the base screen animate on their own slow clock.
+mask 266 625 310 678
+mask 702 624 760 680
+25 load
+48 click 362 734         # the note's Close
+55 key b                 # found a base where the colony pod stands
+64 key Return            # its base screen
+68 state pp_sel 0x6b27b8 12
+68 state pp_grid 0x6b2854 32
+72 click 175 723         # CHANGE
+76 move 600 420
+80 snap open
+82 rclick 240 120        # the Scout Patrol: marked, and the menu opens
+88 snap menu
+90 click 279 170         # Obsolete
+98 snap obsolete         # the Scout Patrol is gone from the list
+100 rclick 240 120       # the Colony Pod is the first now
+106 snap menu-again
+108 click 310 189        # Cancel all obsolete
+116 snap restored
+118 rclick 510 120       # a facility: no Obsolete in its menu
+124 snap menu-facility
+126 click 310 170        # Cancel all obsolete (the third line now)
+134 snap restored-again
+136 click 664 515        # CANCEL
+144 close
