@@ -229,6 +229,12 @@ static void draw_tests(void) {
 static int life_closes;
 static void LT_THIS life_win_close(void *w) { life_closes++; }
 
+static int group_deleted;
+static void LT_THIS group_delete(void *o, int flag) { group_deleted += flag; }
+static void *group_box_vtable[1] = {(void *)group_delete};
+
+static int life_data_closed_edit;
+static void LT_THIS life_data_close_edit(void *d) { life_data_closed_edit++; }
 static void test_life(void) {
     life_image_init();
     life_buffer_standins();
@@ -257,6 +263,43 @@ static void test_life(void) {
     life_closes = 0;
     edit_dtor(e);
     EXPECT(life_closes, 2), EXPECT(OW(obj, 0), IMGVA(0x66ff34));
+
+    // An EditGroup: two virtual bases (the GraphicWin at 0x8c, the Dialog at 0xaa4) through the first word's table; its ten boxes, texts and
+    // limits cleared, the vtables of the group set; close deletes the boxes and gives back the texts, and the destructor sets the vtables again.
+    {
+        static uint8_t g[0xb98];
+        life_vbtable(0x670a3c, 0x8c, 0xaa4), life_vbtable(0x66b0ec, 0x24, 0);
+        game_dialog_data_close = life_data_close_edit;
+        game_dialog_defs_a = game_at(0x697098), game_dialog_defs_b = game_at(0x9b8eb4);
+        memset(g, 0xcc, sizeof g);
+        EXPECT(editgroup_ctor(g, 1) == g, 1);
+        EXPECT(OW(g, 0), IMGVA(0x670a3c)), EXPECT(OW(g, 0x8c), IMGVA(0x6708d4)), EXPECT(OW(g, 0x8c + 0x444), IMGVA(0x6708cc)), EXPECT(OW(g, 0xaa4), IMGVA(0x6708c0));
+        EXPECT(OW(g, 0x88), 0), EXPECT(OW(g, 0xaa0), 0), EXPECT(OW(g, 0x84), IMGW(0x9b8fcc)), EXPECT(OW(g, 0x7c), 0xcccccccc);
+        for (int i = 0; i < 10; i++) EXPECT(OW(g, 4 + 4 * i), 0), EXPECT(OW(g, 0x2c + 4 * i), 0), EXPECT(OW(g, 0x54 + 4 * i), 10);
+        void *boxes[2] = {group_box_vtable, group_box_vtable};
+        char *t3 = malloc(4), *t9 = malloc(4);
+        OW(g, 4) = (uint32_t)(uintptr_t)&boxes[0], OW(g, 4 + 4 * 7) = (uint32_t)(uintptr_t)&boxes[1];
+        OW(g, 0x2c + 4 * 3) = (uint32_t)(uintptr_t)t3, OW(g, 0x2c + 4 * 9) = (uint32_t)(uintptr_t)t9;
+        OW(g, 0x54) = 20, OW(g, 0x54 + 4 * 7) = 30, OW(g, 0x54 + 4 * 2) = 40, OW(g, 0x84) = 1;
+        life_freed = 0, group_deleted = 0, life_data_closed_edit = 0;
+        editgroup_close(g);
+        EXPECT(group_deleted, 2), EXPECT(life_freed, 2), EXPECT(life_freed_has(t3), 1), EXPECT(life_freed_has(t9), 1);
+        EXPECT(OW(g, 4), 0), EXPECT(OW(g, 4 + 4 * 7), 0), EXPECT(OW(g, 0x2c + 4 * 3), 0), EXPECT(OW(g, 0x54), 10), EXPECT(OW(g, 0x54 + 4 * 7), 10);
+        EXPECT(OW(g, 0x54 + 4 * 2), 40), EXPECT(OW(g, 0x84), IMGW(0x9b8fcc)), EXPECT(life_data_closed_edit, 1);
+        OW(g, 0x8c) = 0, OW(g, 0xaa4) = 0, OW(g, 0x88) = 5;
+        life_data_closed_edit = 0;
+        editgroup_dtor(g + 0x8c);
+        EXPECT(OW(g, 0x8c), IMGVA(0x6708d4)), EXPECT(OW(g, 0xaa4), IMGVA(0x6708c0)), EXPECT(OW(g, 0x88), 0), EXPECT(life_data_closed_edit, 1);
+        // The EditBox's scalar deleting destructor.
+        void *e = calloc(1, 0xb74);
+        life_freed = 0;
+        EXPECT(edit_scalar_dtor((struct game_editbox *)e, 1) == e, 1), EXPECT(life_freed_has(e), 1);
+        e = calloc(1, 0xb74);
+        life_freed = 0;
+        EXPECT(edit_scalar_dtor((struct game_editbox *)e, 0) == e, 1), EXPECT(life_freed, 0);
+        free(e);
+    }
+
 }
 
 int main(void) {

@@ -1339,6 +1339,13 @@ SHADOW_PASS_T(MENU, int, spot_init, (struct game_spot * s, int n), (s, n))
 SHADOW_PASS_T(MENU, void, spot_shutdown, (struct game_spot * s), (s))
 SHADOW_PASS_T(MENU, void, spot_dtor, (struct game_spot * s), (s))
 SHADOW_PASS_T(MENU, void *, menu_ctor, (struct game_menu * m), (m))
+// The scalar deleting destructors of Menu and PullDown: the destructor, then the object freed if bit 0 of the flag is set.
+LIFE_SCALAR(menu_scalar_dtor, struct game_menu, menu_dtor)
+LIFE_SCALAR(pulldown_scalar_dtor, struct game_pulldown, pulldown_dtor)
+SHADOW_PASS_T(MENU, void *, menu_scalar_dtor, (struct game_menu * m, int flag), (m, flag))
+SHADOW_PASS_T(MENU, void *, pulldown_scalar_dtor, (struct game_pulldown * p, int flag), (p, flag))
+LIFE_FN(menu_scalar_dtor, orig_menu_scalar_dtor(o, 0), menu_scalar_dtor(o, 0))
+LIFE_FN(pulldown_scalar_dtor, orig_pulldown_scalar_dtor(o, 0), pulldown_scalar_dtor(o, 0))
 SHADOW_PASS_T(MENU, void, menu_dtor, (struct game_menu * m), (m))
 SHADOW_PASS_T(MENU, void *, pulldown_ctor, (struct game_pulldown * p), (p))
 SHADOW_PASS_T(MENU, void, pulldown_dtor, (struct game_pulldown * p), (p))
@@ -1422,6 +1429,20 @@ static void life_sweep_menu(void) {
         }
         if (life_run(&stats_pulldown_dtor, &pd_class, life_orig_pulldown_dtor, life_ours_pulldown_dtor, NULL, none, 0))
             life_buffer_check(&stats_pulldown_dtor);
+        // The scalar deleting destructors (flag 0: the objects are in static memory).
+        life_build(&menu_class, fill, life_orig_menu_ctor, NULL);
+        life_buffers(0x444, 4 + round, 3 + round);
+        for (int i = 0; i < 15; i++)
+            if ((i + round) % 3 == 0) life_text(0xa38 + 0x14 * i + 4, "a title");
+        pd_deleted = 0;
+        if (life_run(&stats_menu_scalar_dtor, &menu_class, life_orig_menu_scalar_dtor, life_ours_menu_scalar_dtor, NULL, deleted, 1))
+            life_buffer_check(&stats_menu_scalar_dtor);
+        life_build(&pd_class, fill, life_orig_pulldown_ctor, NULL);
+        life_buffers(0x444, 4 + round, 3 + round);
+        for (int i = 0; i < 14; i++)
+            if ((i + round) % 2 == 0) life_text(0xa18 + 0x14 * i, "a line");
+        if (life_run(&stats_pulldown_scalar_dtor, &pd_class, life_orig_pulldown_scalar_dtor, life_ours_pulldown_scalar_dtor, NULL, none, 0))
+            life_buffer_check(&stats_pulldown_scalar_dtor);
     }
 }
 
@@ -1431,6 +1452,9 @@ static const struct hook menu_hooks[] = {
     HOOK(0x5fa8a0, spot_init, 0x56, 0x8b, 0xf1, 0x57, 0x8b, 0x06),  // push esi; mov esi, ecx; push edi; mov eax, [esi]
     HOOK(0x5fa830, spot_shutdown, 0x56, 0x8b, 0xf1, 0x8b, 0x06, 0x85, 0xc0),
     HOOK(0x5fa870, spot_dtor, 0x56, 0x8b, 0xf1, 0x8b, 0x06, 0x85, 0xc0),
+    // push esi; mov esi, ecx; call the destructor
+    HOOK_CALL(0x5fa770, pulldown_scalar_dtor, 0x56, 0x8b, 0xf1, 0xe8, 0x28, 0xe1, 0xff, 0xff),
+    HOOK_CALL(0x5fc6d0, menu_scalar_dtor, 0x56, 0x8b, 0xf1, 0xe8, 0x28, 0xe6, 0xff, 0xff),
     HOOK(0x5fac60, menu_ctor, 0x6a, 0xff, 0x68, 0xf8, 0x2c, 0x66, 0x00),  // push -1; push handler
     HOOK(0x5fad00, menu_dtor, 0x6a, 0xff, 0x68, 0x18, 0x2d, 0x66, 0x00),
     // push esi; mov esi, ecx; call graphic_win_ctor

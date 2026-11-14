@@ -81,3 +81,7 @@ void *MENU_THIS menu_ctor(struct game_menu *m);
 void MENU_THIS menu_dtor(struct game_menu *m);
 void *MENU_THIS pulldown_ctor(struct game_pulldown *p);
 void MENU_THIS pulldown_dtor(struct game_pulldown *p);
+
+// The scalar deleting destructors of Menu and PullDown (menu.c).
+void *MENU_THIS menu_scalar_dtor(struct game_menu *m, int flag);
+void *MENU_THIS pulldown_scalar_dtor(struct game_pulldown *p, int flag);

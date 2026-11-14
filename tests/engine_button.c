@@ -408,6 +408,8 @@ static int life_closes, life_data_closed;
 static void LT_THIS life_win_close(void *w) { life_closes++; }
 static void LT_THIS life_data_close(void *d) { life_data_closed++; }
 
+static void *null_alloc(size_t n) { (void)n; return NULL; }
+#define NULL_ALLOC null_alloc
 static void test_life(void) {
     life_image_init();
     life_buffer_standins();
@@ -525,6 +527,40 @@ static void test_life(void) {
     EXPECT(life_freed, 0), EXPECT(life_closes, 2), EXPECT(OW(big, 0x18), IMGVA(0x66ff34));
     EXPECT(radio_dtor(heap_obj + 0x18, 1) == heap_obj, 1);
     EXPECT(life_freed, 1);
+
+    // The name and the bubble text: the old copy freed, the text copied onto the heap; no bubble text leaves it empty; a failed allocation answers 4.
+    {
+        struct game_button *b = (struct game_button *)obj;
+        memset(obj, 0, sizeof obj);
+        game_free = life_free, game_mem_get = life_mem_get;
+        EXPECT(base_button_set_name(b, "a name"), 0), EXPECT(strcmp(b->name, "a name"), 0);
+        char *old = b->name;
+        life_freed = 0;
+        EXPECT(base_button_set_name(b, "other"), 0), EXPECT(strcmp(b->name, "other"), 0), EXPECT(life_freed, 1), EXPECT(life_freed_has(old), 1);
+        EXPECT(base_button_set_bubble_text(b, "bubble"), 0), EXPECT(strcmp(b->bubble, "bubble"), 0), EXPECT(strcmp(b->name, "other"), 0);
+        old = b->bubble, life_freed = 0;
+        EXPECT(base_button_set_bubble_text(b, NULL), 0), EXPECT(b->bubble == NULL, 1), EXPECT(life_freed, 1), EXPECT(life_freed_has(old), 1);
+        EXPECT(base_button_set_name(b, NULL), 0), EXPECT(b->name == NULL, 1);
+        game_mem_get = NULL_ALLOC;
+        EXPECT(base_button_set_name(b, "fails"), 4), EXPECT(b->name == NULL, 1), EXPECT(base_button_set_bubble_text(b, "fails"), 4), EXPECT(b->bubble == NULL, 1);
+        game_mem_get = life_mem_get;
+    }
+    // The scalar deleting destructors: the destructor, then the object freed if bit 0 of the flag is set.
+    {
+        life_closes = 0;
+        void *o = calloc(1, 0xb60);
+        EXPECT(base_button_scalar_dtor((struct game_button *)o, 0) == o, 1), EXPECT(life_closes, 2);
+        life_freed = 0;
+        EXPECT(flat_button_scalar_dtor((struct game_flat_button *)o, 1) == o, 1), EXPECT(life_freed_has(o), 1);
+        o = calloc(1, 0xb60);
+        life_freed = 0;
+        EXPECT(push_button_scalar_dtor((struct game_push_button *)o, 3) == o, 1), EXPECT(life_freed_has(o), 1);
+        o = calloc(1, 0xb60);
+        life_freed = 0;
+        EXPECT(image_button_scalar_dtor((struct game_button *)o, 0) == o, 1), EXPECT(life_freed, 0);
+        EXPECT(check_button_scalar_dtor((struct game_check_button *)o, 1) == o, 1), EXPECT(life_freed_has(o), 1);
+    }
+
 }
 
 int main(void) {

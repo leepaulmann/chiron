@@ -90,6 +90,8 @@ struct game_buffer *button_sweep_buffer(struct font **font);
 void *BUTTON_THIS base_button_ctor(struct game_button *b);
 void BUTTON_THIS base_button_close(struct game_button *b);
 void BUTTON_THIS base_button_dtor(struct game_button *b);
+int BUTTON_THIS base_button_set_name(struct game_button *b, const char *name);
+int BUTTON_THIS base_button_set_bubble_text(struct game_button *b, const char *text);
 void *BUTTON_THIS flat_button_ctor(struct game_flat_button *f);
 void BUTTON_THIS flat_button_close(struct game_flat_button *f);
 void BUTTON_THIS flat_button_dtor(struct game_flat_button *f);
@@ -108,3 +110,10 @@ void BUTTON_THIS checkbox_dtor(uint8_t *win);
 void *BUTTON_THIS radio_ctor(uint8_t *o, int most_derived);
 void BUTTON_THIS radio_close(uint8_t *o);
 void *BUTTON_THIS radio_dtor(uint8_t *win, int flag);
+
+// The buttons' scalar deleting destructors (button.c).
+void *BUTTON_THIS base_button_scalar_dtor(struct game_button *b, int flag);
+void *BUTTON_THIS flat_button_scalar_dtor(struct game_flat_button *f, int flag);
+void *BUTTON_THIS push_button_scalar_dtor(struct game_push_button *p, int flag);
+void *BUTTON_THIS image_button_scalar_dtor(struct game_button *b, int flag);
+void *BUTTON_THIS check_button_scalar_dtor(struct game_check_button *c, int flag);

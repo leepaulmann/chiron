@@ -14,6 +14,7 @@
 #include <stdint.h>
 
 #include "bufobj.h"
+#include "game.h"
 #include "hooks.h"
 
 // A word of an object that holds a pointer to a block of the game's heap, or a handle: the two
@@ -32,10 +33,11 @@ struct life_class {
     int n_slots;
     uint16_t skip_lo, skip_hi;  // a part the word compare leaves out (a Buffer inside, compared on its own), or 0, 0
     uint16_t scribble[2];       // words a close or destructor resets: made-up values are put there before it runs (0: none)
+    uint16_t skip2_lo, skip2_hi;  // a second part the word compare leaves out (another Buffer inside), or 0, 0
 };
 
 // The two objects every check builds in (in static memory, big enough for any widget).
-enum { LIFE_MAX = 0x2400 };
+enum { LIFE_MAX = 0x3240 };
 extern uint8_t life_a[LIFE_MAX], life_b[LIFE_MAX];
 
 typedef void (*life_fn)(void *obj, void *arg);
@@ -122,9 +124,30 @@ static inline void life_close_check(struct hook_stats *s, const struct life_clas
     if (life_run(s, c, orig, ours, NULL, none, 0)) life_buffer_check(s);
 }
 
+// Both objects get, in each of the `n` words from `off` on, a block of the game's heap of its own that is an object with a
+// stand-in vtable (deleting it through slot 0 frees the block), or a copy of a text.
+void life_objects(int off, int n);
+void life_texts(int off, int n, const char *text);
+
 // Both objects get, for the string list at `off` (as a Dialog keeps its items: 0xbc into the Dialog), a ring of
 // `n` nodes each holding an item. A node and an item are blocks of the game's heap, and a stand-in vtable
 // (deleting one frees the block) makes the list's own walk free them.
 void life_nodes(int off, int n);
 // Both Dialogs (at `off`) get data of `size` bytes from the game's arena, which closing them gives back.
 void life_data(int off, int size);
+
+// A scalar deleting destructor: runs the destructor and, if bit 0 of the flag is set, frees the object (with the game's free); answers the
+// object. (A sweep gives it flag 0: its objects are in static memory.)
+#define LIFE_SCALAR(name, type, dtor_fn)                         \
+    void *__attribute__((thiscall)) name(type *o, int flag) {    \
+        dtor_fn(o);                                              \
+        if (flag & 1) game_free(o);                              \
+        return o;                                                \
+    }
+
+// A class with two virtual bases, a GraphicWin at `win` and a Dialog at `dlg`: one round of its sweep. The constructor on garbage (`ctor_o`
+// and `ctor_n`, taking the object and answering with it as the original's does, run as most-derived), then a `close_o`/`close_n` check on
+// objects the original made, each with a Buffer, `round` list items and, on odd rounds, data; `extra` (if any) fills in what the class
+// holds besides. The bases the close leaves are unmade by the original's own functions. `globals` are compared too.
+void life_vb_round(const struct life_class *c, int win, int dlg, struct hook_stats *s_ctor, life_fn ctor_o, life_fn ctor_n,
+                   struct hook_stats *s_close, life_fn close_o, life_fn close_n, int round, uint8_t fill, void (*extra)(int round));

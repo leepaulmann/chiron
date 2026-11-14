@@ -30,12 +30,10 @@
 // arguments of pops_18 and pop_ask_6.
 //
 // Left to the original:
-//  - the constructors and destructors and everything that opens, builds or frees objects the game
-//    keeps on its heap with an exception frame (Dialog_ctor, dtor and scalar_dtor, BasePop_ctor,
-//    close, init_class, close_class, basepop_alloc, SpriteBox_ctor, dtor, close and the six inits
-//    that call SpriteBox_close, which closes the GraphicWin), and the ones that copy text onto the heap
-//    (BasePop's set_ok_text, set_cancel_text, set_def_ok_text, set_def_cancel_text and UNK1, Dialog_item
-//    through StringStruct_add);
+//  - what opens, builds or frees objects the game keeps on its heap and is not made and unmade by the
+//    life cycle below: BasePop's init_class, close_class, basepop_alloc and UNK1, the six SpriteBox
+//    inits, and Dialog_item through StringStruct_add (the Dialog's, the BasePop's and the SpriteBox's
+//    constructors, destructors, closes and text setters are here: see "Life cycle");
 //  - everything that draws or measures with a Font and a Buffer (BasePop_calculate_dimensions and
 //    on_redraw, SpriteBox's calculate_dimensions, draw_item, on_left_click, on_key_down and on_redraw),
 //    runs the popup (BasePop_start and exec_3, which quiet.c already holds while state is protected)
@@ -92,7 +90,11 @@
 #include "game.h"
 #include "hooks.h"
 #include "life.h"
+#include "edit.h"
 #include "menu.h"
+#include "scroll.h"
+#include "sprite.h"
+#include "win.h"
 #include "shadow.h"
 #include "strlist.h"
 #include "text.h"
@@ -1380,6 +1382,9 @@ static void random_line(char *buf, size_t cap) {
 }
 
 static void life_sweep_dialog(void);
+static void life_sweep_pop(void);
+static void life_sweep_sprite_box(void);
+static void life_sweep_dialog_scalar(void);
 static void dialog_sweep(void) {
     static struct font f_ok, f_bad;
     int sweeping = hooks_sweeping;
@@ -1698,6 +1703,9 @@ static void dialog_sweep(void) {
     memcpy(game_pop_file, file, 13);
     *game_pop_open = open, *game_pop_fallout_on = fallout, *game_win_screen_w = screen_w;
     life_sweep_dialog();
+    life_sweep_pop();
+    life_sweep_sprite_box();
+    life_sweep_dialog_scalar();
     hooks_sweeping = sweeping;
 }
 
@@ -1723,17 +1731,39 @@ static void dlist_set_part_vtable(struct game_dlist *l, uint32_t vtable) {
     *(uint32_t *)((uint8_t *)l + 4 + vbtable[1]) = vtable;
 }
 
+// A list as the Dialog class keeps it (and a BasePop and a StringBox keep their own): the list part, then its virtual base's table
+// (a vbptr at 0x4) and, 0x28 on, the base's vtable and the game's list head the constructor saved and cleared (0x2c). The
+// constructor saves and clears, the destructor empties the list, walks the vtables back and puts the head back.
+void dlist_ctor(struct game_dlist *l) {
+    uint8_t *o = (uint8_t *)l;
+    l->vbptr = (void *)(uintptr_t)game_va(DLG_VBPTR);
+    *(uint32_t *)(o + 0x28) = game_va(DLG_VB_VTABLE);
+    *(uint32_t *)(o + 0x2c) = *(uint32_t *)game_at(DLG_HEAD);
+    *(uint32_t *)game_at(DLG_HEAD) = 0;
+    l->vtable = (void **)(uintptr_t)game_va(DLG_BASE_VT);
+    dlist_set_part_vtable(l, game_va(DLG_BASE_PART));
+    l->head = NULL, l->cur = NULL, l->count = 0, l->idx = 0, l->buf = NULL;
+    l->vtable = (void **)(uintptr_t)game_va(DLG_LIST_VT);
+    dlist_set_part_vtable(l, game_va(DLG_LIST_PART));
+}
+
+void dlist_dtor(struct game_dlist *l) {
+    uint8_t *o = (uint8_t *)l;
+    l->vtable = (void **)(uintptr_t)game_va(DLG_LIST_VT);
+    dlist_set_part_vtable(l, game_va(DLG_LIST_PART));
+    strlist_remove_all((struct game_strlist *)l);
+    l->idx = 0;
+    l->vtable = (void **)(uintptr_t)game_va(DLG_BASE_VT);
+    dlist_set_part_vtable(l, game_va(DLG_BASE_PART));
+    l->idx = 0;
+    uint32_t saved = *(uint32_t *)(o + 0x2c);
+    *(uint32_t *)(o + 0x28) = game_va(DLG_VB_VTABLE);
+    *(uint32_t *)game_at(DLG_HEAD) = saved;
+}
+
 void *DLG_THIS dialog_ctor(struct game_dialog *d) {
     d->data_flag = 0, d->data = NULL, d->cursor = NULL, d->data_size = 0, d->data_left = 0;
-    d->list.vbptr = (void *)(uintptr_t)game_va(DLG_VBPTR);
-    d->ve4 = (void *)(uintptr_t)game_va(DLG_VB_VTABLE);
-    d->ve8 = (int32_t)*(uint32_t *)game_at(DLG_HEAD);
-    *(uint32_t *)game_at(DLG_HEAD) = 0;
-    d->list.vtable = (void **)(uintptr_t)game_va(DLG_BASE_VT);
-    dlist_set_part_vtable(&d->list, game_va(DLG_BASE_PART));
-    d->list.head = NULL, d->list.cur = NULL, d->list.count = 0, d->list.idx = 0, d->list.buf = NULL;
-    d->list.vtable = (void **)(uintptr_t)game_va(DLG_LIST_VT);
-    dlist_set_part_vtable(&d->list, game_va(DLG_LIST_PART));
+    dlist_ctor(&d->list);
     d->vtable = (void **)(uintptr_t)game_va(DLG_VTABLE);
     dialog_defaults(d);
     return d;
@@ -1742,18 +1772,272 @@ void *DLG_THIS dialog_ctor(struct game_dialog *d) {
 void DLG_THIS dialog_dtor(struct game_dialog *d) {
     d->vtable = (void **)(uintptr_t)game_va(DLG_VTABLE);
     dialog_close(d);
-    d->list.vtable = (void **)(uintptr_t)game_va(DLG_LIST_VT);
-    dlist_set_part_vtable(&d->list, game_va(DLG_LIST_PART));
-    strlist_remove_all((struct game_strlist *)&d->list);
-    d->list.idx = 0;
-    d->list.vtable = (void **)(uintptr_t)game_va(DLG_BASE_VT);
-    dlist_set_part_vtable(&d->list, game_va(DLG_BASE_PART));
-    d->list.idx = 0;
-    uint32_t saved = (uint32_t)d->ve8;
-    d->ve4 = (void *)(uintptr_t)game_va(DLG_VB_VTABLE);
-    *(uint32_t *)game_at(DLG_HEAD) = saved;
+    dlist_dtor(&d->list);
     game_dialog_data_close(&d->data_flag);
 }
+
+// ---- Life cycle: BasePop and SpriteBox -------------------------------------------------------------
+
+// A BasePop (the popup, 0x3230 bytes) is a GraphicWin of its own kind with many parts: a string arena (0xa28), two FlatButtons (0xa5c, the
+// OK button, and 0x15a8), a Sprite (0x2118), two dialog lists (0x2150, 0x2180), the combined widget the game's own functions make (0x21d0:
+// a ListBox, with a RadioButton at +0x44, a CheckBox at +0x58, a SpriteBox at +0x70 and an EditGroup at +0xf8 as parts, a GraphicWin at
+// +0x188 and a Dialog at +0xba0 as virtual bases), a Spot list (0x3098), tables the game's defaults are copied into (0x2e64 on) and the
+// popup's own fields. The constructor and close put the same defaults in (close also asks the buttons to close themselves, gives back the
+// two texts, the file name and the popup's eight objects, and closes each part); the destructor closes, unmakes the parts one by one and the
+// GraphicWin. The combined widget's constructor and the part of its destructor before its bases (0x612830, 0x406910) and the CheckBox's
+// close are the original's. Quirks kept: close puts the same number in two fields where the constructor puts two (0x3104 and 0x3108 both
+// come from 0x696ed8); the original's scaling of the height with the screen (when the external window is not set) never runs, as it tests
+// the window it has just found set. The ones that allocate or free do so on the game's heap, so in shadow mode the game's calls run the
+// original and the sweep checks Chiron's code on twin popups (life.c). The exception frames are not reproduced. Differences from
+// OpenSMACX: it has none of these.
+
+#define PW(o, off) (*(uint32_t *)((uint8_t *)(o) + (off)))
+#define GLOB(addr) (*(uint32_t *)game_at(addr))
+enum {
+    BP_VTABLE = 0x6698d4, BP_BUFFER_VTABLE = 0x6698cc, BP_ARENA = 0xa28, BP_BTN_A = 0xa5c, BP_BTN_B = 0x15a8, BP_SPRITE = 0x2118,
+    BP_LIST_A = 0x2150, BP_LIST_B = 0x2180, BP_DIALOGS = 0x21d0, BP_RADIO = 0x2214, BP_CHECK = 0x2228, BP_SPRITEBOX = 0x2240,
+    BP_EDITGROUP = 0x22c8, BP_DLG_WIN = 0x2358, BP_DLG_DLG = 0x2d70, BP_SPOT = 0x3098, BP_VT_CLOSE = 0x168
+};
+
+// The defaults both the constructor and close put in: the text and button colours and fonts, the default sizes and the external window
+// (0xa14 on). The tables the game keeps are copied in by pop_copy_tables and pop_colour_rows.
+static const struct life_set pop_defaults[] = {
+    LG(0x21b8, 0x9b8d94), LG(0x21bc, 0x9b8d90), LG(0x21b0, 0x9b8d88), LG(0x21b4, 0x9b8d8c), LG(0x21c0, 0x696ed0), LG(0x21c4, 0x696ed4),
+    LZ(0x30a8), LZ(0x30ac),
+    LZ(0x30b0), LZ(0x30b4), LZ(0x30b8), LZ(0x30bc), LZ(0x30c0), LZ(0x30c4), LZ(0x30c8), LZ(0x30cc), LZ(0x30d0), LZ(0x30d4), LZ(0x30d8),
+    LZ(0x30dc), LZ(0x30e0), LZ(0x30e4), LZ(0x30e8), LZ(0x30ec), LZ(0x30f0), LZ(0x30f4),
+    LC(0x30f8, 0x1000), LC(0x30fc, 0x1000), LZ(0x3100), LG(0x3104, 0x696ed8), LG(0x310c, 0x696ee0), LG(0x3110, 0x9b8d98),
+    LG(0x3120, 0x696ee4), LG(0x3130, 0x696ef4), LG(0x3140, 0x696f04), LG(0x3150, 0x696f14), LG(0x3114, 0x9b8d9c),
+    LG(0x3124, 0x696ee8), LG(0x3134, 0x696ef8), LG(0x3144, 0x696f08), LG(0x3154, 0x696f18), LG(0x3118, 0x9b8da0),
+    LG(0x3128, 0x696eec), LG(0x3138, 0x696efc), LG(0x3148, 0x696f0c), LG(0x3158, 0x696f1c), LG(0x311c, 0x9b8da4),
+    LG(0x312c, 0x696ef0), LG(0x313c, 0x696f00), LG(0x314c, 0x696f10), LG(0x315c, 0x696f20), LZ(0x3160), LZ(0x3164), LZ(0x3168),
+    LG(0x316c, 0x9b8da8), LG(0x317c, 0x696f30), LG(0x3188, 0x696f3c), LG(0x3194, 0x696f48), LG(0x3170, 0x9b8dac),
+    LG(0x3180, 0x696f34), LG(0x318c, 0x696f40), LG(0x3198, 0x696f4c), LG(0x3174, 0x9b8db0), LG(0x3184, 0x696f38),
+    LG(0x3190, 0x696f44), LG(0x319c, 0x696f50), LG(0x31a4, 0x696f58), LG(0x31a8, 0x696f5c), LG(0x31ac, 0x696f60),
+    LG(0x31b0, 0x9b8db4), LG(0x31b4, 0x9b8db8), LG(0x214c, 0x9b8dc0), LG(0x2148, 0x9b8dbc), LZ(0x322c), LG(0x322c, 0x9b8dd0),
+    LG(0xa14, 0x9b8d04), LG(0xa18, 0x9b8d08), LG(0xa1c, 0x9b8d0c), LG(0xa20, 0x696ec4), LG(0xa24, 0x696ec8),
+};
+
+// The table and three bytes the defaults take besides, and the field the constructor and close take different globals for (0x3108).
+static void pop_defaults_apply(uint8_t *p, int ctor) {
+    life_apply(p, pop_defaults, (int)(sizeof pop_defaults / sizeof pop_defaults[0]));
+    PW(p, 0x3108) = GLOB(ctor ? 0x696edc : 0x696ed8);
+    p[0x3178] = *(uint8_t *)game_at(0x696f24), p[0x3179] = *(uint8_t *)game_at(0x696f28), p[0x317a] = *(uint8_t *)game_at(0x696f2c);
+    p[0x31a0] = *(uint8_t *)game_at(0x696f54);
+}
+
+// The two tables of 0x118 bytes, and the three columns of nine numbers (from the game's table at 0x9b8d10).
+static void pop_copy_tables(uint8_t *p) {
+    PW(p, 0x30a4) = GLOB(0x9b8dcc), PW(p, 0x3094) = GLOB(0x9b8cf8);
+    memcpy(p + 0x2e64, game_at(0x9b8ab8), 0x118);
+    memcpy(p + 0x2f7c, game_at(0x9b8bd0), 0x118);
+}
+static void pop_colour_rows(uint8_t *p) {
+    for (int k = 0; k < 3; k++) {
+        uint8_t *c = p + 0x31c4 + 4 * k;
+        uint32_t a = (uint32_t)(4 * k);
+        PW(c, -0xc) = GLOB(0x9b8d10 + a), PW(c, 0) = GLOB(0x9b8d1c + a), PW(c, 0xc) = GLOB(0x9b8d28 + a), PW(c, 0x18) = GLOB(0x9b8d34 + a);
+        PW(c, 0x24) = GLOB(0x9b8d40 + a), PW(c, 0x30) = GLOB(0x9b8d4c + a), PW(c, 0x3c) = GLOB(0x9b8d58 + a), PW(c, 0x48) = GLOB(0x9b8d64 + a);
+        PW(c, 0x54) = GLOB(0x9b8d70 + a);
+    }
+}
+
+// The external window's size goes to the dialog part of the combined widget (and its flags get bits 0 and 1), and its place to the popup.
+static void pop_external(uint8_t *p) {
+    if (!PW(p, 0xa14)) return;
+    uint8_t *dlg = p + BP_DIALOGS + life_vb(p + BP_DIALOGS, 2);
+    PW(dlg, 0x2c) = PW(p, 0xa20);
+    PW(dlg, 0x30) = PW(p, 0xa24);
+    if (PW(p, 0xa18) != 0x2000) PW(p, 0x30f8) = PW(p, 0xa18);
+    if (PW(p, 0xa1c) != 0x2000) PW(p, 0x30fc) = PW(p, 0xa1c);
+    PW(dlg, 0x20) |= 3;
+}
+
+void *DLG_THIS pop_ctor(struct game_base_pop *pop) {
+    uint8_t *p = (uint8_t *)pop;
+    graphic_win_ctor((struct game_win *)pop);
+    game_arena_ctor(p + BP_ARENA);
+    flat_button_ctor((struct game_flat_button *)(p + BP_BTN_A));
+    flat_button_ctor((struct game_flat_button *)(p + BP_BTN_B));
+    sprite_ctor((struct game_sprite *)(p + BP_SPRITE));
+    dlist_ctor((struct game_dlist *)(p + BP_LIST_A));
+    dlist_ctor((struct game_dlist *)(p + BP_LIST_B));
+    game_dialogs_ctor(p + BP_DIALOGS, 1);
+    game_spot_ctor(p + BP_SPOT);
+    PW(p, 0) = game_va(BP_VTABLE), PW(p, 0x444) = game_va(BP_BUFFER_VTABLE);
+    pop_copy_tables(p);
+    pop_colour_rows(p);
+    PW(p, 0x21c8) = 0, PW(p, 0x21cc) = 0xffffffffu, PW(p, 0x3224) = 0, PW(p, 0x3228) = 0, PW(p, 0xa3c) = (uint32_t)(uintptr_t)p;
+    PW(p, 0x20f4) = 0, PW(p, 0xa40) = 0, PW(p, 0xa44) = 0xffffffffu;
+    memset(p + 0x20f8, 0, 32);
+    PW(p, 0xa48) = 0;
+    pop_defaults_apply(p, 1);
+    sprite_close((struct game_sprite *)(p + BP_SPRITE));
+    PW(p, 0x2144) = 0;
+    pop_external(p);
+    return pop;
+}
+
+// Closes every part and puts the defaults back; gives back the two button texts, the file name (0xa48) and the eight objects (0x20f8).
+void DLG_THIS pop_close(struct game_base_pop *pop) {
+    uint8_t *p = (uint8_t *)pop;
+    pop_copy_tables(p);
+    for (int off = 0x3224; off <= 0x3228; off += 4)
+        if (PW(p, off)) game_free((void *)(uintptr_t)PW(p, off)), PW(p, off) = 0;
+    PW(p, 0xa3c) = (uint32_t)(uintptr_t)p;
+    pop_colour_rows(p);
+    listbox_close(p + BP_DIALOGS);
+    game_checkbox_close(p + BP_CHECK);
+    radio_close(p + BP_RADIO);
+    sprite_box_close(p + BP_SPRITEBOX);
+    editgroup_close(p + BP_EDITGROUP);
+    graphic_win_close((struct game_win *)pop);
+    sprite_close((struct game_sprite *)(p + BP_SPRITE));
+    PW(p, 0x20f4) = 0, PW(p, 0x2144) = 0, PW(p, 0xa40) = 0, PW(p, 0xa44) = 0xffffffffu;
+    if (PW(p, 0xa48)) game_free((void *)(uintptr_t)PW(p, 0xa48)), PW(p, 0xa48) = 0;
+    PW(p, 0x21c8) = 0, PW(p, 0x21cc) = 0xffffffffu;
+    vcall0(p + BP_BTN_A, BP_VT_CLOSE);
+    vcall0(p + BP_BTN_B, BP_VT_CLOSE);
+    for (int off = BP_LIST_B; off >= BP_LIST_A; off -= BP_LIST_B - BP_LIST_A) {
+        struct game_strlist *l = (struct game_strlist *)(p + off);
+        strlist_remove_all(l);
+        l->idx = 0;
+    }
+    for (int off = 0x20f8; off < 0x2118; off += 4)
+        if (PW(p, off)) {
+            void *obj = (void *)(uintptr_t)PW(p, off);
+            ((void(THISCALL *)(void *, int))(*(void ***)obj)[0])(obj, 1);
+            PW(p, off) = 0;
+        }
+    pop_defaults_apply(p, 0);
+    pop_external(p);
+    game_dialog_data_close(p + BP_ARENA);
+}
+
+void DLG_THIS pop_dtor(struct game_base_pop *pop) {
+    uint8_t *p = (uint8_t *)pop;
+    PW(p, 0) = game_va(BP_VTABLE), PW(p, 0x444) = game_va(BP_BUFFER_VTABLE);
+    pop_close(pop);
+    game_spot_dtor(p + BP_SPOT);
+    game_dialogs_dtor_part(p + BP_DLG_WIN);
+    dialog_dtor((struct game_dialog *)(p + BP_DLG_DLG));
+    graphic_win_dtor((struct game_win *)(p + BP_DLG_WIN));
+    dlist_dtor((struct game_dlist *)(p + BP_LIST_B));
+    dlist_dtor((struct game_dlist *)(p + BP_LIST_A));
+    sprite_close((struct game_sprite *)(p + BP_SPRITE));
+    for (int off = BP_BTN_B; off >= BP_BTN_A; off -= BP_BTN_B - BP_BTN_A) {
+        struct game_flat_button *f = (struct game_flat_button *)(p + off);
+        f->base.win.vtable = (void **)(uintptr_t)game_va(0x669754);
+        f->base.buf.vtable = (void **)(uintptr_t)game_va(0x66974c);
+        flat_button_close(f);
+        base_button_dtor(&f->base);
+    }
+    game_arena_close(p + BP_ARENA);
+    graphic_win_dtor((struct game_win *)pop);
+}
+
+// The popup's button texts and the defaults for new popups: the old copy is freed, the new one made on the game's heap. No text answers 3
+// and no memory 5 (the default cancel text answers 4: the original's two last functions differ there), leaving the copy empty.
+static int pop_set_text(uint32_t *slot, const char *text, int fail) {
+    if (!text) return 3;
+    if (*slot) game_free((void *)(uintptr_t)*slot), *slot = 0;
+    char *copy = game_mem_get(strlen(text) + 1);
+    *slot = (uint32_t)(uintptr_t)copy;
+    if (!copy) return fail;
+    copy[0] = 0;
+    strcpy(copy, text);
+    return 0;
+}
+int DLG_THIS pop_set_ok_text(struct game_base_pop *p, const char *text) { return pop_set_text((uint32_t *)((uint8_t *)p + 0x3224), text, 5); }
+int DLG_THIS pop_set_cancel_text(struct game_base_pop *p, const char *text) { return pop_set_text((uint32_t *)((uint8_t *)p + 0x3228), text, 5); }
+int pop_set_def_ok_text(const char *text) { return pop_set_text((uint32_t *)game_at(0x9b8d80), text, 5); }
+int pop_set_def_cancel_text(const char *text) { return pop_set_text((uint32_t *)game_at(0x9b8d84), text, 4); }
+
+// SpriteBox: an object with two virtual bases, a GraphicWin (at 0x8c when it is the whole object) and a Dialog (0xaa4), found through the table the
+// first word points to, as the CheckBox's and ListBox's are. Its own fields: a Spot list (0x10), a list of sprites (0x24, with a base table of its own
+// at 0x28 and the game's list head saved and cleared at 0x50), the functions a screen set to hear of the mouse (0x68 on, cleared by the constructor and close) and a few numbers. The
+// constructor (given whether it is the whole object) makes the bases and the Spot and the list, sets the vtables and the word before each base,
+// the numbers, and the Buffer's text colours and fonts from the game's defaults; close closes the bases and starts the fields again; the
+// destructor (given the GraphicWin, 0x8c on) sets the vtables again, closes, unmakes the list and the Spot, and puts the list head back.
+enum {
+    SB_VBPTR = 0x6708b4, SB_WIN_VT = 0x670738, SB_BUF_VT = 0x670730, SB_DLG_VT = 0x670724, SB_LIST_VBTABLE = 0x6708ac, SB_LIST_VT = 0x6708a4,
+    SB_LIST_PART = 0x6708a0, SB_LIST_OLD_VT = 0x66943c, SB_LIST_OLD_PART = 0x669438, SB_WIN = 0x8c, SB_DLG = 0xaa4, SB_LIST = 0x24
+};
+
+static void sprite_box_vtables(uint8_t *o) {
+    int32_t win = life_vb(o, 1), dlg = life_vb(o, 2);
+    PW(o, win) = game_va(SB_WIN_VT), PW(o, win + 0x444) = game_va(SB_BUF_VT), PW(o, dlg) = game_va(SB_DLG_VT);
+    PW(o, win - 4) = (uint32_t)(win - SB_WIN), PW(o, dlg - 4) = (uint32_t)(dlg - SB_DLG);
+}
+
+// The numbers a new SpriteBox and close start with, and the mouse functions (0x68 on) cleared.
+static void sprite_box_numbers(uint8_t *o) {
+    PW(o, 4) = 0, PW(o, 0x1c) = 1, PW(o, 0x20) = 1;
+    memset(o + 0x54, 0, 0x84 - 0x54 + 4);
+}
+
+// The Buffer's text colours and fonts from the game's table.
+static void sprite_box_buffer(uint8_t *o) {
+    struct game_buffer *b = (struct game_buffer *)(o + life_vb(o, 1) + 0x444);
+    PW(o, 8) = GLOB(0x9b8fc4);
+    buffer_set_text_color(b, (int)GLOB(0x6970ac), (int)GLOB(0x6970b8), (int)GLOB(0x6970c4), (int)GLOB(0x6970d0));
+    buffer_set_text_color2(b, (int)GLOB(0x6970b0), (int)GLOB(0x6970bc), (int)GLOB(0x6970c8), (int)GLOB(0x6970d4));
+    buffer_set_text_color3(b, (int)GLOB(0x6970b4), (int)GLOB(0x6970c0), (int)GLOB(0x6970cc), (int)GLOB(0x6970d8));
+    buffer_set_font(b, (struct font *)(uintptr_t)GLOB(0x9b8ec0), (struct font *)(uintptr_t)GLOB(0x9b8ec4),
+                    (struct font *)(uintptr_t)GLOB(0x9b8ec8), NULL);
+}
+
+void *DLG_THIS sprite_box_ctor(uint8_t *o, int most_derived) {
+    if (most_derived) {
+        PW(o, 0) = game_va(SB_VBPTR);
+        graphic_win_ctor((struct game_win *)(o + SB_WIN));
+        dialog_ctor((struct game_dialog *)(o + SB_DLG));
+    }
+    game_spot_ctor(o + 0x10);
+    struct game_dlist *l = (struct game_dlist *)(o + SB_LIST);
+    l->vbptr = (void *)(uintptr_t)game_va(SB_LIST_VBTABLE);
+    PW(o, 0x4c) = game_va(DLG_VB_VTABLE);
+    PW(o, 0x50) = GLOB(DLG_HEAD);
+    GLOB(DLG_HEAD) = 0;
+    l->vtable = (void **)(uintptr_t)game_va(SB_LIST_OLD_VT);
+    dlist_set_part_vtable(l, game_va(SB_LIST_OLD_PART));
+    l->head = NULL, l->cur = NULL, l->count = 0, l->idx = 0, l->buf = NULL;
+    l->vtable = (void **)(uintptr_t)game_va(SB_LIST_VT);
+    dlist_set_part_vtable(l, game_va(SB_LIST_PART));
+    sprite_box_vtables(o);
+    sprite_box_numbers(o);
+    sprite_box_buffer(o);
+    return o;
+}
+
+void DLG_THIS sprite_box_close(uint8_t *o) {
+    graphic_win_close((struct game_win *)(o + life_vb(o, 1)));
+    dialog_close((struct game_dialog *)(o + life_vb(o, 2)));
+    sprite_box_numbers(o);
+    struct game_strlist *l = (struct game_strlist *)(o + SB_LIST);
+    strlist_remove_all(l);
+    l->idx = 0;
+    spot_shutdown((struct game_spot *)(o + 0x10));
+    sprite_box_buffer(o);
+}
+
+void DLG_THIS sprite_box_dtor(uint8_t *win) {
+    uint8_t *o = win - SB_WIN;
+    sprite_box_vtables(o);
+    sprite_box_close(o);
+    struct game_dlist *l = (struct game_dlist *)(o + SB_LIST);
+    l->vtable = (void **)(uintptr_t)game_va(SB_LIST_OLD_VT);
+    dlist_set_part_vtable(l, game_va(SB_LIST_OLD_PART));
+    strlist_remove_all((struct game_strlist *)l);
+    l->idx = 0;
+    uint32_t saved = PW(o, 0x50);
+    PW(o, 0x4c) = game_va(DLG_VB_VTABLE);
+    GLOB(DLG_HEAD) = saved;
+    spot_dtor((struct game_spot *)(o + 0x10));
+}
+
+// A Dialog's scalar deleting destructor: the destructor, then the object freed if bit 0 of the flag is set.
+LIFE_SCALAR(dialog_scalar_dtor, struct game_dialog, dialog_dtor)
 
 // ---- Life cycle: shadow mode and the sweep ----
 
@@ -1782,9 +2066,190 @@ static void life_sweep_dialog(void) {
     }
 }
 
+// ---- Life cycle: BasePop and SpriteBox, shadow mode and the sweep ----
+
+SHADOW_PASS_T(DLG, void *, pop_ctor, (struct game_base_pop * p), (p))
+SHADOW_PASS_T(DLG, void, pop_close, (struct game_base_pop * p), (p))
+SHADOW_PASS_T(DLG, void, pop_dtor, (struct game_base_pop * p), (p))
+SHADOW_PASS_T(DLG, int, pop_set_ok_text, (struct game_base_pop * p, const char *text), (p, text))
+SHADOW_PASS_T(DLG, int, pop_set_cancel_text, (struct game_base_pop * p, const char *text), (p, text))
+SHADOW_PASS(DLG, int, pop_set_def_ok_text, (const char *text), (text))
+SHADOW_PASS(DLG, int, pop_set_def_cancel_text, (const char *text), (text))
+SHADOW_PASS_T(DLG, void *, sprite_box_ctor, (uint8_t * o, int most), (o, most))
+SHADOW_PASS_T(DLG, void, sprite_box_close, (uint8_t * o), (o))
+SHADOW_PASS_T(DLG, void, sprite_box_dtor, (uint8_t * win), (win))
+SHADOW_PASS_T(DLG, void *, dialog_scalar_dtor, (struct game_dialog * d, int flag), (d, flag))
+
+// (The setters' answers go to a counter the check compares as a global.)
+static uint32_t pop_text_answer;
+LIFE_FN(pop_ctor, orig_pop_ctor(o), pop_ctor(o))
+LIFE_FN(pop_close, orig_pop_close(o), pop_close(o))
+LIFE_FN(pop_dtor, orig_pop_dtor(o), pop_dtor(o))
+LIFE_FN(pop_set_ok_text, pop_text_answer = (uint32_t)orig_pop_set_ok_text(o, x), pop_text_answer = (uint32_t)pop_set_ok_text(o, x))
+LIFE_FN(pop_set_cancel_text, pop_text_answer = (uint32_t)orig_pop_set_cancel_text(o, x), pop_text_answer = (uint32_t)pop_set_cancel_text(o, x))
+LIFE_FN(sprite_box_ctor, orig_sprite_box_ctor(o, 1), sprite_box_ctor(o, 1))
+LIFE_FN(sprite_box_close, orig_sprite_box_close(o), sprite_box_close(o))
+LIFE_FN(sprite_box_dtor, orig_sprite_box_dtor((uint8_t *)o + SB_WIN), sprite_box_dtor((uint8_t *)o + SB_WIN))
+LIFE_FN(dialog_scalar_dtor, orig_dialog_scalar_dtor(o, 0), dialog_scalar_dtor(o, 0))
+
+// The default texts are the game's own words (0x9b8d80, 0x9b8d84): the check puts each run's block in the object's second word (the old one,
+// freed by the run) and finds the new one in the first.
+static void def_text_run(uint8_t *o, uint32_t addr, const char *x, int ours, int cancel) {
+    GLOB(addr) = *(uint32_t *)(o + 4);
+    const char *t = x;
+    if (cancel) pop_text_answer = (uint32_t)(ours ? pop_set_def_cancel_text(t) : orig_pop_set_def_cancel_text(t));
+    else pop_text_answer = (uint32_t)(ours ? pop_set_def_ok_text(t) : orig_pop_set_def_ok_text(t));
+    *(uint32_t *)o = GLOB(addr);
+}
+static void life_orig_def_ok(void *o, void *x) { def_text_run(o, 0x9b8d80, x, 0, 0); }
+static void life_ours_def_ok(void *o, void *x) { def_text_run(o, 0x9b8d80, x, 1, 0); }
+static void life_orig_def_cancel(void *o, void *x) { def_text_run(o, 0x9b8d84, x, 0, 1); }
+static void life_ours_def_cancel(void *o, void *x) { def_text_run(o, 0x9b8d84, x, 1, 1); }
+
+// The popup's slots: the Win's dialog list, the file name, the eight objects, the two button texts, the two lists' head and cursor, the
+// combined widget's GraphicWin's dialog list and its Dialog's data, cursor, list head and cursor.
+static const struct life_slot pop_slots[] = {
+    {0xcc, -1}, {0xd0, -1}, {0xa48, -1}, {0x20f8, -1}, {0x20fc, -1}, {0x2100, -1}, {0x2104, -1}, {0x2108, -1}, {0x210c, -1}, {0x2110, -1},
+    {0x2114, -1}, {0x3224, -1}, {0x3228, -1}, {0x2158, -1}, {0x215c, -1}, {0x2188, -1}, {0x218c, -1}, {BP_DLG_WIN + 0xcc, -1},
+    {BP_DLG_WIN + 0xd0, -1}, {BP_DLG_DLG + 8, -1}, {BP_DLG_DLG + 0xc, -1}, {BP_DLG_DLG + 0xc4, -1}, {BP_DLG_DLG + 0xc8, -1},
+    {BP_SPOT, -1},
+};
+static const struct life_class pop_class = {"BasePop", 0x3230, pop_slots, 24, 0x444, 0x9cc, {0x21c8, 0x3100}};
+static const struct life_slot pop_text_slots[] = {{0x3224, 0}, {0x3228, 0}};
+static const struct life_class pop_text_class = {"BasePop texts", 0x3230, pop_text_slots, 2};
+static const struct life_slot def_slots[] = {{0, 0}, {4, -1}};
+static const struct life_class def_class = {"BasePop default texts", 8, def_slots, 2};
+
+// Both objects get, for the Spot list at `off`, room for rectangles of the game's heap of its own (shutting it down gives the block back).
+static void spot_room(int off) {
+    uint8_t *objs[2] = {life_a, life_b};
+    for (int k = 0; k < 2; k++) {
+        struct game_spot *sp = (struct game_spot *)(objs[k] + off);
+        sp->rects = game_mem_get(48);
+        memset(sp->rects, 0, 48);
+        sp->cap = 2, sp->count = 1;
+    }
+}
+
+// What a popup holds besides its Win and Buffer: the arena's data, texts, objects, list items and the combined widget's Dialog's.
+static void pop_extra(int round) {
+    life_data(0xa24, 32);
+    life_data(BP_DLG_DLG, 64);
+    life_nodes(BP_DLG_DLG + 0xbc, round % 3);
+    life_nodes(BP_LIST_A, round % 3);
+    life_nodes(BP_LIST_B, (round + 1) % 3);
+    spot_room(BP_SPOT);
+    life_objects(0x20f8, round % 4);
+    if (round & 1) life_text(0xa48, "a file name");
+    if (round & 2) life_text(0x3224, "OK"), life_text(0x3228, "Cancel");
+}
+
+// The external window (a number in 0x9b8d04, which the popup only tests): set on some rounds, with a size and a place.
+static void pop_external_globals(int round) {
+    GLOB(0x9b8d04) = (round & 4) ? 0x1234 : 0;
+    GLOB(0x9b8d08) = (round & 8) ? 0x2000 : 0x333;
+    GLOB(0x9b8d0c) = (round & 16) ? 0x2000 : 0x444;
+    GLOB(0x696ec4) = 0x555, GLOB(0x696ec8) = 0x666;
+}
+
+static void life_sweep_pop(void) {
+    uint32_t *globals[2] = {(uint32_t *)game_at(DLG_HEAD), (uint32_t *)game_at(0x9b6618)};
+    uint32_t *answer[1] = {&pop_text_answer};
+    uint32_t saved[5] = {GLOB(0x9b8d04), GLOB(0x9b8d08), GLOB(0x9b8d0c), GLOB(0x696ec4), GLOB(0x696ec8)};
+    if (!game_mem_get || *game_ddraw || !hooks_dc_same || !game_string_alloc) return;
+    static const char *const texts[] = {"OK", "", "a much longer button text than the one before", NULL};
+    for (int round = 0; round < 12; round++) {
+        uint8_t fill = (uint8_t)(round * 67 + 29);
+        pop_external_globals(round);
+        life_ctor_check(&stats_pop_ctor, &pop_class, life_orig_pop_ctor, life_ours_pop_ctor, fill);
+        for (int which = 0; which < 2; which++) {
+            struct hook_stats *s = which ? &stats_pop_dtor : &stats_pop_close;
+            life_build(&pop_class, fill, life_orig_pop_ctor, NULL);
+            life_buffers(0x444, 4 + round % 3, 3 + round % 3);
+            pop_extra(round);
+            if (life_run(s, &pop_class, which ? life_orig_pop_dtor : life_orig_pop_close, which ? life_ours_pop_dtor : life_ours_pop_close, NULL,
+                         globals, 2))
+                life_buffer_check(s);
+            if (!which)
+                for (int i = 0; i < 2; i++) orig_pop_dtor((struct game_base_pop *)(i ? life_b : life_a));  // (close leaves the parts standing)
+        }
+        // The setters, on popups that hold no text, one or both.
+        const char *t = texts[round % 4];
+        life_fill(&pop_text_class, life_a, life_b, fill);
+        if (round & 1) life_text(0x3224, "an old OK text"); else PW(life_a, 0x3224) = PW(life_b, 0x3224) = 0;
+        if (round & 2) life_text(0x3228, "an old cancel text"); else PW(life_a, 0x3228) = PW(life_b, 0x3228) = 0;
+        life_run(&stats_pop_set_ok_text, &pop_text_class, life_orig_pop_set_ok_text, life_ours_pop_set_ok_text, (void *)(uintptr_t)t, answer, 1);
+        life_run(&stats_pop_set_cancel_text, &pop_text_class, life_orig_pop_set_cancel_text, life_ours_pop_set_cancel_text, (void *)(uintptr_t)t,
+                 answer, 1);
+        for (int i = 0; i < 2; i++)
+            for (int off = 0x3224; off <= 0x3228; off += 4) {
+                void *b = *(void **)((i ? life_b : life_a) + off);
+                if (b) game_free(b);
+            }
+        // The defaults for new popups (words of the game): an old block of each run's own in the second word.
+        for (int which = 0; which < 2; which++) {
+            memset(life_a, 0, 8), memset(life_b, 0, 8);
+            life_text(4, "an old default");
+            uint32_t keep = GLOB(which ? 0x9b8d84 : 0x9b8d80);
+            life_run(which ? &stats_pop_set_def_cancel_text : &stats_pop_set_def_ok_text, &def_class, which ? life_orig_def_cancel : life_orig_def_ok,
+                     which ? life_ours_def_cancel : life_ours_def_ok, (void *)(uintptr_t)t, answer, 1);
+            // (A null text leaves the old block alone, which the first word then holds as the global did: free it once.)
+            for (int i = 0; i < 2; i++) game_free(*(void **)((i ? life_b : life_a) + (t ? 0 : 4)));
+            GLOB(which ? 0x9b8d84 : 0x9b8d80) = keep;
+        }
+    }
+    GLOB(0x9b8d04) = saved[0], GLOB(0x9b8d08) = saved[1], GLOB(0x9b8d0c) = saved[2], GLOB(0x696ec4) = saved[3], GLOB(0x696ec8) = saved[4];
+}
+
+static const struct life_slot sbox_slots[] = {{SB_WIN + 0xcc, -1}, {SB_WIN + 0xd0, -1}, {SB_DLG + 8, -1}, {SB_DLG + 0xc, -1}, {SB_DLG + 0xc4, -1},
+                                              {SB_DLG + 0xc8, -1}, {SB_LIST + 8, -1}, {SB_LIST + 0xc, -1}, {0x10, -1}};
+static const struct life_class sbox_class = {"SpriteBox", SB_DLG + 0xf4, sbox_slots, 9, SB_WIN + 0x444, SB_WIN + 0x9cc, {0x1c, 0x58}};
+static void sbox_extra(int round) {
+    life_nodes(SB_LIST, round % 4);
+    spot_room(0x10);
+}
+
+static void life_sweep_sprite_box(void) {
+    if (!game_mem_get || *game_ddraw || !hooks_dc_same) return;
+    uint32_t keep_a = GLOB(0x9b8fc4);
+    for (int round = 0; round < 8; round++) {
+        uint8_t fill = (uint8_t)(round * 71 + 3);
+        life_vb_round(&sbox_class, SB_WIN, SB_DLG, &stats_sprite_box_ctor, life_orig_sprite_box_ctor, life_ours_sprite_box_ctor, &stats_sprite_box_close,
+                      life_orig_sprite_box_close, life_ours_sprite_box_close, round, fill, sbox_extra);
+        life_vb_round(&sbox_class, SB_WIN, SB_DLG, &stats_sprite_box_ctor, life_orig_sprite_box_ctor, life_ours_sprite_box_ctor, &stats_sprite_box_dtor,
+                      life_orig_sprite_box_dtor, life_ours_sprite_box_dtor, round, fill, sbox_extra);
+    }
+    GLOB(0x9b8fc4) = keep_a;
+}
+
+static void life_sweep_dialog_scalar(void) {
+    static const struct life_slot slots[] = {{8, -1}, {0xc, -1}, {0xc4, -1}, {0xc8, -1}};
+    static const struct life_class cls = {"Dialog", 0xf4, slots, 4};
+    uint32_t *head_global[1] = {(uint32_t *)game_at(DLG_HEAD)};
+    if (!game_mem_get || !game_string_alloc) return;
+    for (int round = 0; round < 4; round++) {
+        life_build(&cls, (uint8_t)(round * 31 + 9), life_orig_dialog_ctor, NULL);
+        life_nodes(0xbc, round);
+        if (round & 1) life_data(0, 64);
+        life_run(&stats_dialog_scalar_dtor, &cls, life_orig_dialog_scalar_dtor, life_ours_dialog_scalar_dtor, NULL, head_global, 1);
+    }
+}
+
 // ---- Hooks --------------------------------------------------------------------------------------
 
 static const struct hook dialog_hooks[] = {
+    HOOK(0x600860, pop_ctor, 0x6a, 0xff, 0x68, 0xf8, 0x2d, 0x66, 0x00),  // push -1; push handler
+    HOOK(0x600f00, pop_close, 0x51, 0xa1, 0xcc, 0x8d, 0x9b, 0x00, 0x53, 0x8b, 0xd9),  // push ecx; mov eax, [0x9b8dcc]; push ebx; mov ebx, ecx
+    HOOK(0x4064d0, pop_dtor, 0x55, 0x8b, 0xec, 0x6a, 0xff, 0x68, 0x6e, 0x09, 0x65, 0x00),
+    // push esi; push edi; mov edi, [esp+0xc]; mov esi, ecx
+    HOOK(0x6017a0, pop_set_ok_text, 0x56, 0x57, 0x8b, 0x7c, 0x24, 0x0c, 0x8b, 0xf1),
+    HOOK(0x601820, pop_set_cancel_text, 0x56, 0x57, 0x8b, 0x7c, 0x24, 0x0c, 0x8b, 0xf1),
+    HOOK(0x6018a0, pop_set_def_ok_text, 0x56, 0x8b, 0x74, 0x24, 0x08, 0x85, 0xf6),  // push esi; mov esi, [esp+8]; test esi, esi
+    HOOK(0x601910, pop_set_def_cancel_text, 0x56, 0x8b, 0x74, 0x24, 0x08, 0x85, 0xf6),
+    HOOK(0x60ff00, sprite_box_ctor, 0x6a, 0xff, 0x68, 0xf0, 0x2f, 0x66, 0x00),  // push -1; push handler
+    HOOK(0x610120, sprite_box_dtor, 0x6a, 0xff, 0x68, 0x10, 0x30, 0x66, 0x00),
+    HOOK(0x610280, sprite_box_close, 0x51, 0x55, 0x56, 0x8b, 0xf1, 0x57, 0x8b, 0x06),  // push ecx; push ebp; push esi; mov esi, ecx; push edi; mov eax, [esi]
+    HOOK_CALL(0x609d90, dialog_scalar_dtor, 0x56, 0x8b, 0xf1, 0xe8, 0x78, 0xf0, 0xff, 0xff),  // push esi; mov esi, ecx; call dialog_dtor
     HOOK(0x608c10, dialog_ctor, 0x51, 0x56, 0x8b, 0xf1, 0x57),  // push ecx; push esi; mov esi, ecx; push edi
     HOOK(0x608e10, dialog_dtor, 0x6a, 0xff, 0x68, 0xe4, 0x2e, 0x66, 0x00),  // push -1; push handler
     HOOK(0x600760, purge_leading, 0x8b, 0x44, 0x24, 0x04, 0x80, 0x38, 0x20),

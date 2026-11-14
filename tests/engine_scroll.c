@@ -446,6 +446,46 @@ static void test_life(void) {
     life_closes = 0, life_data_closed = 0;
     listbox_dtor(big + 0x48);
     EXPECT(OW(big, 0x48), IMGVA(0x67041c)), EXPECT(OW(big, 0x10), IMGW(0x6970e8)), EXPECT(life_closes, 1), EXPECT(life_data_closed, 1);
+
+    // A StringBox: a GraphicWin with its own fields, a Scroll (0xa20) and a list of links (0x2b70); the constructor starts the fields, close puts
+    // them back, closes the GraphicWin, empties the list and closes the Scroll, and the destructor unmakes the list, the Scroll and the GraphicWin.
+    {
+        static uint8_t sbx[0x2ba0];
+        life_vbtable(0x66b0ec, 0x24, 0);
+        uint32_t *head = game_at(0x9b3374);
+        *head = 0x2468;
+        memset(sbx, 0xcc, sizeof sbx);
+        EXPECT(stringbox_ctor(sbx) == sbx, 1);
+        EXPECT(OW(sbx, 0), IMGVA(0x66adc8)), EXPECT(OW(sbx, 0x444), IMGVA(0x66adc0)), EXPECT(OW(sbx, 0xa18), 0xffffffffu), EXPECT(OW(sbx, 0xa1c), 0);
+        EXPECT(OW(sbx, 0xa14), 0), EXPECT(OW(sbx, 0x2b6c), 0), EXPECT(OW(sbx, 0xa20), IMGVA(0x669d58)), EXPECT(OW(sbx, 0x2b70), IMGVA(0x6698c4));
+        EXPECT(OW(sbx, 0x2b74), IMGVA(0x66b0ec)), EXPECT(OW(sbx, 0x2b9c), 0x2468), EXPECT(*head, 0), EXPECT(OW(sbx, 0x2b78), 0), EXPECT(OW(sbx, 0x2b88), 0);
+        OW(sbx, 0xa14) = 4, OW(sbx, 0xa18) = 5, OW(sbx, 0xa1c) = 6, OW(sbx, 0x2b6c) = 7, OW(sbx, 0x2b84) = 3;
+        OW(sbx, 0xa20 + 0xaac) = (uint32_t)(uintptr_t)life_arrow_vtable, OW(sbx, 0xa20 + 0x15f8) = (uint32_t)(uintptr_t)life_arrow_vtable;
+        life_closes = 0, life_arrow_closes = 0;
+        stringbox_close(sbx);
+        EXPECT(OW(sbx, 0xa14), 0), EXPECT(OW(sbx, 0xa18), 0xffffffffu), EXPECT(OW(sbx, 0xa1c), 0), EXPECT(OW(sbx, 0x2b6c), 0), EXPECT(OW(sbx, 0x2b84), 0);
+        EXPECT(life_closes, 2), EXPECT(life_arrow_closes, 2);
+        OW(sbx, 0) = 0, OW(sbx, 0xa20) = 0, OW(sbx, 0x2b9c) = 0x1357;
+        stringbox_dtor(sbx);
+        EXPECT(OW(sbx, 0), IMGVA(0x66ff34)), EXPECT(OW(sbx, 0xa20), IMGVA(0x66ff34)), EXPECT(*head, 0x1357), EXPECT(OW(sbx, 0x2b70), IMGVA(0x6693a4));
+        EXPECT(OW(sbx, 0x2b98), IMGVA(0x6693ac));
+        // The scalar deleting destructors of StringBox and Scroll (the arrows of the Scroll close through their vtable).
+        void *o = calloc(1, 0x2ba0);
+        stringbox_ctor(o);
+        OW(o, 0xa20 + 0xaac) = OW(o, 0xa20 + 0x15f8) = (uint32_t)(uintptr_t)life_arrow_vtable;
+        life_freed = 0;
+        EXPECT(stringbox_scalar_dtor(o, 1) == o, 1), EXPECT(life_freed_has(o), 1);
+        o = calloc(1, 0x2ba0);
+        OW(o, 0xaac) = OW(o, 0x15f8) = (uint32_t)(uintptr_t)life_arrow_vtable;
+        life_freed = 0;
+        EXPECT(scroll_scalar_dtor(o, 1) == o, 1), EXPECT(life_freed_has(o), 1);
+        o = calloc(1, 0x2ba0);
+        OW(o, 0xaac) = OW(o, 0x15f8) = (uint32_t)(uintptr_t)life_arrow_vtable;
+        life_freed = 0;
+        EXPECT(scroll_scalar_dtor(o, 0) == o, 1), EXPECT(life_freed_has(o), 0);
+        free(o);
+    }
+
 }
 
 int main(void) {

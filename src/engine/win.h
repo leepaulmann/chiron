@@ -150,3 +150,6 @@ void WIN_THIS win_dtor(struct game_win *w);
 void *WIN_THIS graphic_win_ctor(struct game_win *w);
 void WIN_THIS graphic_win_dtor(struct game_win *w);
 void WIN_THIS graphic_win_close(struct game_win *w);
+
+// Win_set_caption (win.c): the window's caption; allocates, so in shadow mode the game's calls run the original.
+void WIN_THIS win_set_caption(struct game_win *w, const char *text);

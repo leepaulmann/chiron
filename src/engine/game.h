@@ -1856,6 +1856,14 @@ extern void *(__attribute__((thiscall)) * game_dialog_ctor)(void *dialog);
 extern void(__attribute__((thiscall)) * game_dialog_dtor)(void *dialog);  // the original's: Dialog_dtor, GraphicWin_dtor (for sweeps)
 extern void(__attribute__((thiscall)) * game_graphic_win_dtor)(void *win);
 extern void(__attribute__((thiscall)) * game_win_close)(void *win);  // Win_close: the original's (not reimplemented)
+// The original's, called by the life cycle of the popup (dialog.c): the combined widget a BasePop holds (its constructor, given whether
+// it is the whole object, and the part of its destructor that lies before the bases'), the CheckBox's close, and the string arena's
+// constructor and close.
+extern void *(__attribute__((thiscall)) * game_dialogs_ctor)(void *o, int most_derived);
+extern void(__attribute__((thiscall)) * game_dialogs_dtor_part)(void *gw);
+extern void(__attribute__((thiscall)) * game_checkbox_close)(void *o);
+extern void *(__attribute__((thiscall)) * game_arena_ctor)(void *a);
+extern void(__attribute__((thiscall)) * game_arena_close)(void *a);
 extern void (*game_exit)(int code);
 // ---- Image files and Sprite files (bufimg.c) ----------------------------------------------------
 // The game's file-mapping object (16 bytes: the view, the file handle, the mapping handle and the size): made empty,

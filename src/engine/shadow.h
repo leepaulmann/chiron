@@ -227,6 +227,17 @@ static inline int shadow_bypass(void) { return hooks_sweeping || hooks_checking(
         return orig_##name args;                                             \
     }
 
+// The same for a plain (cdecl) function.
+#define SHADOW_PASS(module, ret, name, params, args)                         \
+    SHADOW_DECLARE(ret, name, params)                                        \
+    static ret shadow_##name params {                                        \
+        if (!hooks_nested && !shadow_bypass()) {                             \
+            stats_##name.calls++;                                            \
+            shadow_tick(module);                                             \
+        }                                                                    \
+        return orig_##name args;                                             \
+    }
+
 // A hook table entry: the original's address, our function, and the first
 // bytes of the original (whole instructions, no relative jumps).
 #define HOOK(addr, name, ...)                                                                   \

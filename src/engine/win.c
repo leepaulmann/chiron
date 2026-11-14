@@ -3797,8 +3797,27 @@ void WIN_THIS graphic_win_close(struct game_win *w) {
     }
 }
 
+// Sets the window's caption: the old copy is freed, the text copied onto the game's heap (not at all for a null text),
+// and a visible window (one whose parent, if any, is visible too) is asked, through its slot 0x128 (with 0 and -1), to
+// draw its frame again. No memory leaves the caption empty and the window alone. Differences from OpenSMACX: it
+// has none of these.
+void WIN_THIS win_set_caption(struct game_win *w, const char *text) {
+    if (w->title) game_free((void *)(uintptr_t)w->title), w->title = NULL;
+    if (text) {
+        char *copy = game_mem_get(strlen(text) + 1);
+        w->title = copy;
+        if (!copy) return;
+        copy[0] = 0;
+        strcpy(copy, text);
+    }
+    if (!(w->flags2 & WIN_F2_VISIBLE)) return;
+    if (w->parent && !win_is_visible(w->parent)) return;
+    ((void(WIN_THIS *)(void *, int, int))w->vtable[0x128 / 4])(w, 0, -1);
+}
+
 // ---- Life cycle: shadow mode and the sweep ----
 
+SHADOW_PASS_T(WIN, void, win_set_caption, (struct game_win * w, const char *text), (w, text))
 SHADOW_PASS_T(WIN, void *, winbase_ctor, (struct game_win * w), (w))
 SHADOW_PASS_T(WIN, void, winbase_reset, (struct game_win * w), (w))
 SHADOW_PASS_T(WIN, void *, win_ctor, (struct game_win * w), (w))
@@ -3807,6 +3826,7 @@ SHADOW_PASS_T(WIN, void *, graphic_win_ctor, (struct game_win * w), (w))
 SHADOW_PASS_T(WIN, void, graphic_win_dtor, (struct game_win * w), (w))
 SHADOW_PASS_T(WIN, void, graphic_win_close, (struct game_win * w), (w))
 
+LIFE_FN(win_set_caption, orig_win_set_caption(o, x), win_set_caption(o, x))
 LIFE_FN(winbase_ctor, orig_winbase_ctor(o), winbase_ctor(o))
 LIFE_FN(winbase_reset, orig_winbase_reset(o), winbase_reset(o))
 LIFE_FN(win_ctor, orig_win_ctor(o), win_ctor(o))
@@ -3847,6 +3867,44 @@ static void build_win_pair(const struct life_class *c, int graphic, uint8_t fill
         }
         if (first) first->prev = prev, prev->next = first;
         w->dlg_head = first, w->dlg_cur = first, w->dlg_count = nodes, w->dlg_index = 0;
+    }
+}
+
+// The caption setter: the caption's block is compared as a string, and the frame's redraw (slot 0x128 of a stand-in vtable)
+// as the calls made and what they were given, which stand in the two counters the check compares as globals.
+static const struct life_slot caption_slots[] = {{0xcc, -1}, {0xd0, -1}, {0xe0, 0}};
+static const struct life_class caption_class = {"Win caption", 0x444, caption_slots, 3};
+static uint32_t caption_calls, caption_args;
+static void WIN_THIS caption_redraw(void *w, int a, int b) {
+    caption_calls++;
+    // (the window as which of the two twins it is, not its address)
+    caption_args = caption_args * 31 + (uint32_t)((uint8_t *)w == life_a ? 1 : (uint8_t *)w == life_b ? 1 : 2) + (uint32_t)a * 7 + (uint32_t)b * 13;
+}
+static void *caption_vtable[0x180 / 4];
+static uint8_t caption_parent[0x444];
+
+static void life_sweep_caption(void) {
+    uint32_t *globals[2] = {&caption_calls, &caption_args};
+    static const char *const texts[] = {"A caption", "", "a much longer caption than the one before, to need more room", NULL};
+    caption_vtable[0x128 / 4] = (void *)caption_redraw;
+    for (int round = 0; round < 24; round++) {
+        life_build(&caption_class, (uint8_t)(round * 29 + 3), life_orig_win_ctor, NULL);
+        if (round & 1) life_text(0xe0, "the old caption");
+        for (int i = 0; i < 2; i++) {
+            uint8_t *o = i ? life_b : life_a;
+            *(void **)o = caption_vtable;
+            *(uint32_t *)(o + 0x9c) = (round & 2) ? 1 : 0;
+            *(void **)(o + 0xc4) = (round & 4) ? (void *)caption_parent : NULL;
+        }
+        *(uint32_t *)(caption_parent + 0x9c) = (round & 8) ? 0 : 1;
+        caption_calls = caption_args = 0;
+        life_run(&stats_win_set_caption, &caption_class, life_orig_win_set_caption, life_ours_win_set_caption, (void *)(uintptr_t)texts[round % 4],
+                 globals, 2);
+        // Give back what the runs made (a caption each).
+        for (int i = 0; i < 2; i++) {
+            void *c = *(void **)((i ? life_b : life_a) + 0xe0);
+            if (c) game_free(c);
+        }
     }
 }
 
@@ -4050,6 +4108,7 @@ static void win_sweep(void) {
         twin_sweep(font, saved.hwnd);
     }
     life_sweep_win();
+    life_sweep_caption();
     globals_restore(&saved);
     hooks_sweeping = sweeping;
 }
@@ -4193,6 +4252,7 @@ static const struct hook win_hooks[] = {
     HOOK(0x5d4cf0, graphic_win_ctor, 0x6a, 0xff, 0x68, 0x18, 0x2b, 0x66, 0x00),
     HOOK(0x5d4dd0, graphic_win_dtor, 0x6a, 0xff, 0x68, 0x2a, 0x2b, 0x66, 0x00),
     // push esi; push edi; mov esi, ecx; call win_close
+    HOOK(0x5edf50, win_set_caption, 0x56, 0x8b, 0xf1, 0x57, 0x8b, 0x86, 0xe0, 0x00, 0x00, 0x00),  // push esi; mov esi, ecx; push edi; mov eax, [esi+0xe0]
     HOOK_CALL(0x5d4e40, graphic_win_close, 0x56, 0x57, 0x8b, 0xf1, 0xe8, 0xf7, 0x67, 0x01, 0x00),
 };
 struct hook_module win_module = {"win", win_hooks, HOOK_COUNT(win_hooks), win_sweep, NULL, -1};

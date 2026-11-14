@@ -355,6 +355,20 @@ static void test_life(void) {
     EXPECT(life_freed, 3), EXPECT(life_freed_has(line), 1), EXPECT(life_freed_has(key), 1), EXPECT(life_freed_has(last), 1);
     EXPECT(p->items[2].text == NULL, 1), EXPECT(p->items[2].tail == NULL, 1), EXPECT(p->items[2].id, 4), EXPECT(p->dirty, 1);
     EXPECT(p->ff38, (int)IMGW(0x9b7b58)), EXPECT(life_closes, 1);
+
+    // The scalar deleting destructors of Menu and PullDown.
+    {
+        static uint8_t big[0xf40];
+        memset(big, 0, sizeof big);
+        EXPECT(menu_scalar_dtor((struct game_menu *)big, 0) == (void *)big, 1);
+        EXPECT(pulldown_scalar_dtor((struct game_pulldown *)big, 0) == (void *)big, 1);
+        void *o = calloc(1, 0xf40);
+        life_freed = 0;
+        EXPECT(pulldown_scalar_dtor((struct game_pulldown *)o, 1) == o, 1), EXPECT(life_freed_has(o), 1);
+        o = calloc(1, 0xf40);
+        EXPECT(menu_scalar_dtor((struct game_menu *)o, 1) == o, 1), EXPECT(life_freed_has(o), 1);
+    }
+
 }
 
 int main(void) {

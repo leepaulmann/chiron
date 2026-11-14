@@ -130,3 +130,20 @@ void DLG_THIS sprite_box_on_right_double_click(void *w, int x, int y);
 // free it.
 void *DLG_THIS dialog_ctor(struct game_dialog *d);
 void DLG_THIS dialog_dtor(struct game_dialog *d);
+
+// The popup's life cycle and setters, and the SpriteBox's (see dialog.c). The constructors return the object; the destructors do not free it.
+// A dialog list (the Dialog class's, which a BasePop and a StringBox keep too): made, or unmade with the game's list head put back.
+void dlist_ctor(struct game_dlist *l);
+void dlist_dtor(struct game_dlist *l);
+void *DLG_THIS pop_ctor(struct game_base_pop *p);
+void DLG_THIS pop_close(struct game_base_pop *p);
+void DLG_THIS pop_dtor(struct game_base_pop *p);
+int DLG_THIS pop_set_ok_text(struct game_base_pop *p, const char *text);
+int DLG_THIS pop_set_cancel_text(struct game_base_pop *p, const char *text);
+int pop_set_def_ok_text(const char *text);
+int pop_set_def_cancel_text(const char *text);
+// The SpriteBox's: `most_derived` says it is the whole object; the destructor is given the GraphicWin (0x8c into it).
+void *DLG_THIS sprite_box_ctor(uint8_t *o, int most_derived);
+void DLG_THIS sprite_box_close(uint8_t *o);
+void DLG_THIS sprite_box_dtor(uint8_t *win);
+void *DLG_THIS dialog_scalar_dtor(struct game_dialog *d, int flag);

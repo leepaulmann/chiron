@@ -40,3 +40,9 @@ void EDIT_THIS group_on_redraw(void *w);
 void *EDIT_THIS edit_ctor(struct game_editbox *e);
 void EDIT_THIS edit_close(struct game_editbox *e);
 void EDIT_THIS edit_dtor(struct game_editbox *e);
+
+// EditGroup (edit.c): the constructor says whether it is the whole object; the destructor is given the GraphicWin (0x8c into the group).
+void *EDIT_THIS editgroup_ctor(uint8_t *o, int most_derived);
+void EDIT_THIS editgroup_close(uint8_t *o);
+void EDIT_THIS editgroup_dtor(uint8_t *win);
+void *EDIT_THIS edit_scalar_dtor(struct game_editbox *e, int flag);

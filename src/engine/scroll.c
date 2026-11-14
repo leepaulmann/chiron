@@ -1411,6 +1411,7 @@ static void lx_sweep(struct game_buffer *big, struct font *font) {
 
 static void life_sweep_scroll(void);
 static void life_sweep_listbox(void);
+static void life_sweep_stringbox(void);
 static void scroll_sweep(void) {
     int sweeping = hooks_sweeping;
     hooks_sweeping = 1;
@@ -1499,6 +1500,7 @@ static void scroll_sweep(void) {
     *game_scroll_by_key = by_key, *game_listbox_right = right;
     life_sweep_scroll();
     life_sweep_listbox();
+    life_sweep_stringbox();
     hooks_sweeping = sweeping;
 }
 
@@ -1698,9 +1700,104 @@ static void life_sweep_listbox(void) {
     }
 }
 
+// ---- Life cycle: StringBox ------------------------------------------------------------------------
+
+// A StringBox is a GraphicWin (the text of a message, with links) with its own fields (0xa14 on, and 0x2b6c), a Scroll (0xa20) for its scroll bar and
+// a dialog list of its links (0x2b70). The constructor makes the GraphicWin, the Scroll and the list and sets the fields; close puts the fields back,
+// closes the GraphicWin, empties the list and closes the Scroll; the destructor closes, unmakes the list, the Scroll (as the Scroll's own destructor
+// does) and the GraphicWin. These allocate or free on the game's heap, so in shadow mode the game's calls run the original and the sweep checks
+// Chiron's code on twin boxes (life.c). The exception frames are not reproduced. Differences from OpenSMACX: it has none of these.
+
+enum { SBX_VTABLE = 0x66adc8, SBX_BUFFER_VTABLE = 0x66adc0, SBX_SCROLL = 0xa20, SBX_LIST = 0x2b70 };
+
+static void stringbox_fields(uint8_t *o) {
+    *(int32_t *)(o + 0xa18) = -1;
+    *(uint32_t *)(o + 0xa1c) = 0, *(uint32_t *)(o + 0x2b6c) = 0, *(uint32_t *)(o + 0xa14) = 0;
+}
+
+void *SCROLL_THIS stringbox_ctor(uint8_t *o) {
+    graphic_win_ctor((struct game_win *)o);
+    scroll_ctor((struct game_scroll *)(o + SBX_SCROLL));
+    dlist_ctor((struct game_dlist *)(o + SBX_LIST));
+    *(uint32_t *)(o + 0xa1c) = 0, *(uint32_t *)(o + 0x2b6c) = 0, *(uint32_t *)(o + 0xa14) = 0;
+    *(uint32_t *)o = game_va(SBX_VTABLE), *(uint32_t *)(o + 0x444) = game_va(SBX_BUFFER_VTABLE);
+    *(int32_t *)(o + 0xa18) = -1;
+    return o;
+}
+
+void SCROLL_THIS stringbox_close(uint8_t *o) {
+    stringbox_fields(o);
+    graphic_win_close((struct game_win *)o);
+    struct game_strlist *l = (struct game_strlist *)(o + SBX_LIST);
+    strlist_remove_all(l);
+    l->idx = 0;
+    scroll_close((struct game_scroll *)(o + SBX_SCROLL));
+}
+
+void SCROLL_THIS stringbox_dtor(uint8_t *o) {
+    *(uint32_t *)o = game_va(SBX_VTABLE), *(uint32_t *)(o + 0x444) = game_va(SBX_BUFFER_VTABLE);
+    stringbox_close(o);
+    dlist_dtor((struct game_dlist *)(o + SBX_LIST));
+    scroll_dtor((struct game_scroll *)(o + SBX_SCROLL));
+    graphic_win_dtor((struct game_win *)o);
+}
+
+// The scalar deleting destructors of Scroll and StringBox.
+LIFE_SCALAR(scroll_scalar_dtor, struct game_scroll, scroll_dtor)
+LIFE_SCALAR(stringbox_scalar_dtor, uint8_t, stringbox_dtor)
+
+// ---- Life cycle: StringBox, shadow mode and the sweep ----
+
+SHADOW_PASS_T(SCROLL, void *, stringbox_ctor, (uint8_t * o), (o))
+SHADOW_PASS_T(SCROLL, void, stringbox_close, (uint8_t * o), (o))
+SHADOW_PASS_T(SCROLL, void, stringbox_dtor, (uint8_t * o), (o))
+SHADOW_PASS_T(SCROLL, void *, stringbox_scalar_dtor, (uint8_t * o, int flag), (o, flag))
+SHADOW_PASS_T(SCROLL, void *, scroll_scalar_dtor, (struct game_scroll * s, int flag), (s, flag))
+
+LIFE_FN(stringbox_ctor, orig_stringbox_ctor(o), stringbox_ctor(o))
+LIFE_FN(stringbox_close, orig_stringbox_close(o), stringbox_close(o))
+LIFE_FN(stringbox_dtor, orig_stringbox_dtor(o), stringbox_dtor(o))
+LIFE_FN(stringbox_scalar_dtor, orig_stringbox_scalar_dtor(o, 0), stringbox_scalar_dtor(o, 0))
+LIFE_FN(scroll_scalar_dtor, orig_scroll_scalar_dtor(o, 0), scroll_scalar_dtor(o, 0))
+
+// The Win's dialog list, the Scroll's (a GraphicWin of its own: Buffer and dialog list inside) and the list of links.
+static const struct life_slot stringbox_slots[] = {{0xcc, -1}, {0xd0, -1}, {SBX_SCROLL + 0xcc, -1}, {SBX_SCROLL + 0xd0, -1}, {SBX_LIST + 8, -1}, {SBX_LIST + 0xc, -1}};
+// (The Buffer of the Scroll, at 0xe64, is compared as a Buffer.)
+static const struct life_class stringbox_class = {"StringBox", 0x2ba0, stringbox_slots, 6, 0x444, 0x9cc, {0xa14, 0xa18}, SBX_SCROLL + 0x444, SBX_SCROLL + 0x9cc};
+
+static void life_sweep_stringbox(void) {
+    uint32_t *head_global[1] = {(uint32_t *)game_at(0x9b3374)};
+    if (!game_mem_get || *game_ddraw || !hooks_dc_same) return;
+    for (int round = 0; round < 4; round++) {
+        uint8_t fill = (uint8_t)(round * 59 + 23);
+        life_ctor_check(&stats_stringbox_ctor, &stringbox_class, life_orig_stringbox_ctor, life_ours_stringbox_ctor, fill);
+        for (int which = 0; which < 3; which++) {
+            struct hook_stats *s = which == 0 ? &stats_stringbox_close : which == 1 ? &stats_stringbox_dtor : &stats_stringbox_scalar_dtor;
+            life_fn orig = which == 0 ? life_orig_stringbox_close : which == 1 ? life_orig_stringbox_dtor : life_orig_stringbox_scalar_dtor;
+            life_fn ours = which == 0 ? life_ours_stringbox_close : which == 1 ? life_ours_stringbox_dtor : life_ours_stringbox_scalar_dtor;
+            life_build(&stringbox_class, fill, life_orig_stringbox_ctor, NULL);
+            life_buffers(0x444, 4 + round, 3 + round);
+            life_buffers(SBX_SCROLL + 0x444, 3 + round, 4 + round);  // (the Scroll's own)
+            life_nodes(SBX_LIST, round);
+            if (life_run(s, &stringbox_class, orig, ours, NULL, head_global, 1)) life_buffer_check(s), life_buffer_check_at(s, SBX_SCROLL + 0x444);
+            if (which == 0)
+                for (int i = 0; i < 2; i++) orig_stringbox_dtor(i ? life_b : life_a);  // (close leaves the parts standing)
+        }
+        life_close_check(&stats_scroll_scalar_dtor, &scroll_class, life_orig_scroll_ctor, life_orig_scroll_scalar_dtor, life_ours_scroll_scalar_dtor, fill,
+                         4 + round, 3 + round, 0);
+    }
+}
+
 // ---- Hooks ----------------------------------------------------------------------------------------------------------------
 
 static const struct hook scroll_hooks[] = {
+    HOOK(0x629110, stringbox_ctor, 0x6a, 0xff, 0x68, 0x08, 0x33, 0x66, 0x00),  // push -1; push handler
+    // push ecx; push ebx; push ebp; mov ebx, ecx; xor ebp, ebp; push esi
+    HOOK(0x629210, stringbox_close, 0x51, 0x53, 0x55, 0x8b, 0xd9, 0x33, 0xed, 0x56),
+    HOOK(0x4325c0, stringbox_dtor, 0x55, 0x8b, 0xec, 0x6a, 0xff, 0x68, 0x13, 0x34, 0x65, 0x00),
+    // push ebp; mov ebp, esp; push esi; mov esi, ecx; call the destructor
+    HOOK_CALL(0x432770, stringbox_scalar_dtor, 0x55, 0x8b, 0xec, 0x56, 0x8b, 0xf1, 0xe8, 0x45, 0xfe, 0xff, 0xff),
+    HOOK_CALL(0x406f20, scroll_scalar_dtor, 0x55, 0x8b, 0xec, 0x56, 0x8b, 0xf1, 0xe8, 0x35, 0xff, 0xff, 0xff),
     HOOK(0x609db0, listbox_ctor, 0x6a, 0xff, 0x68, 0x0a, 0x2f, 0x66, 0x00),  // push -1; push handler
     // mov eax, ecx; push esi; mov edx, [eax-0x48]; lea ecx, [eax-0x48]
     HOOK(0x609ec0, listbox_dtor, 0x8b, 0xc1, 0x56, 0x8b, 0x50, 0xb8, 0x8d, 0x48, 0xb8),

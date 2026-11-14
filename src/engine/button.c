@@ -15,8 +15,8 @@
 // here, and the CheckBox's and RadioButton's layout (calculate_dimensions), item drawing (draw_item)
 // and redraw, whose text comes from the Dialog's string list (the list box's are in scroll.c).
 //
-// Left to the original: the constructors and destructors (they build objects on the game's heap
-// and keep an exception frame), set_name, set_bubble_text and init (they copy text onto the heap),
+// Left to the original: init (it copies text onto the heap; the constructors, destructors and the name and
+// bubble text setters are in the life cycle below),
 // everything that starts or stops a Time object (a multimedia timer, which the journal can't put
 // back): left_down, left_up, mouse_move, timer_callback and its daemon, and right_click; the
 // FlatButton's mouse functions (they start the bubble's timer) and the CheckBox's and RadioButton's
@@ -1563,6 +1563,8 @@ struct game_buffer *button_sweep_buffer(struct font **font) {
 
 static void life_sweep_button(void);
 static void life_sweep_checkbox(void);
+static void life_sweep_button_text(void);
+static void life_sweep_button_scalar(void);
 static void button_sweep(void) {
     static struct game_buffer real;
     static struct font font_a;
@@ -1689,6 +1691,8 @@ static void button_sweep(void) {
     *game_button_defaults = defaults;
     *game_button_fonts = fonts;
     life_sweep_button();
+    life_sweep_button_text();
+    life_sweep_button_scalar();
     life_sweep_checkbox();
     hooks_sweeping = sweeping;
 #undef mine
@@ -1753,6 +1757,23 @@ void BUTTON_THIS base_button_dtor(struct game_button *b) {
     time_dtor(button_time(b, BB_TIME_HOLD));
     graphic_win_dtor(&b->win);
 }
+
+// The button's name and its bubble text: the old copy is freed and the new one made on the game's heap. A failed
+// allocation leaves the copy empty and answers 4 (as the original does for both). A null name made the original write
+// to address 0 (a crash no game code reaches); here it leaves the name empty and answers 0. A null bubble text leaves
+// the text empty.
+static int button_set_copy(char **slot, const char *text) {
+    if (*slot) game_free(*slot), *slot = NULL;
+    if (!text) return 0;
+    char *copy = game_mem_get(strlen(text) + 1);
+    *slot = copy;
+    if (!copy) return 4;
+    copy[0] = 0;
+    strcpy(copy, text);
+    return 0;
+}
+int BUTTON_THIS base_button_set_name(struct game_button *b, const char *name) { return button_set_copy(&b->name, name); }
+int BUTTON_THIS base_button_set_bubble_text(struct game_button *b, const char *text) { return button_set_copy(&b->bubble, text); }
 
 // FlatButton: three looks (as it lies, changed, pressed), each with a text colour (-1), a frame, a picture
 // and the nine pieces of a frame of sprites, which start from the game's table (0x9b8e44 on; each piece has
@@ -1862,6 +1883,8 @@ void BUTTON_THIS check_button_dtor(struct game_check_button *c) {
 
 // ---- Life cycle: shadow mode and the sweep ----
 
+SHADOW_PASS_T(BUTTON, int, base_button_set_name, (struct game_button * b, const char *name), (b, name))
+SHADOW_PASS_T(BUTTON, int, base_button_set_bubble_text, (struct game_button * b, const char *text), (b, text))
 SHADOW_PASS_T(BUTTON, void *, base_button_ctor, (struct game_button * b), (b))
 SHADOW_PASS_T(BUTTON, void, base_button_close, (struct game_button * b), (b))
 SHADOW_PASS_T(BUTTON, void, base_button_dtor, (struct game_button * b), (b))
@@ -1876,6 +1899,11 @@ SHADOW_PASS_T(BUTTON, void *, check_button_ctor, (struct game_check_button * c),
 SHADOW_PASS_T(BUTTON, void, check_button_close, (struct game_check_button * c), (c))
 SHADOW_PASS_T(BUTTON, void, check_button_dtor, (struct game_check_button * c), (c))
 
+// (The answer goes to a counter the check compares as a global.)
+static uint32_t button_text_answer;
+LIFE_FN(base_button_set_name, button_text_answer = (uint32_t)orig_base_button_set_name(o, x), button_text_answer = (uint32_t)base_button_set_name(o, x))
+LIFE_FN(base_button_set_bubble_text, button_text_answer = (uint32_t)orig_base_button_set_bubble_text(o, x),
+        button_text_answer = (uint32_t)base_button_set_bubble_text(o, x))
 LIFE_FN(base_button_ctor, orig_base_button_ctor(o), base_button_ctor(o))
 LIFE_FN(base_button_close, orig_base_button_close(o), base_button_close(o))
 LIFE_FN(base_button_dtor, orig_base_button_dtor(o), base_button_dtor(o))
@@ -1920,6 +1948,60 @@ static void life_sweep_button(void) {
         LIFE_BTN_CTOR(check_button_ctor, check_button_class, check_button_ctor);
         LIFE_BTN_CLOSE(check_button_close, check_button_class, check_button_ctor, check_button_close, 0);
         LIFE_BTN_CLOSE(check_button_dtor, check_button_class, check_button_ctor, check_button_dtor, 0);
+    }
+}
+
+// The scalar deleting destructors of the buttons: the destructor, then the object freed if bit 0 of the flag is set.
+LIFE_SCALAR(base_button_scalar_dtor, struct game_button, base_button_dtor)
+LIFE_SCALAR(flat_button_scalar_dtor, struct game_flat_button, flat_button_dtor)
+LIFE_SCALAR(push_button_scalar_dtor, struct game_push_button, push_button_dtor)
+LIFE_SCALAR(image_button_scalar_dtor, struct game_button, image_button_dtor)
+LIFE_SCALAR(check_button_scalar_dtor, struct game_check_button, check_button_dtor)
+
+SHADOW_PASS_T(BUTTON, void *, base_button_scalar_dtor, (struct game_button * b, int flag), (b, flag))
+SHADOW_PASS_T(BUTTON, void *, flat_button_scalar_dtor, (struct game_flat_button * f, int flag), (f, flag))
+SHADOW_PASS_T(BUTTON, void *, push_button_scalar_dtor, (struct game_push_button * p, int flag), (p, flag))
+SHADOW_PASS_T(BUTTON, void *, image_button_scalar_dtor, (struct game_button * b, int flag), (b, flag))
+SHADOW_PASS_T(BUTTON, void *, check_button_scalar_dtor, (struct game_check_button * c, int flag), (c, flag))
+LIFE_FN(base_button_scalar_dtor, orig_base_button_scalar_dtor(o, 0), base_button_scalar_dtor(o, 0))
+LIFE_FN(flat_button_scalar_dtor, orig_flat_button_scalar_dtor(o, 0), flat_button_scalar_dtor(o, 0))
+LIFE_FN(push_button_scalar_dtor, orig_push_button_scalar_dtor(o, 0), push_button_scalar_dtor(o, 0))
+LIFE_FN(image_button_scalar_dtor, orig_image_button_scalar_dtor(o, 0), image_button_scalar_dtor(o, 0))
+LIFE_FN(check_button_scalar_dtor, orig_check_button_scalar_dtor(o, 0), check_button_scalar_dtor(o, 0))
+
+static void life_sweep_button_scalar(void) {
+    if (!game_mem_get || *game_ddraw || !hooks_dc_same) return;
+    for (int round = 0; round < 4; round++) {
+        uint8_t fill = (uint8_t)(round * 13 + 5);
+        int texts = round & 1;
+        LIFE_BTN_CLOSE(base_button_scalar_dtor, base_button_class, base_button_ctor, base_button_scalar_dtor, texts);
+        LIFE_BTN_CLOSE(flat_button_scalar_dtor, flat_button_class, flat_button_ctor, flat_button_scalar_dtor, texts);
+        LIFE_BTN_CLOSE(push_button_scalar_dtor, push_button_class, push_button_ctor, push_button_scalar_dtor, texts);
+        LIFE_BTN_CLOSE(image_button_scalar_dtor, base_button_class, image_button_ctor, image_button_scalar_dtor, texts);
+        LIFE_BTN_CLOSE(check_button_scalar_dtor, check_button_class, check_button_ctor, check_button_scalar_dtor, 0);
+    }
+}
+
+// The setters, on buttons holding no text, a name, a bubble text or both.
+static void life_sweep_button_text(void) {
+    uint32_t *answer[1] = {&button_text_answer};
+    static const char *const texts[] = {"Name", "", "a longer name than the old one had, which needs more room", NULL};
+    if (!game_mem_get || *game_ddraw || !hooks_dc_same) return;
+    for (int round = 0; round < 16; round++) {
+        life_build(&base_button_class, (uint8_t)(round * 17 + 1), life_orig_base_button_ctor, NULL);
+        if (round & 1) life_text(0xa7c, "an old name");
+        if (round & 2) life_text(0xa80, "an old bubble text");
+        const char *t = texts[(round >> 2) % 4];
+        life_run(&stats_base_button_set_bubble_text, &base_button_class, life_orig_base_button_set_bubble_text, life_ours_base_button_set_bubble_text,
+                 (void *)(uintptr_t)t, answer, 1);
+        // (A null name is a crash in the original.)
+        life_run(&stats_base_button_set_name, &base_button_class, life_orig_base_button_set_name, life_ours_base_button_set_name,
+                 (void *)(uintptr_t)(t ? t : "x"), answer, 1);
+        for (int i = 0; i < 2; i++) {
+            struct game_button *b = (struct game_button *)(i ? life_b : life_a);
+            if (b->name) game_free(b->name);
+            if (b->bubble) game_free(b->bubble);
+        }
     }
 }
 
@@ -2079,6 +2161,15 @@ static const struct hook button_hooks[] = {
     HOOK(0x60d0e0, radio_ctor, 0x6a, 0xff, 0x68, 0x3a, 0x2f, 0x66, 0x00),
     HOOK(0x60d1b0, radio_close, 0x56, 0x8b, 0xf1, 0x33, 0xc0, 0x8b, 0x16),  // push esi; mov esi, ecx; xor eax, eax; mov edx, [esi]
     HOOK(0x406f60, radio_dtor, 0x55, 0x8b, 0xec, 0x56, 0x57),  // push ebp; mov ebp, esp; push esi; push edi
+    // push esi; mov esi, ecx; push edi; mov eax, [esi+0xa7c] / [esi+0xa80]
+    // push esi; mov esi, ecx; call the destructor (the last three are push ebp; mov ebp, esp; push esi; mov esi, ecx; call)
+    HOOK_CALL(0x607cc0, base_button_scalar_dtor, 0x56, 0x8b, 0xf1, 0xe8, 0x78, 0xf3, 0xff, 0xff),
+    HOOK_CALL(0x4068e0, flat_button_scalar_dtor, 0x55, 0x8b, 0xec, 0x56, 0x8b, 0xf1, 0xe8, 0x95, 0xff, 0xff, 0xff),
+    HOOK_CALL(0x62c830, push_button_scalar_dtor, 0x56, 0x8b, 0xf1, 0xe8, 0xd8, 0xf7, 0xff, 0xff),
+    HOOK_CALL(0x6256d0, image_button_scalar_dtor, 0x56, 0x8b, 0xf1, 0xe8, 0x38, 0xfc, 0xff, 0xff),
+    HOOK_CALL(0x4b3f20, check_button_scalar_dtor, 0x55, 0x8b, 0xec, 0x56, 0x8b, 0xf1, 0xe8, 0x95, 0xff, 0xff, 0xff),
+    HOOK(0x6074e0, base_button_set_name, 0x56, 0x8b, 0xf1, 0x57, 0x8b, 0x86, 0x7c, 0x0a, 0x00, 0x00),
+    HOOK(0x607550, base_button_set_bubble_text, 0x56, 0x8b, 0xf1, 0x57, 0x8b, 0x86, 0x80, 0x0a, 0x00, 0x00),
     HOOK(0x606f30, base_button_ctor, 0x6a, 0xff, 0x68, 0x66, 0x2e, 0x66, 0x00),  // push -1; push handler
     HOOK(0x607040, base_button_dtor, 0x6a, 0xff, 0x68, 0x94, 0x2e, 0x66, 0x00),
     // push esi; push edi; mov esi, ecx; call graphic_win_close

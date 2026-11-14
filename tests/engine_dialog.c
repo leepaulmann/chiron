@@ -6,6 +6,7 @@
 
 #include "../src/engine/dialog.h"
 #include "../src/engine/game.h"
+#include "../src/engine/win.h"
 #include "life_test.h"
 
 static int failures;
@@ -152,6 +153,27 @@ static void LT_THIS life_delete(void *o, int flag) { life_deleted++; free(o); }
 static void *life_list_vtable[3] = {NULL, (void *)life_slot1};
 static void *life_node_vtable[2] = {(void *)life_delete, NULL};
 
+// The stand-ins the popup's and SpriteBox's life cycle need: the original's parts log their calls, and the arrows and the
+// objects the popup deletes count theirs.
+static int pop_log[32], pop_nlog, pop_deleted, pop_button_closes, pop_win_closes;
+static void pop_note(int what) { if (pop_nlog < 32) pop_log[pop_nlog++] = what; }
+static void LT_THIS pop_win_close(void *w) { pop_win_closes++; }
+static void *LT_THIS stub_dialogs_ctor(void *o, int most) {
+    pop_note(0x612830 + most);
+    OW(o, 0) = IMGVA(0x680100), OW(o, 0x44) = IMGVA(0x680200), OW(o, 0x70) = IMGVA(0x680400), OW(o, 0xf8) = IMGVA(0x680500);
+    graphic_win_ctor((struct game_win *)((uint8_t *)o + 0x188)), dialog_ctor((struct game_dialog *)((uint8_t *)o + 0xba0));
+    return o;
+}
+static void LT_THIS stub_dialogs_dtor_part(void *w) { pop_note(0x406910); }
+static void LT_THIS stub_checkbox_close(void *o) { pop_note(0x60e7c0); }
+static void *LT_THIS stub_arena_ctor(void *a) { pop_note(0x5d4560); return a; }
+static void LT_THIS stub_arena_close(void *a) { pop_note(0x5d45b0); }
+static void LT_THIS stub_button_close(void *b) { pop_button_closes++; }
+static void LT_THIS stub_delete(void *o, int flag) { pop_deleted += flag; }
+static void *stub_button_vtable[0x180 / 4], *stub_object_vtable[1] = {(void *)stub_delete};
+
+static void *null_alloc_dlg(size_t n) { (void)n; return NULL; }
+#define NULL_ALLOC_DLG null_alloc_dlg
 static void test_life(void) {
     life_image_init();
     game_free = life_free, game_mem_get = life_mem_get, game_dialog_data_close = life_data_close;
@@ -192,6 +214,140 @@ static void test_life(void) {
     EXPECT(life_deleted, 4), EXPECT(life_item_slot1, 2), EXPECT(d->list.head == NULL, 1), EXPECT(d->list.count, 0), EXPECT(d->list.idx, 0);
     EXPECT(life_data_closed, 2), EXPECT(*head, 0x1111), EXPECT(d->vtable == (void **)(uintptr_t)IMGVA(0x6703fc), 1);
     EXPECT(d->list.vtable == (void **)(uintptr_t)IMGVA(0x6693a4), 1), EXPECT(d->ve4 == (void *)(uintptr_t)IMGVA(0x6693ac), 1);
+
+    // Setters: the old copy freed, the text copied onto the game's heap; no text answers 3 and leaves things as they are, no memory 5 (4 for
+    // the default cancel text) and an empty copy.
+    {
+        static uint8_t popobj[0x3230];
+        struct game_base_pop *p = (struct game_base_pop *)popobj;
+        life_buffer_standins();
+        memset(popobj, 0, sizeof popobj);
+        EXPECT(pop_set_ok_text(p, "OK"), 0), EXPECT(strcmp((char *)(uintptr_t)OW(popobj, 0x3224), "OK"), 0);
+        char *old = (char *)(uintptr_t)OW(popobj, 0x3224);
+        life_freed = 0;
+        EXPECT(pop_set_ok_text(p, "Fine"), 0), EXPECT(strcmp((char *)(uintptr_t)OW(popobj, 0x3224), "Fine"), 0), EXPECT(life_freed, 1);
+        EXPECT(life_freed_has(old), 1), EXPECT(pop_set_ok_text(p, NULL), 3), EXPECT(strcmp((char *)(uintptr_t)OW(popobj, 0x3224), "Fine"), 0);
+        EXPECT(pop_set_cancel_text(p, "No"), 0), EXPECT(strcmp((char *)(uintptr_t)OW(popobj, 0x3228), "No"), 0);
+        EXPECT(pop_set_cancel_text(p, NULL), 3), EXPECT(OW(popobj, 0x3224) != 0, 1);
+        uint32_t *def_ok = game_at(0x9b8d80), *def_cancel = game_at(0x9b8d84);
+        *def_ok = *def_cancel = 0;
+        EXPECT(pop_set_def_ok_text("Yes"), 0), EXPECT(strcmp((char *)(uintptr_t)*def_ok, "Yes"), 0);
+        EXPECT(pop_set_def_cancel_text("Nope"), 0), EXPECT(strcmp((char *)(uintptr_t)*def_cancel, "Nope"), 0);
+        EXPECT(pop_set_def_ok_text(NULL), 3), EXPECT(pop_set_def_cancel_text(NULL), 3);
+        old = (char *)(uintptr_t)*def_ok, life_freed = 0;
+        EXPECT(pop_set_def_ok_text("Again"), 0), EXPECT(life_freed_has(old), 1);
+        game_mem_get = NULL_ALLOC_DLG;
+        EXPECT(pop_set_def_ok_text("x"), 5), EXPECT(*def_ok, 0), EXPECT(pop_set_def_cancel_text("x"), 4), EXPECT(*def_cancel, 0);
+        EXPECT(pop_set_ok_text(p, "x"), 5), EXPECT(OW(popobj, 0x3224), 0), EXPECT(pop_set_cancel_text(p, "x"), 5), EXPECT(OW(popobj, 0x3228), 0);
+        game_mem_get = life_mem_get;
+    }
+
+    // A popup: made from its parts in order, the game's tables and defaults copied in, the external window (the game's word at 0x9b8d04 is set
+    // in the test image) sent to the combined widget's Dialog; close gives back the texts, the file name and the eight objects, asks each
+    // button to close, and closes the parts; the destructor then unmakes them.
+    {
+        static uint8_t popobj[0x3230];
+        struct game_base_pop *p = (struct game_base_pop *)popobj;
+        life_buffer_standins();
+        life_time_standins();
+        game_sprite_bytes = game_at(0x9b6618);
+        IMGW(0x9b8ec0) = IMGW(0x9b8ec4) = IMGW(0x9b8ec8) = 0;  // (no fonts for the SpriteBox's Buffer)
+        game_win_close = pop_win_close, game_dialogs_ctor = stub_dialogs_ctor, game_dialogs_dtor_part = stub_dialogs_dtor_part;
+        game_checkbox_close = stub_checkbox_close, game_arena_ctor = stub_arena_ctor, game_arena_close = stub_arena_close;
+        stub_button_vtable[0x168 / 4] = (void *)stub_button_close;
+        life_vbtable(0x680100, 0x188, 0xba0), life_vbtable(0x680200, 0x144, 0xb5c), life_vbtable(0x680400, 0x118, 0xb30), life_vbtable(0x680500, 0x90, 0xaa8);
+        life_vbtable(0x66b0ec, 0x24, 0), life_vbtable(0x6708ac, 0x24, 0), life_vbtable(0x6708b4, 0x8c, 0xaa4);
+        game_dialog_data_close = life_data_close;
+        game_dialog_defs_a = game_at(0x697098), game_dialog_defs_b = game_at(0x9b8eb4);
+        uint32_t *head = game_at(0x9b3374);
+        *head = 0x4242;
+        memset(popobj, 0, sizeof popobj);
+        pop_nlog = 0;
+        EXPECT(pop_ctor(p) == p, 1);
+        EXPECT(OW(popobj, 0), IMGVA(0x6698d4)), EXPECT(OW(popobj, 0x444), IMGVA(0x6698cc)), EXPECT(OW(popobj, 0xa3c), (uint32_t)(uintptr_t)popobj);
+        EXPECT(pop_nlog, 2), EXPECT(pop_log[0], 0x5d4560), EXPECT(pop_log[1], 0x612831);
+        EXPECT(memcmp(popobj + 0x2e64, game_at(0x9b8ab8), 0x118), 0), EXPECT(memcmp(popobj + 0x2f7c, game_at(0x9b8bd0), 0x118), 0);
+        EXPECT(OW(popobj, 0x30a4), IMGW(0x9b8dcc)), EXPECT(OW(popobj, 0x3094), IMGW(0x9b8cf8));
+        EXPECT(OW(popobj, 0x31b8), IMGW(0x9b8d10)), EXPECT(OW(popobj, 0x31c4), IMGW(0x9b8d1c)), EXPECT(OW(popobj, 0x31c4 + 0xc + 8), IMGW(0x9b8d28 + 8));
+        EXPECT(OW(popobj, 0x31c4 + 0x54 + 8), IMGW(0x9b8d70 + 8)), EXPECT(OW(popobj, 0x3104), IMGW(0x696ed8)), EXPECT(OW(popobj, 0x3108), IMGW(0x696edc));
+        EXPECT(popobj[0x3178], (uint8_t)IMGW(0x696f24)), EXPECT(popobj[0x31a0], (uint8_t)IMGW(0x696f54)), EXPECT(OW(popobj, 0x21cc), 0xffffffffu);
+        EXPECT(OW(popobj, 0x3100), 0), EXPECT(OW(popobj, 0xa44), 0xffffffffu), EXPECT(OW(popobj, 0x322c), IMGW(0x9b8dd0));
+        EXPECT(OW(popobj, 0x2154), IMGVA(0x66b0ec)), EXPECT(OW(popobj, 0x2150), IMGVA(0x6698c4)), EXPECT(OW(popobj, 0x2180), IMGVA(0x6698c4));
+        EXPECT(OW(popobj, 0x217c), 0x4242), EXPECT(OW(popobj, 0x21ac), 0), EXPECT(*head, 0), EXPECT(OW(popobj, 0x2118), 0);
+        // The external window (the word the test image holds) reaches the Dialog (0xba0 on from the widget): its size, flags bits 0 and 1.
+        EXPECT(OW(popobj, 0xa14), IMGW(0x9b8d04));
+        EXPECT(OW(popobj, 0x21d0 + 0xba0 + 0x2c), IMGW(0x696ec4)), EXPECT(OW(popobj, 0x21d0 + 0xba0 + 0x30), IMGW(0x696ec8));
+        EXPECT(OW(popobj, 0x21d0 + 0xba0 + 0x20) & 3, 3);
+        if (IMGW(0x9b8d08) != 0x2000) EXPECT(OW(popobj, 0x30f8), IMGW(0x9b8d08));
+        // The buttons' own vtables stand in, and the popup holds a text each, a file name and two objects.
+        OW(popobj, 0xa5c) = OW(popobj, 0x15a8) = (uint32_t)(uintptr_t)stub_button_vtable;
+        char *ok = malloc(4), *cancel = malloc(4), *file = malloc(4);
+        OW(popobj, 0x3224) = (uint32_t)(uintptr_t)ok, OW(popobj, 0x3228) = (uint32_t)(uintptr_t)cancel, OW(popobj, 0xa48) = (uint32_t)(uintptr_t)file;
+        void *objs[2] = {stub_object_vtable, stub_object_vtable};
+        OW(popobj, 0x20f8) = (uint32_t)(uintptr_t)&objs[0], OW(popobj, 0x2100) = (uint32_t)(uintptr_t)&objs[1];
+        OW(popobj, 0x3108) = 1, OW(popobj, 0x30f8) = 7, OW(popobj, 0x3100) = 9, OW(popobj, 0xa40) = 5, OW(popobj, 0x21c8) = 3;
+        life_freed = 0, pop_deleted = 0, pop_button_closes = 0, pop_win_closes = 0, life_data_closed = 0, pop_nlog = 0;
+        pop_close(p);
+        EXPECT(life_freed, 3), EXPECT(life_freed_has(ok), 1), EXPECT(life_freed_has(cancel), 1), EXPECT(life_freed_has(file), 1);
+        EXPECT(OW(popobj, 0x3224), 0), EXPECT(OW(popobj, 0x3228), 0), EXPECT(OW(popobj, 0xa48), 0), EXPECT(OW(popobj, 0x20f8), 0), EXPECT(OW(popobj, 0x2100), 0);
+        EXPECT(pop_deleted, 2), EXPECT(pop_button_closes, 2), EXPECT(OW(popobj, 0x3108), IMGW(0x696ed8)), EXPECT(OW(popobj, 0x30f8), IMGW(0x9b8d08));
+        EXPECT(OW(popobj, 0x3100), 0), EXPECT(OW(popobj, 0xa40), 0), EXPECT(OW(popobj, 0x21c8), 0), EXPECT(OW(popobj, 0xa44), 0xffffffffu);
+        EXPECT(pop_nlog, 1), EXPECT(pop_log[0], 0x60e7c0), EXPECT(life_data_closed >= 1, 1);
+        // The destructor: its vtables first, then close and each part unmade (the two lists put the game's head back).
+        life_freed = 0, pop_nlog = 0, pop_win_closes = 0;
+        *head = 0x9999;
+        OW(popobj, 0x217c) = 0x1111;
+        OW(popobj, 0x21ac) = 0x2222;
+        pop_dtor(p);
+        EXPECT(pop_nlog >= 3, 1), EXPECT(pop_log[1], 0x406910), EXPECT(pop_log[pop_nlog - 1], 0x5d45b0), EXPECT(OW(popobj, 0), IMGVA(0x66ff34));
+        EXPECT(OW(popobj, 0x21a8), IMGVA(0x6693ac)), EXPECT(OW(popobj, 0x2178), IMGVA(0x6693ac)), EXPECT(*head, 0x1111);
+        EXPECT(OW(popobj, 0x2150), IMGVA(0x6693a4)), EXPECT(OW(popobj, 0x2180), IMGVA(0x6693a4)), EXPECT(pop_win_closes >= 4, 1);
+    }
+
+    // A SpriteBox: an object with two virtual bases (the first word's table: the GraphicWin at 0x8c, the Dialog at 0xaa4), a Spot list, a list of
+    // sprites with a table of its own, the game's list head saved at 0x50, and the Buffer's colours and fonts from the game's table.
+    {
+        static uint8_t sb[0xb98];
+        life_buffer_standins();
+        game_win_close = pop_win_close;
+        IMGW(0x9b8ec0) = IMGW(0x9b8ec4) = IMGW(0x9b8ec8) = 0;
+        game_dialog_data_close = life_data_close;
+        game_dialog_defs_a = game_at(0x697098), game_dialog_defs_b = game_at(0x9b8eb4);
+        life_vbtable(0x6708b4, 0x8c, 0xaa4), life_vbtable(0x6708ac, 0x24, 0), life_vbtable(0x66b0ec, 0x24, 0);
+        uint32_t *head = game_at(0x9b3374);
+        *head = 0x3131;
+        memset(sb, 0xcc, sizeof sb);
+        EXPECT(sprite_box_ctor(sb, 1) == sb, 1);
+        EXPECT(OW(sb, 0), IMGVA(0x6708b4)), EXPECT(OW(sb, 0x8c), IMGVA(0x670738)), EXPECT(OW(sb, 0x8c + 0x444), IMGVA(0x670730)), EXPECT(OW(sb, 0xaa4), IMGVA(0x670724));
+        EXPECT(OW(sb, 0x88), 0), EXPECT(OW(sb, 0xaa0), 0), EXPECT(OW(sb, 0x28), IMGVA(0x6708ac)), EXPECT(OW(sb, 0x24), IMGVA(0x6708a4));
+        EXPECT(OW(sb, 0x4c), IMGVA(0x6708a0)), EXPECT(OW(sb, 0x50), 0), EXPECT(OW(sb, 0xaa4 + 0xe8), 0x3131), EXPECT(*head, 0), EXPECT(OW(sb, 0x2c), 0), EXPECT(OW(sb, 0x3c), 0);
+        EXPECT(OW(sb, 4), 0), EXPECT(OW(sb, 0x1c), 1), EXPECT(OW(sb, 0x20), 1), EXPECT(OW(sb, 0x54), 0), EXPECT(OW(sb, 0x84), 0), EXPECT(OW(sb, 0x88), 0);
+        EXPECT(OW(sb, 8), IMGW(0x9b8fc4)), EXPECT(OW(sb, 0x68), 0), EXPECT(OW(sb, 0x90 - 0x8), 0);
+        // Close starts the numbers again and closes the bases.
+        OW(sb, 4) = 5, OW(sb, 0x1c) = 0, OW(sb, 0x60) = 9, OW(sb, 0x84) = 3, OW(sb, 8) = 77, OW(sb, 0x38) = 4;
+        pop_win_closes = 0;
+        sprite_box_close(sb);
+        EXPECT(OW(sb, 4), 0), EXPECT(OW(sb, 0x1c), 1), EXPECT(OW(sb, 0x60), 0), EXPECT(OW(sb, 0x84), 0), EXPECT(OW(sb, 8), IMGW(0x9b8fc4));
+        EXPECT(OW(sb, 0x38), 0), EXPECT(pop_win_closes, 1);
+        // The destructor (given the GraphicWin): the vtables again, close, the list's own vtable put back to the first class's and the head too.
+        OW(sb, 0x8c) = 0, OW(sb, 0xaa4) = 0, OW(sb, 0x50) = 0x5151;
+        sprite_box_dtor(sb + 0x8c);
+        EXPECT(OW(sb, 0x8c), IMGVA(0x670738)), EXPECT(OW(sb, 0xaa4), IMGVA(0x670724)), EXPECT(OW(sb, 0x24), IMGVA(0x66943c)), EXPECT(*head, 0x5151);
+        EXPECT(OW(sb, 0x4c), IMGVA(0x6693ac));
+    }
+    // A Dialog's scalar deleting destructor.
+    {
+        void *d = calloc(1, 0xf4);
+        dialog_ctor(d);
+        life_freed = 0;
+        EXPECT(dialog_scalar_dtor((struct game_dialog *)d, 1) == d, 1), EXPECT(life_freed_has(d), 1);
+        d = calloc(1, 0xf4);
+        dialog_ctor(d);
+        life_freed = 0;
+        EXPECT(dialog_scalar_dtor((struct game_dialog *)d, 0) == d, 1), EXPECT(life_freed, 0);
+        free(d);
+    }
+
 }
 
 int main(void) {

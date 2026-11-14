@@ -61,3 +61,10 @@ void SCROLL_THIS scroll_dtor(struct game_scroll *s);
 void *SCROLL_THIS listbox_ctor(uint8_t *o, int most_derived);
 void SCROLL_THIS listbox_close(uint8_t *o);
 void SCROLL_THIS listbox_dtor(uint8_t *win);
+
+// StringBox (scroll.c), and the scalar deleting destructors of Scroll and StringBox.
+void *SCROLL_THIS stringbox_ctor(uint8_t *o);
+void SCROLL_THIS stringbox_close(uint8_t *o);
+void SCROLL_THIS stringbox_dtor(uint8_t *o);
+void *SCROLL_THIS stringbox_scalar_dtor(uint8_t *o, int flag);
+void *SCROLL_THIS scroll_scalar_dtor(struct game_scroll *s, int flag);

@@ -42,6 +42,7 @@
 #include "bufobj.h"
 #include "buffer.h"
 #include "button.h"
+#include "dialog.h"
 #include "drawcheck.h"
 #include "edit.h"
 #include "game.h"
@@ -1100,8 +1101,17 @@ static void sweep_draw(struct game_buffer *real) {
 }
 
 static void life_sweep_edit(void);
+static void life_sweep_group(void);
 static void edit_sweep(void) {
     if (!*game_win_hwnd) return;
+    {
+        // The life cycle's checks build their own objects and need no fonts, so they run before the drawing sweeps' wait for the game's.
+        int sweeping = hooks_sweeping;
+        hooks_sweeping = 1;
+        life_sweep_edit();
+        life_sweep_group();
+        hooks_sweeping = sweeping;
+    }
     // The sweep needs the game's fonts (as text.c's sweep does): the game hasn't set them up yet before its first screen.
     if (!*game_font_default || !*game_font_dc) return;
     if (!made) font_ctor(&mine), game_font_init(&mine, "Arial", 12, 0), made = 1;
@@ -1134,7 +1144,6 @@ static void edit_sweep(void) {
     memset(&S, 0, sizeof S);  // (a timer message that arrives later finds nothing to do)
     game_edit_press[0] = press[0], game_edit_press[1] = press[1];
     *game_win_prev_focus = prev;
-    life_sweep_edit();
     hooks_sweeping = sweeping;
 }
 
@@ -1212,9 +1221,113 @@ static void life_sweep_edit(void) {
     }
 }
 
+// ---- Life cycle: EditGroup ------------------------------------------------------------------------
+
+// An EditGroup is an object with two virtual bases, a GraphicWin (at 0x8c when it is the whole object) and a Dialog (0xaa4), found through the
+// table its first word points to, as the ListBox's and CheckBox's are. Its own part holds ten EditBoxes (0x4), ten labels' texts (0x2c), ten
+// limits (0x54, 10 each) and the widths (0x7c on; 0x84 starts from the game's default at 0x9b8fcc). The constructor, given whether it is the
+// whole object, makes the bases, sets their vtables and the word before each base and clears the three arrays; close deletes each box through its
+// vtable and gives back each text, puts the default back and closes the Dialog; the destructor (given the GraphicWin, 0x8c on) sets the vtables
+// again and closes. These free on the game's heap, so in shadow mode the game's calls run the original and the sweep checks Chiron's code on
+// twin groups (life.c). The exception frames are not reproduced. Differences from OpenSMACX: it has none of these.
+
+enum { EG_VBPTR = 0x670a3c, EG_WIN_VT = 0x6708d4, EG_BUF_VT = 0x6708cc, EG_DLG_VT = 0x6708c0, EG_WIN = 0x8c, EG_DLG = 0xaa4 };
+
+static void group_vtables(uint8_t *o) {
+    int32_t win = life_vb(o, 1), dlg = life_vb(o, 2);
+    *(uint32_t *)(o + win) = game_va(EG_WIN_VT);
+    *(uint32_t *)(o + win + 0x444) = game_va(EG_BUF_VT);
+    *(uint32_t *)(o + dlg) = game_va(EG_DLG_VT);
+    *(int32_t *)(o + win - 4) = win - EG_WIN;
+    *(int32_t *)(o + dlg - 4) = dlg - EG_DLG;
+}
+
+void *EDIT_THIS editgroup_ctor(uint8_t *o, int most_derived) {
+    if (most_derived) {
+        *(uint32_t *)o = game_va(EG_VBPTR);
+        graphic_win_ctor((struct game_win *)(o + EG_WIN));
+        dialog_ctor((struct game_dialog *)(o + EG_DLG));
+    }
+    group_vtables(o);
+    struct game_editgroup *g = (struct game_editgroup *)o;
+    for (int i = 0; i < 10; i++) g->edit[i] = NULL, g->text[i] = NULL, g->limit[i] = 10;
+    g->f84 = *(int32_t *)game_at(0x9b8fcc);
+    return o;
+}
+
+void EDIT_THIS editgroup_close(uint8_t *o) {
+    struct game_editgroup *g = (struct game_editgroup *)o;
+    for (int i = 0; i < 10; i++) {
+        if (g->edit[i]) {
+            void *box = g->edit[i];
+            ((void(EDIT_THIS *)(void *, int))(*(void ***)box)[0])(box, 1);
+            g->edit[i] = NULL;
+            g->limit[i] = 10;
+        }
+        if (g->text[i]) game_free(g->text[i]), g->text[i] = NULL;
+    }
+    g->f84 = *(int32_t *)game_at(0x9b8fcc);
+    dialog_close((struct game_dialog *)(o + life_vb(o, 2)));
+}
+
+// Given the GraphicWin.
+void EDIT_THIS editgroup_dtor(uint8_t *win) {
+    uint8_t *o = win - EG_WIN;
+    group_vtables(o);
+    editgroup_close(o);
+}
+
+// The scalar deleting destructors of EditBox.
+LIFE_SCALAR(edit_scalar_dtor, struct game_editbox, edit_dtor)
+
+// ---- Life cycle: EditGroup, shadow mode and the sweep ----
+
+SHADOW_PASS_T(EDIT, void *, editgroup_ctor, (uint8_t * o, int most), (o, most))
+SHADOW_PASS_T(EDIT, void, editgroup_close, (uint8_t * o), (o))
+SHADOW_PASS_T(EDIT, void, editgroup_dtor, (uint8_t * win), (win))
+SHADOW_PASS_T(EDIT, void *, edit_scalar_dtor, (struct game_editbox * e, int flag), (e, flag))
+
+LIFE_FN(editgroup_ctor, orig_editgroup_ctor(o, 1), editgroup_ctor(o, 1))
+LIFE_FN(editgroup_close, orig_editgroup_close(o), editgroup_close(o))
+LIFE_FN(editgroup_dtor, orig_editgroup_dtor((uint8_t *)o + EG_WIN), editgroup_dtor((uint8_t *)o + EG_WIN))
+LIFE_FN(edit_scalar_dtor, orig_edit_scalar_dtor(o, 0), edit_scalar_dtor(o, 0))
+
+// The boxes and texts, the Win's dialog list and the Dialog's data, cursor, list head and cursor.
+#define EG_SLOTS_ALL                                                                                                                         \
+    {4, -1}, {8, -1}, {0xc, -1}, {0x10, -1}, {0x14, -1}, {0x18, -1}, {0x1c, -1}, {0x20, -1}, {0x24, -1}, {0x28, -1}, {0x2c, -1}, {0x30, -1}, \
+    {0x34, -1}, {0x38, -1}, {0x3c, -1}, {0x40, -1}, {0x44, -1}, {0x48, -1}, {0x4c, -1}, {0x50, -1}, {EG_WIN + 0xcc, -1},                  \
+    {EG_WIN + 0xd0, -1}, {EG_DLG + 8, -1}, {EG_DLG + 0xc, -1}, {EG_DLG + 0xc4, -1}, {EG_DLG + 0xc8, -1}
+static const struct life_slot group_slots[] = {EG_SLOTS_ALL};
+static const struct life_class group_class = {"EditGroup", EG_DLG + 0xf4, group_slots, 26, EG_WIN + 0x444, EG_WIN + 0x9cc, {0x84, 0x54}};
+
+// Boxes in the first `round % 4` places and texts in the first `round % 3 + 1`.
+static void group_extra(int round) {
+    life_objects(4, round % 4);
+    life_texts(0x2c, round % 3 + 1, "a label");
+    life_texts(0x2c + 4 * 5, 1, "another label");
+}
+
+static void life_sweep_group(void) {
+    if (!game_mem_get || *game_ddraw || !hooks_dc_same) return;
+    for (int round = 0; round < 8; round++) {
+        uint8_t fill = (uint8_t)(round * 41 + 7);
+        life_vb_round(&group_class, EG_WIN, EG_DLG, &stats_editgroup_ctor, life_orig_editgroup_ctor, life_ours_editgroup_ctor, &stats_editgroup_close,
+                      life_orig_editgroup_close, life_ours_editgroup_close, round, fill, group_extra);
+        life_vb_round(&group_class, EG_WIN, EG_DLG, &stats_editgroup_ctor, life_orig_editgroup_ctor, life_ours_editgroup_ctor, &stats_editgroup_dtor,
+                      life_orig_editgroup_dtor, life_ours_editgroup_dtor, round, fill, group_extra);
+        life_close_check(&stats_edit_scalar_dtor, &edit_class, life_orig_edit_ctor, life_orig_edit_scalar_dtor, life_ours_edit_scalar_dtor, fill,
+                         4 + round, 3 + round, 0);
+    }
+}
+
 // ---- Hooks -------------------------------------------------------------------------------------------------------------------------
 
 static const struct hook edit_hooks[] = {
+    HOOK(0x611940, editgroup_ctor, 0x6a, 0xff, 0x68, 0x3d, 0x30, 0x66, 0x00),  // push -1; push handler
+    HOOK(0x611a20, editgroup_dtor, 0x8b, 0xc1, 0x56, 0x8b, 0x90, 0x74, 0xff, 0xff, 0xff),  // mov eax, ecx; push esi; mov edx, [eax-0x8c]
+    HOOK(0x611a90, editgroup_close, 0x53, 0x55, 0x8b, 0xe9, 0x56, 0xbb, 0x0a, 0x00, 0x00, 0x00),  // push ebx; push ebp; mov ebp, ecx; push esi; mov ebx, 10
+    // push ebp; mov ebp, esp; push esi; mov esi, ecx; call edit_dtor
+    HOOK_CALL(0x408080, edit_scalar_dtor, 0x55, 0x8b, 0xec, 0x56, 0x8b, 0xf1, 0xe8, 0x85, 0xff, 0xff, 0xff),
     HOOK(0x614e50, edit_ctor, 0x6a, 0xff, 0x68, 0x38, 0x31, 0x66, 0x00),  // push -1; push handler
     HOOK(0x408010, edit_dtor, 0x55, 0x8b, 0xec, 0x6a, 0xff, 0x68, 0x06, 0x0d, 0x65, 0x00),
     HOOK(0x614f30, edit_close, 0x56, 0x8b, 0xf1, 0x33, 0xc0, 0x88, 0x86, 0x14, 0x0a, 0x00, 0x00),  // push esi; mov esi, ecx; xor eax, eax; mov [esi+0xa14], al

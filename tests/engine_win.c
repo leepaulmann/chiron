@@ -656,6 +656,10 @@ static int pic_deleted_;
 static void WIN_THIS pic_delete_(void *o, int flag) { pic_deleted_ += flag; }
 static void *pic_vtable_[1] = {(void *)pic_delete_};
 
+static int caption_redraws, caption_a, caption_b;
+static void LT_THIS caption_redraw(void *w, int a, int b) { caption_redraws++, caption_a = a, caption_b = b; }
+static void *caption_vtable[0x180 / 4];
+
 static void test_life(void) {
     life_image_init();
     life_buffer_standins();
@@ -730,6 +734,41 @@ static void test_life(void) {
     life_closes = 0;
     graphic_win_dtor(w);
     EXPECT(life_closes, 1), EXPECT(w->vtable == (void **)(uintptr_t)IMGVA(0x66ff34), 1);
+
+    // Win_set_caption: the old caption freed, the text copied onto the heap (not at all for none); a visible window (whose parent is visible too)
+    // draws its frame again, through slot 0x128, with 0 and -1.
+    {
+        static uint8_t win[0x444], parent[0x444];
+        game_free = life_free, game_mem_get = life_mem_get;
+        caption_vtable[0x128 / 4] = (void *)caption_redraw;
+        memset(win, 0, sizeof win), memset(parent, 0, sizeof parent);
+        *(void **)win = caption_vtable;
+        struct game_win *cw = (struct game_win *)win;
+        win_set_caption(cw, "first");
+        EXPECT(strcmp((const char *)cw->title, "first"), 0), EXPECT(caption_redraws, 0);
+        char *old = (char *)cw->title;
+        life_freed = 0;
+        OW(win, 0x9c) = 1, caption_redraws = 0;
+        win_set_caption(cw, "second one");
+        EXPECT(strcmp((const char *)cw->title, "second one"), 0), EXPECT(life_freed, 1), EXPECT(life_freed_has(old), 1);
+        EXPECT(caption_redraws, 1), EXPECT(caption_a, 0), EXPECT(caption_b, -1);
+        // A hidden parent keeps the frame as it is; a visible one does not.
+        OW(win, 0xc4) = (uint32_t)(uintptr_t)parent, caption_redraws = 0;
+        win_set_caption(cw, "third");
+        EXPECT(caption_redraws, 0), EXPECT(strcmp((const char *)cw->title, "third"), 0);
+        OW(parent, 0x9c) = 1;
+        win_set_caption(cw, "fourth");
+        EXPECT(caption_redraws, 1);
+        // No text: the old one is freed and none is made; the frame is drawn again.
+        life_freed = 0, old = (char *)cw->title, caption_redraws = 0;
+        win_set_caption(cw, NULL);
+        EXPECT(cw->title == NULL, 1), EXPECT(life_freed, 1), EXPECT(life_freed_has(old), 1), EXPECT(caption_redraws, 1);
+        OW(win, 0x9c) = 0, caption_redraws = 0;
+        win_set_caption(cw, "x");
+        EXPECT(caption_redraws, 0);
+        free((void *)cw->title);
+    }
+
 }
 
 int main(void) {

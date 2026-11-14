@@ -65,7 +65,7 @@ const char *life_twin(const struct life_class *c, void *a, void *b, life_fn orig
 
     // Every word that isn't a slot.
     for (size_t o = 0; o + 4 <= c->size; o += 4) {
-        int slot = o >= c->skip_lo && o < c->skip_hi;
+        int slot = (o >= c->skip_lo && o < c->skip_hi) || (o >= c->skip2_lo && o < c->skip2_hi);
         for (int s = 0; s < c->n_slots; s++) slot |= c->slots[s].off == o;
         if (slot) continue;
         uint32_t x = word(a, (int)o), y = word(b, (int)o);
@@ -170,6 +170,21 @@ void life_text(int off, const char *text) {
 static void __attribute__((thiscall)) fake_delete_block(void *o, int flag) { game_free(o); }
 static void *fake_block_vtable[2] = {(void *)fake_delete_block, NULL};
 
+void life_objects(int off, int n) {
+    uint8_t *objs[2] = {life_a, life_b};
+    for (int k = 0; k < 2; k++)
+        for (int i = 0; i < n; i++) {
+            void **o = game_mem_get(16);
+            memset(o, 0, 16);
+            o[0] = fake_block_vtable;
+            *(void ***)(objs[k] + off + 4 * i) = o;
+        }
+}
+
+void life_texts(int off, int n, const char *text) {
+    for (int i = 0; i < n; i++) life_text(off + 4 * i, text);
+}
+
 void life_nodes(int off, int n) {
     uint8_t *objs[2] = {life_a, life_b};
     for (int k = 0; k < 2; k++) {
@@ -195,4 +210,22 @@ void life_nodes(int off, int n) {
 void life_data(int off, int size) {
     game_dialog_data_alloc(life_a + off + 4, size);
     game_dialog_data_alloc(life_b + off + 4, size);
+}
+
+void life_vb_round(const struct life_class *c, int win, int dlg, struct hook_stats *s_ctor, life_fn ctor_o, life_fn ctor_n,
+                   struct hook_stats *s_close, life_fn close_o, life_fn close_n, int round, uint8_t fill, void (*extra)(int round)) {
+    uint32_t *head_global[1] = {(uint32_t *)game_at(0x9b3374)};
+    life_fill(c, life_a, life_b, fill);
+    if (life_run(s_ctor, c, ctor_o, ctor_n, NULL, head_global, 1)) life_buffer_check_at(s_ctor, win + 0x444);
+    life_build(c, fill, ctor_o, NULL);
+    life_buffers(win + 0x444, 4 + round, 3 + round);
+    life_nodes(dlg + 0xbc, round);
+    if (round & 1) life_data(dlg, 64);
+    if (extra) extra(round);
+    if (life_run(s_close, c, close_o, close_n, NULL, head_global, 1)) life_buffer_check_at(s_close, win + 0x444);
+    for (int i = 0; i < 2; i++) {
+        uint8_t *o = i ? life_b : life_a;
+        game_dialog_dtor((struct game_dialog *)(o + dlg));
+        game_graphic_win_dtor((struct game_win *)(o + win));
+    }
 }
