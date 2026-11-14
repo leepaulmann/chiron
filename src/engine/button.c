@@ -1583,6 +1583,7 @@ static const char *const bubble_texts[] = {"A tip", "Two^lines of it", ""};
 static void flat_sweep(struct game_button *b) {
     if (!*game_win_hwnd) return;
     int32_t *full = (int32_t *)((uint8_t *)b + 0x474);
+    struct game_win *parent_was = b->win.parent;  // (a group's first button's parent is called by a click: put back)
     for (int m = 0; m < 8; m++) {
         unsigned mark = hooks_timer_mark ? hooks_timer_mark() : 0;
         struct game_time *hold = (struct game_time *)b->timer_hold, *rep = (struct game_time *)b->timer_repeat;
@@ -1595,7 +1596,10 @@ static void flat_sweep(struct game_button *b) {
         hold->id = rnd_to(2) ? 0 : 0x13370000u + (uint32_t)rnd_to(9000);
         full[0] = rnd_to(20), full[1] = rnd_to(20), full[2] = full[0] + 10 + rnd_to(60), full[3] = full[1] + 8 + rnd_to(40);
         for (int k = 0; k < 4; k++) {
-            *game_win_press1 = rnd_to(4) == 0 ? &b->win : NULL, *game_win_press2 = rnd_to(2) ? &b->win : NULL;
+            // (A button with the press goes to BaseButton's move, which plays a sound of its parent's: the original reads it through
+            // the parent without looking, so a button with no parent never has the press.)
+            *game_win_press1 = rnd_to(4) == 0 && b->win.parent ? &b->win : NULL;
+            *game_win_press2 = rnd_to(2) && b->win.parent ? &b->win : NULL;
             *game_win_press_inside = rnd_to(3);
             int x = rnd_to(100) - 10, y = rnd_to(80) - 10;
             if (rnd_to(2)) x = rnd_to(full[2] - full[0]), y = rnd_to(full[3] - full[1]);
@@ -1624,6 +1628,7 @@ static void flat_sweep(struct game_button *b) {
         b->win.flags = 0;
         scrub_timers(mark);
     }
+    b->win.parent = parent_was;
 }
 
 static void sweep_dialog(struct game_dlg *d) {
