@@ -265,6 +265,7 @@ int(__attribute__((stdcall)) * game_show_window)(uint32_t hwnd, int cmd);
 int(__attribute__((stdcall)) * game_get_system_metrics)(int index);
 int(__attribute__((stdcall)) * game_is_zoomed)(uint32_t hwnd);
 int(__attribute__((stdcall)) * game_get_window_rect)(uint32_t hwnd, int32_t *rect);
+void *(*game_crt_fopen)(const char *name, const char *mode);
 int32_t *game_win_modal_n, *game_win_modal_aux, *game_win_modal_prev, *game_win_parent_n, *game_win_z_n, *game_win_opaque_flag, *game_win_nc_margin;
 int32_t *game_fill_gap, *game_copy_rem, *game_mask_units, *game_mask_gap_a, *game_mask_gap_b;
 int32_t *game_base_workers, *game_base_reserved, *game_base_food_ok, *game_current_turn;
@@ -1818,4 +1819,5 @@ void game_bind(struct pe_image *exe) {
     game_get_window_rect = *(void **)code_at(exe, 0x6692a8);
     game_say_special = (void *)code_at(exe, 0x58f610);
     game_tutwin_draw_arrow = (void *)code_at(exe, 0x4bdea0);
+    game_crt_fopen = (void *)code_at(exe, 0x645646);
 }

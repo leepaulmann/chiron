@@ -1,10 +1,47 @@
-# The Hall of Fame, which no click reaches (the game shows it at a game's
-# end): opened with the script host's "open" step on the loaded first turn,
-# snapped, closed with Escape, and the map snapped again.
+# The Hall of Fame (FameWin), which the game shows at a game's end and no click reaches: opened with the script host's "open"
+# step on the loaded first turn (final = 0, so it only shows the list: the file in the game folder holds one game). The window
+# as it opens; the mouse over a portrait; a portrait chosen with no game of its faction (the empty list) and one with the game;
+# a click on a place in the list; each of the six record buttons; Escape (closes). The state regions are the list of games
+# (the file's 0x1324 bytes) and the window object's working numbers, the game shown, the chosen portrait, the panels and the looks of the six record buttons. Leave time after each step; the snaps take 2 s each.
 25 load
+42 state fame 0x9a3840 0x1324
+42 state work 0x74e50c 0x3c
+42 state sel 0x758410 4
+42 state group 0x7534e8 0x10
+42 state rects 0x758f24 0x60
+42 state btn0 0x753fb4 4
+42 state btn1 0x754b00 4
+42 state btn2 0x75564c 4
+42 state btn3 0x756198 4
+42 state btn4 0x756ce4 4
+42 state btn5 0x757830 4
 42 snap map
 44 open hall_of_fame
 50 snap fame
-53 key Escape
-58 snap map-after
-62 close
+52 move 620 258
+56 snap hover-portrait
+58 click 300 258        # a portrait whose faction has no game
+62 snap portrait-empty
+64 click 192 258
+68 snap portrait-first
+70 click 280 440        # a place with no game
+74 snap place-empty
+76 click 280 380        # the place with the game
+80 snap place-game
+82 click 248 160        # the six record buttons
+86 snap record-0
+88 click 355 160
+92 snap record-1
+94 click 465 160
+98 snap record-2
+100 click 572 160
+104 snap record-3
+106 click 680 160
+110 snap record-4
+112 click 787 160
+116 snap record-5
+118 move 775 647        # over OK
+122 snap hover-ok
+124 key Escape
+128 snap map-after
+132 close

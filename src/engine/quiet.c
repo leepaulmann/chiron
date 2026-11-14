@@ -486,13 +486,12 @@ HELD(void, log_say5, (void)0, (char *text, char *text2, int a, int b, int c), (t
      (hooks_ui_text(&c_, 0, text), hooks_ui_text(&c_, 1, text2), c_.arg[0] = a, c_.arg[1] = b, c_.arg[2] = c),
      orig_log_say5(TEXT(0), TEXT(1), a_[0], a_[1], a_[2]))
 // The game's end (end_of_game, checked so in the score sweep only): the
-// credits, the score screen, the faction's epitaph, the hall of fame, the
-// replay, and the monument to the win. All are windows, which allocate.
+// credits, the score screen, the faction's epitaph, the hall of fame (held by
+// famewin.c, which owns its function), the replay, and the monument to the win. All are windows, which allocate.
 HELD(void, show_credits, (void)0, (void), (), (void)0, orig_show_credits())
 HELD(void, show_replay, (void)0, (void), (), (void)0, orig_show_replay())
 HELD(void, report_score, (void)0, (int final), (final), (c_.arg[0] = final), orig_report_score(a_[0]))
 HELD(void, quayle, (void)0, (int faction), (faction), (c_.arg[0] = faction), orig_quayle(a_[0]))
-HELD(void, hall_of_fame, (void)0, (int final), (final), (c_.arg[0] = final), orig_hall_of_fame(a_[0]))
 HELD(void, mon_winning_unify, (void)0, (int faction, int other), (faction, other),
      (c_.arg[0] = faction, c_.arg[1] = other), orig_mon_winning_unify(a_[0], a_[1]))
 // The text a capture's interlude read, freed (a base renamed for the
@@ -739,7 +738,6 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x5adbf0, show_replay, SEH_PROLOGUE),
     QUIET_HOOK(0x4acb80, report_score, 0xa1, 0x2c, 0x39, 0x7d, 0x00),                      // mov eax, [0x7d392c]
     QUIET_HOOK(0x496670, quayle, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),                    // mov eax, [ebp+8]
-    QUIET_HOOK(0x44ae50, hall_of_fame, PUSH_EBP_MOV_EBP_ESP, 0x56, 0x68, 0x20, 0x46, 0x68, 0x00),  // push esi; push 0x684620
     QUIET_HOOK(0x477940, mon_winning_unify, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0xd4, 0x64, 0x9a, 0x00),  // mov eax, [0x9a64d4]
     QUIET_HOOK(0x5fd530, text_close, 0xa1, 0xf4, 0x7c, 0x9b, 0x00, 0x85, 0xc0),  // mov eax, [0x9b7cf4]; test eax, eax
     QUIET_HOOK(0x59e510, prefs_put, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0xcc, 0x00, 0x69, 0x00),  // mov eax, [0x6900cc]

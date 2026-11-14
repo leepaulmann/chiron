@@ -2803,6 +2803,7 @@ extern unsigned(__attribute__((stdcall)) * game_map_virtual_key)(unsigned code, 
 extern intptr_t(__attribute__((stdcall)) * game_def_window_proc)(uint32_t hwnd, unsigned msg, uintptr_t wparam, intptr_t lparam);
 extern int(__attribute__((stdcall)) * game_is_zoomed)(uint32_t hwnd);
 extern int(__attribute__((stdcall)) * game_get_window_rect)(uint32_t hwnd, int32_t *rect);
+extern void *(*game_crt_fopen)(const char *name, const char *mode);  // the C runtime's fopen (the Hall of Fame's file)
 
 // ---- The Menu (menu bar), PullDown (drop-down menu) and Spot (hit rectangles) classes (menu.c) ----
 // A Spot list holds rectangles a screen can be hit in, 0x18 bytes each: the rectangle (left, top, right,

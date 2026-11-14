@@ -1,0 +1,42 @@
+# A game added to the Hall of Fame, as at a game's end (the script host's "open hall_of_fame_new" calls hall_of_fame(1)): the
+# loaded game is rated and put in its faction's list, takes the records it beats and has a picture of the screen kept with
+# it. Closed with Escape, and the list shown again (it is written to the fame file and read back). Then two more of the
+# same game, each at the top place, move the lower ones down (and their pictures with them). State: the list and the window object's fields (see hall_of_fame.scene).
+25 load
+42 state fame 0x9a3840 0x1324
+42 state work 0x74e50c 0x3c
+42 state sel 0x758410 4
+42 state group 0x7534e8 0x10
+42 state rects 0x758f24 0x60
+42 state btn0 0x753fb4 4
+42 state btn1 0x754b00 4
+42 state btn2 0x75564c 4
+42 state btn3 0x756198 4
+42 state btn4 0x756ce4 4
+42 state btn5 0x757830 4
+44 open hall_of_fame_new
+50 snap added
+52 click 280 380
+56 snap added-place
+58 click 680 160
+62 snap added-record
+64 key Escape
+68 snap closed
+70 open hall_of_fame
+76 snap reread
+78 key Escape
+82 snap closed-again
+84 open hall_of_fame_new
+90 snap added-second
+92 click 280 440
+96 snap second-place
+98 key Escape
+102 open hall_of_fame_new
+108 snap added-third
+110 click 280 500
+114 snap third-place
+116 click 192 258
+120 snap third-faction
+122 key Escape
+126 snap closed-end
+130 close

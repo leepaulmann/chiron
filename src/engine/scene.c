@@ -172,6 +172,7 @@ static const struct open_entry open_table[] = {
     {"info_unk4", 0x458d60, {0}, 0, 0, 0, 1},  // another that nothing calls: registers the panel's strip
     {"tech_pick", 0x5beb70, {1, 1, -1, 0}},  // int tech_pick(faction, unk, other, label): the research picker for faction 1 (the player in the scenes' save); unk is set because the save plays blind research, which has no picker
     {"give_techs", 0, {1, 40}, .host = give_techs},  // the techs 0 to 39 for faction 1: more than a screenful to build
+    {"hall_of_fame_new", 0x44ae50, {1}},  // hall_of_fame(1): as at a game's end, the loaded game is added to the list, with a picture of the screen
 };
 
 static const struct open_entry *pending;
