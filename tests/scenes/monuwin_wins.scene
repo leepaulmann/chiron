@@ -1,0 +1,67 @@
+# The pictures of the wins over other factions (kinds 15 to 20, see monuwin.scene): the list with one to six of them (the
+# pictures stand two to a position, and a count of six leaves none out), with a win left out of the middle (the walk then
+# skips ahead), the mouse over the portraits of the factions beaten and a click on each (the words of a win and the picture
+# of the faction beaten).
+25 load
+42 state mon 0x94ca08 0x2780
+42 state work 0x7fa96c 0x44
+42 state rects 0x7fd08c 0x110
+42 state pairs 0x7fd2a4 0x60
+42 state faces 0x7fd5c4 0x70
+42 state count 0x7fd634 4
+42 state parse 0x9bb570 0xa84
+45 open mon_win_1
+47 open monument_list
+50 snap wins-1
+53 key Return
+55 open mon_win_2
+57 open monument_list
+60 snap wins-2
+63 key Return
+65 open mon_win_3
+67 open monument_list
+70 snap wins-3
+73 key Return
+75 open mon_win_4
+77 open monument_list
+80 snap wins-4
+83 key Return
+85 open mon_win_5
+87 open monument_list
+90 snap wins-5
+93 key Return
+95 open mon_win_6
+97 open monument_list
+100 snap wins-6
+103 key Return
+105 open mon_win_gap
+107 open monument_list
+110 snap wins-gap
+113 key Return
+115 open mon_win_6
+117 open monument_list
+120 snap wins-six
+123 move 395 620
+126 snap hover-face-first
+129 move 746 620
+132 snap hover-face-last
+135 click 395 620
+138 snap zoom-face-15
+141 click 300 300
+144 click 621 620
+147 snap zoom-face-16
+150 click 300 300
+153 click 333 620
+156 snap zoom-face-17
+159 click 300 300
+162 click 683 620
+165 snap zoom-face-18
+168 click 300 300
+171 click 270 620
+174 snap zoom-face-19
+177 click 300 300
+180 click 746 620
+183 snap zoom-face-20
+186 click 300 300
+189 key Return
+194 close

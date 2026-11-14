@@ -1,0 +1,58 @@
+# The words and the picture of every monument kind, zoomed by a click on its icon (see monuwin.scene): the same with the odd kinds first and the even ones not. Each kind has
+# its own text variables and text, one when the faction was the first to have it and another when it was not; a click on
+# nothing goes back to the list.
+25 load
+42 state mon 0x94ca08 0x2780
+42 state work 0x7fa96c 0x44
+42 state rects 0x7fd08c 0x110
+42 state pairs 0x7fd2a4 0x60
+42 state faces 0x7fd5c4 0x70
+42 state count 0x7fd634 4
+42 state parse 0x9bb570 0xa84
+45 open mon_14b
+47 open monument_list
+50 snap list
+53 click 435 530
+56 snap kind-0
+59 click 300 300
+62 click 589 530
+65 snap kind-13
+68 click 300 300
+71 click 435 478
+74 snap kind-11
+77 click 300 300
+80 click 589 478
+83 snap kind-9
+86 click 300 300
+89 click 297 530
+92 snap kind-7
+95 click 300 300
+98 click 724 530
+101 snap kind-5
+104 click 300 300
+107 click 317 478
+110 snap kind-3
+113 click 300 300
+116 click 704 478
+119 snap kind-1
+122 click 300 300
+125 click 134 530
+128 snap kind-12
+131 click 300 300
+134 click 884 530
+137 snap kind-10
+140 click 300 300
+143 click 171 478
+146 snap kind-8
+149 click 300 300
+152 click 850 478
+155 snap kind-6
+158 click 300 300
+161 click 203 426
+164 snap kind-4
+167 click 300 300
+170 click 816 426
+173 snap kind-2
+176 click 300 300
+179 key Return
+184 close

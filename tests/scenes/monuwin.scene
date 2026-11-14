@@ -1,0 +1,48 @@
+# The Monuments window (MonuWin, see monuwin.c), opened with the script host's steps: mon_14a gives faction 1 fourteen monuments
+# (kinds 0 to 13, dated out of order, the even kinds the faction's own first), and monument_list opens the window on its list
+# (monument(0)). The window is the big one, at the corner of the screen; the icons stand in fourteen places in the order of their
+# dates (slot 0 kind 0, slot 1 kind 13, slot 7 kind 1, ...). The list as it opens; the mouse over an icon (it draws that
+# monument's picture, kind 13 being the faction's own), over the picture shown (nothing) and off every icon; a click zooms an icon
+# (moves are then ignored), a click anywhere goes back; a click on the picture shown zooms the one last shown; Return goes
+# back; the button (at the foot, to the right) goes back and, from the list, closes. The state regions are the faction's
+# monument records (with the kind shown), the window object's working numbers (the corner, the rectangles, the zoom flag, the
+# kind last shown), the places of its pictures, the count of monuments, and the text variables the words are built from.
+# Leave time after each step; the snaps take 2 s each.
+25 load
+42 state mon 0x94ca08 0x2780
+42 state work 0x7fa96c 0x44
+42 state rects 0x7fd08c 0x110
+42 state pairs 0x7fd2a4 0x60
+42 state faces 0x7fd5c4 0x70
+42 state count 0x7fd634 4
+42 state parse 0x9bb570 0xa84
+44 open mon_14a
+46 open monument_list
+52 snap list
+54 move 435 530
+57 snap hover-first
+59 move 589 530
+62 snap hover-own
+64 move 704 478
+67 snap hover-icon
+69 move 512 220
+72 snap hover-view
+74 move 20 20
+77 snap hover-off
+79 click 704 478
+83 snap zoomed
+85 move 435 530
+88 snap zoomed-move
+90 click 300 300
+94 snap list-again
+96 click 512 220
+100 snap zoom-view
+102 key Return
+106 snap key-back
+108 click 704 478
+112 snap zoomed-2
+114 click 924 757
+118 snap button-back
+120 click 924 757
+126 snap closed
+130 close

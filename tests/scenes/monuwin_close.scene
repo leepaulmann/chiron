@@ -1,0 +1,47 @@
+# The ways the Monuments window closes (see monuwin.scene for how it is opened): from the list, Return, Escape, a letter, a digit,
+# Space, Tab and an arrow key close it (every key does: the window has no keys of its own); a click on nothing leaves it open;
+# a key while a monument is zoomed goes back to the list instead (and a second one closes it). The window is opened again for
+# each, with the records given again (the kind shown is kept with them).
+25 load
+42 state mon 0x94ca08 0x2780
+42 state work 0x7fa96c 0x44
+42 state count 0x7fd634 4
+42 state parse 0x9bb570 0xa84
+44 open mon_14a
+46 open monument_list
+52 click 20 20
+55 snap click-nothing
+57 key Return
+62 snap closed-return
+64 open monument_list
+70 key Escape
+75 snap closed-escape
+77 open monument_list
+83 key a
+88 snap closed-letter
+90 open monument_list
+96 key 5
+101 snap closed-digit
+103 open monument_list
+109 key Space
+114 snap closed-space
+116 open monument_list
+122 key Tab
+127 snap closed-tab
+129 open monument_list
+135 key Down
+140 snap closed-arrow
+142 open monument_list
+148 click 704 478
+152 snap zoomed
+154 key Escape
+158 snap zoomed-key
+160 key Escape
+165 snap zoomed-closed
+167 open monument_zoom
+173 snap opened-zoomed
+175 key Return
+179 snap zoom-back
+181 key Return
+186 snap closed-last
+190 close

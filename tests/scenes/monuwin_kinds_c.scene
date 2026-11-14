@@ -1,0 +1,60 @@
+# The unusual cases of the words (see monuwin_kinds_a.scene): the kinds that may have nothing set (-1) in the numbers they
+# name, with it unset and set, first and not first; kinds 5 and 14 in a short list; and lists of three, six and fourteen
+# monuments (which pick the movie's length, the picture behind a zoomed one, and the leader's picture).
+25 load
+42 state mon 0x94ca08 0x2780
+42 state work 0x7fa96c 0x44
+42 state rects 0x7fd08c 0x110
+42 state pairs 0x7fd2a4 0x60
+42 state faces 0x7fd5c4 0x70
+42 state count 0x7fd634 4
+42 state parse 0x9bb570 0xa84
+45 open mon_14d
+47 open monument_list
+50 snap list-d
+53 click 704 478
+56 snap d-kind-14
+59 click 300 300
+62 click 816 426
+65 snap d-kind-2
+68 click 300 300
+71 click 435 530
+74 snap d-kind-13
+77 click 300 300
+80 key Return
+84 open mon_14c
+86 open monument_list
+89 click 816 426
+92 snap c-kind-2
+95 click 300 300
+98 click 589 530
+101 snap c-kind-13
+104 click 300 300
+107 key Return
+111 open mon_14e
+113 open monument_list
+116 click 816 426
+119 snap e-kind-2
+122 click 300 300
+125 key Return
+129 open mon_14f
+131 open monument_list
+134 click 816 426
+137 snap f-kind-2
+140 click 300 300
+143 key Return
+147 open mon_few
+149 open monument_list
+152 snap few-list
+155 click 589 530
+158 snap few-kind-5
+161 click 300 300
+164 click 435 478
+167 snap few-kind-14
+170 click 300 300
+173 key Return
+177 open mon_six
+179 open monument_list
+182 snap six-list
+185 key Return
+190 close

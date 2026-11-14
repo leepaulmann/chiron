@@ -159,6 +159,34 @@ static int give_techs(int faction, int count, int unused, int unused2) {
     for (int t = 0; t < count && t < TECH_COUNT; t++) game_tech_achieved[t] |= (uint8_t)(1u << (faction & 7));
     return count;
 }
+// A scene's own step: the Monuments window's records (see monuwin.c). Faction 1's table (0x94ca08, 0x4f4 bytes a faction) gets
+// the kinds of `used_mask` (bit k for kind k, 0 to 20) in use, in an order of dates that is not the order of the kinds; the kinds
+// of `first_mask` are the first to have it (else the faction that had it before is 2 to 4, whose own record of that kind has a
+// date too); `variant` bit 0 leaves the second number of every kind unset (-1), bit 1 the "what" of kind 2, bit 2 that of kinds
+// 13 and 14; `shown` is the kind the window shows. (Both modes do the same, and the table is part of the state compared.)
+static int give_monuments(int used_mask, int first_mask, int variant, int shown) {
+    uint8_t *table = game_at(0x94ca08);
+    for (int f = 1; f <= 7; f++)
+        for (int k = 0; k < 21; k++) {
+            int32_t *m = (int32_t *)(table + 0x4f4 * f + 0x38 * k);
+            int own = f == 1;
+            memset(m, 0, 0x38);
+            m[0] = own ? 60 + 5 * ((k * 7) % 15) : 30 + 4 * f + k;  // when
+            if (!own) continue;
+            m[1] = (variant & 1) ? -1 : k + 1;  // extra
+            m[2] = k == 1 ? 7 : k == 2 ? ((variant & 2) ? -1 : 4) : k == 5 ? 2 : k == 6 ? 3
+                 : (k == 13 || k == 14) ? ((variant & 4) ? -1 : 2 + k % 3) : k >= 15 ? 2 + (k - 15) % 6 : 0;  // what
+            m[3] = 2 + k % 3;                // other
+            m[4] = (used_mask >> k) & 1;     // used
+            m[5] = (first_mask >> k) & 1;    // first
+        }
+    *(int32_t *)(table + 0x4f4 + 0x498) = shown;
+    memset(table + 0x4f4 + 0x4ac, 0, 0x48);
+    strcpy((char *)table + 0x4f4 + 0x4ac, "Zetaport");
+    strcpy((char *)table + 0x4f4 + 0x4c4, "Betatown");
+    strcpy((char *)table + 0x4f4 + 0x4dc, "Gammaville");
+    return used_mask;
+}
 static const struct open_entry open_table[] = {
     {"hall_of_fame", 0x44ae50, {0}},  // void hall_of_fame(int final): 0 only shows the list
     {"info_tick", 0x459150, {10, 0, 0, 0}, 0x7ad2a0, 0, 0x7ad34c},  // InfoWin_timer_proc(10): one tick of the info panel's clock, made by hand (a scene stops the real clock with the panel's `suspended` word, which is lifted for the call)
@@ -173,6 +201,23 @@ static const struct open_entry open_table[] = {
     {"tech_pick", 0x5beb70, {1, 1, -1, 0}},  // int tech_pick(faction, unk, other, label): the research picker for faction 1 (the player in the scenes' save); unk is set because the save plays blind research, which has no picker
     {"give_techs", 0, {1, 40}, .host = give_techs},  // the techs 0 to 39 for faction 1: more than a screenful to build
     {"hall_of_fame_new", 0x44ae50, {1}},  // hall_of_fame(1): as at a game's end, the loaded game is added to the list, with a picture of the screen
+    {"monument_list", 0x476a50, {0}, .discard = 1},  // monument(0): the Monuments window on its list (the records are given first)
+    {"monument_zoom", 0x476a50, {1}, .discard = 1},  // monument(1): the same, at the monument last shown, zoomed
+    {"mon_14a", 0, {0x3fff, 0x1555, 0, 0}, .host = give_monuments},  // kinds 0 to 13, the even ones the faction's first
+    {"mon_14b", 0, {0x3fff, 0x2aaa, 0, 1}, .host = give_monuments},  // the same, the odd ones the first, kind 1 shown
+    {"mon_14c", 0, {0x3fff, 0x1555, 7, 13}, .host = give_monuments},  // the first again, nothing set that may be -1, kind 13 shown
+    {"mon_14d", 0, {0x7ffe, 0x2aaa, 7, 14}, .host = give_monuments},  // kinds 1 to 14, the odd ones first, nothing set that may be -1
+    {"mon_14e", 0, {0x3fff, 0x1555, 1, 2}, .host = give_monuments},  // kinds 0 to 13, the even ones first, the second number unset
+    {"mon_14f", 0, {0x3fff, 0x2aaa, 1, 2}, .host = give_monuments},  // the odd ones first, the second number unset
+    {"mon_six", 0, {0x3f, 0x15, 0, 2}, .host = give_monuments},  // kinds 0 to 5: six, so more than four
+    {"mon_few", 0, {0x4021, 0, 0, 5}, .host = give_monuments},  // kinds 0, 5 and 14 only: a short list, over the first picture
+    {"mon_win_1", 0, {0x8001, 0, 0, 15}, .host = give_monuments},  // kind 0 and one win
+    {"mon_win_2", 0, {0x18001, 0, 0, 16}, .host = give_monuments},  // and two
+    {"mon_win_3", 0, {0x38001, 0, 0, 17}, .host = give_monuments},
+    {"mon_win_4", 0, {0x78001, 0, 0, 18}, .host = give_monuments},
+    {"mon_win_5", 0, {0xf8001, 0, 0, 19}, .host = give_monuments},
+    {"mon_win_6", 0, {0x1f8001, 0, 0, 20}, .host = give_monuments},
+    {"mon_win_gap", 0, {0x28001, 0, 0, 17}, .host = give_monuments},  // wins 15 and 17 with 16 unused
 };
 
 static const struct open_entry *pending;
