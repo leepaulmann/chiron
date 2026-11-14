@@ -6,6 +6,7 @@
 
 #include "game.h"
 
+#define WIN_STD __attribute__((stdcall))
 #define WIN_THIS __attribute__((thiscall))
 
 // Visibility and the tree.
@@ -82,6 +83,8 @@ int WIN_THIS win_show_maximize(struct game_win *w);
 int WIN_THIS win_center(struct game_win *w);
 void WIN_THIS win_nonclient_to_client_2(struct game_win *w, int32_t *rect);
 void WIN_THIS win_redo_caption_buttons(struct game_win *w);
+void WIN_THIS win_do_caption_buttons(struct game_win *w);
+void WIN_THIS graphic_win_compute_min_size(struct game_win *w);
 void WIN_THIS win_resize_event(struct game_win *w, int cw, int ch);
 int WIN_THIS win_resize(struct game_win *w, int cx, int cy, int client);
 void *WIN_THIS win_redraw_nc_buffer(struct game_win *w, unsigned which);
@@ -128,6 +131,11 @@ void win_OnLButtonDown(int hwnd, int dbl, int x, int y, int keys);
 void win_OnLButtonUp(int hwnd, int x, int y, int keys);
 void win_OnRButtonDown(int hwnd, int dbl, int x, int y, int keys);
 void win_OnRButtonUp(int hwnd, int x, int y, int keys);
+
+// The game's window procedure (0x5f0650), a stdcall function of the window handle, the message and its two words.
+// The game's calls of it run the original in shadow mode (it reaches windows, the screen and Windows calls the
+// journal can't put back), and the sweep checks Chiron's code on scratch windows.
+intptr_t WIN_STD win_proc(uint32_t hwnd, uint32_t msg, uint32_t wparam, intptr_t lparam);
 
 // The GraphicWin class (a Win with a Buffer of its own at 0x444, see win.c): showing what was drawn in it,
 // and drawing it into the back buffer.

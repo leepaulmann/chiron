@@ -802,13 +802,15 @@ static void WIN_THIS wt_fake_delete(void *o, int flag) { fakes_deleted_ += flag;
 static void *wt_fake_vt[1] = {(void *)wt_fake_delete};
 static void *wt_fake_a = &wt_fake_vt, *wt_fake_c = &wt_fake_vt;
 
+static int *cap_log_, *cap_n_;
+static void WIN_THIS cap_stub_(void *o, int flag) { cap_log_[(*cap_n_)++] = (int)(intptr_t)o; (void)flag; }
+static int inval_calls_;
+static int STD inval_(void *h, const int32_t *r, int e) { return ++inval_calls_; }
 static int new_calls_, new_fails_;
 static void *wt_new(size_t n) { return ++new_calls_ == new_fails_ ? NULL : calloc(1, n); }
 static void WIN_THIS wt_scroll_init(void *bar, int a, int b, int c, void *w, int d) {
     wrec_(0x7000 + (d == -1), bar, a * 1000000 + b * 10000 + c * 100 + (w != NULL));
 }
-static void WIN_THIS wt_caption_buttons(void *w) { wrec_(0x7100, w, 0); }
-static void WIN_THIS wt_min_size(void *w) { wrec_(0x7200, w, 0); }
 static int STD wt_message_box(void *w, const char *t, const char *c, int type) { return 0; }
 static void wt_exit(int code) {}
 static void wt_flip_restore(const int32_t *box, int arg) { wrec_(0x7300, (void *)box, arg); }
@@ -832,7 +834,7 @@ static void test_close_init(void) {
     wt_vtable[0x1c / 4] = (void *)wt_bar_map, wt_vtable[0xf4 / 4] = (void *)wt_copy, wt_vtable[0x108 / 4] = (void *)wt_layout;
     wt_vtable[0x128 / 4] = (void *)wt_caption, wt_vtable[0x168 / 4] = (void *)wt_owner, wt_vtable[0x16c / 4] = (void *)wt_nc_height;
     game_operator_new = wt_new, game_scroll_init_vert_nc = wt_scroll_init, game_scroll_init_horz_nc = wt_scroll_init;
-    game_win_do_caption_buttons = wt_caption_buttons, game_graphic_win_compute_min_size = wt_min_size;
+    
     game_message_box_a = wt_message_box, game_exit = wt_exit, game_flip_restore = wt_flip_restore;
     game_win_clear_bubble = wt_clear_bubble;
     game_dc = &wt_dc_, game_flip_text = &wt_flip_text_, game_win_screen_w = &screen_w, game_win_screen_h = &screen_h;
@@ -968,7 +970,7 @@ static void test_close_init(void) {
         EXPECT(W1.outer[0], 160), EXPECT(W1.outer[1], 40), EXPECT(W1.outer[2], 190), EXPECT(W1.outer[3], 80);
         EXPECT(W1.inner[0], want[0] - 160), EXPECT(W1.inner[1], want[1] - 40), EXPECT(W1.inner[2], want[2] - 160), EXPECT(W1.inner[3], want[3] - 40);
         EXPECT(W1.clip[0], W1.inner[0]), EXPECT(W1.clip[1], W1.inner[1]), EXPECT(W1.clip[2], W1.inner[2]), EXPECT(W1.clip[3], W1.inner[3]);
-        EXPECT(nwlog, 3), EXPECT(wlog_[0].slot, 0x8), EXPECT(wlog_[1].slot, 0x108), EXPECT(wlog_[2].slot, 0x7100);  // (the caption buttons made)
+        EXPECT(nwlog, 2), EXPECT(wlog_[0].slot, 0x8), EXPECT(wlog_[1].slot, 0x108);
         win_close(&W1);
     }
     // A window without a frame: its client area is where it was put, from the screen's size for a negative place, and it is
@@ -1046,6 +1048,10 @@ static void test_close_init(void) {
     // the window; the minimum size is worked out in between.
     {
         static uint8_t gw[0xa40];
+        // the frame's pieces are sprites (graphic_win_init works the smallest size out from them)
+        static struct game_sprite piece[11];
+        static const uint32_t piece_words[11] = {0x9b3394, 0x9b3398, 0x9b339c, 0x9b33a0, 0x9b33ac, 0x9b33b0, 0x9b33a8, 0x9b33a4, 0x9b33b8, 0x9b33b4, 0x9b33bc};
+        for (int i = 0; i < 11; i++) piece[i].full_w = 5 + i, piece[i].full_h = 40 - 2 * i, IMGW(piece_words[i]) = (uint32_t)(uintptr_t)&piece[i];
         memset(gw, 0xcc, sizeof gw);
         graphic_win_ctor((struct game_win *)gw);
         ((struct game_win *)gw)->vtable = wt_vtable;
@@ -1060,8 +1066,48 @@ static void test_close_init(void) {
         EXPECT(OW(gw, 0xa08) != 0, 1), EXPECT(OW(gw, 0x448), (uint32_t)(uintptr_t)gw), EXPECT(new_calls_, 5);  // (four frame buffers and the picture)
         struct game_buffer *buf = (struct game_buffer *)(gw + 0x444);
         EXPECT(buf->width, 30), EXPECT(buf->neg_height, -20);
-        EXPECT(wlog_[nwlog - 1].slot, 0x7200);
         EXPECT(((struct game_win *)gw)->inner[0], 3), EXPECT(((struct game_win *)gw)->inner[3], 24);
+        // The smallest size, without bit 0x10: the pieces at 9ec and 9f0 (8 and 9) with 9d0 and 9d8 (1 and 3): widths 13+14=27 against
+        // 6+8=14, heights 24+38=62 against 34+22=56.
+        EXPECT(OW(gw, 0x134), 27), EXPECT(OW(gw, 0x138), 62);
+        // With it the pieces at 9cc and 9d4 (0 and 2) stand in: widths 5+7=12 against 14, heights 40+38=78 against 34+36=70.
+        ((struct game_win *)gw)->flags |= 0x10;
+        graphic_win_compute_min_size((struct game_win *)gw);
+        EXPECT(OW(gw, 0x134), 14), EXPECT(OW(gw, 0x138), 78);
+        // A missing piece leaves both as they are.
+        OW(gw, 0x9d8) = 0, OW(gw, 0x134) = 1, OW(gw, 0x138) = 2;
+        graphic_win_compute_min_size((struct game_win *)gw);
+        EXPECT(OW(gw, 0x134), 1), EXPECT(OW(gw, 0x138), 2);
+    }
+    // The caption buttons are deleted, each through slot 0 of its vtable, in the order 0xe4, 0xe8, 0xec.
+    {
+        static int deleted[3], ndel;
+        static void *cvt[1];
+        static void *cobj[3];
+        cvt[0] = (void *)cap_stub_;
+        for (int i = 0; i < 3; i++) cobj[i] = cvt;
+        struct game_win_btn *cw[3] = {(struct game_win_btn *)&cobj[0], NULL, (struct game_win_btn *)&cobj[2]};
+        W1.btn_e4 = cw[0], W1.btn_e8 = cw[1], W1.btn_ec = cw[2];
+        cap_log_ = deleted, cap_n_ = &ndel;
+        win_do_caption_buttons(&W1);
+        EXPECT(ndel, 2), EXPECT(deleted[0], (int)(intptr_t)&cobj[0]), EXPECT(deleted[1], (int)(intptr_t)&cobj[2]);
+        EXPECT(W1.btn_e4 == NULL, 1), EXPECT(W1.btn_ec == NULL, 1);
+    }
+    // The window procedure: a character and a system key go to the key window, a button press goes to the window under
+    // the mouse (none here), a deactivation lets go of the presses, and the rest are the default.
+    {
+        static int tracked_msg;
+        (void)tracked_msg;
+        press1_ = &W1, press2_ = &W1;
+        game_invalidate_rect = inval_;
+        win_proc(1, 0x6, 0, 0);  // deactivated: invalidated, the presses let go
+        EXPECT(inval_calls_, 1), EXPECT(press1_ == NULL, 1), EXPECT(press2_ == NULL, 1);
+        EXPECT(win_proc(1, 0x14, 0, 0), 0x1234);  // the default's answer
+        static void *dd_test_ = (void *)1;
+        void **keep_dd = game_ddraw;
+        game_ddraw = &dd_test_;
+        EXPECT(win_proc(1, 0x30f, 0, 0), 1);  // asked for a palette under DirectDraw
+        game_ddraw = keep_dd;
     }
     // PullDown_init: the menu colour word (0x9b7b68) is taken from the game's default if it isn't set; the menu's own words are set
     // before and after the window's init.

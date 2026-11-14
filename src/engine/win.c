@@ -42,14 +42,15 @@
 // windows, which draw and open windows, so in shadow mode the game's calls run the original and the
 // sweep checks Chiron's code over scratch windows (with logging stand-ins for all of them and
 // windows with a list of regions behind them). A system key and the keys asked of MapVirtualKey go
-// through the Windows-call journal. Left with the original: the window procedure (WinProc) and the
-// mouse functions it calls that draw the cursor, move or size a window by hand and flip the screen
-// (OnMouseMove, update_cursor, do_tracking), the key functions that drain the message queue or run
+// through the Windows-call journal. Left with the original: the mouse functions that draw the cursor and
+// move or size a window by hand (OnMouseMove, update_cursor, do_tracking), the key functions that drain the message queue or run
 // the cheat code (Win_on_key, Win_on_char), the palette and activation handlers, and the dialog
 // list's set-up and removal (they allocate); the scroll wheel handlers that call the Scroll class.
 //
-// Left with the original: the large frame-overlay function at 0x5f3b80, do_caption_buttons (frees the
-// caption buttons) and GraphicWin's compute_min_size, which Win_init and GraphicWin_init call.
+// The window procedure (WinProc, see "The window procedure" below) and the two small functions Win_init and
+// GraphicWin_init call, do_caption_buttons (deletes the caption buttons, so checked on stand-in buttons in the
+// sweep only) and GraphicWin's compute_min_size, are here too. Left with the original: the large frame-overlay
+// function at 0x5f3b80 and, in the window procedure, a mouse move (it runs update_cursor and do_tracking).
 //
 // The path to the screen. A window's picture reaches the window in three steps: the window draws itself
 // into the back buffer (win_update_screen, above, and the GraphicWin's paint in the section below, which
@@ -79,6 +80,7 @@
 #include "life.h"
 #include "screen.h"
 #include "shadow.h"
+#include "strlist.h"
 #include "text.h"
 #include "win.h"
 
@@ -806,6 +808,38 @@ void WIN_THIS win_redo_caption_buttons(struct game_win *w) {
         x += -1 - w->btn_e8->width;
     }
     if (w->btn_e4) win_move(&w->btn_e4->win, x, size);
+}
+
+// Gives back the caption buttons: each of the three (0xe4, 0xe8, 0xec, in that order) that exists is deleted
+// through slot 0 of its vtable (the deleting destructor, told to free it) and its field cleared.
+void WIN_THIS win_do_caption_buttons(struct game_win *w) {
+    struct game_win_btn **slots[3] = {&w->btn_e4, &w->btn_e8, &w->btn_ec};
+    for (int i = 0; i < 3; i++) {
+        struct game_win_btn *b = *slots[i];
+        if (b) {
+            vcall1(&b->win, 0, 1);
+            *slots[i] = NULL;
+        }
+    }
+}
+
+// GraphicWin: the smallest size the window's pieces allow, from the sprites of its frame (read at their 0x18 and
+// 0x1c, the full width and height). A window with bit 0x10 uses the pieces at 0x9cc and 0x9d4, another those at
+// 0x9ec and 0x9f0, together with the ones at 0x9d0 and 0x9d8 (call them a, b, c, d). Nothing is stored unless all
+// four exist. The width, at 0x134, is the larger of a + b and d + c; the height, at 0x138, the larger of a + c and
+// d + b. (The original stores the first sum before it compares; nothing can see that.)
+void WIN_THIS graphic_win_compute_min_size(struct game_win *w) {
+    uint8_t *p = (uint8_t *)w;
+#define PIECE(off) (*(struct game_sprite **)(p + (off)))
+    int tall = w->flags & 0x10;
+    struct game_sprite *a = PIECE(tall ? 0x9cc : 0x9ec), *b = PIECE(tall ? 0x9d4 : 0x9f0), *c = PIECE(0x9d0), *d = PIECE(0x9d8);
+#undef PIECE
+    if (!a || !b || !c || !d) return;
+    int32_t width = a->full_w + b->full_w, other = d->full_w + c->full_w;
+    *(int32_t *)(p + 0x134) = width > other ? width : other;
+    int32_t height = a->full_h + c->full_h;
+    other = d->full_h + b->full_h;
+    *(int32_t *)(p + 0x138) = height > other ? height : other;
 }
 
 // What happens when a window is resized to a client width and height: the global `cur` names
@@ -2107,6 +2141,155 @@ void win_OnRButtonUp(int hwnd, int x, int y, int keys) {
     if (w) vcall4(w, VT_ON_R_UP, x, y, keys, *game_win_hit_nc);
 }
 
+// ---- The window procedure ---------------------------------------------------------------------
+//
+// The game's one window class's procedure (0x5f0650), a stdcall function of the window handle, the message
+// and its two words. What it does with each message:
+//   0x6 (activate)      the window is invalidated; one activated (the low word) and not minimized (the high word)
+//                       gets the game's palette selected into its device context and realized (not under
+//                       DirectDraw); one deactivated lets go of any button press; then DefWindowProc, answer 0
+//   0xf (paint)         the paint rectangle is drawn from the screen (win_update_screen, every window) and flipped
+//   0x100, 0x101        a key down or up: the key window's slot 0x138 (the key, down or not, the repeat count from
+//                       the low word and the scan code from the high), the game's key hook for a key down, the hook
+//                       for every input; 0x102 a character: slot 0x13c; 0x104, 0x105 a system key: slot 0x140
+//   0x112               a system command: the window kept in the game window's user data (GWL_USERDATA) is
+//                       told; close (0xf060) makes it the current window, calls its callback at 0x404, its slot
+//                       0x38 and lets go the object at 0x18; every other command goes to DefWindowProc
+//   0x200               a mouse move: left with the original (see below)
+//   0x201 to 0x206      the mouse buttons (down, up, double click) and 0x20a the wheel: the window under the mouse is
+//                       found and told, as the OnLButtonDown, OnLButtonUp, OnRButtonDown and OnRButtonUp
+//                       functions do (the original has the ones that are not calls of theirs in line); the wheel
+//                       is told its slot 0x134 with the key state, the turn and the place
+//   0x30f, 0x311        the palette is realized again (the system asks; or another window changed it): not
+//                       under DirectDraw, and a palette change the game's own window made is left alone
+//   0x401               a Time's message (see game_time): the object in wparam has its `fired` word cleared, and
+//                       unless the game is flushing these (0x9b7b9c) or waits for another Time, a pulse that has
+//                       fired twice is stopped and its callbacks are called; then DefWindowProc
+// Anything else goes to DefWindowProc and gives its answer. A handled message answers 0 (a query for a new
+// palette gives 1 under DirectDraw), the same as the original.
+//
+// A mouse move is left with the original: it calls update_cursor (0x5f1820) and do_tracking (0x5f7580), two
+// large functions that draw the cursor and move or size a window by hand, and no check can run those on
+// scratch windows. Differences from OpenSMACX and Thinker: neither has the procedure laid out; the names are the
+// inventory's. The original calls 0x5f86a0 (let an object go: kept if it says so through slot 0x5c, else freed
+// through 0x1c) for a close; it is the let_go above.
+
+static intptr_t(WIN_STD *orig_win_proc)(uint32_t, uint32_t, uint32_t, intptr_t);
+static struct hook_stats stats_win_proc = {"win_proc"};
+
+static int16_t lo16(uint32_t v) { return (int16_t)(v & 0xffff); }
+static int16_t hi16(uint32_t v) { return (int16_t)(v >> 16); }
+
+// The palette in the window's counted device context, selected and realized.
+static void wp_realize(void) {
+    game_select_palette(*game_dc, (void *)(uintptr_t)*game_palette_handle, 0);
+    game_realize_palette(*game_dc);
+}
+
+intptr_t WIN_STD win_proc(uint32_t hwnd, uint32_t msg, uint32_t wp, intptr_t lp) {
+    int32_t x = lo16((uint32_t)lp), y = hi16((uint32_t)lp);
+    switch (msg) {
+    case 0x6: {  // WM_ACTIVATE
+        game_invalidate_rect((void *)(uintptr_t)*game_win_hwnd, NULL, 0);
+        if (wp & 0xffff) {
+            if (!(wp >> 16) && !*game_ddraw && win_get_dc()) {
+                wp_realize();
+                win_release_dc();
+            }
+        } else {
+            *game_win_press1 = NULL;
+            *game_win_press2 = NULL;
+        }
+        game_def_window_proc(hwnd, msg, wp, lp);
+        return 0;
+    }
+    case 0xf: {  // WM_PAINT
+        uint32_t ps[16];
+        if (!game_begin_paint((void *)(uintptr_t)hwnd, ps)) return 0;
+        int32_t rect[4] = {(int32_t)ps[2], (int32_t)ps[3], (int32_t)ps[4], (int32_t)ps[5]};
+        win_update_screen(rect, NULL);
+        win_flip(rect);
+        game_end_paint((void *)(uintptr_t)hwnd, ps);
+        return 0;
+    }
+    case 0x100:  // WM_KEYDOWN
+        win_OnKey(0, (int)wp, 1, lo16((uint32_t)lp), (int)((uint32_t)lp >> 16));
+        return 0;
+    case 0x101:  // WM_KEYUP
+        win_OnKey(0, (int)wp, 0, lo16((uint32_t)lp), (int)((uint32_t)lp >> 16));
+        return 0;
+    case 0x102:  // WM_CHAR
+        win_OnChar(0, (int)wp, lo16((uint32_t)lp));
+        return 0;
+    case 0x104:  // WM_SYSKEYDOWN
+        win_OnSysKey(0, (int)wp, 1, lo16((uint32_t)lp), (int)((uint32_t)lp >> 16));
+        return 0;
+    case 0x105:  // WM_SYSKEYUP
+        win_OnSysKey(0, (int)wp, 0, lo16((uint32_t)lp), (int)((uint32_t)lp >> 16));
+        return 0;
+    case 0x112: {  // WM_SYSCOMMAND
+        struct game_win *w = (struct game_win *)(uintptr_t)game_get_window_long((void *)(uintptr_t)hwnd, -21);
+        if (!w) return 0;
+        if (wp != 0xf060) {
+            game_def_window_proc(hwnd, msg, wp, lp);
+            return 0;
+        }
+        *game_win_cur = w;
+        void (*cb)(void) = (void (*)(void))field_at(w, 0x404);
+        if (cb) cb();
+        vcall0(w, 0x38);
+        let_go(field_at(w, 0x18));
+        return 0;
+    }
+    case 0x200:  // WM_MOUSEMOVE
+        return orig_win_proc(hwnd, msg, wp, lp);
+    case 0x201: win_OnLButtonDown((int)hwnd, 0, x, y, (int)wp); return 0;
+    case 0x203: win_OnLButtonDown((int)hwnd, 1, x, y, (int)wp); return 0;
+    case 0x202: win_OnLButtonUp((int)hwnd, x, y, (int)wp); return 0;
+    case 0x204: win_OnRButtonDown((int)hwnd, 0, x, y, (int)wp); return 0;
+    case 0x206: win_OnRButtonDown((int)hwnd, 1, x, y, (int)wp); return 0;
+    case 0x205: win_OnRButtonUp((int)hwnd, x, y, (int)wp); return 0;
+    case 0x20a: {  // WM_MOUSEWHEEL
+        struct game_win *w = win_get_mouse_window(&x, &y);
+        if (w) vcall5(w, 0x134, (int)wp, (int)(wp >> 16), x, y, *game_win_hit_nc);
+        return 0;
+    }
+    case 0x30f:  // WM_QUERYNEWPALETTE
+        if (*game_ddraw) return 1;
+        if (win_get_dc()) {
+            wp_realize();
+            win_release_dc();
+        }
+        return 0;
+    case 0x311:  // WM_PALETTECHANGED
+        if (hwnd == wp || *game_ddraw || !win_get_dc()) return 0;
+        wp_realize();
+        win_release_dc();
+        return 0;
+    case 0x401: {  // a Time's message
+        struct game_time *t = (struct game_time *)(uintptr_t)wp;
+        t->fired = 0;
+        if (!*game_time_flush_flag) {
+            int go = 1;
+            if (t->flags & 1) {
+                if (t->flags & 2) {
+                    time_stop(t);
+                    go = 0;
+                } else {
+                    t->flags |= 2;
+                }
+            }
+            if (go && (!*game_time_current || t == *game_time_current)) {
+                if (t->cb) t->cb(t->arg);
+                if (t->cb2) t->cb2(t->arg, t->arg2);
+            }
+        }
+        break;
+    }
+    }
+    return game_def_window_proc(hwnd, msg, wp, lp);
+}
+
 // ---- Shadow checks -------------------------------------------------------------------------
 
 typedef struct game_win *winp;
@@ -2297,6 +2480,7 @@ SHADOW_WRITER_T(WIN, int, win_center, (struct game_win * w), (w), WRITES(w->inne
 SHADOW_WRITER_T(WIN, void, win_nonclient_to_client_2, (struct game_win * w, int32_t *r), (w, r),
                 (writes_ints(&w_, r, 16), writes_vlog(&w_)), "%d", P(w))
 SHADOW_WRITER_T(WIN, void, win_redo_caption_buttons, (struct game_win * w), (w), writes_redo(&w_, w), "%d", P(w))
+SHADOW_WRITER_T(WIN, void, graphic_win_compute_min_size, (struct game_win * w), (w), WRITES((uint8_t *)w + 0x134, 8), "%d", P(w))
 SHADOW_WRITER_T(WIN, void, win_resize_event, (struct game_win * w, int cw, int ch), (w, cw, ch),
                 writes_resize_event(&w_, w), "%d, %d, %d", P(w), cw, ch)
 SHADOW_WRITER_T(WIN, int, win_resize, (struct game_win * w, int cx, int cy, int client), (w, cx, cy, client),
@@ -2387,6 +2571,11 @@ static void shadow_win_update(void) {
         return orig_##name args;                                                           \
     }
 PASS_T(void, win_update_back_to_window, (struct game_win * w, struct game_buffer *dest), (w, dest))
+// The caption buttons are deleted through their destructors (they free memory), which a check can't put back:
+// the game's calls run the original, and the sweep checks Chiron's code on windows whose buttons are stand-ins
+// that log the call.
+PASS_T(void, win_do_caption_buttons, (struct game_win * w), (w))
+SHADOW_WRITER_BODY(void, win_do_caption_buttons, (struct game_win * w), (w), (writes_vlog(&w_), WRITES(&w->btn_e4, 12)), "%d", P(w))
 
 // What drawing a window into a Buffer writes: what the screen's draw does (the back buffer and the
 // overlay, the scratch the fills and copies leave behind), the Buffer drawn into, the z-order list, the
@@ -2577,7 +2766,7 @@ static void fill_stub_vtable(void) {
     static int THISCALL stub_##slot(struct game_win *w, int a, int b, int c, int d, int e) {          \
         return vrec(slot, w, a, b, c * 7 + d * 3 + e), slot + 1;                                      \
     }
-STUB1(0x3c) STUB2(0x44) STUB2(0x4c) STUB2(0x50) STUB2(0x54) STUB2(0x58) STUB2(0x5c) STUB2(0x60) STUB2(0x70) STUB2(0x74)
+STUB0(0x38) STUB5(0x134) STUB1(0x3c) STUB2(0x44) STUB2(0x4c) STUB2(0x50) STUB2(0x54) STUB2(0x58) STUB2(0x5c) STUB2(0x60) STUB2(0x70) STUB2(0x74)
 STUB1(0x78) STUB2(0x7c) STUB2(0x80) STUB2(0x84) STUB2(0x88) STUB2(0x8c) STUB2(0x90) STUB2(0x94) STUB2(0x98) STUB2(0x9c)
 STUB1(0xb0) STUB0(0x100) STUB1(0x104) STUB4(0x138) STUB2(0x13c) STUB4(0x140) STUB5(0x144) STUB4(0x148) STUB5(0x14c) STUB4(0x150)
 // The key slots: whether the key was used (a scroll bar's, asked with (0, key)), and what the handler answers.
@@ -2609,6 +2798,7 @@ static void (*const cb2_table[9])(int, int) = {cb2_0, cb2_1, cb2_2, cb2_3, cb2_4
 static int cbi_key_click(int a, int b) { return vrec(0x2010, NULL, a, b, 0), (a + b) & 3; }
 static int cbi_key_down(int a) { return vrec(0x2011, NULL, a, 0, 0), a & 3; }
 static int cbi_key_up(int a) { return vrec(0x2012, NULL, a, 0, 0), (a >> 1) & 3; }
+static void cb_close(void) { vrec(0x404, NULL, 0, 0, 0); }
 static void hook_after(void) { vrec(0x2020, NULL, 0, 0, 0); }
 static void hook_key(int a) { vrec(0x2021, NULL, a, 0, 0); }
 static void hook_left(int x, int y) { vrec(0x2022, NULL, x, y, 0); }
@@ -2621,7 +2811,8 @@ static void random_event_fields(struct game_win *w) {
     *(void **)(p + 0x42c) = rnd_to(3) ? (void *)cbi_key_click : NULL;
     *(void **)(p + 0x430) = rnd_to(3) ? (void *)cbi_key_down : NULL;
     *(void **)(p + 0x434) = rnd_to(3) ? (void *)cbi_key_up : NULL;
-    for (int off = 0x1c; off <= 0x6c; off += 4) *(void **)(p + off) = rnd_to(3) ? (void *)&links[rnd_to(4)] : NULL;
+    for (int off = 0x18; off <= 0x6c; off += 4) *(void **)(p + off) = rnd_to(3) ? (void *)&links[rnd_to(4)] : NULL;
+    *(void **)(p + 0x404) = rnd_to(3) ? (void *)cb_close : NULL;
 }
 
 // Windows with room behind them for the list of regions a subclass keeps at 0x8f4 (the entries at
@@ -2634,7 +2825,7 @@ _Static_assert(offsetof(struct fat_win, sub) == 0x444, "the sub-class part follo
 
 static void fill_event_stubs(void) {
     void **v = stub_vtable;
-    v[0x3c / 4] = (void *)stub_0x3c, v[0x44 / 4] = (void *)stub_0x44, v[0x4c / 4] = (void *)stub_0x4c, v[0x50 / 4] = (void *)stub_0x50;
+    v[0x38 / 4] = (void *)stub_0x38, v[0x134 / 4] = (void *)stub_0x134, v[0x3c / 4] = (void *)stub_0x3c, v[0x44 / 4] = (void *)stub_0x44, v[0x4c / 4] = (void *)stub_0x4c, v[0x50 / 4] = (void *)stub_0x50;
     v[0x54 / 4] = (void *)stub_0x54, v[0x58 / 4] = (void *)stub_0x58, v[0x5c / 4] = (void *)stub_0x5c, v[0x60 / 4] = (void *)stub_0x60;
     v[0x64 / 4] = (void *)stub_0x64, v[0x68 / 4] = (void *)stub_0x68, v[0x6c / 4] = (void *)stub_0x6c, v[0x70 / 4] = (void *)stub_0x70;
     v[0x74 / 4] = (void *)stub_0x74, v[0x78 / 4] = (void *)stub_0x78, v[0x7c / 4] = (void *)stub_0x7c, v[0x80 / 4] = (void *)stub_0x80;
@@ -3004,6 +3195,53 @@ PASS_CHECK_C(void, win_OnRButtonDown, (int hwnd, int dbl, int x, int y, int keys
 PASS_CHECK_C(void, win_OnRButtonUp, (int hwnd, int x, int y, int keys), (hwnd, x, y, keys), writes_dispatch(&w_), "%d, %d, %d", x, y,
              keys)
 
+// The window procedure. What the original does that a check can see: the scratch windows' state and the lists
+// (as the game's own calls into the windows), the counted device context and the window's own, the Time objects
+// the sweep makes, and for a paint the screen's back buffer and the window's pixels. The Windows calls go through
+// the journal (BeginPaint and EndPaint with a paint structure); the sweep's `wp_prepare`, if set, is called before
+// each run (a paint needs a rectangle invalidated for BeginPaint to give).
+static struct game_time wp_times[3];
+static void (*wp_prepare)(void);
+static uint32_t wp_hwnd;  // the real window, for the checks that reach its device context
+static void writes_winproc(struct hook_writes *w, uint32_t msg) {
+    writes_dispatch(w);
+    hooks_writes_add(w, game_dc_count, 4);
+    hooks_writes_add(w, game_dc, 4);
+    hooks_writes_add(w, wp_times, sizeof wp_times);
+    hooks_writes_add(w, game_win_press1, 12);
+    if (wp_hwnd && (msg == 0x6 || msg == 0x30f || msg == 0x311)) {
+        void *dc = game_get_dc((void *)(uintptr_t)wp_hwnd);
+        if (dc) {
+            hooks_writes_dc(w, dc);
+            game_release_dc((void *)(uintptr_t)wp_hwnd, dc);
+        }
+    }
+    if (msg == 0xf) {
+        writes_screen(w, NULL);
+        screen_writes_flip(w);
+    }
+}
+static intptr_t WIN_STD shadow_win_proc(uint32_t hwnd, uint32_t msg, uint32_t wp, intptr_t lp) {
+    if (!hooks_nested && !shadow_bypass()) stats_win_proc.calls++, shadow_tick(WIN);
+    return orig_win_proc(hwnd, msg, wp, lp);
+}
+static int check_win_proc(uint32_t hwnd, uint32_t msg, uint32_t wp, intptr_t lp) {
+    struct hook_writes w_ = {0};
+    writes_winproc(&w_, msg);
+    hooks_writes_begin(&w_);
+    hooks_nested++;
+    if (wp_prepare) wp_prepare();
+    int want = (int)orig_win_proc(hwnd, msg, wp, lp);
+    hooks_nested--;
+    hooks_writes_middle(&w_);
+    if (wp_prepare) wp_prepare();
+    int got = (int)win_proc(hwnd, msg, wp, lp);
+    const char *diff_ = hooks_writes_end(&w_, got, want);
+    if (diff_) hooks_mismatch(&stats_win_proc, "(0x%x, 0x%x, 0x%x, 0x%x) %s", hwnd, msg, wp, (uint32_t)lp, diff_);
+    hooks_ui_release();
+    return want;
+}
+
 // Key codes of the kinds the functions tell apart (return, escape, tab, letters and digits, a key
 // the system gives no character for, and the shift, control and alt flags on top), and at random.
 static int random_key(void) {
@@ -3151,6 +3389,189 @@ static void sweep_dispatch(void) {
         check_win_OnKey(0, random_key(), rnd_to(2), rnd_to(5), rnd_to(256));
         check_win_OnChar(0, rnd_to(256), rnd_to(5));
         check_win_OnSysKey(0, random_key(), rnd_to(2), rnd_to(5), rnd_to(256));
+    }
+}
+
+// ---- Sweep: the window procedure ----
+//
+// Every message it handles, over the scratch windows with the stand-in slots, callbacks, links and hooks the
+// event sweep uses, at random: the buttons and wheel (the mouse's window needs the Buffers), the keys, a system
+// command (the real window's user data holds a scratch window meanwhile), the palette messages and the activate
+// (against the real window's device context, with a made-up palette handle Windows rejects), a paint (its
+// rectangle invalidated first, the back buffer's pixels made up so the flip changes the window) and a Time's
+// message (with pulses fired once, twice and not at all, callbacks that log, and the game's flush flag and
+// waited-for Time at random). A message the procedure leaves to DefWindowProc is one that does nothing.
+static void wp_time_cb(void *a) { vrec(0x3001, NULL, (int)(intptr_t)a, 0, 0); }
+static void wp_time_cb2(void *a, int b) { vrec(0x3002, NULL, (int)(intptr_t)a, b, 0); }
+static int32_t *wp_prepare_rect;
+static void wp_invalidate(void) { game_invalidate_rect((void *)(uintptr_t)wp_hwnd, wp_prepare_rect, 0); }
+static void sweep_winproc(uint32_t real) {
+    int mouse_ok = nbuf_state > 0;
+    int32_t flush_flag = (int32_t)*game_time_flush_flag;
+    void *current = *game_time_current;
+    uint32_t saved_handle = *game_palette_handle, saved_hwnd = *game_win_hwnd;
+    void *saved_dc = *game_dc;
+    int32_t saved_count = *game_dc_count;
+    void *saved_ddraw = *game_ddraw;
+    static const uint32_t plain[] = {0x14, 0x7, 0x8, 0x113, 0x1c, 0x21, 0x2b, 0x81, 0x400, 0x402, 0x20c, 0x2a3};
+    wp_hwnd = real;
+    for (int k = 0; k < 24; k++) {
+        random_globals();
+        random_hooks();
+        for (int i = 0; i < 4; i++) links[i].keep = rnd_to(2);
+        for (int i = 0; i < POOL; i++) random_event_fields(PW(i));
+        *game_win_press1 = rnd_to(6) == 0 ? any_pool() : NULL;
+        *game_win_press2 = rnd_to(6) == 0 ? any_pool() : NULL;
+        *game_win_capture = rnd_to(6) == 0 ? any_pool() : NULL;
+        *game_win_hover = rnd_to(6) == 0 ? any_pool() : NULL;
+        *game_win_modal = rnd_to(3) == 0 ? any_pool() : NULL;
+        *game_win_modal_prev = (int32_t)(uintptr_t)(rnd_to(2) ? any_pool() : NULL);
+        *game_win_parent_n = rnd_to(9);
+        for (int i = 0; i < *game_win_parent_n; i++) game_win_parents[i] = PW(rnd_to(POOL));
+        *game_win_track = rnd_to(3) == 0 ? any_pool() : NULL;
+        uint32_t keys = (uint32_t)rnd_to(64) | (rnd_to(3) ? 0 : (uint32_t)(rnd_to(2) ? -120 : 240) << 16);
+        int mx = rnd_to(340) - 30, my = rnd_to(300) - 30;
+        intptr_t lp = (intptr_t)(((uint32_t)my << 16) | ((uint32_t)mx & 0xffff));
+        if (mouse_ok) {
+            static const uint32_t buttons[] = {0x201, 0x202, 0x203, 0x204, 0x205, 0x206, 0x20a};
+            for (int j = 0; j < 7; j++) {
+                *game_win_hwnd = 1;
+                mx = rnd_to(340) - 30, my = rnd_to(300) - 30;
+                lp = (intptr_t)(((uint32_t)my << 16) | ((uint32_t)mx & 0xffff));
+                check_win_proc(1, buttons[j], keys, lp);
+            }
+        }
+        static const uint32_t key_msgs[] = {0x100, 0x101, 0x102, 0x104, 0x105};
+        for (int j = 0; j < 5; j++) check_win_proc(1, key_msgs[j], (uint32_t)random_key(), (intptr_t)rnd());
+        check_win_proc(1, plain[rnd_to((int)(sizeof plain / sizeof *plain))], rnd(), (intptr_t)rnd());
+        // A system command, through the real window's user data (put back after).
+        if (real) {
+            long old = game_get_window_long((void *)(uintptr_t)real, -21);
+            for (int j = 0; j < 4; j++) {
+                // a window kept (twice, so that its own links come up at random), and none
+                game_set_window_long((void *)(uintptr_t)real, -21, j == 3 ? 0 : (long)(uintptr_t)PW(rnd_to(POOL)));
+                check_win_proc(real, 0x112, 0xf060, (intptr_t)rnd());
+                check_win_proc(real, 0x112, (uint32_t)rnd_to(0x10000) & ~0xf060u, (intptr_t)rnd());
+            }
+            game_set_window_long((void *)(uintptr_t)real, -21, old);
+        }
+        // A Time's message.
+        for (int j = 0; j < 3; j++) {
+            struct game_time *t = &wp_times[j];
+            memset(t, 0, sizeof *t);
+            t->flags = (uint32_t)rnd_to(4);
+            t->cb = rnd_to(3) ? wp_time_cb : NULL;
+            t->cb2 = rnd_to(3) ? wp_time_cb2 : NULL;
+            t->arg = (void *)(uintptr_t)rnd_to(100), t->arg2 = rnd_to(100), t->fired = rnd_to(2);
+            *game_time_flush_flag = rnd_to(4) == 0;
+            *game_time_current = rnd_to(3) == 0 ? &wp_times[rnd_to(3)] : NULL;
+            check_win_proc(1, 0x401, (uint32_t)(uintptr_t)t, (intptr_t)rnd());
+        }
+        *game_time_flush_flag = (uint32_t)flush_flag;
+        *game_time_current = current;
+        // The palette: with the real window's device context, counted already or not, and without DirectDraw or with.
+        if (real) {
+            *game_win_hwnd = real;
+            *game_palette_handle = 1;
+            for (int j = 0; j < 6; j++) {
+                void *dc = NULL;
+                *game_ddraw = (rnd_to(5) == 0) ? (void *)1 : NULL;
+                if (rnd_to(3) == 0) {
+                    dc = game_get_dc((void *)(uintptr_t)real);
+                    *game_dc = dc, *game_dc_count = 1 + rnd_to(2);
+                } else {
+                    *game_dc = NULL, *game_dc_count = 0;
+                }
+                static const uint32_t pal[] = {0x6, 0x30f, 0x311};
+                uint32_t m = pal[j % 3];
+                uint32_t wp = m == 0x6 ? (uint32_t)(rnd_to(3) | (rnd_to(2) << 16)) : (rnd_to(2) ? real : (uint32_t)rnd());
+                check_win_proc(real, m, wp, (intptr_t)rnd());
+                if (dc) game_release_dc((void *)(uintptr_t)real, dc);
+                *game_dc = NULL, *game_dc_count = 0;
+            }
+            *game_ddraw = saved_ddraw;
+        }
+        *game_win_hwnd = 1;
+    }
+    // A paint: only where the screen's own sweep can run (the window's pixels can be seen, no DirectDraw).
+    int size;
+    buffer_t *back = game_win_back;
+    if (real && !*game_ddraw && !*game_dd_surface && hooks_window_pixels && hooks_window_pixels((void *)(uintptr_t)real, &size) &&
+        *game_palette_copy && saved_handle && back->bits && !back->dd && back->neg_height < 0 && nbuf_state > 0) {
+        char *saved_text = *game_flip_text;
+        void (*saved_hook)(void) = *game_flip_hook;
+        int32_t saved_over = *game_win_overlay_on;
+        struct game_buffer saved_overlay = *game_win_overlay;
+        *game_win_overlay = scratch_overlay;
+        int w = back->width, h = -back->neg_height;
+        int64_t pitch = back->pitch, rows = h;
+        size_t bytes = (size_t)(pitch < 0 ? -pitch : pitch) * (size_t)rows;
+        uint8_t *base = pitch < 0 ? back->bits + pitch * (rows - 1) : back->bits;
+        uint8_t *kept = malloc(bytes);
+        if (kept) memcpy(kept, base, bytes);
+        *game_flip_text = NULL, *game_flip_hook = NULL;
+        *game_win_hwnd = real;
+        *game_palette_handle = 1;
+        wp_prepare = wp_invalidate;
+        for (int k = 0; k < 6 && kept; k++) {
+            for (size_t i = 0; i < bytes; i++) base[i] = (uint8_t)rnd();
+            *game_dc_count = 0, *game_dc = NULL;
+            *game_win_z_n = rnd_to(7);
+            for (int i = 0; i < *game_win_z_n; i++) game_win_zorder[i] = PW(rnd_to(POOL));
+            *game_win_back_alt = rnd_to(2) ? (struct game_buffer *)(uintptr_t)1 : NULL;
+            *game_win_opaque = rnd_to(2) && *game_win_z_n ? game_win_zorder[rnd_to(*game_win_z_n)] : any_pool();
+            *game_win_overlay_on = 0;
+            game_win_overlay_pos[0] = rnd_to(w + 40) - 20, game_win_overlay_pos[1] = rnd_to(h + 40) - 20;
+            game_win_overlay_size[0] = rnd_to(80), game_win_overlay_size[1] = rnd_to(60);
+            static int32_t rect[4];
+            rect[0] = rnd_to(w) - 10, rect[1] = rnd_to(h) - 10, rect[2] = rect[0] + 1 + rnd_to(120), rect[3] = rect[1] + 1 + rnd_to(90);
+            wp_prepare_rect = rect;
+            check_win_proc(real, 0xf, 0, 0);
+        }
+        wp_prepare = NULL;
+        if (kept) memcpy(base, kept, bytes);
+        free(kept);
+        *game_flip_text = saved_text, *game_flip_hook = saved_hook;
+        *game_win_overlay_on = saved_over;
+        *game_win_overlay = saved_overlay;
+    }
+    wp_prepare = NULL;
+    wp_hwnd = 0;
+    *game_palette_handle = saved_handle, *game_win_hwnd = saved_hwnd;
+    *game_dc = saved_dc, *game_dc_count = saved_count, *game_ddraw = saved_ddraw;
+}
+
+// ---- Sweep: the caption buttons and the smallest size ----
+static void *cap_vtable[1];
+static struct {
+    void **vtable;
+    int pad;
+} cap_obj[6];
+static int THISCALL cap_del(void *obj, int flag) { return vrec(0, obj, flag, 0, 0), 0; }
+static void sweep_caption_buttons(void) {
+    cap_vtable[0] = (void *)cap_del;
+    for (int i = 0; i < 6; i++) cap_obj[i].vtable = cap_vtable;
+    for (int k = 0; k < 24; k++) {
+        struct game_win *w = PW(k % POOL);
+        struct game_win_btn *save[3] = {w->btn_e4, w->btn_e8, w->btn_ec};
+        w->btn_e4 = rnd_to(3) ? (struct game_win_btn *)&cap_obj[rnd_to(2)] : NULL;
+        w->btn_e8 = rnd_to(3) ? (struct game_win_btn *)&cap_obj[2 + rnd_to(2)] : NULL;
+        w->btn_ec = rnd_to(3) ? (struct game_win_btn *)&cap_obj[4 + rnd_to(2)] : NULL;
+        check_win_do_caption_buttons(w);
+        w->btn_e4 = save[0], w->btn_e8 = save[1], w->btn_ec = save[2];
+    }
+}
+static void sweep_min_size(void) {
+    static struct game_sprite sp[8];
+    for (int k = 0; k < 60; k++) {
+        for (int i = 0; i < 8; i++) sp[i].full_w = rnd_to(80) - 10, sp[i].full_h = rnd_to(80) - 10;
+        struct game_win *w = &fat[k % 3].w;
+        uint8_t *p = (uint8_t *)w;
+        static const int offs[] = {0x9cc, 0x9d0, 0x9d4, 0x9d8, 0x9ec, 0x9f0};
+        for (unsigned i = 0; i < sizeof offs / sizeof *offs; i++) *(struct game_sprite **)(p + offs[i]) = rnd_to(8) ? &sp[rnd_to(8)] : NULL;
+        w->flags = rnd_to(2) ? 0x10 : 0;
+        *(int32_t *)(p + 0x134) = rnd_to(1000), *(int32_t *)(p + 0x138) = rnd_to(1000);
+        check_graphic_win_compute_min_size(w);
     }
 }
 
@@ -4171,7 +4592,7 @@ int WIN_THIS win_init(struct game_win *w, int x, int y, int cw, int ch, const ch
             vcall1((struct game_win *)bar, WIN_VT_SHOW, 0);
         }
     }
-    game_win_do_caption_buttons(w);
+    win_do_caption_buttons(w);
     *game_win_cur = w;
     f = w->flags;
     if ((f & 0x100000) && !(f & 0x200000) && !(w->flags2 & WIN_F2_BUSY) && !((f & 0x1000) && !parent) &&
@@ -4195,7 +4616,7 @@ int WIN_THIS graphic_win_init(struct game_win *w, int x, int y, int cw, int ch, 
     int r = win_init(w, x, y, cw, ch, title, flags, parent, owner, caption);
     if (r) return r;
     *(void **)((uint8_t *)w + 0x448) = w;
-    game_graphic_win_compute_min_size(w);
+    graphic_win_compute_min_size(w);
     int32_t wd = cw, ht = ch;
     if (!(flags & 0x800)) {
         win_nonclient_to_client(w, &wd, &ht);
@@ -5023,6 +5444,9 @@ static void win_sweep(void) {
         // The events (the dispatch needs the Buffers the mouse's window is hit-tested by).
         sweep_events();
         if (nbuf_state > 0) sweep_dispatch();
+        if (round % 4 == 1) sweep_winproc(saved.hwnd);
+        sweep_caption_buttons();
+        sweep_min_size();
         // The lists a window leaves: one in them, one not, and the same twice over.
         for (int k = 0; k < 6; k++) {
             check_win_remove_parent(*game_win_parent_n && rnd_to(4) ? game_win_parents[rnd_to(*game_win_parent_n)] : any_pool());
@@ -5102,6 +5526,9 @@ static const struct hook win_hooks[] = {
     HOOK(0x5edf00, win_show_maximize, 0xa1, 0xbc, 0x7a, 0x9b, 0x00, 0x56, 0x57, 0x8b, 0xf1, 0x33, 0xff, 0x3b, 0xc6),
     HOOK(0x5ed5c0, win_center, 0x83, 0xec, 0x08, 0x53, 0x8b, 0xd9, 0x56, 0x57),
     HOOK(0x5ef110, win_nonclient_to_client_2, 0x56, 0x8b, 0x74, 0x24, 0x08, 0x85, 0xf6),
+    HOOK(0x5f2700, win_do_caption_buttons, 0x56, 0x8b, 0xf1, 0x8b, 0x8e, 0xe4, 0x00, 0x00, 0x00),
+    HOOK(0x5d7030, graphic_win_compute_min_size, 0x8a, 0x81, 0x98, 0x00, 0x00, 0x00, 0x53, 0x55),
+    HOOK(0x5f0650, win_proc, 0x83, 0xec, 0x50, 0x56, 0x8b, 0x74, 0x24, 0x60, 0x57, 0x8b, 0x7c, 0x24, 0x60),
     HOOK(0x5f2760, win_redo_caption_buttons, 0x53, 0x56, 0x57, 0x8b, 0xf9, 0x8b, 0x9f, 0x28, 0x01, 0x00, 0x00),
     HOOK(0x5ee330, win_resize_event, 0x53, 0x56, 0x8b, 0xf1, 0x57, 0x89, 0x35, 0xb8, 0x7a, 0x9b, 0x00),
     HOOK(0x5ed880, win_resize, 0x8b, 0x44, 0x24, 0x0c, 0x56, 0x57, 0x8b, 0xf9, 0x85, 0xc0),

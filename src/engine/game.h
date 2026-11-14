@@ -1863,8 +1863,6 @@ extern void *(*game_operator_new)(size_t size);  // 0x64558a: the game's operato
 // four numbers the window works out and the window it belongs to, then -1 or -2.
 extern void(__attribute__((thiscall)) * game_scroll_init_vert_nc)(void *bar, int a, int b, int c, void *win, int d);
 extern void(__attribute__((thiscall)) * game_scroll_init_horz_nc)(void *bar, int a, int b, int c, void *win, int d);
-extern void(__attribute__((thiscall)) * game_win_do_caption_buttons)(void *win);       // 0x5f2700: deletes the caption buttons
-extern void(__attribute__((thiscall)) * game_graphic_win_compute_min_size)(void *win); // 0x5d7030
 extern void (*game_flip_restore)(const int32_t *box, int arg);  // 0x5f7320: puts back what the bubble text covered
 extern void(__attribute__((thiscall)) * game_win_set_bubble_text)(void *win, const char *text, const int32_t *rect);  // 0x5f83d0: shows the bubble text in a box near the rectangle
 extern void (*game_win_clear_bubble)(void);  // 0x5f8500 (Win_clear_bubble_text): takes the bubble text away, if one is shown
@@ -2440,6 +2438,17 @@ extern int32_t *game_win_track_code, *game_win_track_pos;
 // key or button event (no arguments), [1] a key went down (its code), [2] the left and [3] the right
 // button went down (x, y). The array starts at 0x9b7a88.
 extern void **game_win_hooks;
+// What the window procedure (0x5f0650) uses besides the above: BeginPaint, EndPaint, GetWindowLong and SetWindowLong
+// as imported (stdcall); the Win whose mouse-move event was told last (0x9b7a7c); a flag the mouse move clears
+// (0x9b7b3c); the Time a 0x401 message is let through for (0x9b90d0, or NULL for any); and the functions it
+// calls that are left with the original: update_cursor (0x5f1820, cdecl) and do_tracking (0x5f7580, stdcall).
+extern void *(__attribute__((stdcall)) * game_begin_paint)(void *hwnd, void *paintstruct);
+extern int(__attribute__((stdcall)) * game_end_paint)(void *hwnd, const void *paintstruct);
+extern long(__attribute__((stdcall)) * game_get_window_long)(void *hwnd, int index);
+extern long(__attribute__((stdcall)) * game_set_window_long)(void *hwnd, int index, long value);
+extern struct game_win **game_win_over;
+extern int32_t *game_win_moved;
+extern void **game_time_current;
 // A list of rectangles a window keeps behind its base fields at 0x8f4: the index of the last one
 // that holds the point, or -1; its fields at 0x14 and 0x10 go to the two pointers if given.
 extern int(__attribute__((thiscall)) * game_spot_check)(void *list, int x, int y, int *field14, int *field10);

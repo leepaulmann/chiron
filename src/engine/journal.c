@@ -29,7 +29,8 @@
 // What an argument is.
 // IN_ENTRIES is a pointer to as many 4-byte colour entries (a PALETTEENTRY or an RGBQUAD) as the
 // third argument says (at most 256); the call is compared by a hash of them.
-enum { V, IN_RECT, OUT_POINT, OUT_RECT, INOUT_POINT, IN_ENTRIES };
+// OUT_PAINT is a PAINTSTRUCT (64 bytes) BeginPaint fills in, IN_PAINT the one EndPaint is given back: compared by what it holds.
+enum { V, IN_RECT, OUT_POINT, OUT_RECT, INOUT_POINT, IN_ENTRIES, OUT_PAINT, IN_PAINT };
 
 struct import {
     const char *name;
@@ -67,6 +68,8 @@ static struct import imports[] = {
     {"SetDIBColorTable", 0x6690b4, 4, {V, V, V, IN_ENTRIES}},
     {"AnimatePalette", 0x6690a8, 4, {V, V, V, IN_ENTRIES}},
     {"Sleep", 0x66912c, 1, {V}},
+    {"BeginPaint", 0x6692b8, 2, {V, OUT_PAINT}},
+    {"EndPaint", 0x6692b4, 2, {V, IN_PAINT}},
 };
 enum { N_IMPORTS = sizeof imports / sizeof imports[0] };
 
@@ -85,7 +88,9 @@ static uint32_t call_real(const struct import *im, const uint32_t *a) {
     }
 }
 
-static size_t data_size(int kind) { return kind == IN_RECT || kind == OUT_RECT ? 16 : kind == V ? 0 : kind == IN_ENTRIES ? 4 : 8; }
+static size_t data_size(int kind) {
+    return kind == OUT_PAINT || kind == IN_PAINT ? 64 : kind == IN_RECT || kind == OUT_RECT ? 16 : kind == V ? 0 : kind == IN_ENTRIES ? 4 : 8;
+}
 
 // A hash of the entries an IN_ENTRIES argument points to (n of them, as the call's third argument says).
 static uint32_t entries_hash(const uint32_t *a, int i) {
@@ -100,7 +105,7 @@ static uint32_t entries_hash(const uint32_t *a, int i) {
 struct entry {
     int fn;
     uint32_t arg[6];
-    uint8_t in[6][16], out[6][16];
+    uint8_t in[6][64], out[6][64];
     uint32_t ret;
 };
 enum { LOG_MAX = 256 };
@@ -129,7 +134,7 @@ static uint32_t journal_call(int fn, uint32_t *a) {
             for (int i = 0; i < im->nargs; i++) {
                 e->arg[i] = a[i];
                 int k = im->kind[i];
-                if ((k == IN_RECT || k == INOUT_POINT) && a[i]) memcpy(e->in[i], (void *)(uintptr_t)a[i], data_size(k));
+                if ((k == IN_RECT || k == INOUT_POINT || k == IN_PAINT) && a[i]) memcpy(e->in[i], (void *)(uintptr_t)a[i], data_size(k));
                 if (k == IN_ENTRIES && a[i]) *(uint32_t *)e->in[i] = entries_hash(a, i);
             }
         }
@@ -139,7 +144,7 @@ static uint32_t journal_call(int fn, uint32_t *a) {
             e->ret = r;
             for (int i = 0; i < im->nargs; i++) {
                 int k = im->kind[i];
-                if ((k == OUT_POINT || k == OUT_RECT || k == INOUT_POINT) && a[i])
+                if ((k == OUT_POINT || k == OUT_RECT || k == INOUT_POINT || k == OUT_PAINT) && a[i])
                     memcpy(e->out[i], (void *)(uintptr_t)a[i], data_size(k));
             }
         }
@@ -160,7 +165,7 @@ static uint32_t journal_call(int fn, uint32_t *a) {
         int k = im->kind[i];
         if (k == V) same = e->arg[i] == a[i];
         else if (!e->arg[i] != !a[i]) same = 0;  // pointers: whether given, and what they hold
-        else if ((k == IN_RECT || k == INOUT_POINT) && a[i])
+        else if ((k == IN_RECT || k == INOUT_POINT || k == IN_PAINT) && a[i])
             same = !memcmp(e->in[i], (void *)(uintptr_t)a[i], data_size(k));
         else if (k == IN_ENTRIES && a[i]) same = *(uint32_t *)e->in[i] == entries_hash(a, i);
     }
@@ -173,7 +178,7 @@ static uint32_t journal_call(int fn, uint32_t *a) {
     }
     for (int i = 0; i < im->nargs; i++) {
         int k = im->kind[i];
-        if ((k == OUT_POINT || k == OUT_RECT || k == INOUT_POINT) && a[i])
+        if ((k == OUT_POINT || k == OUT_RECT || k == INOUT_POINT || k == OUT_PAINT) && a[i])
             memcpy((void *)(uintptr_t)a[i], e->out[i], data_size(k));
     }
     return e->ret;
@@ -201,12 +206,12 @@ static uint32_t journal_call(int fn, uint32_t *a) {
         return journal_call(i, (uint32_t[]){a, b, c, d, e, f});                                            \
     }
 W2(0) W1(1) W1(2) W2(3) W2(4) W2(5) W2(6) W0(7) W2(8) W4(9) W3(10) W2(11) W4(12) W2(13) W6(14) W1(15) W1(16) W1(17) W0(18)
-    W2(19) W4(20) W1(21) W1(22) W5(23) W4(24) W4(25) W1(26)
+    W2(19) W4(20) W1(21) W1(22) W5(23) W4(24) W4(25) W1(26) W2(27) W2(28)
 static void *const wrappers[N_IMPORTS] = {
     (void *)wrap_0,  (void *)wrap_1,  (void *)wrap_2,  (void *)wrap_3,  (void *)wrap_4,  (void *)wrap_5,  (void *)wrap_6,
     (void *)wrap_7,  (void *)wrap_8,  (void *)wrap_9,  (void *)wrap_10, (void *)wrap_11, (void *)wrap_12, (void *)wrap_13,
     (void *)wrap_14, (void *)wrap_15, (void *)wrap_16, (void *)wrap_17, (void *)wrap_18, (void *)wrap_19, (void *)wrap_20,
-    (void *)wrap_21, (void *)wrap_22, (void *)wrap_23, (void *)wrap_24, (void *)wrap_25, (void *)wrap_26};
+    (void *)wrap_21, (void *)wrap_22, (void *)wrap_23, (void *)wrap_24, (void *)wrap_25, (void *)wrap_26, (void *)wrap_27, (void *)wrap_28};
 _Static_assert(sizeof wrappers / sizeof wrappers[0] == N_IMPORTS, "a wrapper for each import");
 
 void journal_install(struct pe_image *exe) {

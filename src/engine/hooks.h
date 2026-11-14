@@ -76,7 +76,7 @@ struct hook_writes {
     struct {
         void *p;
         size_t size;
-    } span[24];
+    } span[48];
     int n;
     int depth;         // which save buffers, as checks can nest
     int protect_only;  // only saved and put back (hooks_writes_abandon), not a check
