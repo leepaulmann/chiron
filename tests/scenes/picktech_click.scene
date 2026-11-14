@@ -1,0 +1,13 @@
+# The research picker chosen with the mouse (see picktech.scene for how it is opened): the mouse over a card of the second
+# row, and a click on it. open_result in the state file holds the tech chosen.
+25 load
+48 click 362 734
+50 open tech_pick
+58 click 511 423
+62 click 511 444
+68 snap open
+70 move 627 565         # over a card in the second row
+74 snap hover
+76 click 627 565        # a click chooses it
+84 snap chosen-click
+88 close

@@ -37,6 +37,9 @@ struct region {
 };
 static struct region extra[MAX_EXTRA];
 static int nextra;
+// What the last "open" call answered (-2 before any), written to every state file as the region open_result: a screen that
+// answers a choice (the research picker) shows it there.
+static int32_t open_result = -2;
 
 // "state NAME ADDR SIZE": add a region to every later snap.
 void scene_add_state(const char *name, uint32_t addr, uint32_t size) {
@@ -98,6 +101,7 @@ void scene_write_state(const char *frame_path) {
         if (globals_skip[i].to > globals_skip[i].from)
             memset(globals + globals_skip[i].from - GLOBALS_START, 0, globals_skip[i].to - globals_skip[i].from);
     write_region(f, "globals", globals, GLOBALS_START, sizeof(globals), sizeof(globals));
+    write_region(f, "open_result", (const uint8_t *)&open_result, 0, sizeof(open_result), sizeof(open_result));
     for (int i = 0; i < nextra; i++)
         write_region(f, extra[i].name, game_at(extra[i].addr), extra[i].addr, extra[i].size, extra[i].size);
     fclose(f);
@@ -120,6 +124,7 @@ struct open_entry {
 };
 static const struct open_entry open_table[] = {
     {"hall_of_fame", 0x44ae50, {0}},  // void hall_of_fame(int final): 0 only shows the list
+    {"tech_pick", 0x5beb70, {1, 1, -1, 0}},  // int tech_pick(faction, unk, other, label): the research picker for faction 1 (the player in the scenes' save); unk is set because the save plays blind research, which has no picker
 };
 
 static const struct open_entry *pending;
@@ -139,5 +144,6 @@ void scene_poll(void) {
     pending = NULL;
     fprintf(stderr, "chiron: script: opening %s\n", e->name);
     typedef int (*fn4)(int, int, int, int);
-    ((fn4)game_at(e->addr))(e->args[0], e->args[1], e->args[2], e->args[3]);
+    open_result = ((fn4)game_at(e->addr))(e->args[0], e->args[1], e->args[2], e->args[3]);
+    fprintf(stderr, "chiron: script: %s answered %d\n", e->name, open_result);
 }

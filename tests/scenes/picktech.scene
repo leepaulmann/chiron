@@ -1,0 +1,33 @@
+# The research picker (PickTech), opened with the script host's "open tech_pick" step (the save plays blind research, which
+# has no picker of its own; unk=1 asks for the list anyway). The tutorial note and the research priorities come first, and
+# are answered. The picker is a grid of eight cards (four by two) over the whole screen. The state file's open_result region
+# holds the tech the call answers. Leave time after each step; the snaps take 2 s each.
+25 load
+48 click 362 734        # the first-turn note's Close
+50 open tech_pick
+58 click 511 423        # the tutorial note's OK
+62 click 511 444        # the research priorities' OK
+68 snap open
+70 move 390 220         # over the second card
+74 snap hover
+76 move 500 8           # outside the grid, over the title
+80 snap hover-out
+82 key Right
+86 snap key-right
+88 key Down
+92 snap key-down
+94 key Left
+98 snap key-left
+100 key Up
+104 snap key-up
+106 key Up
+110 snap key-up-wrap
+112 key Left
+116 snap key-left-wrap
+118 key c               # a letter: the first card whose name begins with it
+122 snap key-letter
+124 key Escape           # not used by the window
+128 snap key-escape
+130 key Return           # chooses the marked card
+138 snap chosen-return
+142 close

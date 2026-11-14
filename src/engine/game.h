@@ -1442,6 +1442,16 @@ extern int (*game_spying)(int faction);
 extern void (*game_set_agenda)(int faction, int other, uint32_t agenda, int on);
 extern void(__attribute__((thiscall)) * game_console_set_move)(void *console, int unk);
 extern void(__attribute__((thiscall)) * game_popup_dtor)(void *pop);
+// What the research picker (src/ui/picktech.c) calls that is not reimplemented: the game's message with its pop-up script
+// (popt), the console's hand-over to the AI, the font lookup (size, style), a tech's colour by category, a StringList's load
+// (the file, the label, and two flags), the Datalinks' opening (the kind and the id) and the plain help key.
+extern void (*game_popt)(const char *script, const char *label, int a, int b, int c);
+extern void(__attribute__((thiscall)) * game_console_set_ai)(void *console, int faction);
+extern void *(*game_find_font)(int size, int style);
+extern int (*game_mandate_color)(int category);
+extern int(__attribute__((thiscall)) * game_stringlist_load)(void *list, const char *file, const char *label, int a, int b);
+extern void(__attribute__((thiscall)) * game_datalink_exec)(void *datalinks, int kind, int id);
+extern void (*game_open_help)(void);
 extern void(__attribute__((thiscall)) * game_diplo_pop_start)(void *pop, int faction);
 extern void (*game_introduce)(int faction, int other);
 extern void (*game_report_intel)(int faction);

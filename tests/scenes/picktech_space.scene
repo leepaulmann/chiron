@@ -1,0 +1,17 @@
+# The research picker moved with Tab and Backspace, a letter looked up, and Space to choose (see picktech.scene for how it is
+# opened).
+25 load
+48 click 362 734
+50 open tech_pick
+58 click 511 423
+62 click 511 444
+68 snap open
+70 key Tab               # right
+74 snap key-tab
+76 key Backspace         # left
+80 snap key-backspace
+82 key p                 # a letter
+86 snap key-letter
+88 key Space             # chooses
+96 snap chosen-space
+100 close
