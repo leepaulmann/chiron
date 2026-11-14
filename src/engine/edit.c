@@ -46,6 +46,7 @@
 #include "edit.h"
 #include "game.h"
 #include "hooks.h"
+#include "life.h"
 #include "menu.h"
 #include "shadow.h"
 #include "strlist.h"
@@ -1098,6 +1099,7 @@ static void sweep_draw(struct game_buffer *real) {
     *game_win_cur = saved_cur;
 }
 
+static void life_sweep_edit(void);
 static void edit_sweep(void) {
     if (!*game_win_hwnd) return;
     // The sweep needs the game's fonts (as text.c's sweep does): the game hasn't set them up yet before its first screen.
@@ -1132,16 +1134,90 @@ static void edit_sweep(void) {
     memset(&S, 0, sizeof S);  // (a timer message that arrives later finds nothing to do)
     game_edit_press[0] = press[0], game_edit_press[1] = press[1];
     *game_win_prev_focus = prev;
+    life_sweep_edit();
     hooks_sweeping = sweeping;
+}
+
+// ---- Life cycle -----------------------------------------------------------------------------------
+
+// An EditBox made and unmade: a GraphicWin with its text (inline, 0xa14), the game's defaults for its
+// colours and frame, and a Time object for the caret's blink. The constructor and close start the same
+// fields; close stops the blink and closes the GraphicWin, and the destructor closes and unmakes the
+// Time and the GraphicWin. These make Windows objects (the Buffer) and the Time may have a timer, so in
+// shadow mode the game's calls run the original and the sweep checks Chiron's code on twin boxes
+// (life.c). The exception frames are not reproduced (nothing reads them). Differences from
+// OpenSMACX: it has none of these.
+
+#define EB_VTABLE 0x66a038
+#define EB_BUFFER_VTABLE 0x66a030
+
+static void edit_start_fields(struct game_editbox *e) {
+    e->text[0] = 0;
+    e->max_len = 10;
+    e->border_a = *(int32_t *)game_at(0x9b90b8);
+    e->border_b = *(int32_t *)game_at(0x9b90bc);
+    e->border_w = *(int32_t *)game_at(0x6971e0);
+    e->pad = *(int32_t *)game_at(0x6971e4);
+    e->color = *(int32_t *)game_at(0x6971dc);
+    e->sel_text = *(int32_t *)game_at(0x6971f8);
+    e->sel_back = *(int32_t *)game_at(0x6971f4);
+    e->mods = 0, e->anchor = 0, e->caret = 0, e->blink = 0, e->first = 0, e->flags = 0;
+}
+
+void *EDIT_THIS edit_ctor(struct game_editbox *e) {
+    graphic_win_ctor(&e->win);
+    time_ctor(&e->timer);
+    e->win.vtable = (void **)(uintptr_t)game_va(EB_VTABLE);
+    e->buf.vtable = (void **)(uintptr_t)game_va(EB_BUFFER_VTABLE);
+    edit_start_fields(e);
+    return e;
+}
+
+void EDIT_THIS edit_close(struct game_editbox *e) {
+    edit_start_fields(e);
+    time_close(&e->timer);
+    graphic_win_close(&e->win);
+}
+
+void EDIT_THIS edit_dtor(struct game_editbox *e) {
+    e->win.vtable = (void **)(uintptr_t)game_va(EB_VTABLE);
+    e->buf.vtable = (void **)(uintptr_t)game_va(EB_BUFFER_VTABLE);
+    edit_close(e);
+    time_dtor(&e->timer);
+    graphic_win_dtor(&e->win);
+}
+
+// ---- Life cycle: shadow mode and the sweep ----
+
+SHADOW_PASS_T(EDIT, void *, edit_ctor, (struct game_editbox * e), (e))
+SHADOW_PASS_T(EDIT, void, edit_close, (struct game_editbox * e), (e))
+SHADOW_PASS_T(EDIT, void, edit_dtor, (struct game_editbox * e), (e))
+
+LIFE_FN(edit_ctor, orig_edit_ctor(o), edit_ctor(o))
+LIFE_FN(edit_close, orig_edit_close(o), edit_close(o))
+LIFE_FN(edit_dtor, orig_edit_dtor(o), edit_dtor(o))
+
+static const struct life_slot edit_slots[] = {{0xcc, -1}, {0xd0, -1}};
+static const struct life_class edit_class = {"EditBox", 0xb74, edit_slots, 2, 0x444, 0x9cc, {0xb14, 0x20}};
+
+static void life_sweep_edit(void) {
+    if (!game_mem_get || *game_ddraw || !hooks_dc_same) return;
+    for (int round = 0; round < 4; round++) {
+        uint8_t fill = (uint8_t)(round * 53 + 11);
+        life_ctor_check(&stats_edit_ctor, &edit_class, life_orig_edit_ctor, life_ours_edit_ctor, fill);
+        life_close_check(&stats_edit_close, &edit_class, life_orig_edit_ctor, life_orig_edit_close, life_ours_edit_close, fill, 4 + round,
+                         3 + round, 0);
+        life_close_check(&stats_edit_dtor, &edit_class, life_orig_edit_ctor, life_orig_edit_dtor, life_ours_edit_dtor, fill, 4 + round,
+                         3 + round, 0);
+    }
 }
 
 // ---- Hooks -------------------------------------------------------------------------------------------------------------------------
 
-// A hook whose prologue ends in a relative call (re-aimed in the trampoline).
-#define HOOK_CALL(addr, name, ...)                                                              \
-    {addr, (const uint8_t[]){__VA_ARGS__}, sizeof((const uint8_t[]){__VA_ARGS__}), (void *)name, \
-     (void *)shadow_##name, (void **)&orig_##name, &stats_##name, 0, 1}
 static const struct hook edit_hooks[] = {
+    HOOK(0x614e50, edit_ctor, 0x6a, 0xff, 0x68, 0x38, 0x31, 0x66, 0x00),  // push -1; push handler
+    HOOK(0x408010, edit_dtor, 0x55, 0x8b, 0xec, 0x6a, 0xff, 0x68, 0x06, 0x0d, 0x65, 0x00),
+    HOOK(0x614f30, edit_close, 0x56, 0x8b, 0xf1, 0x33, 0xc0, 0x88, 0x86, 0x14, 0x0a, 0x00, 0x00),  // push esi; mov esi, ecx; xor eax, eax; mov [esi+0xa14], al
     HOOK(0x6151e0, edit_set_text, 0x53, 0x55, 0x57, 0x8b, 0xf9, 0x33, 0xdb),
     HOOK(0x615e40, edit_caret_callback, 0x8b, 0x4c, 0x24, 0x04, 0x33, 0xc0),
     HOOK(0x615e60, edit_on_left_down, 0xa1, 0xbc, 0x7a, 0x9b, 0x00, 0x56, 0x85, 0xc0),

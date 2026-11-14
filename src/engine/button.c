@@ -49,8 +49,10 @@
 #include "bufobj.h"
 #include "bufimg.h"
 #include "button.h"
+#include "dialog.h"
 #include "game.h"
 #include "hooks.h"
+#include "life.h"
 #include "shadow.h"
 #include "sprite.h"
 #include "strlist.h"
@@ -1559,6 +1561,8 @@ struct game_buffer *button_sweep_buffer(struct font **font) {
     return &big;
 }
 
+static void life_sweep_button(void);
+static void life_sweep_checkbox(void);
 static void button_sweep(void) {
     static struct game_buffer real;
     static struct font font_a;
@@ -1684,14 +1688,414 @@ static void button_sweep(void) {
     game_button_hooks[0] = hooks[0], game_button_hooks[1] = hooks[1];
     *game_button_defaults = defaults;
     *game_button_fonts = fonts;
+    life_sweep_button();
+    life_sweep_checkbox();
     hooks_sweeping = sweeping;
 #undef mine
 #undef fonted
 }
 
+// ---- Life cycle -----------------------------------------------------------------------------------
+
+// Making and unmaking buttons: BaseButton and the classes that derive from it (FlatButton, PushButton,
+// ImageButton), and CheckButton, a GraphicWin of its own kind. A BaseButton owns two Time objects (the
+// delay of the bubble text and the auto-repeat), the copies of its name and its bubble text (blocks of the
+// game's heap, freed by close and by the destructor) and the Buffer of its GraphicWin. Each constructor runs
+// its base class's and then sets its own fields, from constants and the game's defaults; each destructor
+// puts its vtables back for its own class, closes, and runs its base class's. These allocate or free on the
+// game's heap, so in shadow mode the game's calls run the original and the sweep checks Chiron's code on
+// twin buttons (life.c). The exception frames the original's constructors and destructors set up are not
+// reproduced (nothing reads them). Differences from OpenSMACX: it has none of these; PushButton's and
+// ImageButton's destructors are only their vtables and a jump to BaseButton's.
+
+#define BB_VTABLE 0x670290
+#define BB_BUFFER_VTABLE 0x670288
+enum { BB_TIME_HOLD = 0xa1c, BB_TIME_REPEAT = 0xa4c };
+
+// What a button starts with and what close puts back: no click pending, no auto-repeat (-1), the defaults
+// of the game's table (fill, borders, focus colours, press time) and no id.
+static const struct life_set base_button_start[] = {
+    LZ(0xa74), LC(0xa44, 0xffffffff), LC(0xa48, 0xffffffff), LZ(0xa78), LZ(0xa9c), LZ(0xaac), LZ(0xab0), LZ(0xab4),
+    LG(0xa94, 0x9b8e2c), LG(0xa84, 0x69704c), LG(0xa88, 0x697050), LG(0xa8c, 0x697054), LG(0xa90, 0x697058),
+    LG(0xa98, 0x9b8e30), LZ(0xaa4), LG(0xaa0, 0x69705c),
+};
+
+static struct game_time *button_time(void *b, int off) { return (struct game_time *)((uint8_t *)b + off); }
+static void base_button_start_fields(struct game_button *b) {
+    life_apply(b, base_button_start, (int)(sizeof base_button_start / sizeof base_button_start[0]));
+}
+
+void *BUTTON_THIS base_button_ctor(struct game_button *b) {
+    graphic_win_ctor(&b->win);
+    time_ctor(button_time(b, BB_TIME_HOLD));
+    time_ctor(button_time(b, BB_TIME_REPEAT));
+    b->win.vtable = (void **)(uintptr_t)game_va(BB_VTABLE);
+    b->buf.vtable = (void **)(uintptr_t)game_va(BB_BUFFER_VTABLE);
+    base_button_start_fields(b);
+    b->name = NULL, b->bubble = NULL, b->group = NULL;
+    return b;
+}
+
+// Closes the GraphicWin, puts the defaults back and gives back the name and the bubble text.
+void BUTTON_THIS base_button_close(struct game_button *b) {
+    graphic_win_close(&b->win);
+    base_button_start_fields(b);
+    if (b->name) game_free(b->name), b->name = NULL;
+    if (b->bubble) game_free(b->bubble), b->bubble = NULL;
+    b->group = NULL;
+}
+
+void BUTTON_THIS base_button_dtor(struct game_button *b) {
+    b->win.vtable = (void **)(uintptr_t)game_va(BB_VTABLE);
+    b->buf.vtable = (void **)(uintptr_t)game_va(BB_BUFFER_VTABLE);
+    base_button_close(b);
+    time_dtor(button_time(b, BB_TIME_REPEAT));
+    time_dtor(button_time(b, BB_TIME_HOLD));
+    graphic_win_dtor(&b->win);
+}
+
+// FlatButton: three looks (as it lies, changed, pressed), each with a text colour (-1), a frame, a picture
+// and the nine pieces of a frame of sprites, which start from the game's table (0x9b8e44 on; each piece has
+// three words, one for each look, twelve bytes from the previous piece's).
+#define FB_VTABLE 0x669754
+#define FB_BUFFER_VTABLE 0x66974c
+static void flat_button_start(struct game_flat_button *f) {
+    f->base.picture = (void *)(uintptr_t)-1;
+    uint32_t *piece = (uint32_t *)f->left;
+    for (int i = 0; i < 3; i++) {
+        f->text_color[i] = -1;
+        f->frame[i] = NULL;
+        f->pic[i] = NULL;
+        for (int row = 0; row < 9; row++) piece[i + 3 * row] = *(uint32_t *)game_at(0x9b8e44 + 4 * (uint32_t)i + 12 * (uint32_t)row);
+    }
+}
+
+void *BUTTON_THIS flat_button_ctor(struct game_flat_button *f) {
+    base_button_ctor(&f->base);
+    f->base.win.vtable = (void **)(uintptr_t)game_va(FB_VTABLE);
+    f->base.buf.vtable = (void **)(uintptr_t)game_va(FB_BUFFER_VTABLE);
+    *(int32_t *)((uint8_t *)f + 0xa18) = 0;
+    *(int32_t *)((uint8_t *)f + 0xa14) = 0;
+    flat_button_start(f);
+    return f;
+}
+
+// Stops the bubble's delay, puts the looks back to the defaults and closes the BaseButton.
+void BUTTON_THIS flat_button_close(struct game_flat_button *f) {
+    time_close(button_time(f, BB_TIME_HOLD));
+    *(int32_t *)((uint8_t *)f + 0xa18) = 0;
+    *(int32_t *)((uint8_t *)f + 0xa14) = 0;
+    f->base.picture = (void *)(uintptr_t)-1;
+    base_button_close(&f->base);
+    flat_button_start(f);
+}
+
+void BUTTON_THIS flat_button_dtor(struct game_flat_button *f) {
+    f->base.win.vtable = (void **)(uintptr_t)game_va(FB_VTABLE);
+    f->base.buf.vtable = (void **)(uintptr_t)game_va(FB_BUFFER_VTABLE);
+    flat_button_close(f);
+    base_button_dtor(&f->base);
+}
+
+// PushButton: the pictures of its two looks, copied from the game's table (0x9bc118 on, 18 words).
+#define PB_VTABLE 0x670c60
+#define PB_BUFFER_VTABLE 0x670c58
+void *BUTTON_THIS push_button_ctor(struct game_push_button *p) {
+    base_button_ctor(&p->base);
+    p->base.win.vtable = (void **)(uintptr_t)game_va(PB_VTABLE);
+    p->base.buf.vtable = (void **)(uintptr_t)game_va(PB_BUFFER_VTABLE);
+    for (int i = 0; i < 18; i++) *(uint32_t *)((uint8_t *)p + 0xab8 + 4 * i) = *(uint32_t *)game_at(0x9bc118 + 4 * (uint32_t)i);
+    return p;
+}
+
+void BUTTON_THIS push_button_dtor(struct game_push_button *p) {
+    p->base.win.vtable = (void **)(uintptr_t)game_va(PB_VTABLE);
+    p->base.buf.vtable = (void **)(uintptr_t)game_va(PB_BUFFER_VTABLE);
+    base_button_dtor(&p->base);
+}
+
+#define IB_VTABLE 0x670a94
+#define IB_BUFFER_VTABLE 0x670a8c
+void *BUTTON_THIS image_button_ctor(struct game_button *b) {
+    base_button_ctor(b);
+    b->win.vtable = (void **)(uintptr_t)game_va(IB_VTABLE);
+    b->buf.vtable = (void **)(uintptr_t)game_va(IB_BUFFER_VTABLE);
+    b->picture = NULL;
+    return b;
+}
+
+void BUTTON_THIS image_button_dtor(struct game_button *b) {
+    b->win.vtable = (void **)(uintptr_t)game_va(IB_VTABLE);
+    b->buf.vtable = (void **)(uintptr_t)game_va(IB_BUFFER_VTABLE);
+    base_button_dtor(b);
+}
+
+// CheckButton: a GraphicWin with a checked state, an id, two click functions and two pictures (the game's
+// defaults).
+#define CB_VTABLE 0x66dc14
+#define CB_BUFFER_VTABLE 0x66dc0c
+static void check_button_start(struct game_check_button *c) {
+    c->state = 0, c->id = 0, c->on_click = NULL, c->on_double_click = NULL;
+    c->pic_on = *(void **)game_at(0x697f24);
+    c->pic_off = *(void **)game_at(0x697f20);
+}
+
+void *BUTTON_THIS check_button_ctor(struct game_check_button *c) {
+    graphic_win_ctor(&c->win);
+    c->win.vtable = (void **)(uintptr_t)game_va(CB_VTABLE);
+    c->buf.vtable = (void **)(uintptr_t)game_va(CB_BUFFER_VTABLE);
+    check_button_start(c);
+    return c;
+}
+
+void BUTTON_THIS check_button_close(struct game_check_button *c) {
+    check_button_start(c);
+    graphic_win_close(&c->win);
+}
+
+void BUTTON_THIS check_button_dtor(struct game_check_button *c) {
+    c->win.vtable = (void **)(uintptr_t)game_va(CB_VTABLE);
+    c->buf.vtable = (void **)(uintptr_t)game_va(CB_BUFFER_VTABLE);
+    check_button_close(c);
+    graphic_win_dtor(&c->win);
+}
+
+// ---- Life cycle: shadow mode and the sweep ----
+
+SHADOW_PASS_T(BUTTON, void *, base_button_ctor, (struct game_button * b), (b))
+SHADOW_PASS_T(BUTTON, void, base_button_close, (struct game_button * b), (b))
+SHADOW_PASS_T(BUTTON, void, base_button_dtor, (struct game_button * b), (b))
+SHADOW_PASS_T(BUTTON, void *, flat_button_ctor, (struct game_flat_button * f), (f))
+SHADOW_PASS_T(BUTTON, void, flat_button_close, (struct game_flat_button * f), (f))
+SHADOW_PASS_T(BUTTON, void, flat_button_dtor, (struct game_flat_button * f), (f))
+SHADOW_PASS_T(BUTTON, void *, push_button_ctor, (struct game_push_button * p), (p))
+SHADOW_PASS_T(BUTTON, void, push_button_dtor, (struct game_push_button * p), (p))
+SHADOW_PASS_T(BUTTON, void *, image_button_ctor, (struct game_button * b), (b))
+SHADOW_PASS_T(BUTTON, void, image_button_dtor, (struct game_button * b), (b))
+SHADOW_PASS_T(BUTTON, void *, check_button_ctor, (struct game_check_button * c), (c))
+SHADOW_PASS_T(BUTTON, void, check_button_close, (struct game_check_button * c), (c))
+SHADOW_PASS_T(BUTTON, void, check_button_dtor, (struct game_check_button * c), (c))
+
+LIFE_FN(base_button_ctor, orig_base_button_ctor(o), base_button_ctor(o))
+LIFE_FN(base_button_close, orig_base_button_close(o), base_button_close(o))
+LIFE_FN(base_button_dtor, orig_base_button_dtor(o), base_button_dtor(o))
+LIFE_FN(flat_button_ctor, orig_flat_button_ctor(o), flat_button_ctor(o))
+LIFE_FN(flat_button_close, orig_flat_button_close(o), flat_button_close(o))
+LIFE_FN(flat_button_dtor, orig_flat_button_dtor(o), flat_button_dtor(o))
+LIFE_FN(push_button_ctor, orig_push_button_ctor(o), push_button_ctor(o))
+LIFE_FN(push_button_dtor, orig_push_button_dtor(o), push_button_dtor(o))
+LIFE_FN(image_button_ctor, orig_image_button_ctor(o), image_button_ctor(o))
+LIFE_FN(image_button_dtor, orig_image_button_dtor(o), image_button_dtor(o))
+LIFE_FN(check_button_ctor, orig_check_button_ctor(o), check_button_ctor(o))
+LIFE_FN(check_button_close, orig_check_button_close(o), check_button_close(o))
+LIFE_FN(check_button_dtor, orig_check_button_dtor(o), check_button_dtor(o))
+
+// The dialog list's head and cursor (the Win's 0xcc and 0xd0), a button's name and bubble text (strings).
+static const struct life_slot button_slots[] = {{0xcc, -1}, {0xd0, -1}, {0xa7c, 0}, {0xa80, 0}};
+static const struct life_class base_button_class = {"BaseButton", 0xabc, button_slots, 4, 0x444, 0x9cc, {0xa84, 0x20}};
+static const struct life_class flat_button_class = {"FlatButton", 0xb4c, button_slots, 4, 0x444, 0x9cc, {0xae0, 0x20}};
+static const struct life_class push_button_class = {"PushButton", 0xb00, button_slots, 4, 0x444, 0x9cc, {0xac0, 0x20}};
+static const struct life_slot check_slots[] = {{0xcc, -1}, {0xd0, -1}};
+static const struct life_class check_button_class = {"CheckButton", 0xa2c, check_slots, 2, 0x444, 0x9cc, {0xa28, 0x20}};
+
+#define LIFE_BTN_CTOR(stats, cls, name) life_ctor_check(&stats_##stats, &cls, life_orig_##name, life_ours_##name, fill)
+#define LIFE_BTN_CLOSE(stats, cls, ctor, name, texts) \
+    life_close_check(&stats_##stats, &cls, life_orig_##ctor, life_orig_##name, life_ours_##name, fill, 4 + round, 3 + round, texts)
+
+static void life_sweep_button(void) {
+    if (!game_mem_get || *game_ddraw || !hooks_dc_same) return;
+    for (int round = 0; round < 4; round++) {
+        uint8_t fill = (uint8_t)rnd();
+        int texts = round & 1;
+        LIFE_BTN_CTOR(base_button_ctor, base_button_class, base_button_ctor);
+        LIFE_BTN_CLOSE(base_button_close, base_button_class, base_button_ctor, base_button_close, texts);
+        LIFE_BTN_CLOSE(base_button_dtor, base_button_class, base_button_ctor, base_button_dtor, texts);
+        LIFE_BTN_CTOR(flat_button_ctor, flat_button_class, flat_button_ctor);
+        LIFE_BTN_CLOSE(flat_button_close, flat_button_class, flat_button_ctor, flat_button_close, texts);
+        LIFE_BTN_CLOSE(flat_button_dtor, flat_button_class, flat_button_ctor, flat_button_dtor, texts);
+        LIFE_BTN_CTOR(push_button_ctor, push_button_class, push_button_ctor);
+        LIFE_BTN_CLOSE(push_button_dtor, push_button_class, push_button_ctor, push_button_dtor, texts);
+        LIFE_BTN_CTOR(image_button_ctor, base_button_class, image_button_ctor);
+        LIFE_BTN_CLOSE(image_button_dtor, base_button_class, image_button_ctor, image_button_dtor, texts);
+        LIFE_BTN_CTOR(check_button_ctor, check_button_class, check_button_ctor);
+        LIFE_BTN_CLOSE(check_button_close, check_button_class, check_button_ctor, check_button_close, 0);
+        LIFE_BTN_CLOSE(check_button_dtor, check_button_class, check_button_ctor, check_button_dtor, 0);
+    }
+}
+
+// ---- Life cycle: CheckBox and RadioButton ----------------------------------------------------------------
+
+// Like ListBox (scroll.c), a CheckBox (GraphicWin at 0x1c, Dialog at 0xa34) and a RadioButton (at 0x18 and
+// 0xa30) are objects with two virtual bases found through the table their first word points to. The
+// constructor, given whether it is the whole object, makes the bases and sets their vtables for the class
+// (and the word before each base to the difference between its place and the table's); then two numbers
+// from the game's defaults, and the fields the item lists use (the selected item, the hover...) cleared.
+// CheckBox's destructor is the part of the destruction the class does itself (the vtables, the fields, then
+// closing the Dialog and the GraphicWin); the RadioButton's is the deleting destructor: it sets the vtables,
+// closes, unmakes the Dialog and the GraphicWin, and frees the object if it is asked to. They allocate or
+// free on the game's heap, so in shadow mode the game's calls run the original and the sweep checks Chiron's
+// code on twin objects (life.c). The exception frames are not reproduced. Differences from OpenSMACX: it
+// has none of these.
+
+enum { CK_VBPTR = 0x670718, CK_WIN = 0x1c, CK_DLG = 0xa34, RB_VBPTR = 0x670590, RB_WIN = 0x18, RB_DLG = 0xa30 };
+
+// The vtables of the three parts and the word before each base.
+static void check_vtables(uint8_t *o, uint32_t win_vt, uint32_t buf_vt, uint32_t dlg_vt, int win_at, int dlg_at) {
+    int32_t win = life_vb(o, 1), dlg = life_vb(o, 2);
+    *(uint32_t *)(o + win) = game_va(win_vt);
+    *(uint32_t *)(o + win + 0x444) = game_va(buf_vt);
+    *(uint32_t *)(o + dlg) = game_va(dlg_vt);
+    *(int32_t *)(o + win - 4) = win - win_at;
+    *(int32_t *)(o + dlg - 4) = dlg - dlg_at;
+}
+#define CK_VTABLES(o) check_vtables(o, 0x6705b0, 0x6705a8, 0x67059c, CK_WIN, CK_DLG)
+#define RB_VTABLES(o) check_vtables(o, 0x669a6c, 0x669a64, 0x669a58, RB_WIN, RB_DLG)
+
+static void checkbox_start_fields(uint8_t *o) {
+    uint32_t *f = (uint32_t *)o;
+    f[1] = 0, f[2] = 0, f[3] = 0;
+    f[5] = *(uint32_t *)game_at(0x697108), f[4] = *(uint32_t *)game_at(0x697104);
+}
+
+void *BUTTON_THIS checkbox_ctor(uint8_t *o, int most_derived) {
+    if (most_derived) {
+        *(uint32_t *)o = game_va(CK_VBPTR);
+        graphic_win_ctor((struct game_win *)(o + CK_WIN));
+        dialog_ctor((struct game_dialog *)(o + CK_DLG));
+    }
+    CK_VTABLES(o);
+    checkbox_start_fields(o);
+    return o;
+}
+
+// Given the GraphicWin (the CheckBox's second part).
+void BUTTON_THIS checkbox_dtor(uint8_t *win) {
+    uint8_t *o = win - CK_WIN;
+    CK_VTABLES(o);
+    checkbox_start_fields(o);
+    dialog_close((struct game_dialog *)(o + life_vb(o, 2)));
+    graphic_win_close((struct game_win *)(o + life_vb(o, 1)));
+}
+
+static void radio_start_fields(uint8_t *o) {
+    uint32_t *f = (uint32_t *)o;
+    f[3] = 0, f[4] = 0;
+    f[2] = *(uint32_t *)game_at(0x6970f4), f[1] = *(uint32_t *)game_at(0x6970f0);
+}
+
+void *BUTTON_THIS radio_ctor(uint8_t *o, int most_derived) {
+    if (most_derived) {
+        *(uint32_t *)o = game_va(RB_VBPTR);
+        graphic_win_ctor((struct game_win *)(o + RB_WIN));
+        dialog_ctor((struct game_dialog *)(o + RB_DLG));
+    }
+    RB_VTABLES(o);
+    radio_start_fields(o);
+    return o;
+}
+
+void BUTTON_THIS radio_close(uint8_t *o) {
+    radio_start_fields(o);
+    dialog_close((struct game_dialog *)(o + life_vb(o, 2)));
+    graphic_win_close((struct game_win *)(o + life_vb(o, 1)));
+}
+
+// The deleting destructor, given the GraphicWin: answers the RadioButton.
+void *BUTTON_THIS radio_dtor(uint8_t *win, int flag) {
+    uint8_t *o = win - RB_WIN;
+    RB_VTABLES(o);
+    radio_close(o);
+    dialog_dtor((struct game_dialog *)(o + RB_DLG));
+    graphic_win_dtor((struct game_win *)win);
+    if (flag & 1) game_free(o);
+    return o;
+}
+
+// ---- Life cycle: CheckBox and RadioButton, shadow mode and the sweep ----
+
+SHADOW_PASS_T(BUTTON, void *, checkbox_ctor, (uint8_t * o, int most), (o, most))
+SHADOW_PASS_T(BUTTON, void, checkbox_dtor, (uint8_t * win), (win))
+SHADOW_PASS_T(BUTTON, void *, radio_ctor, (uint8_t * o, int most), (o, most))
+SHADOW_PASS_T(BUTTON, void, radio_close, (uint8_t * o), (o))
+SHADOW_PASS_T(BUTTON, void *, radio_dtor, (uint8_t * win, int flag), (win, flag))
+
+LIFE_FN(checkbox_ctor, orig_checkbox_ctor(o, 1), checkbox_ctor(o, 1))
+LIFE_FN(checkbox_dtor, orig_checkbox_dtor((uint8_t *)o + CK_WIN), checkbox_dtor((uint8_t *)o + CK_WIN))
+LIFE_FN(radio_ctor, orig_radio_ctor(o, 1), radio_ctor(o, 1))
+LIFE_FN(radio_close, orig_radio_close(o), radio_close(o))
+LIFE_FN(radio_dtor, orig_radio_dtor((uint8_t *)o + RB_WIN, 0), radio_dtor((uint8_t *)o + RB_WIN, 0))
+
+// The Win's dialog list, the Dialog's data and cursor and its list's head and cursor.
+#define VB_SLOTS(win, dlg) {win + 0xcc, -1}, {win + 0xd0, -1}, {dlg + 8, -1}, {dlg + 0xc, -1}, {dlg + 0xc4, -1}, {dlg + 0xc8, -1}
+static const struct life_slot checkbox_slots[] = {VB_SLOTS(CK_WIN, CK_DLG)};
+static const struct life_slot radio_slots[] = {VB_SLOTS(RB_WIN, RB_DLG)};
+static const struct life_class checkbox_class = {"CheckBox", CK_DLG + 0xf4, checkbox_slots, 6, CK_WIN + 0x444, CK_WIN + 0x9cc, {0x14}};
+static const struct life_class radio_class = {"RadioButton", RB_DLG + 0xf4, radio_slots, 6, RB_WIN + 0x444, RB_WIN + 0x9cc, {8, 0x38}};
+
+// One class: a constructor from garbage, then a close (or a part's destructor) on a box the original made with a
+// Buffer, items and data; the bases it leaves are unmade by the original's own functions.
+static void life_sweep_vb_class(const struct life_class *c, int win, int dlg, struct hook_stats *s_ctor, life_fn ctor_o, life_fn ctor_n,
+                                struct hook_stats *s_close, life_fn close_o, life_fn close_n, int round, uint8_t fill) {
+    uint32_t *head_global[1] = {(uint32_t *)game_at(0x9b3374)};
+    life_fill(c, life_a, life_b, fill);
+    if (life_run(s_ctor, c, ctor_o, ctor_n, NULL, head_global, 1)) life_buffer_check_at(s_ctor, win + 0x444);
+    life_build(c, fill, ctor_o, NULL);
+    life_buffers(win + 0x444, 4 + round, 3 + round);
+    life_nodes(dlg + 0xbc, round);
+    if (round & 1) life_data(dlg, 64);
+    if (life_run(s_close, c, close_o, close_n, NULL, head_global, 1)) life_buffer_check_at(s_close, win + 0x444);
+    for (int i = 0; i < 2; i++) {
+        uint8_t *o = i ? life_b : life_a;
+        game_dialog_dtor((struct game_dialog *)(o + dlg));
+        game_graphic_win_dtor((struct game_win *)(o + win));
+    }
+}
+
+static void life_sweep_checkbox(void) {
+    if (!game_mem_get || *game_ddraw || !hooks_dc_same) return;
+    for (int round = 0; round < 4; round++) {
+        uint8_t fill = (uint8_t)(round * 47 + 17);
+        life_sweep_vb_class(&checkbox_class, CK_WIN, CK_DLG, &stats_checkbox_ctor, life_orig_checkbox_ctor, life_ours_checkbox_ctor,
+                            &stats_checkbox_dtor, life_orig_checkbox_dtor, life_ours_checkbox_dtor, round, fill);
+        life_sweep_vb_class(&radio_class, RB_WIN, RB_DLG, &stats_radio_ctor, life_orig_radio_ctor, life_ours_radio_ctor, &stats_radio_close,
+                            life_orig_radio_close, life_ours_radio_close, round, fill);
+        // The deleting destructor unmakes everything (it is given flag 0: the object is in static memory).
+        life_build(&radio_class, fill, life_orig_radio_ctor, NULL);
+        life_buffers(RB_WIN + 0x444, 4 + round, 3 + round);
+        life_nodes(RB_DLG + 0xbc, round);
+        if (round & 1) life_data(RB_DLG, 64);
+        uint32_t *head_global[1] = {(uint32_t *)game_at(0x9b3374)};
+        if (life_run(&stats_radio_dtor, &radio_class, life_orig_radio_dtor, life_ours_radio_dtor, NULL, head_global, 1))
+            life_buffer_check_at(&stats_radio_dtor, RB_WIN + 0x444);
+    }
+}
+
 // ---- Hooks ------------------------------------------------------------------------------------------------
 
 static const struct hook button_hooks[] = {
+    HOOK(0x60e670, checkbox_ctor, 0x6a, 0xff, 0x68, 0x7a, 0x2f, 0x66, 0x00),  // push -1; push handler
+    // mov eax, [ecx-0x1c]; push esi; lea esi, [ecx-0x1c]; mov edx, [eax+4]
+    HOOK(0x60e740, checkbox_dtor, 0x8b, 0x41, 0xe4, 0x56, 0x8d, 0x71, 0xe4, 0x8b, 0x50, 0x04),
+    HOOK(0x60d0e0, radio_ctor, 0x6a, 0xff, 0x68, 0x3a, 0x2f, 0x66, 0x00),
+    HOOK(0x60d1b0, radio_close, 0x56, 0x8b, 0xf1, 0x33, 0xc0, 0x8b, 0x16),  // push esi; mov esi, ecx; xor eax, eax; mov edx, [esi]
+    HOOK(0x406f60, radio_dtor, 0x55, 0x8b, 0xec, 0x56, 0x57),  // push ebp; mov ebp, esp; push esi; push edi
+    HOOK(0x606f30, base_button_ctor, 0x6a, 0xff, 0x68, 0x66, 0x2e, 0x66, 0x00),  // push -1; push handler
+    HOOK(0x607040, base_button_dtor, 0x6a, 0xff, 0x68, 0x94, 0x2e, 0x66, 0x00),
+    // push esi; push edi; mov esi, ecx; call graphic_win_close
+    HOOK_CALL(0x6070c0, base_button_close, 0x56, 0x57, 0x8b, 0xf1, 0xe8, 0x77, 0xdd, 0xfc, 0xff),
+    // push ebx; push esi; mov esi, ecx; call base_button_ctor
+    HOOK_CALL(0x607cf0, flat_button_ctor, 0x53, 0x56, 0x8b, 0xf1, 0xe8, 0x37, 0xf2, 0xff, 0xff),
+    HOOK(0x406880, flat_button_dtor, 0x55, 0x8b, 0xec, 0x6a, 0xff, 0x68, 0xa8, 0x09, 0x65, 0x00),
+    // push esi; mov esi, ecx; push edi; lea ecx, [esi+0xa1c]
+    HOOK(0x607da0, flat_button_close, 0x56, 0x8b, 0xf1, 0x57, 0x8d, 0x8e, 0x1c, 0x0a, 0x00, 0x00),
+    HOOK_CALL(0x62bf20, push_button_ctor, 0x56, 0x8b, 0xf1, 0xe8, 0x08, 0xb0, 0xfd, 0xff),
+    // mov [ecx], vtable; mov [ecx+0x444], vtable (then a jump to base_button_dtor)
+    HOOK(0x62c010, push_button_dtor, 0xc7, 0x01, 0x60, 0x0c, 0x67, 0x00, 0xc7, 0x81, 0x44, 0x04, 0x00, 0x00, 0x58, 0x0c, 0x67, 0x00),
+    HOOK_CALL(0x6252e0, image_button_ctor, 0x56, 0x8b, 0xf1, 0xe8, 0x48, 0x1c, 0xfe, 0xff),
+    HOOK(0x625310, image_button_dtor, 0xc7, 0x01, 0x94, 0x0a, 0x67, 0x00, 0xc7, 0x81, 0x44, 0x04, 0x00, 0x00, 0x8c, 0x0a, 0x67, 0x00),
+    HOOK_CALL(0x633750, check_button_ctor, 0x56, 0x8b, 0xf1, 0xe8, 0x98, 0x15, 0xfa, 0xff),
+    HOOK(0x6337a0, check_button_close, 0x33, 0xc0, 0x89, 0x81, 0x14, 0x0a, 0x00, 0x00),  // xor eax, eax; mov [ecx+0xa14], eax
+    HOOK(0x4b3ec0, check_button_dtor, 0x55, 0x8b, 0xec, 0x6a, 0xff, 0x68, 0x88, 0x98, 0x65, 0x00),
     HOOK(0x607420, button_set_def_text_color, 0x8b, 0x44, 0x24, 0x04, 0x8b, 0x4c, 0x24, 0x08),
     HOOK(0x607450, button_set_def_text_color2, 0x8b, 0x44, 0x24, 0x04, 0x8b, 0x4c, 0x24, 0x08),
     HOOK(0x607480, button_set_def_text_color3, 0x8b, 0x44, 0x24, 0x04, 0x8b, 0x4c, 0x24, 0x08),

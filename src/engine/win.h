@@ -140,3 +140,13 @@ int WIN_THIS graphic_win_soft_update_3(struct game_win *w, const int32_t *rect);
 void WIN_THIS graphic_win_on_redraw_nc(struct game_win *w, const int32_t *rect, int which);
 void WIN_THIS win_copy_into_frame(struct game_win *w, struct game_win *o, const int32_t *rect, int which);
 void WIN_THIS graphic_win_on_paint(struct game_win *w, const int32_t *clip);
+
+// Life cycle (win.c): the base class's defaults, a Win and a GraphicWin made and unmade. The constructors
+// return the object; the destructors do not free it.
+void *WIN_THIS winbase_ctor(struct game_win *w);
+void WIN_THIS winbase_reset(struct game_win *w);
+void *WIN_THIS win_ctor(struct game_win *w);
+void WIN_THIS win_dtor(struct game_win *w);
+void *WIN_THIS graphic_win_ctor(struct game_win *w);
+void WIN_THIS graphic_win_dtor(struct game_win *w);
+void WIN_THIS graphic_win_close(struct game_win *w);

@@ -7,6 +7,7 @@
 
 #include "../src/engine/button.h"
 #include "../src/engine/game.h"
+#include "life_test.h"
 #include "../src/engine/scroll.h"
 #include "../src/engine/text.h"
 
@@ -380,6 +381,73 @@ static void lb_tests(void) {
     EXPECT(ncalls, 1), EXPECT(calls[0].slot, 0x401), EXPECT(calls[0].a, 100), EXPECT(calls[0].b, 3), EXPECT(fill_rects, 0);
 }
 
+// ---- Life cycle ----
+
+static int life_closes, life_data_closed, life_arrow_closes;
+static void LT_THIS life_win_close(void *w) { life_closes++; }
+static void LT_THIS life_data_close(void *d) { life_data_closed++; }
+static void LT_THIS life_arrow_close(void *b) { life_arrow_closes++; }
+static void *life_arrow_vtable[0x180 / 4];
+
+static void test_life(void) {
+    life_image_init();
+    life_buffer_standins();
+    life_time_standins();
+    game_win_close = life_win_close, game_dialog_data_close = life_data_close;
+    game_dialog_defs_a = game_at(0x697098), game_dialog_defs_b = game_at(0x9b8eb4);
+    life_arrow_vtable[0x168 / 4] = (void *)life_arrow_close;
+    static uint8_t obj[0x2150];
+
+    // A Scroll: its own vtables and defaults, the arrows' pictures (three numbers each, the second row on
+    // starting one word along), and two FlatButtons for the arrows.
+    memset(obj, 0xcc, sizeof obj);
+    EXPECT(scroll_ctor((struct game_scroll *)obj) == (struct game_scroll *)obj, 1);
+    EXPECT(OW(obj, 0), IMGVA(0x669d58)), EXPECT(OW(obj, 0x444), IMGVA(0x669d50)), EXPECT(OW(obj, 0xa14), IMGW(0x9b8de0));
+    EXPECT(OW(obj, 0xa1c), IMGW(0x69702c)), EXPECT(OW(obj, 0xa3c), 0xffffffffu), EXPECT(OW(obj, 0xa28), 0), EXPECT(OW(obj, 0xa4c), 0);
+    EXPECT(OW(obj, 0xa48), IMGW(0x697034)), EXPECT(OW(obj, 0xa70), IMGW(0x697048)), EXPECT(OW(obj, 0xa74), IMGW(0x9b8e1c));
+    EXPECT(OW(obj, 0xa78), IMGW(0x9b8e20)), EXPECT(OW(obj, 0x2144), 0), EXPECT(OW(obj, 0x2148), 0), EXPECT(OW(obj, 0x214c), 0xcccccccc);
+    for (int i = 0; i < 3; i++) {
+        EXPECT(OW(obj, 0xa7c + 4 * i), IMGW(0x9b8de8 + 4 * i)), EXPECT(OW(obj, 0xa88 + 4 * i), IMGW(0x9b8df4 + 4 * i));
+        EXPECT(OW(obj, 0xa94 + 4 * i), IMGW(0x9b8e00 + 4 * i)), EXPECT(OW(obj, 0xaa0 + 4 * i), IMGW(0x9b8e0c + 4 * i));
+    }
+    EXPECT(OW(obj, 0xaac), IMGVA(0x669754)), EXPECT(OW(obj, 0x15f8), IMGVA(0x669754));  // (the arrows are FlatButtons)
+    // Close: the defaults again, each arrow asked to close through its vtable, and the GraphicWin closed.
+    OW(obj, 0xa14) = 1, OW(obj, 0x2144) = 5;
+    OW(obj, 0xaac) = (uint32_t)(uintptr_t)life_arrow_vtable, OW(obj, 0x15f8) = (uint32_t)(uintptr_t)life_arrow_vtable;
+    life_closes = 0, life_arrow_closes = 0;
+    scroll_close((struct game_scroll *)obj);
+    EXPECT(OW(obj, 0xa14), IMGW(0x9b8de0)), EXPECT(OW(obj, 0x2144), 0), EXPECT(life_arrow_closes, 2), EXPECT(life_closes, 1);
+    // The destructor unmakes the arrows as the FlatButtons they are, and the GraphicWin.
+    life_closes = 0, life_arrow_closes = 0;
+    OW(obj, 0xaac) = (uint32_t)(uintptr_t)life_arrow_vtable, OW(obj, 0x15f8) = (uint32_t)(uintptr_t)life_arrow_vtable;
+    scroll_dtor((struct game_scroll *)obj);
+    EXPECT(life_arrow_closes, 2), EXPECT(OW(obj, 0), IMGVA(0x66ff34)), EXPECT(OW(obj, 0xaac), IMGVA(0x66ff34)), EXPECT(OW(obj, 0x15f8), IMGVA(0x66ff34));
+    EXPECT(life_closes, 1 + 3 + 3 + 1);  // (the Scroll's close, each arrow's FlatButton close, BaseButton close and Win destructor, the Win's)
+
+    // A ListBox: two virtual bases, the GraphicWin 0x48 in and the Dialog 0xa60 in.
+    life_vbtable(0x66b0ec, 0x24, 0), life_vbtable(0x670584, 0x48, 0xa60);
+    static uint8_t big[0xb60];
+    memset(big, 0xcc, sizeof big);
+    EXPECT(listbox_ctor(big, 1) == big, 1);
+    EXPECT(OW(big, 0), IMGVA(0x670584)), EXPECT(OW(big, 0x48), IMGVA(0x67041c)), EXPECT(OW(big, 0x48 + 0x444), IMGVA(0x670414));
+    EXPECT(OW(big, 0xa60), IMGVA(0x670408)), EXPECT(OW(big, 0x44), 0), EXPECT(OW(big, 0xa5c), 0);
+    EXPECT(OW(big, 4), 0), EXPECT(OW(big, 8), 0), EXPECT(OW(big, 0x10), IMGW(0x6970e8)), EXPECT(OW(big, 0x14), IMGW(0x6970ec));
+    EXPECT(OW(big, 0x24), IMGW(0x6970e0)), EXPECT(OW(big, 0x28), IMGW(0x9b8ee0)), EXPECT(OW(big, 0x2c), IMGW(0x6970e4)), EXPECT(OW(big, 0x40), 0);
+    EXPECT(OW(big, 0xa60 + 0xb4), 1), EXPECT(OW(big, 0xc), 0), EXPECT(OW(big, 0x48), IMGVA(0x67041c));
+    OW(big, 0x10) = 9, OW(big, 0x40) = 4, OW(big, 0xa60 + 0xb4) = 6;
+    life_closes = 0, life_data_closed = 0;
+    listbox_close(big);
+    EXPECT(OW(big, 0x10), IMGW(0x6970e8)), EXPECT(OW(big, 0x40), 0), EXPECT(OW(big, 0xa60 + 0xb4), 1), EXPECT(life_closes, 1), EXPECT(life_data_closed, 1);
+    // A part of a bigger object leaves the bases to the maker; the destructor, given the GraphicWin, sets the
+    // vtables and closes.
+    OW(big, 0x48) = 0;
+    EXPECT(listbox_ctor(big, 0) == big, 1), EXPECT(OW(big, 0x48), IMGVA(0x67041c));
+    OW(big, 0x10) = 9, OW(big, 0x48) = 0;
+    life_closes = 0, life_data_closed = 0;
+    listbox_dtor(big + 0x48);
+    EXPECT(OW(big, 0x48), IMGVA(0x67041c)), EXPECT(OW(big, 0x10), IMGW(0x6970e8)), EXPECT(life_closes, 1), EXPECT(life_data_closed, 1);
+}
+
 int main(void) {
     static struct game_scroll scroll_b;
     B = &scroll_b;
@@ -669,6 +737,8 @@ int main(void) {
 
     draw_tests();
     lb_tests();
+    test_life();
+
     if (failures) printf("%d failures\n", failures);
     else printf("ok\n");
     return failures != 0;

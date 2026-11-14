@@ -81,6 +81,7 @@ add_executable(chiron
   src/engine/journal.c
   src/engine/bufimg.c
   src/engine/font.c
+  src/engine/life.c
   src/engine/win.c
   src/engine/screen.c
   src/engine/button.c

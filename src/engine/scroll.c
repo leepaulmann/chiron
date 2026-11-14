@@ -42,9 +42,11 @@
 #include "bufobj.h"
 #include "bufimg.h"
 #include "button.h"
+#include "dialog.h"
 #include "buffer.h"
 #include "game.h"
 #include "hooks.h"
+#include "life.h"
 #include "scroll.h"
 #include "strlist.h"
 #include "text.h"
@@ -1407,6 +1409,8 @@ static void lx_sweep(struct game_buffer *big, struct font *font) {
     *game_listbox_row = row, *game_listbox_cur = cur, *game_listbox_bar = bar;
 }
 
+static void life_sweep_scroll(void);
+static void life_sweep_listbox(void);
 static void scroll_sweep(void) {
     int sweeping = hooks_sweeping;
     hooks_sweeping = 1;
@@ -1493,12 +1497,218 @@ static void scroll_sweep(void) {
     if (lx_buf) lx_sweep(lx_buf, lx_font);
     *game_win_capture = capture, *game_win_hover = hover, *game_win_cur = cur;
     *game_scroll_by_key = by_key, *game_listbox_right = right;
+    life_sweep_scroll();
+    life_sweep_listbox();
     hooks_sweeping = sweeping;
+}
+
+// ---- Life cycle -----------------------------------------------------------------------------------
+
+// A Scroll made and unmade: a GraphicWin with its own fields (the game's defaults for colours, delays and
+// pictures) and two FlatButtons (0xaac and 0x15f8) for the arrows. The constructor and close start the
+// same fields; close also asks each arrow to close itself through its vtable (slot 0x168), and the
+// destructor closes and unmakes the arrows as FlatButtons (it sets their vtables first, since the Scroll's
+// own destructor runs as the arrows' class has been taken apart). These allocate or free (the arrows'
+// names, the Buffers), so in shadow mode the game's calls run the original and the sweep checks Chiron's
+// code on twin scroll bars (life.c). The exception frames are not reproduced. Differences from
+// OpenSMACX: it has none of these.
+
+#define SC_VTABLE 0x669d58
+#define SC_BUFFER_VTABLE 0x669d50
+enum { SC_BTN_A = 0xaac, SC_BTN_B = 0x15f8, SC_VT_CLOSE = 0x168 };
+
+static const struct life_set scroll_start[] = {
+    LG(0xa14, 0x9b8de0), LG(0xa1c, 0x69702c), LZ(0xa28), LG(0xa20, 0x9b8de4), LG(0xa24, 0x697030), LG(0xa2c, 0x9b8de4),
+    LG(0xa30, 0x697028), LC(0xa3c, 0xffffffff), LZ(0xa38), LG(0xa34, 0x697024), LG(0xa40, 0x697020), LZ(0xa44),
+    LZ(0xa4c), LZ(0xa50), LZ(0xa54), LZ(0xa58), LG(0xa48, 0x697034), LG(0xa5c, 0x697038), LG(0xa64, 0x69703c),
+    LG(0xa68, 0x697040), LG(0xa6c, 0x697044), LG(0xa70, 0x697048), LG(0xa74, 0x9b8e1c), LG(0xa78, 0x9b8e20),
+    LZ(0x2144), LZ(0x2148),
+};
+
+// The pictures for the four arrows: three numbers each, from the game's table (0x9b8de8 on; the second to
+// fourth rows start one word on, as the original's loop reads them).
+static void scroll_start_fields(struct game_scroll *s) {
+    life_apply(s, scroll_start, (int)(sizeof scroll_start / sizeof scroll_start[0]));
+    for (uint32_t i = 0; i < 3; i++) {
+        uint32_t d = 4 * i, e = 4 * (i + 1);
+        *(uint32_t *)((uint8_t *)s + 0xa7c + d) = *(uint32_t *)game_at(0x9b8de8 + d);
+        *(uint32_t *)((uint8_t *)s + 0xa88 + d) = *(uint32_t *)game_at(0x9b8df0 + e);
+        *(uint32_t *)((uint8_t *)s + 0xa94 + d) = *(uint32_t *)game_at(0x9b8dfc + e);
+        *(uint32_t *)((uint8_t *)s + 0xaa0 + d) = *(uint32_t *)game_at(0x9b8e08 + e);
+    }
+}
+
+void *SCROLL_THIS scroll_ctor(struct game_scroll *s) {
+    graphic_win_ctor(&s->win);
+    flat_button_ctor((struct game_flat_button *)((uint8_t *)s + SC_BTN_A));
+    flat_button_ctor((struct game_flat_button *)((uint8_t *)s + SC_BTN_B));
+    s->win.vtable = (void **)(uintptr_t)game_va(SC_VTABLE);
+    s->buf.vtable = (void **)(uintptr_t)game_va(SC_BUFFER_VTABLE);
+    scroll_start_fields(s);
+    return s;
+}
+
+// Starts the fields again, has each arrow close itself, and closes the GraphicWin.
+void SCROLL_THIS scroll_close(struct game_scroll *s) {
+    scroll_start_fields(s);
+    void *arrows[2] = {(uint8_t *)s + SC_BTN_A, (uint8_t *)s + SC_BTN_B};
+    for (int i = 0; i < 2; i++) ((void(SCROLL_THIS *)(void *))(*(void ***)arrows[i])[SC_VT_CLOSE / 4])(arrows[i]);
+    graphic_win_close(&s->win);
+}
+
+void SCROLL_THIS scroll_dtor(struct game_scroll *s) {
+    s->win.vtable = (void **)(uintptr_t)game_va(SC_VTABLE);
+    s->buf.vtable = (void **)(uintptr_t)game_va(SC_BUFFER_VTABLE);
+    scroll_close(s);
+    // The second arrow, then the first, as the FlatButtons they are.
+    for (int off = SC_BTN_B; off >= SC_BTN_A; off -= SC_BTN_B - SC_BTN_A) {
+        struct game_flat_button *f = (struct game_flat_button *)((uint8_t *)s + off);
+        f->base.win.vtable = (void **)(uintptr_t)game_va(0x669754);
+        f->base.buf.vtable = (void **)(uintptr_t)game_va(0x66974c);
+        flat_button_close(f);
+        base_button_dtor(&f->base);
+    }
+    graphic_win_dtor(&s->win);
+}
+
+// ---- Life cycle: shadow mode and the sweep ----
+
+SHADOW_PASS_T(SCROLL, void *, scroll_ctor, (struct game_scroll * s), (s))
+SHADOW_PASS_T(SCROLL, void, scroll_close, (struct game_scroll * s), (s))
+SHADOW_PASS_T(SCROLL, void, scroll_dtor, (struct game_scroll * s), (s))
+
+LIFE_FN(scroll_ctor, orig_scroll_ctor(o), scroll_ctor(o))
+LIFE_FN(scroll_close, orig_scroll_close(o), scroll_close(o))
+LIFE_FN(scroll_dtor, orig_scroll_dtor(o), scroll_dtor(o))
+
+static const struct life_slot scroll_slots[] = {{0xcc, -1}, {0xd0, -1}};
+static const struct life_class scroll_class = {"Scroll", 0x2150, scroll_slots, 2, 0x444, 0x9cc, {0xa14, 0x20}};
+
+static void life_sweep_scroll(void) {
+    if (!game_mem_get || *game_ddraw || !hooks_dc_same) return;
+    for (int round = 0; round < 4; round++) {
+        uint8_t fill = (uint8_t)round * 37 + 5;
+        life_ctor_check(&stats_scroll_ctor, &scroll_class, life_orig_scroll_ctor, life_ours_scroll_ctor, fill);
+        life_close_check(&stats_scroll_close, &scroll_class, life_orig_scroll_ctor, life_orig_scroll_close, life_ours_scroll_close, fill,
+                         4 + round, 3 + round, 0);
+        life_close_check(&stats_scroll_dtor, &scroll_class, life_orig_scroll_ctor, life_orig_scroll_dtor, life_ours_scroll_dtor, fill,
+                         4 + round, 3 + round, 0);
+    }
+}
+
+// ---- Life cycle: ListBox ---------------------------------------------------------------------------
+
+// A ListBox is an object with two virtual bases, a GraphicWin (0x48 into it) and a Dialog (0xa60), found
+// through the table its first word points to (entries 1 and 2: where each lies from the start). Its
+// constructor, given whether it is the whole object, makes the bases (the GraphicWin's and the Dialog's
+// constructors) and sets every base's vtables for ListBox and the difference between each base's place and
+// the place the table gives (a word before each base); then its own fields, from the game's defaults and
+// the Dialog's field at 0xb4 set to 1. Close closes the GraphicWin and the Dialog and starts the fields
+// again. The destructor given here is the part of the destruction a ListBox does for itself (the vtables,
+// then close); the bases are unmade by the deleting destructor. These allocate or free on the game's heap,
+// so in shadow mode the game's calls run the original and the sweep checks Chiron's code on twin boxes
+// (life.c). The exception frames are not reproduced. Differences from OpenSMACX: it has none of these.
+
+enum { LB_VBPTR = 0x670584, LB_WIN_VT = 0x67041c, LB_BUF_VT = 0x670414, LB_DLG_VT = 0x670408, LB_WIN = 0x48, LB_DLG = 0xa60 };
+
+static void listbox_vtables(uint8_t *o) {
+    int32_t win = life_vb(o, 1), dlg = life_vb(o, 2);
+    *(uint32_t *)(o + win) = game_va(LB_WIN_VT);
+    *(uint32_t *)(o + win + 0x444) = game_va(LB_BUF_VT);
+    *(uint32_t *)(o + dlg) = game_va(LB_DLG_VT);
+    *(int32_t *)(o + win - 4) = win - LB_WIN;
+    *(int32_t *)(o + dlg - 4) = dlg - LB_DLG;
+}
+
+// The box's own fields (0x4 to 0x40) and the Dialog's field at 0xb4.
+static void listbox_start_fields(uint8_t *o) {
+    uint32_t *f = (uint32_t *)o;
+    f[1] = 0, f[2] = 0;
+    f[4] = *(uint32_t *)game_at(0x6970e8), f[5] = *(uint32_t *)game_at(0x6970ec);
+    f[6] = 0, f[7] = 0, f[8] = 0;
+    f[9] = *(uint32_t *)game_at(0x6970e0), f[10] = *(uint32_t *)game_at(0x9b8ee0), f[0xc] = 0, f[0xb] = *(uint32_t *)game_at(0x6970e4);
+    f[0xd] = 0, f[0xe] = 0, f[0xf] = 0, f[0x10] = 0;
+    *(uint32_t *)(o + life_vb(o, 2) + 0xb4) = 1;
+    f[3] = 0;
+}
+
+void *SCROLL_THIS listbox_ctor(uint8_t *o, int most_derived) {
+    if (most_derived) {
+        *(uint32_t *)o = game_va(LB_VBPTR);
+        graphic_win_ctor((struct game_win *)(o + LB_WIN));
+        dialog_ctor((struct game_dialog *)(o + LB_DLG));
+    }
+    listbox_vtables(o);
+    listbox_start_fields(o);
+    return o;
+}
+
+void SCROLL_THIS listbox_close(uint8_t *o) {
+    graphic_win_close((struct game_win *)(o + life_vb(o, 1)));
+    dialog_close((struct game_dialog *)(o + life_vb(o, 2)));
+    listbox_start_fields(o);
+}
+
+// Given the GraphicWin (the ListBox's second part).
+void SCROLL_THIS listbox_dtor(uint8_t *win) {
+    uint8_t *o = win - LB_WIN;
+    listbox_vtables(o);
+    listbox_close(o);
+}
+
+// ---- Life cycle: ListBox, shadow mode and the sweep ----
+
+SHADOW_PASS_T(SCROLL, void *, listbox_ctor, (uint8_t * o, int most), (o, most))
+SHADOW_PASS_T(SCROLL, void, listbox_close, (uint8_t * o), (o))
+SHADOW_PASS_T(SCROLL, void, listbox_dtor, (uint8_t * win), (win))
+
+LIFE_FN(listbox_ctor, orig_listbox_ctor(o, 1), listbox_ctor(o, 1))
+LIFE_FN(listbox_close, orig_listbox_close(o), listbox_close(o))
+LIFE_FN(listbox_dtor, orig_listbox_dtor((uint8_t *)o + LB_WIN), listbox_dtor((uint8_t *)o + LB_WIN))
+
+// The Win's dialog list (0x48 + 0xcc, 0xd0), the Dialog's data and cursor (0xa60 + 8, 0xc) and list head and
+// cursor (0xa60 + 0xc4, 0xc8).
+static const struct life_slot listbox_slots[] = {{0x114, -1}, {0x118, -1}, {0xa68, -1}, {0xa6c, -1}, {0xb24, -1}, {0xb28, -1}};
+static const struct life_class listbox_class = {"ListBox", 0xb54, listbox_slots, 6, LB_WIN + 0x444, LB_WIN + 0x9cc, {0x10}};
+
+static void life_sweep_listbox(void) {
+    uint32_t *head_global[1] = {(uint32_t *)game_at(0x9b3374)};
+    if (!game_mem_get || *game_ddraw || !hooks_dc_same) return;
+    for (int round = 0; round < 4; round++) {
+        uint8_t fill = (uint8_t)(round * 43 + 13);
+        life_fill(&listbox_class, life_a, life_b, fill);
+        if (life_run(&stats_listbox_ctor, &listbox_class, life_orig_listbox_ctor, life_ours_listbox_ctor, NULL, head_global, 1))
+            life_buffer_check_at(&stats_listbox_ctor, LB_WIN + 0x444);
+        for (int which = 0; which < 2; which++) {
+            life_build(&listbox_class, fill, life_orig_listbox_ctor, NULL);
+            life_buffers(LB_WIN + 0x444, 4 + round, 3 + round);
+            life_nodes(LB_DLG + 0xbc, round);
+            if (round & 1) life_data(LB_DLG, 64);
+            struct hook_stats *s = which ? &stats_listbox_dtor : &stats_listbox_close;
+            if (life_run(s, &listbox_class, which ? life_orig_listbox_dtor : life_orig_listbox_close,
+                         which ? life_ours_listbox_dtor : life_ours_listbox_close, NULL, head_global, 1))
+                life_buffer_check_at(s, LB_WIN + 0x444);
+            // (Close leaves the bases standing; unmake them as the deleting destructor would.)
+            for (int i = 0; i < 2; i++) {
+                uint8_t *o = i ? life_b : life_a;
+                game_dialog_dtor(o + LB_DLG);
+                game_graphic_win_dtor(o + LB_WIN);
+            }
+        }
+    }
 }
 
 // ---- Hooks ----------------------------------------------------------------------------------------------------------------
 
 static const struct hook scroll_hooks[] = {
+    HOOK(0x609db0, listbox_ctor, 0x6a, 0xff, 0x68, 0x0a, 0x2f, 0x66, 0x00),  // push -1; push handler
+    // mov eax, ecx; push esi; mov edx, [eax-0x48]; lea ecx, [eax-0x48]
+    HOOK(0x609ec0, listbox_dtor, 0x8b, 0xc1, 0x56, 0x8b, 0x50, 0xb8, 0x8d, 0x48, 0xb8),
+    HOOK(0x609f20, listbox_close, 0x56, 0x8b, 0xf1, 0x8b, 0x06, 0x8b, 0x48, 0x04),  // push esi; mov esi, ecx; mov eax, [esi]; mov ecx, [eax+4]
+    HOOK(0x6051d0, scroll_ctor, 0x6a, 0xff, 0x68, 0x46, 0x2e, 0x66, 0x00),  // push -1; push handler
+    // mov eax, [0x9b8de0]; push esi; mov esi, ecx
+    HOOK(0x605370, scroll_close, 0xa1, 0xe0, 0x8d, 0x9b, 0x00, 0x56, 0x8b, 0xf1),
+    HOOK(0x406e60, scroll_dtor, 0x55, 0x8b, 0xec, 0x6a, 0xff, 0x68, 0xe4, 0x0b, 0x65, 0x00),
     HOOK(0x6059b0, scroll_set_range, 0x8b, 0x44, 0x24, 0x04, 0x56),
     HOOK(0x605a10, scroll_set_button_color, 0x8b, 0x44, 0x24, 0x04, 0x56),
     HOOK(0x605a50, scroll_set_bevel_thickness, 0x8b, 0x44, 0x24, 0x04, 0x56),

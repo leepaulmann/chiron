@@ -34,3 +34,9 @@ void EDIT_THIS group_pass_dialog_focus(void *w);
 // Drawing (the boxes' and the group's slot 0xf8).
 void EDIT_THIS edit_on_redraw(struct game_editbox *e);
 void EDIT_THIS group_on_redraw(void *w);
+
+// Life cycle (see edit.c): an EditBox made and unmade. The constructor returns the object; the destructor does
+// not free it.
+void *EDIT_THIS edit_ctor(struct game_editbox *e);
+void EDIT_THIS edit_close(struct game_editbox *e);
+void EDIT_THIS edit_dtor(struct game_editbox *e);

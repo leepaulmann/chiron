@@ -71,3 +71,13 @@ void MENU_THIS pulldown_on_redraw(struct game_pulldown *pd);
 void MENU_THIS pulldown_update(struct game_pulldown *pd, int a, int b);
 void MENU_THIS menu_on_redraw(struct game_menu *m);
 void menu_draw_sweep(void);  // (the drawing checks' sweep, run by edit.c's once the fonts exist)
+
+// Life cycle (see menu.c): Spot's room, and Menu and PullDown made and unmade. The constructors return the
+// object; the destructors do not free it.
+int MENU_THIS spot_init(struct game_spot *s, int n);
+void MENU_THIS spot_shutdown(struct game_spot *s);
+void MENU_THIS spot_dtor(struct game_spot *s);
+void *MENU_THIS menu_ctor(struct game_menu *m);
+void MENU_THIS menu_dtor(struct game_menu *m);
+void *MENU_THIS pulldown_ctor(struct game_pulldown *p);
+void MENU_THIS pulldown_dtor(struct game_pulldown *p);

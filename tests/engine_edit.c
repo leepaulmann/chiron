@@ -6,6 +6,7 @@
 
 #include "../src/engine/edit.h"
 #include "../src/engine/game.h"
+#include "life_test.h"
 #include "../src/engine/strlist.h"
 #include "../src/engine/text.h"
 
@@ -221,6 +222,41 @@ static void draw_tests(void) {
     gwin->parent = NULL, nouts = 0, cur_win = NULL;
     group_on_redraw(graw + 0x8c);
     EXPECT(nouts, 0), EXPECT(cur_win == NULL, 1);
+}
+
+// ---- Life cycle ----
+
+static int life_closes;
+static void LT_THIS life_win_close(void *w) { life_closes++; }
+
+static void test_life(void) {
+    life_image_init();
+    life_buffer_standins();
+    life_time_standins();
+    game_win_close = life_win_close;
+    static uint8_t obj[0xb80];
+    memset(obj, 0xcc, sizeof obj);
+
+    // An EditBox: its own vtables, no text, room for ten characters, the game's colours and frame, no selection;
+    // its blink Time made (a resolution of 5).
+    EXPECT(edit_ctor((struct game_editbox *)obj) == (struct game_editbox *)obj, 1);
+    struct game_editbox *e = (struct game_editbox *)obj;
+    EXPECT(OW(obj, 0), IMGVA(0x66a038)), EXPECT(OW(obj, 0x444), IMGVA(0x66a030)), EXPECT(e->text[0], 0), EXPECT(e->max_len, 10);
+    EXPECT(e->border_a, (int)IMGW(0x9b90b8)), EXPECT(e->border_b, (int)IMGW(0x9b90bc)), EXPECT(e->border_w, (int)IMGW(0x6971e0));
+    EXPECT(e->pad, (int)IMGW(0x6971e4)), EXPECT(e->color, (int)IMGW(0x6971dc)), EXPECT(e->sel_text, (int)IMGW(0x6971f8));
+    EXPECT(e->sel_back, (int)IMGW(0x6971f4)), EXPECT(e->mods, 0), EXPECT(e->flags, 0), EXPECT(e->anchor, 0), EXPECT(e->caret, 0);
+    EXPECT(e->blink, 0), EXPECT(e->first, 0), EXPECT(e->timer.resolution, 5), EXPECT(e->text[1], (char)0xcc);
+    // Close starts the fields again, stops the Time and closes the GraphicWin.
+    strcpy(e->text, "abc"), e->max_len = 99, e->caret = 3, e->flags = 4, e->color = 1;
+    e->timer.delay = 77;
+    life_closes = 0;
+    edit_close(e);
+    EXPECT(e->text[0], 0), EXPECT(e->text[1], 'b'), EXPECT(e->max_len, 10), EXPECT(e->caret, 0), EXPECT(e->flags, 0), EXPECT(e->color, (int)IMGW(0x6971dc));
+    EXPECT(e->timer.delay, 0), EXPECT(life_closes, 1);
+    // The destructor closes, unmakes the Time and the GraphicWin.
+    life_closes = 0;
+    edit_dtor(e);
+    EXPECT(life_closes, 2), EXPECT(OW(obj, 0), IMGVA(0x66ff34));
 }
 
 int main(void) {
@@ -587,6 +623,8 @@ int main(void) {
     EXPECT(group_calculate_dimensions(g), 7), EXPECT(*(int32_t *)(D + 0x64), 99);
 
     draw_tests();
+
+    test_life();
 
     if (failures) printf("%d failures\n", failures);
     else printf("ok\n");

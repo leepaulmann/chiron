@@ -125,3 +125,8 @@ void DLG_THIS sprite_box_on_right_down(void *w, int x, int y);
 void DLG_THIS sprite_box_on_right_up(void *w, int x, int y);
 void DLG_THIS sprite_box_on_left_double_click(void *w, int x, int y);
 void DLG_THIS sprite_box_on_right_double_click(void *w, int x, int y);
+
+// Life cycle (see dialog.c): a Dialog made and unmade. The constructor returns the object; the destructor does not
+// free it.
+void *DLG_THIS dialog_ctor(struct game_dialog *d);
+void DLG_THIS dialog_dtor(struct game_dialog *d);

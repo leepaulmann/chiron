@@ -36,6 +36,7 @@
 
 #include "game.h"
 #include "hooks.h"
+#include "life.h"
 #include "shadow.h"
 #include "strlist.h"
 
@@ -392,6 +393,7 @@ static void build_list(int n) {
     L.list.idx = n ? rnd_to(n) : 0;
 }
 
+static void life_sweep_strings(void);
 static void strings_sweep(void) {
     if (!*game_win_hwnd) return;  // (a SetTimer timer needs the game's window: with none the timer gets an id of its own)
     int sweeping = hooks_sweeping;
@@ -467,13 +469,344 @@ static void strings_sweep(void) {
         check_strlist_sort(&L.list, 0), check_strlist_next_entry(&L.list), check_strlist_seek_pos(&L.list, -1);
     }
     memset(T, 0, sizeof T);  // (a timer message that arrives later finds nothing to do)
+    life_sweep_strings();
     hooks_sweeping = sweeping;
+}
+
+// ---- Life cycle -----------------------------------------------------------------------------------
+
+// The string list's constructor, close, remove_all and deleting destructor, StringList's fill_entry,
+// kill_entry and add_special, and the constructor, init, shutdown and put of Strings (the game's string
+// table, built on the arena class that Dialog's data uses: closing it is the game's own function at
+// 0x5d4580, allocating from it 0x5d4680, and giving it a block 0x5d4620, all left with the original).
+//
+// A string list is an object with a virtual base: the first word is the vtable, the second the pointer
+// to the table of the virtual base's offset, then the ring's head, cursor, count and index; the virtual
+// base (the node and item deleting class) follows at 0x1c and keeps the global list head the object was
+// made over (0x9b3374: a constructor that makes the whole object, not a part of a bigger one, saves it
+// and clears it, and the deleting destructor puts it back). Its vtables are the game's. The destructors
+// walk the ring and delete each item and node through their own vtables; the list's own vtable slot 1
+// is told of every item first (StringList's kills its text). They free blocks of the game's heap, so in
+// shadow mode the game's calls run the original and the sweep checks Chiron's code on twin lists built
+// over nodes and items that are real blocks of the game's heap with a stand-in vtable (life.c). The
+// exception frames the constructors set up are not reproduced. Differences from OpenSMACX: it has none
+// of these. StringStruct_scalar_dtor frees the object only when its saved global is clear, and always
+// clears the global when it is asked to free; the sweep gives it flag 0 (the flag 1 path frees the
+// object itself, which the twins, in static memory, cannot take), the unit test the other.
+
+enum { SL_VTABLE = 0x6693a4, SL_VB_VTABLE = 0x6693ac, SL_VBPTR = 0x6693b0, SL_VB_PART = 0x6693a0, SL_HEAD = 0x9b3374 };
+
+static void life_vdelete(void *o) {
+    void **vt = *(void ***)o;
+    uint8_t *part = (uint8_t *)o + (intptr_t)vt[1];
+    ((void(STR_THIS *)(void *, int))(*(void ***)part)[0])(part, 1);
+}
+
+// Where the virtual base's vtable is kept: the object's address plus 4 plus the offset the base table
+// gives (its second word).
+static void list_set_part_vtable(struct game_strlist *l, uint32_t vtable) {
+    const int32_t *vbtable = (const int32_t *)(uintptr_t)l->vbptr;
+    *(uint32_t *)((uint8_t *)l + 4 + vbtable[1]) = vtable;
+}
+
+// Deletes every item and node, as the original's loop does (the count is read again after each).
+static void strlist_empty(struct game_strlist *l) {
+    int i = 0;
+    if (l->count > 0) {
+        do {
+            struct game_strnode *n = l->head;
+            l->cur = n->next;
+            void *item = n->item;
+            ((void(STR_THIS *)(void *, void *))l->vtable[1])(l, item);
+            if (item) life_vdelete(item);
+            l->head->item = NULL;
+            if (l->head) life_vdelete(l->head);
+            l->head = l->cur;
+            i++;
+        } while (i < l->count);
+    }
+    l->head = NULL, l->idx = 0, l->count = 0;
+}
+
+// `most_derived` is set for an object that is not part of a bigger one: it makes the virtual base too.
+void *STR_THIS strlist_ctor(struct game_strlist *l, int most_derived) {
+    uint8_t *o = (uint8_t *)l;
+    if (most_derived) {
+        l->vbptr = (void *)(uintptr_t)game_va(SL_VBPTR);
+        *(uint32_t *)(o + 0x1c) = game_va(SL_VB_VTABLE);
+        *(uint32_t *)(o + 0x20) = *(uint32_t *)game_at(SL_HEAD);
+        *(uint32_t *)game_at(SL_HEAD) = 0;
+    }
+    l->vtable = (void **)(uintptr_t)game_va(SL_VTABLE);
+    list_set_part_vtable(l, game_va(SL_VB_PART));
+    l->head = NULL, l->cur = NULL, l->count = 0, l->idx = 0;
+    *(uint32_t *)(o + 0x18) = 0;
+    return l;
+}
+
+// What the virtual base's own function does (`vb` is the base, 0x1c into the list): empty the list.
+void STR_THIS strlist_close(void *vb) {
+    struct game_strlist *l = (struct game_strlist *)((uint8_t *)vb - 0x1c);
+    l->vtable = (void **)(uintptr_t)game_va(SL_VTABLE);
+    list_set_part_vtable(l, game_va(SL_VB_PART));
+    if (l->head) strlist_empty(l);
+    l->idx = 0;
+}
+
+void STR_THIS strlist_remove_all(struct game_strlist *l) {
+    if (l->head) strlist_empty(l);
+}
+
+// The deleting destructor, given the virtual base: empties the list, puts back the global it saved and,
+// if asked to (bit 0), frees the object unless it saved a global. Answers the object.
+void *STR_THIS strlist_scalar_dtor(void *vb, int flag) {
+    struct game_strlist *l = (struct game_strlist *)((uint8_t *)vb - 0x1c);
+    uint8_t *o = (uint8_t *)l;
+    l->vtable = (void **)(uintptr_t)game_va(SL_VTABLE);
+    list_set_part_vtable(l, game_va(SL_VB_PART));
+    strlist_remove_all(l);
+    l->idx = 0;
+    uint32_t saved = *(uint32_t *)(o + 0x20);
+    *(uint32_t *)(o + 0x1c) = game_va(SL_VB_VTABLE);
+    *(uint32_t *)game_at(SL_HEAD) = saved;
+    if ((flag & 1) && l) {
+        if (!saved) game_free(l);
+        *(uint32_t *)game_at(SL_HEAD) = 0;
+    }
+    return l;
+}
+
+// StringList: the list part is followed by the arena the text comes from (0x18, none for the game's heap),
+// the text to add (0x1c) and two numbers (0x20, 0x24) that every new entry takes.
+int STR_THIS stringlist_fill_entry(struct game_strlist *l, void *item) {
+    uint8_t *o = (uint8_t *)l;
+    uint8_t *it = (uint8_t *)item;
+    const char *text = *(const char **)(o + 0x1c);
+    if (text) {
+        void *arena = *(void **)(o + 0x18);
+        size_t n = strlen(text) + 1;
+        char *block = arena ? game_string_alloc(arena, (int)n) : game_mem_get(n);
+        *(char **)(it + 4) = block;
+        if (!block) return 4;
+        block[0] = 0;
+        strcat(block, text);
+    }
+    *(uint32_t *)(it + 8) = *(uint32_t *)(o + 0x20);
+    *(uint32_t *)(it + 0xc) = *(uint32_t *)(o + 0x24);
+    return 0;
+}
+
+// Gives the entry's text back (not a text from an arena, which is the arena's). What it answers is what the
+// register holds: the text when an arena keeps it, else nothing worth reading (the original's is whatever the
+// free left; every caller ignores it).
+int STR_THIS stringlist_kill_entry(struct game_strlist *l, void *item) {
+    char **text = (char **)((uint8_t *)item + 4);
+    if (!*text) return 0;
+    if (*(void **)((uint8_t *)l + 0x18)) return (int)(intptr_t)*text;
+    game_free(*text);
+    *text = NULL;
+    return 0;
+}
+
+// Adds an entry for a text that may begin with up to three '^': one makes the number 1, two 2 (the third
+// is skipped if there), and a lone one 3 (a text of just "^").
+int STR_THIS stringlist_add_special(struct game_strlist *l, const char *text) {
+    uint8_t *o = (uint8_t *)l;
+    int kind = 0;
+    if (text[0] == '^') {
+        if (text[1] == 0) kind = 3, text += 1;
+        else if (text[1] != '^') kind = 1, text += 1;
+        else kind = 2, text += text[2] == '^' ? 3 : 2;
+    }
+    *(const char **)(o + 0x1c) = text;
+    *(int32_t *)(o + 0x20) = kind;
+    *(int32_t *)(o + 0x24) = 0;
+    return game_strlist_add(l, 0) != 0;
+}
+
+// Strings (the table): the arena's five words then a flag at 0x14 that says the default text was put in.
+void *STR_THIS strings_ctor(struct game_strings *t) {
+    *(uint8_t *)t = 0;
+    t->f8 = 0, t->base = 0, t->f10 = 0, t->size = 0;
+    t->f14 = 0;
+    return t;
+}
+
+int STR_THIS strings_init(struct game_strings *t, int size) {
+    if (t->f14) game_dialog_data_close(t), t->f14 = 0;
+    if (game_dialog_data_alloc(t, size)) return 1;
+    const char *dflt = (const char *)game_at(0x6971fc);
+    char *block = game_string_alloc(t, (int)strlen(dflt) + 1);
+    strcpy(block, dflt);
+    t->f14 = 1;
+    return 0;
+}
+
+int STR_THIS strings_shutdown(struct game_strings *t) {
+    game_dialog_data_close(t);
+    t->f14 = 0;
+    return 0;
+}
+
+// Copies a text into the arena and answers where it went.
+char *STR_THIS strings_put(struct game_strings *t, const char *text) {
+    char *block = game_string_alloc(t, (int)strlen(text) + 1);
+    strcpy(block, text);
+    return block;
+}
+
+// ---- Life cycle: shadow mode and the sweep ----
+
+SHADOW_PASS_T(STRINGS, void *, strlist_ctor, (struct game_strlist * l, int most), (l, most))
+SHADOW_PASS_T(STRINGS, void, strlist_close, (void *vb), (vb))
+SHADOW_PASS_T(STRINGS, void, strlist_remove_all, (struct game_strlist * l), (l))
+SHADOW_PASS_T(STRINGS, void *, strlist_scalar_dtor, (void *vb, int flag), (vb, flag))
+SHADOW_PASS_T(STRINGS, int, stringlist_fill_entry, (struct game_strlist * l, void *item), (l, item))
+SHADOW_PASS_T(STRINGS, int, stringlist_kill_entry, (struct game_strlist * l, void *item), (l, item))
+SHADOW_PASS_T(STRINGS, int, stringlist_add_special, (struct game_strlist * l, const char *text), (l, text))
+SHADOW_PASS_T(STRINGS, void *, strings_ctor, (struct game_strings * t), (t))
+SHADOW_PASS_T(STRINGS, int, strings_init, (struct game_strings * t, int size), (t, size))
+SHADOW_PASS_T(STRINGS, int, strings_shutdown, (struct game_strings * t), (t))
+SHADOW_PASS_T(STRINGS, char *, strings_put, (struct game_strings * t, const char *text), (t, text))
+
+static uint32_t put_result;
+static const char *put_text = "a line of text";
+static uint32_t hash_text(const char *s) {
+    uint32_t h = 5381;
+    for (; s && *s; s++) h = h * 33 + (uint8_t)*s;
+    return h;
+}
+
+LIFE_FN(strlist_ctor_most, orig_strlist_ctor(o, 1), strlist_ctor(o, 1))
+LIFE_FN(strlist_ctor_part, orig_strlist_ctor(o, 0), strlist_ctor(o, 0))
+LIFE_FN(strlist_close, orig_strlist_close((uint8_t *)o + 0x1c), strlist_close((uint8_t *)o + 0x1c))
+LIFE_FN(strlist_remove_all, orig_strlist_remove_all(o), strlist_remove_all(o))
+LIFE_FN(strlist_scalar_dtor, orig_strlist_scalar_dtor((uint8_t *)o + 0x1c, 0), strlist_scalar_dtor((uint8_t *)o + 0x1c, 0))
+LIFE_FN(strings_ctor, orig_strings_ctor(o), strings_ctor(o))
+LIFE_FN(strings_init, orig_strings_init(o, (int)(intptr_t)x), strings_init(o, (int)(intptr_t)x))
+LIFE_FN(strings_shutdown, orig_strings_shutdown(o), strings_shutdown(o))
+LIFE_FN(strings_put, put_result = hash_text(orig_strings_put(o, put_text)), put_result = hash_text(strings_put(o, put_text)))
+
+static const struct life_slot strlist_slots[] = {{8, -1}, {0xc, -1}};
+static const struct life_class strlist_class = {"StringStruct", 0x24, strlist_slots, 2};
+// The arena's block, and where in it the next text goes.
+static const struct life_slot strings_slots[] = {{4, -1}, {8, -1}};
+static const struct life_class strings_class = {"Strings", 0x18, strings_slots, 2};
+
+// StringList's entries, on Dialogs (whose item list is a StringList at 0xbc: the arena at 0xd4, the text to
+// add at 0xd8, the two numbers at 0xdc and 0xe0), with an item of its own beyond the Dialog (at 0x100).
+static uint32_t sl_result;
+static const char *sl_texts[] = {"abc", "^abc", "^^abc", "^^^abc", "^", "^^", "^^^"};
+#define SL_LIST(o) ((struct game_strlist *)((uint8_t *)(o) + 0xbc))
+#define SL_ITEM(o) ((void *)((uint8_t *)(o) + 0x100))
+
+static void life_orig_sl_dialog_ctor(void *o, void *x) { (void)x, game_dialog_ctor(o); }
+LIFE_FN(stringlist_fill_entry, sl_result = (uint32_t)orig_stringlist_fill_entry(SL_LIST(o), SL_ITEM(o)),
+        sl_result = (uint32_t)stringlist_fill_entry(SL_LIST(o), SL_ITEM(o)))
+LIFE_FN(stringlist_kill_entry, orig_stringlist_kill_entry(SL_LIST(o), SL_ITEM(o)), stringlist_kill_entry(SL_LIST(o), SL_ITEM(o)))
+LIFE_FN(stringlist_add_special, sl_result = (uint32_t)orig_stringlist_add_special(SL_LIST(o), sl_texts[(int)(intptr_t)x]),
+        sl_result = (uint32_t)stringlist_add_special(SL_LIST(o), sl_texts[(int)(intptr_t)x]))
+
+// The Dialog's data and cursor, its list's head and cursor, and the item's text.
+static const struct life_slot stringlist_slots[] = {{8, -1}, {0xc, -1}, {0xc4, -1}, {0xc8, -1}, {0x104, 0}};
+static const struct life_class stringlist_class = {"StringList", 0x110, stringlist_slots, 5};
+
+static void life_sweep_stringlist(void) {
+    uint32_t *head_global[1] = {(uint32_t *)game_at(SL_HEAD)}, *result_global[1] = {&sl_result};
+    (void)head_global;
+    if (!game_dialog_ctor || !game_dialog_dtor || !game_mem_get) return;
+    for (int round = 0; round < 6; round++) {
+        uint8_t fill = (uint8_t)(round * 19 + 3);
+        for (int arena = 0; arena < 2; arena++) {
+            // Each of the entry functions on a Dialog the original made, with the text and numbers set and
+            // the arena either the Dialog's own data or none.
+            for (int which = 0; which < 3; which++) {
+                life_build(&stringlist_class, fill, life_orig_sl_dialog_ctor, NULL);
+                if (arena) life_data(0, 96);
+                uint8_t *objs[2] = {life_a, life_b};
+                for (int k = 0; k < 2; k++) {
+                    uint8_t *o = objs[k];
+                    memset(o + 0x100, 0, 16);
+                    *(void **)(o + 0xd4) = arena ? o + 4 : NULL;
+                    *(const char **)(o + 0xd8) = round == 5 ? NULL : sl_texts[round % 3];
+                    *(int32_t *)(o + 0xdc) = 3 + round, *(int32_t *)(o + 0xe0) = 7 - round;
+                }
+                if (which == 1) life_text(0x104, "some entry text");
+                if (which == 0)
+                    life_run(&stats_stringlist_fill_entry, &stringlist_class, life_orig_stringlist_fill_entry, life_ours_stringlist_fill_entry, NULL, result_global, 1);
+                if (which == 1)
+                    life_run(&stats_stringlist_kill_entry, &stringlist_class, life_orig_stringlist_kill_entry, life_ours_stringlist_kill_entry, NULL, result_global, 1);
+                if (which == 2)
+                    life_run(&stats_stringlist_add_special, &stringlist_class, life_orig_stringlist_add_special, life_ours_stringlist_add_special,
+                             (void *)(intptr_t)(round % 7), result_global, 1);
+                // Give back what the check left: the item's text if it came from the heap (fill_entry) or was left (the
+                // kill with an arena), then the Dialogs and what they hold, with the original's destructor.
+                if ((which == 0 && !arena) || (which == 1 && arena)) {
+                    game_free(*(void **)(life_a + 0x104));
+                    game_free(*(void **)(life_b + 0x104));
+                }
+                game_dialog_dtor(life_a), game_dialog_dtor(life_b);
+            }
+        }
+    }
+}
+
+static void life_sweep_strings(void) {
+    static uint32_t *none[1];
+    uint32_t *head_global[1] = {(uint32_t *)game_at(SL_HEAD)};
+    uint32_t *put_global[1] = {&put_result};
+    if (!game_mem_get || !game_string_alloc) return;
+    for (int round = 0; round < 4; round++) {
+        uint8_t fill = (uint8_t)(round * 29 + 7);
+        // The constructor of a whole object, and of a part (whose base table the maker has set).
+        life_fill(&strlist_class, life_a, life_b, fill);
+        life_run(&stats_strlist_ctor, &strlist_class, life_orig_strlist_ctor_most, life_ours_strlist_ctor_most, NULL, head_global, 1);
+        life_fill(&strlist_class, life_a, life_b, fill);
+        ((struct game_strlist *)life_a)->vbptr = ((struct game_strlist *)life_b)->vbptr = (void *)(uintptr_t)game_va(SL_VBPTR);
+        life_run(&stats_strlist_ctor, &strlist_class, life_orig_strlist_ctor_part, life_ours_strlist_ctor_part, NULL, head_global, 1);
+        // Close, remove_all and the destructor on lists of 0 to 3 nodes.
+        for (int which = 0; which < 3; which++) {
+            life_build(&strlist_class, fill, life_orig_strlist_ctor_most, NULL);
+            life_nodes(0, round);
+            if (which == 0) life_run(&stats_strlist_close, &strlist_class, life_orig_strlist_close, life_ours_strlist_close, NULL, none, 0);
+            if (which == 1) life_run(&stats_strlist_remove_all, &strlist_class, life_orig_strlist_remove_all, life_ours_strlist_remove_all, NULL, none, 0);
+            if (which == 2)
+                life_run(&stats_strlist_scalar_dtor, &strlist_class, life_orig_strlist_scalar_dtor, life_ours_strlist_scalar_dtor, NULL, head_global, 1);
+            // (The constructor saved the global the lists were made over: put it back.)
+            if (which != 2) orig_strlist_scalar_dtor(life_a + 0x1c, 0), orig_strlist_scalar_dtor(life_b + 0x1c, 0);
+        }
+        // Strings.
+        life_fill(&strings_class, life_a, life_b, fill);
+        life_run(&stats_strings_ctor, &strings_class, life_orig_strings_ctor, life_ours_strings_ctor, NULL, none, 0);
+        for (int again = 0; again < 2; again++) {
+            life_build(&strings_class, fill, life_orig_strings_ctor, NULL);
+            if (again) orig_strings_init((struct game_strings *)life_a, 64), orig_strings_init((struct game_strings *)life_b, 64);
+            life_run(&stats_strings_init, &strings_class, life_orig_strings_init, life_ours_strings_init, (void *)(intptr_t)(96 + round), none, 0);
+            // Put a text in, then shut it down.
+            life_run(&stats_strings_put, &strings_class, life_orig_strings_put, life_ours_strings_put, NULL, put_global, 1);
+            life_run(&stats_strings_shutdown, &strings_class, life_orig_strings_shutdown, life_ours_strings_shutdown, NULL, none, 0);
+            orig_strings_shutdown((struct game_strings *)life_a), orig_strings_shutdown((struct game_strings *)life_b);
+        }
+    }
+    life_sweep_stringlist();
 }
 
 // ---- Hooks ---------------------------------------------------------------------------------------------------------
 
 #define TIME_PRO 0x53, 0x56, 0x8b, 0xf1, 0x57, 0x33, 0xdb  // push ebx; push esi; mov esi, ecx; push edi; xor ebx, ebx
 static const struct hook strings_hooks[] = {
+    HOOK(0x401000, strlist_ctor, 0x55, 0x8b, 0xec, 0x51, 0x8b, 0x55, 0x08),  // push ebp; mov ebp, esp; push ecx; mov edx, [ebp+8]
+    HOOK(0x401060, strlist_close, 0x55, 0x8b, 0xec, 0x51, 0x53),
+    HOOK(0x402970, strlist_remove_all, 0x53, 0x56, 0x8b, 0xf1, 0x33, 0xdb),
+    HOOK(0x4029f0, strlist_scalar_dtor, 0x55, 0x8b, 0xec, 0x56, 0x8d, 0x71, 0xe4),  // ... lea esi, [ecx-0x1c]
+    HOOK(0x6086f0, stringlist_fill_entry, 0x56, 0x8b, 0xf1, 0x57, 0x8b, 0x7c, 0x24, 0x0c),
+    HOOK(0x608770, stringlist_kill_entry, 0x56, 0x8b, 0x74, 0x24, 0x08, 0x8b, 0x46, 0x04),
+    HOOK(0x608ba0, stringlist_add_special, 0x8b, 0x44, 0x24, 0x04, 0x53, 0x33, 0xd2),
+    // push esi; mov esi, ecx; call the arena's constructor
+    HOOK_CALL(0x6168d0, strings_ctor, 0x56, 0x8b, 0xf1, 0xe8, 0x88, 0xdc, 0xfb, 0xff),
+    HOOK(0x6168f0, strings_init, 0x56, 0x8b, 0xf1, 0x8b, 0x46, 0x14, 0x85, 0xc0),
+    HOOK_CALL(0x616950, strings_shutdown, 0x56, 0x8b, 0xf1, 0xe8, 0x28, 0xdc, 0xfb, 0xff),
+    HOOK(0x616970, strings_put, 0x56, 0x57, 0x8b, 0x7c, 0x24, 0x0c, 0x8b, 0xf1),
     HOOK(0x6169a0, strings_get, 0x8b, 0x41, 0x04, 0x8b, 0x54, 0x24, 0x04, 0x3b, 0xd0),
     HOOK(0x6161d0, time_ctor, 0x8b, 0xc1, 0x33, 0xc9, 0x89, 0x48, 0x04),
     HOOK(0x616200, time_dtor, TIME_PRO),

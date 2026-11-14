@@ -6,6 +6,7 @@
 
 #include "../src/engine/dialog.h"
 #include "../src/engine/game.h"
+#include "life_test.h"
 
 static int failures;
 static void check_(const char *what, long got, long want) {
@@ -141,6 +142,57 @@ static const char xyz_text[] = "xyz";
             check_(what_, fwd_args[k_], exp_[k_]);                                                       \
         }                                                                                                \
     } while (0)
+
+// ---- Life cycle ----
+
+static int life_data_closed, life_item_slot1, life_deleted;
+static void LT_THIS life_data_close(void *d) { life_data_closed++; }
+static void LT_THIS life_slot1(void *l, void *item) { life_item_slot1++; }
+static void LT_THIS life_delete(void *o, int flag) { life_deleted++; free(o); }
+static void *life_list_vtable[3] = {NULL, (void *)life_slot1};
+static void *life_node_vtable[2] = {(void *)life_delete, NULL};
+
+static void test_life(void) {
+    life_image_init();
+    game_free = life_free, game_mem_get = life_mem_get, game_dialog_data_close = life_data_close;
+    game_dialog_defs_a = game_at(0x697098), game_dialog_defs_b = game_at(0x9b8eb4);
+    life_vbtable(0x66b0ec, 0x24, 0);
+    static uint8_t obj[0xf8];
+    uint32_t *head = game_at(0x9b3374);
+
+    // A new Dialog: the game's list head saved in its base (0xe8) and cleared, the vtables of the Dialog and of
+    // the list (and its base), the list empty, no data, and the game's defaults.
+    memset(obj, 0xcc, sizeof obj);
+    *head = 0x1111;
+    EXPECT(dialog_ctor((struct game_dialog *)obj) == (struct game_dialog *)obj, 1);
+    struct game_dialog *d = (struct game_dialog *)obj;
+    EXPECT(d->vtable == (void **)(uintptr_t)IMGVA(0x6703fc), 1), EXPECT(*head, 0), EXPECT(d->ve8, 0x1111);
+    EXPECT(d->list.vtable == (void **)(uintptr_t)IMGVA(0x6698c4), 1), EXPECT(d->list.vbptr == (void *)(uintptr_t)IMGVA(0x66b0ec), 1);
+    // (The list's virtual base, whose vtable is at 0xe4, ends with the list's own.)
+    EXPECT(d->ve4 == (void *)(uintptr_t)IMGVA(0x6698c0), 1), EXPECT(d->list.head == NULL, 1), EXPECT(d->list.count, 0);
+    EXPECT(d->list.idx, 0), EXPECT(d->list.buf == NULL, 1), EXPECT(d->data_flag, 0), EXPECT(d->data == NULL, 1), EXPECT(d->cursor == NULL, 1);
+    EXPECT(d->data_size, 0), EXPECT(d->data_left, 0), EXPECT(d->size, -1), EXPECT(d->hover, -1), EXPECT(d->sel, 0);
+    EXPECT(d->flags, IMGW(0x6970dc)), EXPECT(d->w, (int)IMGW(0x697098)), EXPECT(d->h, (int)IMGW(0x9b8eb4)), EXPECT(d->font == (void *)(uintptr_t)IMGW(0x9b8ec0), 1);
+    EXPECT(d->color[3][2], (int)IMGW(0x6970d8)), EXPECT(d->color[0][0], (int)IMGW(0x6970ac)), EXPECT(d->v48, -1), EXPECT(d->ext == (void *)0xcccccccc, 1);
+
+    // The destructor closes the Dialog (which empties the list through the list's vtable and the items' own),
+    // walks the list's vtables back, gives the data back and puts the game's list head back.
+    d->list.vtable = life_list_vtable;
+    struct game_dlist_node *n[2];
+    for (int i = 0; i < 2; i++) {
+        n[i] = calloc(1, 32);
+        *(void **)n[i] = life_node_vtable;
+        n[i]->item = calloc(1, 16);
+        *(void **)n[i]->item = life_node_vtable;
+    }
+    n[0]->next = n[1], n[1]->next = n[0], d->list.head = n[0], d->list.count = 2;
+    life_data_closed = 0, life_item_slot1 = 0, life_deleted = 0;
+    OW(obj, 0xbc) = (uint32_t)(uintptr_t)life_list_vtable;
+    dialog_dtor(d);
+    EXPECT(life_deleted, 4), EXPECT(life_item_slot1, 2), EXPECT(d->list.head == NULL, 1), EXPECT(d->list.count, 0), EXPECT(d->list.idx, 0);
+    EXPECT(life_data_closed, 2), EXPECT(*head, 0x1111), EXPECT(d->vtable == (void **)(uintptr_t)IMGVA(0x6703fc), 1);
+    EXPECT(d->list.vtable == (void **)(uintptr_t)IMGVA(0x6693a4), 1), EXPECT(d->ve4 == (void *)(uintptr_t)IMGVA(0x6693ac), 1);
+}
 
 int main(void) {
     vt[1] = (void *)s_4, vt[0x8 / 4] = (void *)s_8, vt[0xb0 / 4] = (void *)s_b0, vt[0xe8 / 4] = (void *)s_e8, vt[0xf8 / 4] = (void *)s_f8;
@@ -546,6 +598,8 @@ int main(void) {
         // (only this event's function is called)
         SB.sb.fn[(i + 1) % 7 + 1] = sprite_fn, fn_id = -1, handlers[i](w, 15, 15), EXPECT(fn_id, -1);
     }
+
+    test_life();
 
     if (failures) printf("%d failures\n", failures);
     else printf("ok\n");

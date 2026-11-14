@@ -6,6 +6,7 @@
 
 #include "../src/engine/bufobj.h"
 #include "../src/engine/game.h"
+#include "life_test.h"
 #include "../src/engine/win.h"
 
 static int failures, line_;
@@ -645,6 +646,90 @@ static void test_events(void) {
         EXPECT(track == NULL, 1), EXPECT(nvlog, 3);
         ehooks[2] = (void *)ehook_left, ehooks[3] = (void *)ehook_right;
     }
+}
+
+// ---- Life cycle ----
+
+static int life_closes;
+static void WIN_THIS life_win_close(void *w) { life_closes++; }
+static int pic_deleted_;
+static void WIN_THIS pic_delete_(void *o, int flag) { pic_deleted_ += flag; }
+static void *pic_vtable_[1] = {(void *)pic_delete_};
+
+static void test_life(void) {
+    life_image_init();
+    life_buffer_standins();
+    game_win_close = life_win_close;
+    static uint8_t obj[0xa40];
+
+    // The base class takes the game's defaults, the first four to the places the original puts them.
+    memset(obj, 0xcc, sizeof obj);
+    EXPECT(winbase_ctor((struct game_win *)obj) == (struct game_win *)obj, 1);
+    EXPECT(OW(obj, 0), IMGVA(0x66ff34)), EXPECT(OW(obj, 4), IMGW(0x9bc080)), EXPECT(OW(obj, 0xc), IMGW(0x9bc084));
+    EXPECT(OW(obj, 0x10), IMGW(0x9bc088)), EXPECT(OW(obj, 8), IMGW(0x9bc08c)), EXPECT(OW(obj, 0x14), IMGW(0x9bc090));
+    EXPECT(OW(obj, 0x94), IMGW(0x9bc110)), EXPECT(OW(obj, 0x98), 0xcccccccc);
+    OW(obj, 0x30) = 5, OW(obj, 0) = 7;
+    winbase_reset((struct game_win *)obj);
+    EXPECT(OW(obj, 0x30), IMGW(0x9bc0ac)), EXPECT(OW(obj, 0), 7);
+
+    // A new window is hidden, has no children or parent, is its own root and takes the game's colours.
+    memset(obj, 0xcc, sizeof obj);
+    EXPECT(win_ctor((struct game_win *)obj) == (struct game_win *)obj, 1);
+    struct game_win *w = (struct game_win *)obj;
+    EXPECT(w->vtable == (void **)(uintptr_t)IMGVA(0x66fdd0), 1), EXPECT(OW(obj, 0xc8), IMGVA(0x66ff30));
+    EXPECT(w->root == w, 1), EXPECT(w->flags, 0), EXPECT(w->flags2, 0), EXPECT(w->n_children, 0), EXPECT(w->parent == NULL, 1);
+    EXPECT(OW(obj, 0x130), 1), EXPECT(OW(obj, 0x1a0), 2), EXPECT(OW(obj, 0x17c), 1), EXPECT(OW(obj, 0x400), 0), EXPECT(OW(obj, 0x438), 0);
+    EXPECT(OW(obj, 0xfc), IMGW(0x9b7af0)), EXPECT(OW(obj, 0x114), IMGW(0x696d38)), EXPECT(OW(obj, 0x128), IMGW(0x696d54));
+    EXPECT(OW(obj, 0xf8), IMGW(0x9b7af4)), EXPECT(OW(obj, 0x444), 0xcccccccc);
+
+    // The destructor closes the window, frees the dialog list's blocks and nodes, and puts the defaults back.
+    for (int shared = 0; shared < 2; shared++) {
+        win_ctor(w);
+        struct game_win_node *n[3], *prev = NULL;
+        void *payload[3];
+        for (int i = 0; i < 3; i++) {
+            n[i] = calloc(1, sizeof *n[i]);
+            payload[i] = malloc(8);
+            n[i]->pad8 = (int32_t)(uintptr_t)payload[i];
+            if (prev) prev->next = n[i], n[i]->prev = prev;
+            prev = n[i];
+        }
+        n[2]->next = n[0], n[0]->prev = n[2];
+        w->dlg_head = n[0], w->dlg_count = 3, w->dlg_index = 1;
+        OW(obj, 0xdc) = (uint32_t)shared;
+        OW(obj, 0x30) = 5;
+        life_closes = 0, life_freed = 0;
+        win_dtor(w);
+        EXPECT(life_closes, 1), EXPECT(w->dlg_head == NULL, 1), EXPECT(w->dlg_count, 0), EXPECT(w->dlg_index, 0);
+        EXPECT(w->vtable == (void **)(uintptr_t)IMGVA(0x66ff34), 1), EXPECT(OW(obj, 0xc8), IMGVA(0x66ff30)), EXPECT(OW(obj, 0x30), IMGW(0x9bc0ac));
+        if (!shared) {
+            EXPECT(life_freed, 6), EXPECT(life_freed_has(n[1]), 1), EXPECT(life_freed_has(payload[2]), 1);
+            EXPECT(OW(obj, 0xd0) != 0, 1);  // (the cursor is left where the walk ended)
+        } else {
+            EXPECT(life_freed, 0);
+            for (int i = 0; i < 3; i++) free(payload[i]), free(n[i]);
+        }
+    }
+
+    // A GraphicWin: its Buffer is made, the vtables are its own, and its fields are cleared; close and the
+    // destructor close the Win and the Buffer, and close deletes the object at 0xa08.
+    memset(obj, 0xcc, sizeof obj);
+    EXPECT(graphic_win_ctor(w) == w, 1);
+    EXPECT(w->vtable == (void **)(uintptr_t)IMGVA(0x66fc50), 1), EXPECT(OW(obj, 0x444), IMGVA(0x66fc48)), EXPECT(OW(obj, 0xa10), 0);
+    EXPECT(OW(obj, 0x9cc), 0), EXPECT(OW(obj, 0xa04), 0), EXPECT(OW(obj, 0xa08), 0), EXPECT(OW(obj, 0xa0c), IMGW(0x9b33c0));
+    EXPECT(OW(obj, 0x134), 0), EXPECT(w->root == w, 1);
+    OW(obj, 0xa0c) = 1, OW(obj, 0x9d0) = 9;
+    void *pic_obj = pic_vtable_;
+    void *pic = &pic_obj;
+    OW(obj, 0xa08) = (uint32_t)(uintptr_t)pic;
+    life_closes = 0, pic_deleted_ = 0;
+    graphic_win_close(w);
+    EXPECT(life_closes, 1), EXPECT(pic_deleted_, 1), EXPECT(OW(obj, 0xa08), 0), EXPECT(OW(obj, 0xa0c), IMGW(0x9b33c0)), EXPECT(OW(obj, 0x9d0), 0);
+    graphic_win_close(w);  // (no picture: nothing to delete)
+    EXPECT(pic_deleted_, 1), EXPECT(life_closes, 2);
+    life_closes = 0;
+    graphic_win_dtor(w);
+    EXPECT(life_closes, 1), EXPECT(w->vtable == (void **)(uintptr_t)IMGVA(0x66ff34), 1);
 }
 
 int main(void) {
@@ -1738,6 +1823,8 @@ int main(void) {
     }
 
     test_events();
+
+    test_life();
 
     if (failures) return 1;
     printf("engine_win: ok\n");

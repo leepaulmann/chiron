@@ -91,8 +91,10 @@
 #include "dialog.h"
 #include "game.h"
 #include "hooks.h"
+#include "life.h"
 #include "menu.h"
 #include "shadow.h"
+#include "strlist.h"
 #include "text.h"
 
 #define DLG (&dialog_module)
@@ -1377,6 +1379,7 @@ static void random_line(char *buf, size_t cap) {
     if (need_digit || !rnd_to(4)) snprintf(buf + n, cap - n, "%s%d", rnd_to(2) ? " " : "", rnd_to(10));
 }
 
+static void life_sweep_dialog(void);
 static void dialog_sweep(void) {
     static struct font f_ok, f_bad;
     int sweeping = hooks_sweeping;
@@ -1694,12 +1697,96 @@ static void dialog_sweep(void) {
     memcpy(game_pop_ext_a, ext_a, sizeof ext_a), memcpy(game_pop_ext_b, ext_b, sizeof ext_b);
     memcpy(game_pop_file, file, 13);
     *game_pop_open = open, *game_pop_fallout_on = fallout, *game_win_screen_w = screen_w;
+    life_sweep_dialog();
     hooks_sweeping = sweeping;
+}
+
+// ---- Life cycle -----------------------------------------------------------------------------------
+
+// A Dialog made and unmade. It holds its data (a String arena at 0x4), the defaults of the game's table
+// (what Dialog_close puts back) and the list of its items at 0xbc, which has a virtual base of its own at
+// 0xe4: the constructor saves the game's list head (0x9b3374) in the base (0xe8) and clears it, and the
+// destructor puts it back. The destructor closes the Dialog, walks the list's vtables back to the base
+// class's (which empties it), and gives the arena back. These allocate and free on the game's heap, so
+// in shadow mode the game's calls run the original and the sweep checks Chiron's code on twin Dialogs
+// (life.c). The exception frames are not reproduced (nothing reads them). Differences from OpenSMACX: it
+// has none of these. The destructor's second walk of the list (the original inlines the close of the
+// list again after calling remove_all) finds it empty and does nothing, so it is left out.
+
+enum { DLG_VBPTR = 0x66b0ec, DLG_VTABLE = 0x6703fc, DLG_LIST_VT = 0x6698c4, DLG_LIST_PART = 0x6698c0, DLG_BASE_VT = 0x6693a4,
+       DLG_BASE_PART = 0x6693a0, DLG_VB_VTABLE = 0x6693ac, DLG_HEAD = 0x9b3374 };
+
+// Sets the vtable of the list's virtual base: the object's own address (0xc0 into the Dialog) plus the
+// offset the base table gives.
+static void dlist_set_part_vtable(struct game_dlist *l, uint32_t vtable) {
+    const int32_t *vbtable = (const int32_t *)(uintptr_t)l->vbptr;
+    *(uint32_t *)((uint8_t *)l + 4 + vbtable[1]) = vtable;
+}
+
+void *DLG_THIS dialog_ctor(struct game_dialog *d) {
+    d->data_flag = 0, d->data = NULL, d->cursor = NULL, d->data_size = 0, d->data_left = 0;
+    d->list.vbptr = (void *)(uintptr_t)game_va(DLG_VBPTR);
+    d->ve4 = (void *)(uintptr_t)game_va(DLG_VB_VTABLE);
+    d->ve8 = (int32_t)*(uint32_t *)game_at(DLG_HEAD);
+    *(uint32_t *)game_at(DLG_HEAD) = 0;
+    d->list.vtable = (void **)(uintptr_t)game_va(DLG_BASE_VT);
+    dlist_set_part_vtable(&d->list, game_va(DLG_BASE_PART));
+    d->list.head = NULL, d->list.cur = NULL, d->list.count = 0, d->list.idx = 0, d->list.buf = NULL;
+    d->list.vtable = (void **)(uintptr_t)game_va(DLG_LIST_VT);
+    dlist_set_part_vtable(&d->list, game_va(DLG_LIST_PART));
+    d->vtable = (void **)(uintptr_t)game_va(DLG_VTABLE);
+    dialog_defaults(d);
+    return d;
+}
+
+void DLG_THIS dialog_dtor(struct game_dialog *d) {
+    d->vtable = (void **)(uintptr_t)game_va(DLG_VTABLE);
+    dialog_close(d);
+    d->list.vtable = (void **)(uintptr_t)game_va(DLG_LIST_VT);
+    dlist_set_part_vtable(&d->list, game_va(DLG_LIST_PART));
+    strlist_remove_all((struct game_strlist *)&d->list);
+    d->list.idx = 0;
+    d->list.vtable = (void **)(uintptr_t)game_va(DLG_BASE_VT);
+    dlist_set_part_vtable(&d->list, game_va(DLG_BASE_PART));
+    d->list.idx = 0;
+    uint32_t saved = (uint32_t)d->ve8;
+    d->ve4 = (void *)(uintptr_t)game_va(DLG_VB_VTABLE);
+    *(uint32_t *)game_at(DLG_HEAD) = saved;
+    game_dialog_data_close(&d->data_flag);
+}
+
+// ---- Life cycle: shadow mode and the sweep ----
+
+SHADOW_PASS_T(DLG, void *, dialog_ctor, (struct game_dialog * d), (d))
+SHADOW_PASS_T(DLG, void, dialog_dtor, (struct game_dialog * d), (d))
+
+LIFE_FN(dialog_ctor, orig_dialog_ctor(o), dialog_ctor(o))
+LIFE_FN(dialog_dtor, orig_dialog_dtor(o), dialog_dtor(o))
+
+// The data block and its cursor, and the list's head and cursor.
+static const struct life_slot dialog_slots[] = {{8, -1}, {0xc, -1}, {0xc4, -1}, {0xc8, -1}};
+static const struct life_class dialog_class = {"Dialog", 0xf4, dialog_slots, 4};
+
+static void life_sweep_dialog(void) {
+    uint32_t *head_global[1] = {(uint32_t *)game_at(DLG_HEAD)};
+    if (!game_mem_get || !game_string_alloc) return;
+    for (int round = 0; round < 4; round++) {
+        uint8_t fill = (uint8_t)(round * 31 + 9);
+        life_fill(&dialog_class, life_a, life_b, fill);
+        life_run(&stats_dialog_ctor, &dialog_class, life_orig_dialog_ctor, life_ours_dialog_ctor, NULL, head_global, 1);
+        // The destructor, on Dialogs with 0 to 3 items and, on some rounds, data.
+        life_build(&dialog_class, fill, life_orig_dialog_ctor, NULL);
+        life_nodes(0xbc, round);
+        if (round & 1) life_data(0, 64);
+        life_run(&stats_dialog_dtor, &dialog_class, life_orig_dialog_dtor, life_ours_dialog_dtor, NULL, head_global, 1);
+    }
 }
 
 // ---- Hooks --------------------------------------------------------------------------------------
 
 static const struct hook dialog_hooks[] = {
+    HOOK(0x608c10, dialog_ctor, 0x51, 0x56, 0x8b, 0xf1, 0x57),  // push ecx; push esi; mov esi, ecx; push edi
+    HOOK(0x608e10, dialog_dtor, 0x6a, 0xff, 0x68, 0xe4, 0x2e, 0x66, 0x00),  // push -1; push handler
     HOOK(0x600760, purge_leading, 0x8b, 0x44, 0x24, 0x04, 0x80, 0x38, 0x20),
     HOOK(0x600780, purge_trailing, 0x56, 0x8b, 0x74, 0x24, 0x08, 0x56),
     HOOK(0x6007b0, purge_spaces, 0x81, 0xec, 0x00, 0x02, 0x00, 0x00),

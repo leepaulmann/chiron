@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "../src/engine/game.h"
+#include "life_test.h"
 #include "../src/engine/menu.h"
 #include "../src/engine/text.h"
 
@@ -274,6 +275,88 @@ static void draw_tests(void) {
     default_font_slot = &fnt_default, *game_menu_font = &fnt_menu;
 }
 
+// ---- Life cycle ----
+
+static int life_closes, pd_deleted_;
+static void LT_THIS life_win_close(void *w) { life_closes++; }
+static void LT_THIS fake_pd_delete_(void *o, int flag) { pd_deleted_ += flag; }
+static void *fake_pd_vtable_[1] = {(void *)fake_pd_delete_};
+static void *fake_pd_obj_ = fake_pd_vtable_;
+
+static void test_life(void) {
+    life_image_init();
+    life_buffer_standins();
+    life_time_standins();
+    game_win_close = life_win_close;
+
+    // Spot: room for n rectangles from the game's heap (the old room given back first); shutdown and the
+    // destructor give it back and empty the list.
+    struct game_spot s;
+    memset(&s, 0xcc, sizeof s);
+    s.rects = NULL;
+    life_freed = 0;
+    int got = spot_init(&s, 3);
+    EXPECT(got != 0, 1), EXPECT(s.rects == (void *)(intptr_t)got, 1), EXPECT(s.cap, 3), EXPECT(s.count, 0), EXPECT(life_freed, 0);
+    void *first = s.rects;
+    s.count = 2;
+    EXPECT(spot_init(&s, 5) != 0, 1), EXPECT(life_freed, 1), EXPECT(life_freed_has(first), 1), EXPECT(s.cap, 5), EXPECT(s.count, 0);
+    void *second = s.rects;
+    spot_shutdown(&s);
+    EXPECT(life_freed, 2), EXPECT(life_freed_has(second), 1), EXPECT(s.rects == NULL, 1), EXPECT(s.cap, 0), EXPECT(s.count, 0);
+    spot_shutdown(&s);  // (nothing held: nothing freed)
+    EXPECT(life_freed, 2);
+    s.rects = malloc(8), s.cap = 1, s.count = 1;
+    void *third = s.rects;
+    spot_dtor(&s);
+    EXPECT(life_freed, 3), EXPECT(life_freed_has(third), 1), EXPECT(s.rects == NULL, 1), EXPECT(s.cap, 0);
+
+    // A Menu: no titles (id -1, no text), nothing open (-1), its Spot list empty; the destructor frees the texts and
+    // deletes each title's PullDown.
+    static uint8_t obj[0xf50];
+    memset(obj, 0xcc, sizeof obj);
+    EXPECT(menu_ctor((struct game_menu *)obj) == (struct game_menu *)obj, 1);
+    struct game_menu *m = (struct game_menu *)obj;
+    EXPECT(OW(obj, 0), IMGVA(0x6700b0)), EXPECT(OW(obj, 0x444), IMGVA(0x6700a8)), EXPECT(m->proc == NULL, 1), EXPECT(m->count, 0);
+    EXPECT(OW(obj, 0xa20), 0), EXPECT(m->open, -1), EXPECT(m->spots.rects == NULL, 1), EXPECT(m->spots.cap, 0);
+    EXPECT(OW(obj, 0xa1c), 0xcccccccc), EXPECT(OW(obj, 0xa28), 0xcccccccc);
+    for (int i = 0; i < 15; i++) {
+        EXPECT(m->entries[i].id, -1), EXPECT(m->entries[i].text == NULL, 1), EXPECT(m->entries[i].flags, 0);
+        EXPECT(m->entries[i].hotkey == NULL, 1), EXPECT(m->entries[i].pd == NULL, 1);
+    }
+    EXPECT(OW(obj, 0xa38 + 15 * 0x14), 0xcccccccc);
+    char *text = malloc(8), *text2 = malloc(8);
+    m->entries[0].text = text, m->entries[0].id = 5, m->entries[0].flags = 3, m->entries[0].hotkey = (char *)0x77;
+    m->entries[7].text = text2, m->entries[7].pd = (struct game_pulldown *)&fake_pd_obj_;
+    m->entries[14].pd = (struct game_pulldown *)&fake_pd_obj_;
+    m->proc = (void *)1, m->count = 3, m->open = 2, m->spots.rects = malloc(8);
+    void *spots = m->spots.rects;
+    life_freed = 0, pd_deleted_ = 0, life_closes = 0;
+    menu_dtor(m);
+    EXPECT(life_freed, 3), EXPECT(life_freed_has(text), 1), EXPECT(life_freed_has(text2), 1), EXPECT(life_freed_has(spots), 1), EXPECT(pd_deleted_, 2);
+    EXPECT(m->entries[0].id, -1), EXPECT(m->entries[0].text == NULL, 1), EXPECT(m->entries[0].flags, 0), EXPECT(m->entries[0].hotkey == NULL, 1);
+    EXPECT(m->entries[7].pd == NULL, 1), EXPECT(m->proc == NULL, 1), EXPECT(m->count, 0), EXPECT(m->open, -1), EXPECT(m->spots.rects == NULL, 1);
+    EXPECT(life_closes, 1), EXPECT(OW(obj, 0), IMGVA(0x66ff34));
+
+    // A PullDown: 64 empty lines, a shown flag and the game's two font words; the destructor frees each line's
+    // text and key text.
+    memset(obj, 0xcc, sizeof obj);
+    EXPECT(pulldown_ctor((struct game_pulldown *)obj) == (struct game_pulldown *)obj, 1);
+    struct game_pulldown *p = (struct game_pulldown *)obj;
+    EXPECT(OW(obj, 0), IMGVA(0x66ff40)), EXPECT(OW(obj, 0x444), IMGVA(0x66ff38)), EXPECT(p->items[0].id, -1), EXPECT(p->items[63].id, -1);
+    EXPECT(p->items[63].text == NULL, 1), EXPECT(p->items[63].tail == NULL, 1), EXPECT(p->items[17].flags, 0), EXPECT(p->items[17].hotkey == NULL, 1);
+    EXPECT(p->count, 0), EXPECT(p->width, 0), EXPECT(p->sel, -1), EXPECT(p->shown, 0), EXPECT(p->menu == NULL, 1), EXPECT(p->dirty, 1);
+    EXPECT(p->fa14, 0), EXPECT(p->ff18, 0), EXPECT(p->ff1c, 0), EXPECT(p->ff38, (int)IMGW(0x9b7b58)), EXPECT(p->ff3c, (int)IMGW(0x9b7b5c));
+    EXPECT(OW(obj, 0xf40), 0xcccccccc);
+    char *line = malloc(8), *key = malloc(8), *last = malloc(8);
+    p->items[2].text = line, p->items[2].tail = key, p->items[63].text = last, p->items[2].id = 4;
+    p->dirty = 0, p->ff38 = 0;
+    life_freed = 0, life_closes = 0;
+    pulldown_dtor(p);
+    EXPECT(life_freed, 3), EXPECT(life_freed_has(line), 1), EXPECT(life_freed_has(key), 1), EXPECT(life_freed_has(last), 1);
+    EXPECT(p->items[2].text == NULL, 1), EXPECT(p->items[2].tail == NULL, 1), EXPECT(p->items[2].id, 4), EXPECT(p->dirty, 1);
+    EXPECT(p->ff38, (int)IMGW(0x9b7b58)), EXPECT(life_closes, 1);
+}
+
 int main(void) {
     vt[0x8 / 4] = (void *)s_0x8, vt[0xc / 4] = (void *)s_0xc, vt[0x50 / 4] = (void *)s_0x50, vt[0x54 / 4] = (void *)s_0x54;
     vt[0xf8 / 4] = (void *)s_0xf8, vt[0x170 / 4] = (void *)s_0x170;
@@ -529,6 +612,8 @@ int main(void) {
     EXPECT(ncalls, 0), EXPECT(*game_menu_font == NULL, 1);
 
     draw_tests();
+
+    test_life();
 
     if (failures) printf("%d failures\n", failures);
     else printf("ok\n");

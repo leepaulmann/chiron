@@ -52,6 +52,7 @@
 #include "bufobj.h"
 #include "game.h"
 #include "hooks.h"
+#include "life.h"
 #include "menu.h"
 #include "sprite.h"
 #include "shadow.h"
@@ -1101,6 +1102,7 @@ void menu_draw_sweep(void) {
     hooks_sweeping = sweeping;
 }
 
+static void life_sweep_menu(void);
 static void menu_sweep(void) {
     int sweeping = hooks_sweeping;
     hooks_sweeping = 1;
@@ -1225,12 +1227,215 @@ static void menu_sweep(void) {
     }
     *game_pd_font = saved_pd_font, *game_menu_font = saved_menu_font, *game_pd_margin = saved_margin;
     draw_sweep_inner();
+    life_sweep_menu();
     hooks_sweeping = sweeping;
+}
+
+// ---- Life cycle -----------------------------------------------------------------------------------
+
+// The room a Spot list keeps (init makes room for n rectangles from the game's heap, after giving back
+// what it had; shutdown and the destructor give it back), and the constructors and destructors of Menu
+// and PullDown: a GraphicWin with 15 titles (the text freed with the Menu, each title's PullDown
+// deleted through its vtable) or with 64 lines (the text and the key text freed). They allocate or free
+// on the game's heap, so in shadow mode the game's calls run the original and the sweep checks Chiron's
+// code on twin objects (life.c). The exception frames the originals' constructors and destructors set up
+// are not reproduced (nothing reads them). Differences from OpenSMACX: it has none of these. Spot_init
+// answers the new block (what the register holds), or 0.
+
+int MENU_THIS spot_init(struct game_spot *s, int n) {
+    if (s->rects) game_free(s->rects), s->rects = NULL;
+    s->cap = 0, s->count = 0, s->rects = NULL;
+    struct game_spot_rect *p = game_mem_get((size_t)n * 24);
+    s->rects = p;
+    if (p) s->cap = n, s->count = 0;
+    return (int)(intptr_t)p;
+}
+
+// Gives the room back and empties the list.
+void MENU_THIS spot_shutdown(struct game_spot *s) {
+    if (s->rects) game_free(s->rects), s->rects = NULL;
+    s->cap = 0, s->count = 0, s->rects = NULL;
+}
+void MENU_THIS spot_dtor(struct game_spot *s) {
+    spot_shutdown(s);
+}
+
+#define MENU_VTABLE 0x6700b0
+#define MENU_BUFFER_VTABLE 0x6700a8
+
+static void menu_start_fields(struct game_menu *m) { m->proc = NULL, m->count = 0, m->fa20 = 0, m->open = -1; }
+
+void *MENU_THIS menu_ctor(struct game_menu *m) {
+    graphic_win_ctor(&m->win);
+    spot_ctor(&m->spots);
+    m->win.vtable = (void **)(uintptr_t)game_va(MENU_VTABLE);
+    m->buf.vtable = (void **)(uintptr_t)game_va(MENU_BUFFER_VTABLE);
+    menu_start_fields(m);
+    for (int i = 0; i < 15; i++) {
+        struct game_menu_entry *e = &m->entries[i];
+        e->text = NULL, e->id = -1, e->flags = 0, e->hotkey = NULL, e->pd = NULL;
+    }
+    return m;
+}
+
+// Gives back each title's text and deletes its PullDown (through the first virtual function, with 1:
+// the deleting destructor), then the Spot list and the GraphicWin.
+void MENU_THIS menu_dtor(struct game_menu *m) {
+    m->win.vtable = (void **)(uintptr_t)game_va(MENU_VTABLE);
+    m->buf.vtable = (void **)(uintptr_t)game_va(MENU_BUFFER_VTABLE);
+    for (int i = 0; i < 15; i++) {
+        struct game_menu_entry *e = &m->entries[i];
+        if (e->text) game_free(e->text), e->text = NULL;
+        e->id = -1, e->flags = 0, e->hotkey = NULL;
+        if (e->pd) {
+            ((void(MENU_THIS *)(void *, int))(*(void ***)e->pd)[0])(e->pd, 1);
+            e->pd = NULL;
+        }
+    }
+    menu_start_fields(m);
+    spot_dtor(&m->spots);
+    graphic_win_dtor(&m->win);
+}
+
+#define PD_VTABLE 0x66ff40
+#define PD_BUFFER_VTABLE 0x66ff38
+// The font words a new PullDown keeps at 0xf38 are the game's (0x9b7b58 and 0x9b7b5c).
+static void pulldown_set_font_words(struct game_pulldown *p) {
+    p->dirty = 1;
+    p->ff38 = *(int32_t *)game_at(0x9b7b58);
+    p->ff3c = *(int32_t *)game_at(0x9b7b5c);
+}
+
+void *MENU_THIS pulldown_ctor(struct game_pulldown *p) {
+    graphic_win_ctor(&p->win);
+    p->win.vtable = (void **)(uintptr_t)game_va(PD_VTABLE);
+    p->buf.vtable = (void **)(uintptr_t)game_va(PD_BUFFER_VTABLE);
+    for (int i = 0; i < 64; i++) {
+        struct game_pd_item *it = &p->items[i];
+        it->text = NULL, it->tail = NULL, it->id = -1, it->flags = 0, it->hotkey = NULL;
+    }
+    p->ff18 = 0, p->ff1c = 0, p->count = 0, p->width = 0, p->sel = -1, p->menu = NULL, p->shown = 0;
+    p->fa14 = 0;
+    pulldown_set_font_words(p);
+    return p;
+}
+
+// Gives back every line's text and key text, and the GraphicWin.
+void MENU_THIS pulldown_dtor(struct game_pulldown *p) {
+    p->win.vtable = (void **)(uintptr_t)game_va(PD_VTABLE);
+    p->buf.vtable = (void **)(uintptr_t)game_va(PD_BUFFER_VTABLE);
+    for (int i = 0; i < 64; i++) {
+        struct game_pd_item *it = &p->items[i];
+        if (it->text) game_free(it->text), it->text = NULL;
+        if (it->tail) game_free(it->tail), it->tail = NULL;
+    }
+    pulldown_set_font_words(p);
+    graphic_win_dtor(&p->win);
+}
+
+// ---- Life cycle: shadow mode and the sweep ----
+
+SHADOW_PASS_T(MENU, int, spot_init, (struct game_spot * s, int n), (s, n))
+SHADOW_PASS_T(MENU, void, spot_shutdown, (struct game_spot * s), (s))
+SHADOW_PASS_T(MENU, void, spot_dtor, (struct game_spot * s), (s))
+SHADOW_PASS_T(MENU, void *, menu_ctor, (struct game_menu * m), (m))
+SHADOW_PASS_T(MENU, void, menu_dtor, (struct game_menu * m), (m))
+SHADOW_PASS_T(MENU, void *, pulldown_ctor, (struct game_pulldown * p), (p))
+SHADOW_PASS_T(MENU, void, pulldown_dtor, (struct game_pulldown * p), (p))
+
+// The spot_ctor of this file is the one the other classes' constructors call; the checked one is below.
+LIFE_FN(spot_init, orig_spot_init(o, (int)(intptr_t)x), spot_init(o, (int)(intptr_t)x))
+LIFE_FN(spot_shutdown, orig_spot_shutdown(o), spot_shutdown(o))
+LIFE_FN(spot_dtor, orig_spot_dtor(o), spot_dtor(o))
+LIFE_FN(menu_ctor, orig_menu_ctor(o), menu_ctor(o))
+LIFE_FN(menu_dtor, orig_menu_dtor(o), menu_dtor(o))
+LIFE_FN(pulldown_ctor, orig_pulldown_ctor(o), pulldown_ctor(o))
+LIFE_FN(pulldown_dtor, orig_pulldown_dtor(o), pulldown_dtor(o))
+static void life_spot_ctor(void *o, void *x) { (void)x, spot_ctor(o); }
+
+// What a title's PullDown does when the Menu deletes it: counted (the object is a static one).
+static uint32_t pd_deleted;
+static void MENU_THIS fake_pd_delete(void *o, int flag) { pd_deleted++; }
+static void *fake_pd_vtable[1] = {(void *)fake_pd_delete};
+static void *fake_pd = &fake_pd_vtable;
+
+static const struct life_slot spot_slots[] = {{0, -1}};
+static const struct life_class spot_class = {"Spot", 12, spot_slots, 1};
+
+// A Menu's slots: the dialog list, and the text and PullDown of each title (15 each, 17 + 15 in all).
+static struct life_slot menu_slots[32];
+static const struct life_class menu_class = {"Menu", 0xb64, menu_slots, 32, 0x444, 0x9cc, {0xa24}};
+// A PullDown's: the text and key text of its first fourteen lines.
+static struct life_slot pd_slots[30];
+static const struct life_class pd_class = {"PullDown", 0xf40, pd_slots, 30, 0x444, 0x9cc, {0xf38}};
+
+static void life_sweep_menu(void) {
+    static uint32_t *none[1];
+    uint32_t *deleted[1] = {&pd_deleted};
+    if (!game_mem_get || *game_ddraw || !hooks_dc_same) return;
+    menu_slots[0] = (struct life_slot){0xcc, -1}, menu_slots[1] = (struct life_slot){0xd0, -1};
+    for (int i = 0; i < 15; i++) {
+        menu_slots[2 + i] = (struct life_slot){(uint16_t)(0xa38 + 0x14 * i + 4), 0};
+        menu_slots[17 + i] = (struct life_slot){(uint16_t)(0xa38 + 0x14 * i + 0x10), -1};
+    }
+    pd_slots[0] = (struct life_slot){0xcc, -1}, pd_slots[1] = (struct life_slot){0xd0, -1};
+    for (int i = 0; i < 14; i++) {
+        pd_slots[2 + 2 * i] = (struct life_slot){(uint16_t)(0xa18 + 0x14 * i), 0};
+        pd_slots[3 + 2 * i] = (struct life_slot){(uint16_t)(0xa1c + 0x14 * i), 0};
+    }
+    for (int round = 0; round < 4; round++) {
+        uint8_t fill = (uint8_t)(round * 41 + 3);
+        // Spot: room made with and without room already held, then given back.
+        for (int held = 0; held < 2; held++) {
+            for (int which = 0; which < 3; which++) {
+                life_build(&spot_class, fill, life_spot_ctor, NULL);
+                if (held) {
+                    *(void **)life_a = game_mem_get(48);
+                    *(void **)life_b = game_mem_get(48);
+                    ((struct game_spot *)life_a)->cap = ((struct game_spot *)life_b)->cap = 2;
+                    ((struct game_spot *)life_a)->count = ((struct game_spot *)life_b)->count = 1;
+                }
+                int n = round + 1;
+                if (which == 0) life_run(&stats_spot_init, &spot_class, life_orig_spot_init, life_ours_spot_init, (void *)(intptr_t)n, none, 0);
+                if (which == 1) life_run(&stats_spot_shutdown, &spot_class, life_orig_spot_shutdown, life_ours_spot_shutdown, NULL, none, 0);
+                if (which == 2) life_run(&stats_spot_dtor, &spot_class, life_orig_spot_dtor, life_ours_spot_dtor, NULL, none, 0);
+                // What init made (the shutdown and the destructor leave nothing).
+                if (which == 0) game_free(*(void **)life_a), game_free(*(void **)life_b);
+            }
+        }
+        life_ctor_check(&stats_menu_ctor, &menu_class, life_orig_menu_ctor, life_ours_menu_ctor, fill);
+        // A Menu with texts on some titles and a PullDown on others.
+        life_build(&menu_class, fill, life_orig_menu_ctor, NULL);
+        life_buffers(0x444, 4 + round, 3 + round);
+        for (int i = 0; i < 15; i++) {
+            if (round == 0 || (i + round) % 3 == 0) life_text(0xa38 + 0x14 * i + 4, "a title");
+            if ((i + round) % 4 == 0) *(void **)(life_a + 0xa38 + 0x14 * i + 0x10) = *(void **)(life_b + 0xa38 + 0x14 * i + 0x10) = &fake_pd;
+        }
+        pd_deleted = 0;
+        if (life_run(&stats_menu_dtor, &menu_class, life_orig_menu_dtor, life_ours_menu_dtor, NULL, deleted, 1)) life_buffer_check(&stats_menu_dtor);
+        life_ctor_check(&stats_pulldown_ctor, &pd_class, life_orig_pulldown_ctor, life_ours_pulldown_ctor, fill);
+        life_build(&pd_class, fill, life_orig_pulldown_ctor, NULL);
+        life_buffers(0x444, 4 + round, 3 + round);
+        for (int i = 0; i < 14; i++) {
+            if ((i + round) % 2 == 0) life_text(0xa18 + 0x14 * i, "a line");
+            if ((i + round) % 3 == 0) life_text(0xa1c + 0x14 * i, "a key");
+        }
+        if (life_run(&stats_pulldown_dtor, &pd_class, life_orig_pulldown_dtor, life_ours_pulldown_dtor, NULL, none, 0))
+            life_buffer_check(&stats_pulldown_dtor);
+    }
 }
 
 // ---- Hooks -------------------------------------------------------------------------------------
 
 static const struct hook menu_hooks[] = {
+    HOOK(0x5fa8a0, spot_init, 0x56, 0x8b, 0xf1, 0x57, 0x8b, 0x06),  // push esi; mov esi, ecx; push edi; mov eax, [esi]
+    HOOK(0x5fa830, spot_shutdown, 0x56, 0x8b, 0xf1, 0x8b, 0x06, 0x85, 0xc0),
+    HOOK(0x5fa870, spot_dtor, 0x56, 0x8b, 0xf1, 0x8b, 0x06, 0x85, 0xc0),
+    HOOK(0x5fac60, menu_ctor, 0x6a, 0xff, 0x68, 0xf8, 0x2c, 0x66, 0x00),  // push -1; push handler
+    HOOK(0x5fad00, menu_dtor, 0x6a, 0xff, 0x68, 0x18, 0x2d, 0x66, 0x00),
+    // push esi; mov esi, ecx; call graphic_win_ctor
+    HOOK_CALL(0x5f8800, pulldown_ctor, 0x56, 0x8b, 0xf1, 0xe8, 0xe8, 0xc4, 0xfd, 0xff),
+    HOOK(0x5f88a0, pulldown_dtor, 0x53, 0x8b, 0xd9, 0x55, 0x56),  // push ebx; mov ebx, ecx; push ebp; push esi
     HOOK(0x5f9f60, pulldown_update, 0x83, 0xec, 0x38, 0x53, 0x55, 0x56, 0x57, 0x8b, 0xf9),
     HOOK(0x5f98b0, pulldown_on_redraw, 0xa1, 0x68, 0x7b, 0x9b, 0x00, 0x83, 0xec, 0x30, 0x85, 0xc0, 0x53),
     HOOK(0x5fc290, menu_on_redraw, 0xa1, 0x94, 0x7b, 0x9b, 0x00, 0x83, 0xec, 0x30, 0x85, 0xc0, 0x55, 0x56, 0x57),

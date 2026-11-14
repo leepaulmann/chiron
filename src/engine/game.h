@@ -1852,6 +1852,10 @@ extern const char *game_dib_error_text, *game_dib_error_title;
 extern void(__attribute__((thiscall)) * game_spot_ctor)(void *spot);
 extern void(__attribute__((thiscall)) * game_spot_dtor)(void *spot);
 extern void(__attribute__((thiscall)) * game_spot_init)(void *spot, int n);
+extern void *(__attribute__((thiscall)) * game_dialog_ctor)(void *dialog);
+extern void(__attribute__((thiscall)) * game_dialog_dtor)(void *dialog);  // the original's: Dialog_dtor, GraphicWin_dtor (for sweeps)
+extern void(__attribute__((thiscall)) * game_graphic_win_dtor)(void *win);
+extern void(__attribute__((thiscall)) * game_win_close)(void *win);  // Win_close: the original's (not reimplemented)
 extern void (*game_exit)(int code);
 // ---- Image files and Sprite files (bufimg.c) ----------------------------------------------------
 // The game's file-mapping object (16 bytes: the view, the file handle, the mapping handle and the size): made empty,
@@ -2996,6 +3000,8 @@ GAME_AT(struct game_sprite_box, fn, 0x68);
 // when there was no memory).
 extern void(__attribute__((thiscall)) * game_dialog_data_close)(void *data);
 extern int(__attribute__((thiscall)) * game_dialog_data_alloc)(void *data, int size);
+extern void *(__attribute__((thiscall)) * game_string_alloc)(void *arena, int size);  // 0x5d4680: room for a text in an arena
+extern int(__attribute__((thiscall)) * game_strlist_add)(void *list, int arg);        // StringStruct_add (not reimplemented)
 
 // Point the variables above at a loaded terranx.exe.
 void game_bind(struct pe_image *exe);

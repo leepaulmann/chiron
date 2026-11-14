@@ -1583,10 +1583,6 @@ static int check_read_rules(int all, int shadow) {
 }
 
 #define PUSH_EBP_MOV_EBP_ESP 0x55, 0x8b, 0xec
-// A hook whose prologue ends in a relative call (re-aimed in the trampoline).
-#define HOOK_CALL(addr, name, ...)                                                              \
-    {addr, (const uint8_t[]){__VA_ARGS__}, sizeof((const uint8_t[]){__VA_ARGS__}), (void *)name, \
-     (void *)shadow_##name, (void **)&orig_##name, &stats_##name, 0, 1}
 static const struct hook rules_hooks[] = {
     HOOK(0x584d60, entry_tech_name, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56),  // push ebx; push esi
     HOOK(0x584e40, entry_chas_name, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x56),

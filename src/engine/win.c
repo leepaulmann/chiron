@@ -76,6 +76,7 @@
 #include "bufobj.h"
 #include "game.h"
 #include "hooks.h"
+#include "life.h"
 #include "screen.h"
 #include "shadow.h"
 #include "text.h"
@@ -3661,6 +3662,253 @@ static void sweep_overlay(uint32_t hwnd) {
     *game_win_hwnd = saved_hwnd;
 }
 
+// ---- Life cycle -----------------------------------------------------------------------------
+
+// Making and unmaking a window: the class under Win (a table of defaults the window's handlers start from,
+// copied from the game's data), Win and GraphicWin (a Win with a Buffer of its own at 0x444). The destructors
+// free the dialog list's nodes (Win) and the Buffer (GraphicWin), and the classes close through Win_close,
+// which is left with the original (it calls the window's virtual functions and takes it out of the game's
+// focus and mouse state). These allocate or free on the game's heap and make Windows objects, so in shadow
+// mode the game's own calls run the original, and the sweep checks Chiron's code on twin windows (life.c): a
+// constructor's whole object, a destructor's frees of the dialog list's blocks and of what the Buffer holds.
+// The original's constructors and destructors set up an exception frame (a handler for the case a
+// constructor throws, which nothing in the game does); nothing reads it, so it is not reproduced.
+// Differences from OpenSMACX: it has none of these; the names are the inventory's, and the base class's two
+// functions (0x62ba80 and 0x62bbf0, unnamed there) are called winbase_ctor and winbase_reset here.
+
+// The 37 words the base class starts from the game's table of defaults (0x9bc080 on); the first four go to
+// offsets 4, 0xc, 0x10 and 8, the rest in order from 0x14.
+static const struct life_set winbase_set[] = {
+    LG(0x4, 0x9bc080), LG(0xc, 0x9bc084), LG(0x10, 0x9bc088), LG(0x8, 0x9bc08c),
+    LG(0x14, 0x9bc090), LG(0x18, 0x9bc094), LG(0x1c, 0x9bc098), LG(0x20, 0x9bc09c), LG(0x24, 0x9bc0a0),
+    LG(0x28, 0x9bc0a4), LG(0x2c, 0x9bc0a8), LG(0x30, 0x9bc0ac), LG(0x34, 0x9bc0b0), LG(0x38, 0x9bc0b4),
+    LG(0x3c, 0x9bc0b8), LG(0x40, 0x9bc0bc), LG(0x44, 0x9bc0c0), LG(0x48, 0x9bc0c4), LG(0x4c, 0x9bc0c8),
+    LG(0x50, 0x9bc0cc), LG(0x54, 0x9bc0d0), LG(0x58, 0x9bc0d4), LG(0x5c, 0x9bc0d8), LG(0x60, 0x9bc0dc),
+    LG(0x64, 0x9bc0e0), LG(0x68, 0x9bc0e4), LG(0x6c, 0x9bc0e8), LG(0x70, 0x9bc0ec), LG(0x74, 0x9bc0f0),
+    LG(0x78, 0x9bc0f4), LG(0x7c, 0x9bc0f8), LG(0x80, 0x9bc0fc), LG(0x84, 0x9bc100), LG(0x88, 0x9bc104),
+    LG(0x8c, 0x9bc108), LG(0x90, 0x9bc10c), LG(0x94, 0x9bc110),
+};
+#define WINBASE_VTABLE 0x66ff34
+
+void *WIN_THIS winbase_ctor(struct game_win *w) {
+    w->vtable = (void **)(uintptr_t)game_va(WINBASE_VTABLE);
+    life_apply(w, winbase_set, (int)(sizeof winbase_set / sizeof winbase_set[0]));
+    return w;
+}
+
+// Puts the defaults back (and leaves the vtable).
+void WIN_THIS winbase_reset(struct game_win *w) {
+    life_apply(w, winbase_set, (int)(sizeof winbase_set / sizeof winbase_set[0]));
+}
+
+static const struct life_set win_set[] = {
+    LV(0xc8, 0x66ff30), LZ(0xcc), LZ(0xd0), LZ(0xd4), LZ(0xd8), LZ(0xdc), LV(0x0, 0x66fdd0), LS(0xa8),
+    LZ(0x3fc), LZ(0x9c), LZ(0xa0), LZ(0xa4), LZ(0xac), LZ(0xb0), LZ(0x134), LZ(0x138), LZ(0x188),
+    LZ(0x18c), LZ(0x190), LZ(0x194), LZ(0x198), LZ(0x184), LZ(0xc4), LZ(0xf0), LZ(0x19c), LZ(0x12c),
+    LC(0x130, 0x1), LG(0xfc, 0x9b7af0), LG(0x100, 0x696d34), LG(0x114, 0x696d38), LG(0x104, 0x9b7af8),
+    LG(0x108, 0x696d3c), LG(0x10c, 0x696d40), LG(0x110, 0x696d44), LG(0x118, 0x696d48), LG(0x11c, 0x696d4c),
+    LG(0x120, 0x696d50), LG(0x124, 0x9b7afc), LG(0x128, 0x696d54), LG(0xf8, 0x9b7af4),
+    LZ(0xe0), LZ(0xe4), LZ(0xe8), LZ(0xec), LZ(0x43c), LZ(0x440), LZ(0xf4), LZ(0x15c), LZ(0x160),
+    LZ(0x164), LZ(0x168), LZ(0x13c), LZ(0x140), LZ(0x144), LZ(0x148), LZ(0x14c), LZ(0x150), LZ(0x154),
+    LZ(0x158), LZ(0xb4), LZ(0xc0), LZ(0xbc), LZ(0xb8), LZ(0x16c), LZ(0x170), LZ(0x98), LZ(0x400),
+    LZ(0x404), LZ(0x408), LZ(0x40c), LZ(0x410), LZ(0x414), LZ(0x418), LZ(0x41c), LZ(0x420), LZ(0x424),
+    LZ(0x428), LZ(0x42c), LZ(0x430), LZ(0x434), LZ(0x438), LC(0x174, 0x1), LC(0x178, 0x1), LC(0x17c, 0x1),
+    LC(0x180, 0x1), LC(0x1a0, 0x2),
+};
+#define WIN_VTABLE 0x66fdd0
+#define WIN_DLG_VTABLE 0x66ff30
+
+// A new window: not shown, no children, no parent, itself as its root, the game's default colours, fonts and
+// frame sizes; the dialog list empty.
+void *WIN_THIS win_ctor(struct game_win *w) {
+    winbase_ctor(w);
+    life_apply(w, win_set, (int)(sizeof win_set / sizeof win_set[0]));
+    return w;
+}
+
+// Closes the window (the original's close, which leaves it out of the game's lists and focus), gives back
+// the dialog list's nodes and the blocks they hold (unless the list is shared: word 0xdc), and puts the
+// base class's defaults back.
+void WIN_THIS win_dtor(struct game_win *w) {
+    w->vtable = (void **)(uintptr_t)game_va(WIN_VTABLE);
+    game_win_close(w);
+    *(uint32_t *)((uint8_t *)w + 0xc8) = game_va(WIN_DLG_VTABLE);
+    if (w->dlg_head) {
+        if (!*(int32_t *)((uint8_t *)w + 0xdc)) {
+            for (int i = 0; i < w->dlg_count; i++) {
+                struct game_win_node *n = w->dlg_head;
+                w->dlg_cur = n->next;
+                void *payload = (void *)(uintptr_t)n->pad8;
+                if (payload) game_free(payload);
+                n->pad8 = 0;
+                game_free(n);
+                w->dlg_head = w->dlg_cur;
+            }
+        }
+        w->dlg_head = NULL, w->dlg_index = 0, w->dlg_count = 0;
+    }
+    w->dlg_index = 0;
+    w->vtable = (void **)(uintptr_t)game_va(WINBASE_VTABLE);
+    winbase_reset(w);
+}
+
+static const struct life_set graphic_win_set[] = {
+    LZ(0xa10), LZ(0x134), LZ(0x138), LZ(0x9cc), LZ(0x9d0), LZ(0x9d4), LZ(0x9d8), LZ(0x9dc), LZ(0x9e0),
+    LZ(0x9e4), LZ(0x9e8), LZ(0x9ec), LZ(0x9f0), LZ(0x9f4), LZ(0x9f8), LZ(0x9fc), LZ(0xa00), LZ(0xa04),
+};
+#define GRAPHIC_WIN_VTABLE 0x66fc50
+#define GRAPHIC_WIN_BUFFER_VTABLE 0x66fc48
+enum { GW_BUFFER = 0x444, GW_OWN = 0x9cc, GW_PIC = 0xa08, GW_PALETTE = 0xa0c };
+
+static struct game_buffer *gw_buffer(struct game_win *w) { return (struct game_buffer *)((uint8_t *)w + GW_BUFFER); }
+
+// A new GraphicWin: a Win with an empty Buffer, and its own fields cleared (word 0xa0c is the game's current
+// palette serial).
+void *WIN_THIS graphic_win_ctor(struct game_win *w) {
+    win_ctor(w);
+    buffer_ctor(gw_buffer(w));
+    w->vtable = (void **)(uintptr_t)game_va(GRAPHIC_WIN_VTABLE);
+    gw_buffer(w)->vtable = (void **)(uintptr_t)game_va(GRAPHIC_WIN_BUFFER_VTABLE);
+    life_apply(w, graphic_win_set, (int)(sizeof graphic_win_set / sizeof graphic_win_set[0]));
+    *(uint32_t *)((uint8_t *)w + GW_PIC) = 0;
+    *(uint32_t *)((uint8_t *)w + GW_PALETTE) = *(uint32_t *)game_at(0x9b33c0);
+    return w;
+}
+
+void WIN_THIS graphic_win_dtor(struct game_win *w) {
+    w->vtable = (void **)(uintptr_t)game_va(GRAPHIC_WIN_VTABLE);
+    gw_buffer(w)->vtable = (void **)(uintptr_t)game_va(GRAPHIC_WIN_BUFFER_VTABLE);
+    *(uint32_t *)((uint8_t *)w + 0xa10) = 0;
+    buffer_dtor(gw_buffer(w));
+    win_dtor(w);
+}
+
+// Closes the Win and the Buffer, clears the fields, and deletes the object at 0xa08 (through its first
+// virtual function, which is its deleting destructor) if there is one.
+void WIN_THIS graphic_win_close(struct game_win *w) {
+    game_win_close(w);
+    buffer_close(gw_buffer(w));
+    void *pic = *(void **)((uint8_t *)w + GW_PIC);
+    life_apply(w, graphic_win_set, (int)(sizeof graphic_win_set / sizeof graphic_win_set[0]));
+    *(uint32_t *)((uint8_t *)w + GW_PALETTE) = *(uint32_t *)game_at(0x9b33c0);
+    if (pic) {
+        ((void(WIN_THIS *)(void *, int))(*(void ***)pic)[0])(pic, 1);
+        *(void **)((uint8_t *)w + GW_PIC) = NULL;
+    }
+}
+
+// ---- Life cycle: shadow mode and the sweep ----
+
+SHADOW_PASS_T(WIN, void *, winbase_ctor, (struct game_win * w), (w))
+SHADOW_PASS_T(WIN, void, winbase_reset, (struct game_win * w), (w))
+SHADOW_PASS_T(WIN, void *, win_ctor, (struct game_win * w), (w))
+SHADOW_PASS_T(WIN, void, win_dtor, (struct game_win * w), (w))
+SHADOW_PASS_T(WIN, void *, graphic_win_ctor, (struct game_win * w), (w))
+SHADOW_PASS_T(WIN, void, graphic_win_dtor, (struct game_win * w), (w))
+SHADOW_PASS_T(WIN, void, graphic_win_close, (struct game_win * w), (w))
+
+LIFE_FN(winbase_ctor, orig_winbase_ctor(o), winbase_ctor(o))
+LIFE_FN(winbase_reset, orig_winbase_reset(o), winbase_reset(o))
+LIFE_FN(win_ctor, orig_win_ctor(o), win_ctor(o))
+LIFE_FN(win_dtor, orig_win_dtor(o), win_dtor(o))
+LIFE_FN(graphic_win_ctor, orig_graphic_win_ctor(o), graphic_win_ctor(o))
+LIFE_FN(graphic_win_dtor, orig_graphic_win_dtor(o), graphic_win_dtor(o))
+LIFE_FN(graphic_win_close, orig_graphic_win_close(o), graphic_win_close(o))
+
+static const struct life_slot win_slots[] = {{0xcc, -1}, {0xd0, -1}};
+static const struct life_slot gwin_slots[] = {{0xcc, -1}, {0xd0, -1}, {GW_PIC, -1}};
+static const struct life_class winbase_class = {"WinBase", 0x98};
+static const struct life_class win_class = {"Win", 0x444, win_slots, 2, 0, 0, {0x20}};
+static const struct life_class gwin_class = {"GraphicWin", 0xa14, gwin_slots, 3, GW_BUFFER, GW_OWN, {0x20, 0x9d0}};
+
+// What the picture object at 0xa08 does when it is deleted: counted (the object is a static one).
+static uint32_t pic_deleted;
+static void WIN_THIS fake_pic_delete(void *o, int flag) { pic_deleted++; }
+static void *fake_pic_vtable[1] = {(void *)fake_pic_delete};
+static void *fake_pic = &fake_pic_vtable;
+
+// Two Wins of the class made alike by the original: filled with `fill`, constructed, and given a dialog list
+// of `nodes` nodes (each holding a block) of their own.
+static void build_win_pair(const struct life_class *c, int graphic, uint8_t fill, int nodes) {
+    life_fill(c, life_a, life_b, fill);
+    for (int i = 0; i < 2; i++) {
+        struct game_win *w = (struct game_win *)(i ? life_b : life_a);
+        if (graphic) orig_graphic_win_ctor(w); else orig_win_ctor(w);
+        for (int k = 0; k < 2; k++)
+            if (c->scribble[k]) *(uint32_t *)((uint8_t *)w + c->scribble[k]) = 0x13572468u;
+        struct game_win_node *first = NULL, *prev = NULL;
+        for (int k = 0; k < nodes; k++) {
+            struct game_win_node *n = game_mem_get(sizeof *n);
+            memset(n, 0, sizeof *n);
+            n->pad8 = (int32_t)(uintptr_t)game_mem_get(8);
+            if (!first) first = n;
+            if (prev) prev->next = n, n->prev = prev;
+            prev = n;
+        }
+        if (first) first->prev = prev, prev->next = first;
+        w->dlg_head = first, w->dlg_cur = first, w->dlg_count = nodes, w->dlg_index = 0;
+    }
+}
+
+static void life_sweep_win(void) {
+    static uint32_t *no_globals[1];
+    uint32_t *pic_globals[1] = {&pic_deleted};
+    if (!game_mem_get || *game_ddraw || !hooks_dc_same) return;
+    for (int round = 0; round < 6; round++) {
+        uint8_t fill = (uint8_t)rnd();
+        life_fill(&winbase_class, life_a, life_b, fill);
+        life_run(&stats_winbase_ctor, &winbase_class, life_orig_winbase_ctor, life_ours_winbase_ctor, NULL, no_globals, 0);
+        life_fill(&winbase_class, life_a, life_b, fill);
+        life_run(&stats_winbase_reset, &winbase_class, life_orig_winbase_reset, life_ours_winbase_reset, NULL, no_globals, 0);
+        life_fill(&win_class, life_a, life_b, fill);
+        life_run(&stats_win_ctor, &win_class, life_orig_win_ctor, life_ours_win_ctor, NULL, no_globals, 0);
+        // The destructor, with a dialog list of 0 to 3 nodes, and on the last round one that is shared.
+        int nodes = round % 4;
+        build_win_pair(&win_class, 0, fill, nodes);
+        if (round == 5) *(int32_t *)(life_a + 0xdc) = *(int32_t *)(life_b + 0xdc) = 1;
+        void *kept_a = ((struct game_win *)life_a)->dlg_head, *kept_b = ((struct game_win *)life_b)->dlg_head;
+        life_run(&stats_win_dtor, &win_class, life_orig_win_dtor, life_ours_win_dtor, NULL, no_globals, 0);
+        if (round == 5) {
+            // A shared list is left alone by the destructor: free it here.
+            for (int i = 0; i < 2; i++) {
+                struct game_win_node *head = i ? kept_b : kept_a, *n = head;
+                for (int k = 0; k < nodes && n; k++) {
+                    struct game_win_node *next = n->next;
+                    game_free((void *)(uintptr_t)n->pad8), game_free(n);
+                    n = next;
+                }
+            }
+        }
+        // GraphicWin: the constructor, then the destructor and the close with a Buffer holding a DIB.
+        life_fill(&gwin_class, life_a, life_b, fill);
+        life_run(&stats_graphic_win_ctor, &gwin_class, life_orig_graphic_win_ctor, life_ours_graphic_win_ctor, NULL, no_globals, 0);
+        {
+            const char *d = buffer_twin_diff(gw_buffer((struct game_win *)life_a), gw_buffer((struct game_win *)life_b), 0, 0);
+            if (d) hooks_mismatch(&stats_graphic_win_ctor, " (Buffer): %s", d);
+        }
+        for (int which = 0; which < 2; which++) {
+            build_win_pair(&gwin_class, 1, fill, nodes);
+            for (int i = 0; i < 2; i++) {
+                struct game_win *w = (struct game_win *)(i ? life_b : life_a);
+                game_buffer_init(gw_buffer(w), 4 + round, 3 + round, 0, 0);
+                if (which && (round & 1)) *(void **)((uint8_t *)w + GW_PIC) = &fake_pic;
+            }
+            pic_deleted = 0;
+            if (which) {
+                life_run(&stats_graphic_win_close, &gwin_class, life_orig_graphic_win_close, life_ours_graphic_win_close, NULL, pic_globals, 1);
+            } else {
+                life_run(&stats_graphic_win_dtor, &gwin_class, life_orig_graphic_win_dtor, life_ours_graphic_win_dtor, NULL, no_globals, 0);
+            }
+            {
+                const char *d = buffer_twin_diff(gw_buffer((struct game_win *)life_a), gw_buffer((struct game_win *)life_b), 0, 0);
+                if (d) hooks_mismatch(which ? &stats_graphic_win_close : &stats_graphic_win_dtor, " (Buffer): %s", d);
+            }
+            // Give back what the close left (the destructor leaves nothing).
+            if (which) orig_graphic_win_dtor((struct game_win *)life_a), orig_graphic_win_dtor((struct game_win *)life_b);
+        }
+    }
+}
+
 static void win_sweep(void) {
     static struct win_globals saved;
     static struct game_win *real[REAL];
@@ -3801,6 +4049,7 @@ static void win_sweep(void) {
         fill_stub_vtable();
         twin_sweep(font, saved.hwnd);
     }
+    life_sweep_win();
     globals_restore(&saved);
     hooks_sweeping = sweeping;
 }
@@ -3934,5 +4183,16 @@ static const struct hook win_hooks[] = {
     // lea eax, [esp+0x10]; lea ecx, [esp+0xc]
     HOOK(0x5f25c0, win_OnRButtonDown, 0x8d, 0x44, 0x24, 0x10, 0x8d, 0x4c, 0x24, 0x0c),
     HOOK(0x5f2620, win_OnRButtonUp, 0x8d, 0x44, 0x24, 0x0c, 0x8d, 0x4c, 0x24, 0x08),
+    // mov eax, ecx; mov [eax], 0x66ff34
+    HOOK(0x62ba80, winbase_ctor, 0x8b, 0xc1, 0xc7, 0x00, 0x34, 0xff, 0x66, 0x00),
+    // mov eax, [0x9bc080]; mov [ecx+4], eax
+    HOOK(0x62bbf0, winbase_reset, 0xa1, 0x80, 0xc0, 0x9b, 0x00, 0x89, 0x41, 0x04),
+    // push esi; mov esi, ecx; call winbase_ctor
+    HOOK_CALL(0x5eb3d0, win_ctor, 0x56, 0x8b, 0xf1, 0xe8, 0xa8, 0x06, 0x04, 0x00),
+    HOOK(0x5ebc90, win_dtor, 0x6a, 0xff, 0x68, 0x76, 0x2c, 0x66, 0x00),  // push -1; push handler
+    HOOK(0x5d4cf0, graphic_win_ctor, 0x6a, 0xff, 0x68, 0x18, 0x2b, 0x66, 0x00),
+    HOOK(0x5d4dd0, graphic_win_dtor, 0x6a, 0xff, 0x68, 0x2a, 0x2b, 0x66, 0x00),
+    // push esi; push edi; mov esi, ecx; call win_close
+    HOOK_CALL(0x5d4e40, graphic_win_close, 0x56, 0x57, 0x8b, 0xf1, 0xe8, 0xf7, 0x67, 0x01, 0x00),
 };
 struct hook_module win_module = {"win", win_hooks, HOOK_COUNT(win_hooks), win_sweep, NULL, -1};

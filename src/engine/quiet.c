@@ -14,6 +14,7 @@
 // the like) is held with it, in order, as checks don't put back the game's
 // text variables either.
 #include <stdio.h>
+#include <string.h>
 
 #include "diplomacy.h"
 #include "game.h"
@@ -574,7 +575,23 @@ void modules_scan_stack(uint32_t esp) __attribute__((weak));
 void *orig_heap_malloc, *orig_heap_free;
 static struct hook_stats stats_heap_malloc = {"(heap guard: malloc)"}, stats_heap_free = {"(heap guard: free)"};
 void heap_guard(int is_free, uint32_t esp);
+static struct quiet_heap_log *heap_log;
+void quiet_heap_log(struct quiet_heap_log *log) {
+    if (log) memset(log, 0, sizeof *log);
+    heap_log = log;
+}
 void heap_guard(int is_free, uint32_t esp) {
+    if (heap_log) {
+        // The argument of malloc and free is just above the return address.
+        uint32_t arg = *(uint32_t *)(uintptr_t)(esp + 4);
+        if (is_free) {
+            if (heap_log->frees < 32) heap_log->freed[heap_log->frees] = arg;
+            heap_log->frees++;
+        } else {
+            if (heap_log->mallocs < 32) heap_log->malloc_size[heap_log->mallocs] = arg;
+            heap_log->mallocs++;
+        }
+    }
     if (!hooks_protecting()) return;
     struct hook_stats *s = is_free ? &stats_heap_free : &stats_heap_malloc;
     s->calls++;

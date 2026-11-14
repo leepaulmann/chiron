@@ -214,10 +214,28 @@ static inline int shadow_bypass(void) { return hooks_sweeping || hooks_checking(
     SHADOW_WRITER_BODY(ret, name, params, args, writes, fmt, __VA_ARGS__)  \
     SHADOW_ENTRY_T(module, ret, name, params, args)
 
+// A method the game's own calls leave with the original in shadow mode, because it allocates or frees on the
+// game's heap or makes Windows objects, which a check can't rewind; a sweep checks Chiron's code on twin
+// objects instead (life.c). The calls are counted for the summary.
+#define SHADOW_PASS_T(module, ret, name, params, args)                       \
+    SHADOW_DECLARE_T(ret, name, params)                                      \
+    static ret THISCALL shadow_##name params {                               \
+        if (!hooks_nested && !shadow_bypass()) {                             \
+            stats_##name.calls++;                                            \
+            shadow_tick(module);                                             \
+        }                                                                    \
+        return orig_##name args;                                             \
+    }
+
 // A hook table entry: the original's address, our function, and the first
 // bytes of the original (whole instructions, no relative jumps).
 #define HOOK(addr, name, ...)                                                                   \
     {addr, (const uint8_t[]){__VA_ARGS__}, sizeof((const uint8_t[]){__VA_ARGS__}), (void *)name, \
      (void *)shadow_##name, (void **)&orig_##name, &stats_##name}
+
+// A hook whose prologue ends in a relative call (re-aimed in the trampoline).
+#define HOOK_CALL(addr, name, ...)                                                              \
+    {addr, (const uint8_t[]){__VA_ARGS__}, sizeof((const uint8_t[]){__VA_ARGS__}), (void *)name, \
+     (void *)shadow_##name, (void **)&orig_##name, &stats_##name, 0, 1}
 
 #define HOOK_COUNT(hooks) ((int)(sizeof(hooks) / sizeof((hooks)[0])))

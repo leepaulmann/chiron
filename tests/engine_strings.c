@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "../src/engine/game.h"
+#include "life_test.h"
 #include "../src/engine/strlist.h"
 
 static int failures;
@@ -68,6 +69,152 @@ static void make_list(int n, const char *const *words) {
         nodes[i].item = items[i];
     }
     L.head = n ? nodes : NULL, L.cur = n ? nodes : NULL, L.count = n;
+}
+
+// ---- Life cycle ----
+
+static void check_str_(const char *what, const char *got, const char *want) {
+    if (strcmp(got, want)) {
+        printf("FAIL %s = \"%s\", expected \"%s\"\n", what, got, want);
+        failures++;
+    }
+}
+#define EXPECT_STR_(expr, want) check_str_(#expr, (expr), (want))
+static int ll_slot1, ll_deleted, ll_data_closed, ll_add_calls, ll_alloc_fail;
+static int ll_data_alloc_size, ll_data_alloc_result;
+static char ll_arena[64];
+static int ll_arena_used;
+static void LT_THIS ll_slot1_fn(void *l, void *item) { ll_slot1++; }
+static void LT_THIS ll_delete(void *o, int flag) { ll_deleted++; free(o); }
+static void *ll_list_vtable[3] = {NULL, (void *)ll_slot1_fn};
+static void *ll_node_vtable[2] = {(void *)ll_delete, NULL};
+static void LT_THIS ll_data_close(void *d) { ll_data_closed++; }
+static int LT_THIS ll_data_alloc(void *d, int size) { return ll_data_alloc_size = size, ll_data_alloc_result; }
+static void *LT_THIS ll_string_alloc(void *arena, int size) {
+    char *p = ll_arena + ll_arena_used;
+    ll_arena_used += size;
+    return p;
+}
+static int LT_THIS ll_add(void *list, int arg) { return ll_add_calls++, *(const char **)((uint8_t *)list + 0x1c) != NULL; }
+static void *ll_mem_get(size_t n) { return ll_alloc_fail ? NULL : calloc(1, n); }
+
+static void test_life(void) {
+    life_image_init();
+    memcpy(game_at(0x6971fc), "dflt", 5);
+    IMGW(0x6693a8) = (uint32_t)(uintptr_t)ll_slot1_fn;  // slot 1 of the list base class
+    life_vbtable(0x6693b0, 0x18, 0);  // the table of the list's virtual base
+    game_free = life_free, game_mem_get = ll_mem_get, game_dialog_data_close = ll_data_close, game_dialog_data_alloc = ll_data_alloc;
+    game_string_alloc = ll_string_alloc, game_strlist_add = ll_add;
+    uint32_t *head = game_at(0x9b3374);
+    static uint8_t obj[0x40];
+
+    // A list made whole: its virtual base's table, vtables (the base's at 0x1c), the global it saved, and empty.
+    memset(obj, 0xcc, sizeof obj);
+    *head = 0x2222;
+    EXPECT(strlist_ctor((struct game_strlist *)obj, 1) == (struct game_strlist *)obj, 1);
+    EXPECT(OW(obj, 0), game_va(0x6693a4)), EXPECT(OW(obj, 4), game_va(0x6693b0)), EXPECT(OW(obj, 0x1c), game_va(0x6693a0));
+    EXPECT(OW(obj, 0x20), 0x2222), EXPECT(*head, 0), EXPECT(OW(obj, 8), 0), EXPECT(OW(obj, 0xc), 0), EXPECT(OW(obj, 0x10), 0), EXPECT(OW(obj, 0x14), 0);
+    EXPECT(OW(obj, 0x18), 0), EXPECT(OW(obj, 0x24), 0xcccccccc);
+    // A part of a bigger object keeps its table and leaves the global alone.
+    *head = 0x3333;
+    OW(obj, 0x20) = 0x44, OW(obj, 8) = 5;
+    EXPECT(strlist_ctor((struct game_strlist *)obj, 0) == (struct game_strlist *)obj, 1);
+    EXPECT(*head, 0x3333), EXPECT(OW(obj, 0x20), 0x44), EXPECT(OW(obj, 8), 0), EXPECT(OW(obj, 4), game_va(0x6693b0));
+
+    // Emptying: the list's slot 1 is told of each item, then each item and node is deleted through its own vtable.
+    for (int which = 0; which < 3; which++) {
+        strlist_ctor((struct game_strlist *)obj, 1);
+        struct game_strnode *n[3];
+        for (int i = 0; i < 3; i++) {
+            n[i] = calloc(1, 32);
+            n[i]->pad0 = (int32_t)(uintptr_t)ll_node_vtable;
+            n[i]->item = calloc(1, 16);
+            *(void **)n[i]->item = ll_node_vtable;
+        }
+        for (int i = 0; i < 3; i++) n[i]->next = n[(i + 1) % 3], n[i]->prev = n[(i + 2) % 3];
+        struct game_strlist *l = (struct game_strlist *)obj;
+        l->vtable = ll_list_vtable;
+        l->head = n[0], l->count = 3, l->idx = 2;
+        ll_slot1 = 0, ll_deleted = 0;
+        *head = 0x5555;
+        if (which == 0) strlist_remove_all(l);
+        if (which == 1) strlist_close(obj + 0x1c);
+        if (which == 2) EXPECT(strlist_scalar_dtor(obj + 0x1c, 0) == obj, 1);
+        EXPECT(ll_slot1, 3), EXPECT(ll_deleted, 6), EXPECT(l->head == NULL, 1), EXPECT(l->count, 0), EXPECT(l->idx, 0);
+        if (which == 1) EXPECT(l->vtable == (void **)(uintptr_t)game_va(0x6693a4), 1);
+        if (which == 2) EXPECT(*head, OW(obj, 0x20)), EXPECT(OW(obj, 0x1c), game_va(0x6693ac));
+    }
+    // Remove_all leaves an empty list alone (its index too), and close clears the index.
+    strlist_ctor((struct game_strlist *)obj, 1);
+    ((struct game_strlist *)obj)->idx = 7;
+    strlist_remove_all((struct game_strlist *)obj);
+    EXPECT(((struct game_strlist *)obj)->idx, 7);
+    strlist_close(obj + 0x1c);
+    EXPECT(((struct game_strlist *)obj)->idx, 0);
+    // The deleting destructor frees the object when asked and it saved no global; it always clears the global then.
+    for (int saved = 0; saved < 2; saved++) {
+        uint8_t *heap = calloc(1, 0x40);
+        *head = saved ? 0x66 : 0;
+        strlist_ctor((struct game_strlist *)heap, 1);
+        life_freed = 0;
+        *head = 0x77;
+        EXPECT(strlist_scalar_dtor(heap + 0x1c, 1) == heap, 1);
+        EXPECT(life_freed, saved ? 0 : 1), EXPECT(*head, 0);
+        if (saved) free(heap);
+    }
+
+    // StringList: a text for the entry (from the heap or an arena) and the two numbers; a kill gives back a text
+    // the heap made; a special text drops its '^' marks.
+    uint8_t list[0x30], item[16];
+    for (int arena = 0; arena < 2; arena++) {
+        memset(list, 0, sizeof list), memset(item, 0xcc, sizeof item);
+        OW(list, 0x18) = arena ? (uint32_t)(uintptr_t)ll_arena : 0, OW(list, 0x1c) = (uint32_t)(uintptr_t)"entry", OW(list, 0x20) = 3, OW(list, 0x24) = 4;
+        ll_arena_used = 0;
+        EXPECT(stringlist_fill_entry((struct game_strlist *)list, item), 0);
+        EXPECT_STR_((char *)OW(item, 4), "entry"), EXPECT(OW(item, 8), 3), EXPECT(OW(item, 0xc), 4), EXPECT(OW(item, 0), 0xcccccccc);
+        EXPECT(arena ? (char *)OW(item, 4) == ll_arena : (char *)OW(item, 4) != ll_arena, 1);
+        life_freed = 0;
+        EXPECT(stringlist_kill_entry((struct game_strlist *)list, item) != 0, arena ? 1 : 0);  // (an arena keeps the text: answered)
+        EXPECT(life_freed, arena ? 0 : 1), EXPECT(OW(item, 4) != 0, arena ? 1 : 0);
+        if (!arena) EXPECT(OW(item, 4), 0);
+    }
+    memset(item, 0xcc, sizeof item), OW(list, 0x18) = 0, OW(list, 0x1c) = 0;
+    EXPECT(stringlist_fill_entry((struct game_strlist *)list, item), 0), EXPECT(OW(item, 4), 0xcccccccc), EXPECT(OW(item, 8), 3);
+    OW(list, 0x1c) = (uint32_t)(uintptr_t)"x", ll_alloc_fail = 1;
+    EXPECT(stringlist_fill_entry((struct game_strlist *)list, item), 4), EXPECT(OW(item, 4), 0);
+    ll_alloc_fail = 0;
+    OW(item, 4) = 0;
+    EXPECT(stringlist_kill_entry((struct game_strlist *)list, item), 0);  // (no text: nothing to give back)
+    {
+        static const char *in[] = {"abc", "^abc", "^^abc", "^^^abc", "^", "^^", "^^^^"};
+        static const int kind[] = {0, 1, 2, 2, 3, 2, 2}, skip[] = {0, 1, 2, 3, 1, 2, 3};
+        for (int i = 0; i < 7; i++) {
+            memset(list, 0, sizeof list);
+            ll_add_calls = 0;
+            EXPECT(stringlist_add_special((struct game_strlist *)list, in[i]), 1);
+            EXPECT(OW(list, 0x1c), (uint32_t)(uintptr_t)(in[i] + skip[i])), EXPECT(OW(list, 0x20), kind[i]), EXPECT(OW(list, 0x24), 0), EXPECT(ll_add_calls, 1);
+        }
+        // (an empty text, after the marks, makes the stand-in add answer 1 only for a non-null pointer: always 1 here)
+    }
+
+    // Strings: the arena's five words and a flag; init closes what it held, asks for the room and puts the game's
+    // default text in; shutdown closes; put copies a text into the arena.
+    uint8_t tab[0x18];
+    memset(tab, 0xcc, sizeof tab);
+    EXPECT(strings_ctor((struct game_strings *)tab) == (struct game_strings *)tab, 1);
+    EXPECT(tab[0], 0), EXPECT(tab[1], 0xcc), EXPECT(OW(tab, 4), 0), EXPECT(OW(tab, 8), 0), EXPECT(OW(tab, 0xc), 0), EXPECT(OW(tab, 0x10), 0), EXPECT(OW(tab, 0x14), 0);
+    ll_data_closed = 0, ll_arena_used = 0, ll_data_alloc_result = 0;
+    EXPECT(strings_init((struct game_strings *)tab, 100), 0);
+    EXPECT(ll_data_closed, 0), EXPECT(ll_data_alloc_size, 100), EXPECT(OW(tab, 0x14), 1), EXPECT_STR_(ll_arena, "dflt"), EXPECT(ll_arena_used, 5);
+    EXPECT(strings_init((struct game_strings *)tab, 50), 0), EXPECT(ll_data_closed, 1), EXPECT(ll_data_alloc_size, 50);
+    ll_data_alloc_result = 4, ll_arena_used = 0;
+    EXPECT(strings_init((struct game_strings *)tab, 60), 1), EXPECT(ll_data_closed, 2), EXPECT(OW(tab, 0x14), 0), EXPECT(ll_arena_used, 0);
+    ll_data_alloc_result = 0;
+    ll_arena_used = 8;
+    char *put = strings_put((struct game_strings *)tab, "hello");
+    EXPECT(put == ll_arena + 8, 1), EXPECT_STR_(put, "hello"), EXPECT(ll_arena_used, 14);
+    OW(tab, 0x14) = 1;
+    EXPECT(strings_shutdown((struct game_strings *)tab), 0), EXPECT(ll_data_closed, 3), EXPECT(OW(tab, 0x14), 0);
 }
 
 int main(void) {
@@ -217,6 +364,8 @@ int main(void) {
     EXPECT(L.count, 5);
     make_list(1, w), strlist_sort(&L, 0), EXPECT(nodes[0].id, 10), EXPECT(L.cur == &nodes[0], 1);
     make_list(0, NULL), strlist_sort(&L, 0);
+
+    test_life();
 
     if (failures) printf("%d failures\n", failures);
     else printf("ok\n");

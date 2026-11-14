@@ -6,6 +6,7 @@
 
 #include "../src/engine/button.h"
 #include "../src/engine/game.h"
+#include "life_test.h"
 #include "../src/engine/text.h"
 
 static int failures;
@@ -401,6 +402,131 @@ static void box_tests(void) {
     EXPECT(ncalls, 1), expect_call(0, 0x14, &tpar.win, (int)(intptr_t)&fb, 6, 0);
 }
 
+// ---- Life cycle ----
+
+static int life_closes, life_data_closed;
+static void LT_THIS life_win_close(void *w) { life_closes++; }
+static void LT_THIS life_data_close(void *d) { life_data_closed++; }
+
+static void test_life(void) {
+    life_image_init();
+    life_buffer_standins();
+    life_time_standins();
+    game_win_close = life_win_close, game_dialog_data_close = life_data_close;
+    game_dialog_defs_a = game_at(0x697098), game_dialog_defs_b = game_at(0x9b8eb4);
+    static uint8_t obj[0xb60];
+
+    // BaseButton: the vtables of its class and of its Buffer, no click pending and no auto-repeat, the game's
+    // defaults, no name; its two Time objects made (a resolution of 5).
+    memset(obj, 0xcc, sizeof obj);
+    EXPECT(base_button_ctor((struct game_button *)obj) == (struct game_button *)obj, 1);
+    EXPECT(OW(obj, 0), IMGVA(0x670290)), EXPECT(OW(obj, 0x444), IMGVA(0x670288)), EXPECT(OW(obj, 0xa44), 0xffffffffu);
+    EXPECT(OW(obj, 0xa48), 0xffffffffu), EXPECT(OW(obj, 0xa84), IMGW(0x69704c)), EXPECT(OW(obj, 0xa90), IMGW(0x697058));
+    EXPECT(OW(obj, 0xa94), IMGW(0x9b8e2c)), EXPECT(OW(obj, 0xa98), IMGW(0x9b8e30)), EXPECT(OW(obj, 0xaa0), IMGW(0x69705c));
+    EXPECT(OW(obj, 0xa7c), 0), EXPECT(OW(obj, 0xa80), 0), EXPECT(OW(obj, 0xaa8), 0), EXPECT(OW(obj, 0xaac), 0), EXPECT(OW(obj, 0xa74), 0);
+    EXPECT(OW(obj, 0xa1c + 0x20), 5), EXPECT(OW(obj, 0xa4c + 0x20), 5), EXPECT(OW(obj, 0xa18), 0xcccccccc);
+    // Close: the name and the bubble are freed and the defaults put back.
+    char *name = malloc(8), *bubble = malloc(8);
+    OW(obj, 0xa7c) = (uint32_t)(uintptr_t)name, OW(obj, 0xa80) = (uint32_t)(uintptr_t)bubble;
+    OW(obj, 0xa84) = 1, OW(obj, 0xa44) = 3, OW(obj, 0xaa8) = 0x1234;
+    life_closes = 0, life_freed = 0;
+    base_button_close((struct game_button *)obj);
+    EXPECT(life_closes, 1), EXPECT(life_freed, 2), EXPECT(life_freed_has(name), 1), EXPECT(life_freed_has(bubble), 1);
+    EXPECT(OW(obj, 0xa7c), 0), EXPECT(OW(obj, 0xa80), 0), EXPECT(OW(obj, 0xaa8), 0), EXPECT(OW(obj, 0xa84), IMGW(0x69704c)), EXPECT(OW(obj, 0xa44), 0xffffffffu);
+    life_freed = 0, life_closes = 0;
+    OW(obj, 0) = 0;
+    base_button_dtor((struct game_button *)obj);  // (nothing to free: only the closes)
+    EXPECT(life_closes, 2), EXPECT(life_freed, 0), EXPECT(OW(obj, 0), IMGVA(0x66ff34));
+
+    // FlatButton: three looks, each with the pieces of its frame from the game's table.
+    memset(obj, 0xcc, sizeof obj);
+    EXPECT(flat_button_ctor((struct game_flat_button *)obj) == (struct game_flat_button *)obj, 1);
+    EXPECT(OW(obj, 0), IMGVA(0x669754)), EXPECT(OW(obj, 0x444), IMGVA(0x66974c)), EXPECT(OW(obj, 0xa18), 0), EXPECT(OW(obj, 0xa14), 0);
+    EXPECT(OW(obj, 0xab8), 0xffffffffu), EXPECT(OW(obj, 0xabc), 0xffffffffu), EXPECT(OW(obj, 0xac4), 0xffffffffu);
+    EXPECT(OW(obj, 0xac8), 0), EXPECT(OW(obj, 0xad4 + 8), 0);
+    for (int i = 0; i < 3; i++) {
+        EXPECT(OW(obj, 0xae0 + 4 * i), IMGW(0x9b8e44 + 4 * i)), EXPECT(OW(obj, 0xaec + 4 * i), IMGW(0x9b8e50 + 4 * i));
+        EXPECT(OW(obj, 0xaf8 + 4 * i), IMGW(0x9b8e5c + 4 * i)), EXPECT(OW(obj, 0xb04 + 4 * i), IMGW(0x9b8e68 + 4 * i));
+        EXPECT(OW(obj, 0xb10 + 4 * i), IMGW(0x9b8e74 + 4 * i)), EXPECT(OW(obj, 0xb1c + 4 * i), IMGW(0x9b8e80 + 4 * i));
+        EXPECT(OW(obj, 0xb28 + 4 * i), IMGW(0x9b8e8c + 4 * i)), EXPECT(OW(obj, 0xb34 + 4 * i), IMGW(0x9b8e98 + 4 * i));
+        EXPECT(OW(obj, 0xb40 + 4 * i), IMGW(0x9b8ea4 + 4 * i));
+    }
+    OW(obj, 0xac8) = 5, OW(obj, 0xae4) = 6, OW(obj, 0xab8) = 1;
+    life_closes = 0;
+    flat_button_close((struct game_flat_button *)obj);
+    EXPECT(OW(obj, 0xac8), 0), EXPECT(OW(obj, 0xae4), IMGW(0x9b8e48)), EXPECT(OW(obj, 0xab8), 0xffffffffu), EXPECT(life_closes, 1);
+    OW(obj, 0) = 0, OW(obj, 0x444) = 0;
+    life_closes = 0;
+    flat_button_dtor((struct game_flat_button *)obj);
+    EXPECT(life_closes, 3), EXPECT(OW(obj, 0), IMGVA(0x66ff34));
+
+    // PushButton: the pictures of its two looks (18 words from 0x9bc118); ImageButton: no picture.
+    memset(obj, 0xcc, sizeof obj);
+    EXPECT(push_button_ctor((struct game_push_button *)obj) == (struct game_push_button *)obj, 1);
+    EXPECT(OW(obj, 0), IMGVA(0x670c60)), EXPECT(OW(obj, 0x444), IMGVA(0x670c58));
+    for (int i = 0; i < 18; i++) EXPECT(OW(obj, 0xab8 + 4 * i), IMGW(0x9bc118 + 4 * i));
+    EXPECT(OW(obj, 0xb00), 0xcccccccc);
+    push_button_dtor((struct game_push_button *)obj);
+    EXPECT(OW(obj, 0), IMGVA(0x66ff34));
+    memset(obj, 0xcc, sizeof obj);
+    EXPECT(image_button_ctor((struct game_button *)obj) == (struct game_button *)obj, 1);
+    EXPECT(OW(obj, 0), IMGVA(0x670a94)), EXPECT(OW(obj, 0x444), IMGVA(0x670a8c)), EXPECT(OW(obj, 0xab8), 0);
+    image_button_dtor((struct game_button *)obj);
+    EXPECT(OW(obj, 0), IMGVA(0x66ff34));
+
+    // CheckButton: the pictures are the game's, the state and handlers clear; close, then the destructor.
+    memset(obj, 0xcc, sizeof obj);
+    EXPECT(check_button_ctor((struct game_check_button *)obj) == (struct game_check_button *)obj, 1);
+    EXPECT(OW(obj, 0), IMGVA(0x66dc14)), EXPECT(OW(obj, 0x444), IMGVA(0x66dc0c)), EXPECT(OW(obj, 0xa14), 0), EXPECT(OW(obj, 0xa20), 0);
+    EXPECT(OW(obj, 0xa28), IMGW(0x697f24)), EXPECT(OW(obj, 0xa24), IMGW(0x697f20)), EXPECT(OW(obj, 0xa2c), 0xcccccccc);
+    OW(obj, 0xa14) = 1, OW(obj, 0xa28) = 0;
+    life_closes = 0;
+    check_button_close((struct game_check_button *)obj);
+    EXPECT(OW(obj, 0xa14), 0), EXPECT(OW(obj, 0xa28), IMGW(0x697f24)), EXPECT(life_closes, 1);
+    life_closes = 0;
+    check_button_dtor((struct game_check_button *)obj);
+    EXPECT(life_closes, 2), EXPECT(OW(obj, 0), IMGVA(0x66ff34));
+
+    // CheckBox and RadioButton: objects with two virtual bases (the GraphicWin, then the Dialog), whose places
+    // the table the first word points to gives.
+    life_vbtable(0x66b0ec, 0x24, 0);
+    life_vbtable(0x670718, 0x1c, 0xa34), life_vbtable(0x670590, 0x18, 0xa30);
+    static uint8_t big[0xb40];
+    memset(big, 0xcc, sizeof big);
+    EXPECT(checkbox_ctor(big, 1) == big, 1);
+    EXPECT(OW(big, 0), IMGVA(0x670718)), EXPECT(OW(big, 0x1c), IMGVA(0x6705b0)), EXPECT(OW(big, 0x1c + 0x444), IMGVA(0x6705a8));
+    EXPECT(OW(big, 0xa34), IMGVA(0x67059c)), EXPECT(OW(big, 0x18), 0), EXPECT(OW(big, 0xa30), 0);
+    EXPECT(OW(big, 4), 0), EXPECT(OW(big, 8), 0), EXPECT(OW(big, 0xc), 0), EXPECT(OW(big, 0x10), IMGW(0x697104)), EXPECT(OW(big, 0x14), IMGW(0x697108));
+    EXPECT(OW(big, 0x1c + 0xa8), (uint32_t)(uintptr_t)(big + 0x1c)), EXPECT(OW(big, 0xa34 + 0xf0), 0xffffffffu);  // (the Win's root; the Dialog's hover)
+    OW(big, 0x10) = 9, OW(big, 4) = 7;
+    life_closes = 0, life_data_closed = 0;
+    checkbox_dtor(big + 0x1c);
+    EXPECT(OW(big, 0x10), IMGW(0x697104)), EXPECT(OW(big, 4), 0), EXPECT(life_closes, 1), EXPECT(life_data_closed, 1);
+    EXPECT(OW(big, 0x1c), IMGVA(0x6705b0)), EXPECT(OW(big, 0xa34), IMGVA(0x67059c));
+
+    memset(big, 0xcc, sizeof big);
+    EXPECT(radio_ctor(big, 1) == big, 1);
+    EXPECT(OW(big, 0), IMGVA(0x670590)), EXPECT(OW(big, 0x18), IMGVA(0x669a6c)), EXPECT(OW(big, 0x18 + 0x444), IMGVA(0x669a64));
+    EXPECT(OW(big, 0xa30), IMGVA(0x669a58)), EXPECT(OW(big, 4), IMGW(0x6970f0)), EXPECT(OW(big, 8), IMGW(0x6970f4));
+    EXPECT(OW(big, 0xc), 0), EXPECT(OW(big, 0x10), 0), EXPECT(OW(big, 0x14), 0);
+    // A part of a bigger object (`most_derived` clear) leaves the bases to the maker.
+    uint32_t win_vt = OW(big, 0x18);
+    OW(big, 0x18) = 0;
+    EXPECT(radio_ctor(big, 0) == big, 1), EXPECT(OW(big, 0x18), win_vt);
+    OW(big, 4) = 5, OW(big, 0xc) = 6;
+    life_closes = 0, life_data_closed = 0;
+    radio_close(big);
+    EXPECT(OW(big, 4), IMGW(0x6970f0)), EXPECT(OW(big, 0xc), 0), EXPECT(life_closes, 1), EXPECT(life_data_closed, 1);
+    // The deleting destructor closes, unmakes the bases and frees the object only if asked.
+    uint8_t *heap_obj = calloc(1, sizeof big);
+    memcpy(heap_obj, big, sizeof big);
+    life_closes = 0, life_data_closed = 0, life_freed = 0;
+    EXPECT(radio_dtor(big + 0x18, 0) == big, 1);
+    EXPECT(life_freed, 0), EXPECT(life_closes, 2), EXPECT(OW(big, 0x18), IMGVA(0x66ff34));
+    EXPECT(radio_dtor(heap_obj + 0x18, 1) == heap_obj, 1);
+    EXPECT(life_freed, 1);
+}
+
 int main(void) {
     game_win_capture = &capture, game_win_hover = &hover, game_win_press1 = &press1, game_win_press2 = &press2, game_win_cur = &cur;
     game_win_press_inside = &inside, game_button_hooks = (void *)hooks, game_button_defaults = &defaults, game_button_fonts = &fonts;
@@ -555,6 +681,8 @@ int main(void) {
 
     draw_tests();
     box_tests();
+    test_life();
+
     if (failures) printf("%d failures\n", failures);
     else printf("ok\n");
     return failures != 0;

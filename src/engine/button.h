@@ -84,3 +84,27 @@ void BUTTON_THIS radio_on_redraw(void *w);
 // The sweeps' Buffer with a device context and a Font (see button.c), or NULL before the game has fonts.
 struct font;
 struct game_buffer *button_sweep_buffer(struct font **font);
+
+// Life cycle: BaseButton and what derives from it, and CheckButton (see button.c). The constructors return the
+// object; the destructors do not free it.
+void *BUTTON_THIS base_button_ctor(struct game_button *b);
+void BUTTON_THIS base_button_close(struct game_button *b);
+void BUTTON_THIS base_button_dtor(struct game_button *b);
+void *BUTTON_THIS flat_button_ctor(struct game_flat_button *f);
+void BUTTON_THIS flat_button_close(struct game_flat_button *f);
+void BUTTON_THIS flat_button_dtor(struct game_flat_button *f);
+void *BUTTON_THIS push_button_ctor(struct game_push_button *p);
+void BUTTON_THIS push_button_dtor(struct game_push_button *p);
+void *BUTTON_THIS image_button_ctor(struct game_button *b);
+void BUTTON_THIS image_button_dtor(struct game_button *b);
+void *BUTTON_THIS check_button_ctor(struct game_check_button *c);
+void BUTTON_THIS check_button_close(struct game_check_button *c);
+void BUTTON_THIS check_button_dtor(struct game_check_button *c);
+
+// CheckBox and RadioButton: objects with a GraphicWin and a Dialog as virtual bases (see button.c). `o` is the
+// object; the destructors are given the GraphicWin base (0x1c, or 0x18, into it).
+void *BUTTON_THIS checkbox_ctor(uint8_t *o, int most_derived);
+void BUTTON_THIS checkbox_dtor(uint8_t *win);
+void *BUTTON_THIS radio_ctor(uint8_t *o, int most_derived);
+void BUTTON_THIS radio_close(uint8_t *o);
+void *BUTTON_THIS radio_dtor(uint8_t *win, int flag);

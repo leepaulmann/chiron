@@ -50,3 +50,14 @@ void SCROLL_THIS listbox_draw_item(struct game_listbox *l, int pos);
 // StringBox.
 void SCROLL_THIS stringbox_on_scrolled(struct game_stringbox *b, int a, int pos);
 int SCROLL_THIS stringbox_on_link_clicked(struct game_stringbox *b, int a, int c);
+
+// Life cycle (see scroll.c): the constructor returns the object; the destructor does not free it.
+void *SCROLL_THIS scroll_ctor(struct game_scroll *s);
+void SCROLL_THIS scroll_close(struct game_scroll *s);
+void SCROLL_THIS scroll_dtor(struct game_scroll *s);
+
+// ListBox's life cycle (see scroll.c): `o` is the ListBox, whose virtual bases lie where its table says; the
+// destructor is given the GraphicWin base (0x48 in).
+void *SCROLL_THIS listbox_ctor(uint8_t *o, int most_derived);
+void SCROLL_THIS listbox_close(uint8_t *o);
+void SCROLL_THIS listbox_dtor(uint8_t *win);
