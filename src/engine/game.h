@@ -1406,6 +1406,30 @@ extern int32_t *game_net_income;  // energy_compute()'s answer
 extern void **game_faction_portraits;  // [FACTION_COUNT]
 extern int32_t *game_console_veh_mode;  // non-zero while the console moves game_veh_ref_map_1
 extern void *game_info_win, *game_diplo_pop, *game_tut_win, *game_pop_wait;
+// What the part picker (src/ui/selpart.c) calls that Chiron doesn't reimplement yet. Its model viewer (a 0x14d0-byte
+// object of the picker, which draws a 3-D model of a part into the picker's Buffer): its constructor, reset (which
+// allocates), close, camera (a position and a 3 by 3 matrix of floats), light (an angle and two words), scale (a
+// float, passed as its bits), and the drawing calls (the Buffer, a centre, then numbers the original gives as they are;
+// the second draws the marked-as-unavailable look). Its model builders take the faction, the parts and the viewer (cdecl),
+// and its part-data adder a block of the game's data and a word. The angles-to-matrix function (cdecl), and the two
+// functions that show and hide the picker's scroll bar (cdecl, the window and the bar). The scroll bar's init is
+// the object, x, y, width, height, parent, owner and a last word.
+extern void(__attribute__((thiscall)) *game_model_ctor)(void *m), (__attribute__((thiscall)) *game_model_reset)(void *m), (__attribute__((thiscall)) *game_model_close)(void *m);
+extern void(__attribute__((thiscall)) *game_model_view)(void *m, const float *position, const float *matrix);
+extern void(__attribute__((thiscall)) *game_model_light)(void *m, uint32_t angle_bits, int a, int b);
+extern void(__attribute__((thiscall)) *game_model_scale)(void *m, uint32_t scale_bits);
+extern void(__attribute__((thiscall)) *game_model_add)(void *m, const void *data, int flag);
+extern void(__attribute__((thiscall)) *game_model_draw)(void *m, void *buf, int x, int y, int n);
+extern void(__attribute__((thiscall)) *game_model_draw_special)(void *m, void *buf, int x, int y, int n, const void *data, int k);
+extern void(__attribute__((thiscall)) *game_model_draw_unavailable)(void *m, void *buf, int x, int y, int a, int b);
+extern void (*game_model_build_chassis)(int faction, int chassis, int a, int b, int reactor, void *m);
+extern void (*game_model_build_weapon)(int faction, int chassis, int weapon, void *m);
+extern void (*game_model_build_armor)(int owner, int chassis, int weapon, int armor, int flag, void *m);
+extern void (*game_model_build_reactor)(int owner, int chassis, int weapon, int reactor, int abilities, void *m);
+extern void (*game_matrix_from_angles)(const float *angles, float *matrix);
+extern void (*game_part_scroll_show)(void *win, void *scroll);
+extern void (*game_part_scroll_hide)(void *win, void *scroll);
+extern void(__attribute__((thiscall)) *game_scroll_init)(void *scroll, int x, int y, int w, int h, void *parent, void *owner, int last);
 extern void (*game_energy_compute)(int faction, int unk);
 extern void (*game_comm_check)(int faction, int other);
 extern void (*game_enemies_war)(int faction, int other);

@@ -54,6 +54,29 @@ void scene_add_state(const char *name, uint32_t addr, uint32_t size) {
     nextra++;
 }
 
+// Regions of an object that lives only while a screen runs (a window built on the stack, which no fixed address
+// names): the screen registers the pieces it wants compared when it opens and clears them when it ends
+// (scene_live_state(name, NULL, 0)). They are written with the others at every snap.
+static struct {
+    char name[32];
+    const void *p;
+    size_t size;
+} live[MAX_EXTRA];
+
+void scene_live_state(const char *name, const void *p, size_t size) {
+    int slot = -1;
+    for (int i = 0; i < MAX_EXTRA; i++) {
+        if (!strcmp(live[i].name, name)) {
+            slot = i;
+            break;
+        }
+        if (slot < 0 && !live[i].name[0]) slot = i;
+    }
+    if (slot < 0) return;
+    snprintf(live[slot].name, sizeof(live[slot].name), "%s", name);
+    live[slot].p = p, live[slot].size = p ? size : 0;
+}
+
 static void write_region(FILE *f, const char *name, const uint8_t *p, uint32_t addr, size_t size, size_t rec) {
     fprintf(f, "%s %x %zx %zx %08x ", name, addr, size, rec, fnv(p, size, 2166136261u));
     for (size_t o = 0; o < size; o += CHUNK)
@@ -104,6 +127,8 @@ void scene_write_state(const char *frame_path) {
     write_region(f, "open_result", (const uint8_t *)&open_result, 0, sizeof(open_result), sizeof(open_result));
     for (int i = 0; i < nextra; i++)
         write_region(f, extra[i].name, game_at(extra[i].addr), extra[i].addr, extra[i].size, extra[i].size);
+    for (int i = 0; i < MAX_EXTRA; i++)
+        if (live[i].p) write_region(f, live[i].name, live[i].p, (uint32_t)(uintptr_t)live[i].p, live[i].size, live[i].size);
     fclose(f);
 }
 

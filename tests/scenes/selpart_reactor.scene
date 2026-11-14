@@ -1,0 +1,27 @@
+# The design workshop's reactor picker (see selpart_chassis.scene): four reactors, the first (Fission) the only one this faction
+# can build; the picker answers a reactor's id (one more than its place). Steps: opened; hover; keys; a click on the first.
+25 load
+45 click 362 734         # the tutorial note
+50 click 63 538          # MENU
+52 click 20 376          # HQ
+54 click 211 447         # Design Workshop
+60 click 475 735         # the workshop's own tour note: Continue
+63 state design 0x7334a4 0x30    # DesignWin: the chosen parts (0x141f4 on) and abilities
+mask 395 215 620 400      # the workshop's turning 3-D model
+64 snap ws
+68 click 727 215
+72 snap open
+74 move 403 217
+78 snap hover-cell
+80 key Right
+84 snap key-right
+86 key End
+90 snap key-end
+92 key Home
+96 snap key-home
+98 click 295 217
+102 snap after-click
+104 click 727 215
+108 key Escape
+112 snap after-escape
+116 close

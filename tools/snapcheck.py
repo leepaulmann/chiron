@@ -97,6 +97,8 @@ def compare_state(a_path, b_path):
     problems = []
     for name in sorted(set(a) | set(b)):
         if name not in a or name not in b:
+            if name.startswith("live_"):
+                continue  # a screen's own object, registered only by Chiron's code: nothing to compare it with
             problems.append(f"state: {name} only in one run")
             continue
         rec, total_a, ca = a[name]

@@ -1,0 +1,53 @@
+# The design workshop's part picker (SelectPartWin) for chassis, from the loaded first turn (see selpart.c). Reached from the
+# game menu: HQ, Design Workshop (the key U does not reach it in a scene); the workshop opens with a tour note.
+# The picker is a window over the workshop: nine chassis in a grid of five cells across, the first one (infantry) the only one
+# this faction can build (the others show the unavailable look). The window's own fields are in the state regions
+# live_selpart_a, _b, _c, _scroll and _scroll2 (scene.c's live regions, written while it is open).
+# Steps: opened; the mouse over an unavailable cell, over an empty cell, outside the grid; the keys (Right, Down, Left, Up,
+# End, Home, a letter, PageDown, PageUp); a click on the available cell (it is chosen again); Escape; Return.
+25 load
+45 click 362 734         # the tutorial note
+50 click 63 538          # MENU
+52 click 20 376          # HQ
+54 click 211 447         # Design Workshop
+60 click 475 735         # the workshop's own tour note: Continue
+63 state design 0x7334a4 0x30    # DesignWin: the chosen parts (0x141f4 on) and abilities
+mask 395 215 620 400      # the workshop's turning 3-D model
+64 snap ws
+68 click 295 215
+72 snap open
+74 move 403 217
+78 snap hover-cell
+80 move 727 311
+84 snap hover-empty
+86 move 790 300
+90 snap hover-out
+92 move 295 217
+96 snap hover-first
+98 key Right
+102 snap key-right
+104 key Down
+108 snap key-down
+110 key Left
+114 snap key-left
+116 key Up
+120 snap key-up
+122 key End
+126 snap key-end
+128 key Home
+132 snap key-home
+134 key a
+138 snap key-letter
+140 key PageDown
+144 snap key-pgdn
+146 key PageUp
+150 snap key-pgup
+152 key Escape
+156 snap after-escape
+158 click 295 215
+162 click 295 217
+166 snap after-click
+168 click 295 215
+172 key Return
+176 snap after-return
+180 close

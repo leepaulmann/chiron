@@ -1,0 +1,48 @@
+# The design workshop's weapon picker (see selpart_chassis.scene): 26 weapons, so a scroll bar and a second page. Steps: opened;
+# hover; the arrow keys and Page Down, End, Home, Page Up; the scroll bar's arrows. A click on the first weapon
+# chooses it (the design changes, DesignWin's state region shows it); APPLY saves the design as a prototype (the protos region).
+25 load
+45 click 362 734         # the tutorial note
+50 click 63 538          # MENU
+52 click 20 376          # HQ
+54 click 211 447         # Design Workshop
+60 click 475 735         # the workshop's own tour note: Continue
+63 state design 0x7334a4 0x30    # DesignWin: the chosen parts (0x141f4 on) and abilities
+mask 395 215 620 400      # the workshop's turning 3-D model
+64 snap ws
+68 click 295 300
+72 snap open
+74 move 403 217
+78 snap hover-cell
+80 key Down
+84 snap key-down
+86 key Down
+88 key Down
+92 snap key-down-3
+94 key Down
+98 snap key-down-page
+100 key PageDown
+104 snap key-pgdn
+106 key End
+110 snap key-end
+112 key Left
+116 snap key-left
+118 key Up
+122 snap key-up
+124 key PageUp
+128 snap key-pgup
+130 key Home
+134 snap key-home
+136 click 808 490        # the scroll bar's down arrow: the page moves a row (on_scrolled)
+140 snap scroll-down
+142 click 808 201        # the up arrow
+146 snap scroll-up
+148 key Escape
+152 snap after-escape
+154 click 295 300
+158 move 295 217
+160 click 295 217
+164 snap after-pick
+166 click 295 498
+172 snap applied
+176 close

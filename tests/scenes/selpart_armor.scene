@@ -1,0 +1,29 @@
+# The design workshop's armor picker (see selpart_chassis.scene): 14 armors, three rows, no scroll bar. Steps: opened; hover;
+# keys; Return on the first (No Armor); a click on it.
+25 load
+45 click 362 734         # the tutorial note
+50 click 63 538          # MENU
+52 click 20 376          # HQ
+54 click 211 447         # Design Workshop
+60 click 475 735         # the workshop's own tour note: Continue
+63 state design 0x7334a4 0x30    # DesignWin: the chosen parts (0x141f4 on) and abilities
+mask 395 215 620 400      # the workshop's turning 3-D model
+64 snap ws
+68 click 295 400
+72 snap open
+74 move 403 217
+78 snap hover-cell
+80 key Down
+84 snap key-down
+86 key Right
+90 snap key-right
+92 key End
+96 snap key-end
+98 key Home
+102 snap key-home
+104 key Return
+108 snap after-return
+110 click 295 400
+114 click 295 217
+118 snap after-click
+120 close
