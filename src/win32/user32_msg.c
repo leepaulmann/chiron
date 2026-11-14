@@ -436,8 +436,9 @@ void user32_present_if_due(void) {
 // optionally "Ctrl+NAME"), "type TEXT" (typed characters, up to the next
 // ';'), "snap FILE" (save the frame on screen as a BMP, and the game's state
 // beside it as FILE.state), "state NAME ADDR SIZE" (add a region to the
-// state), "open NAME" (call a screen's entry point, see scene.c) or "close" (the
-// window's close button).
+// state), "open NAME" (call a screen's entry point, see scene.c), "rclick X Y" (a right
+// click), "wheel N" (notches of the mouse wheel), "poke ADDR VALUE [or]" (set a word of the game's memory from the game thread, to put
+// the game in a state a scene cannot reach by playing) or "close" (the window's close button).
 // "<seconds> every <interval> <action>" repeats an action from then on:
 //   CHIRON_SCRIPT="25 click 835 362; 40 every 0.5 key Return; 600 close"
 // Keys stay down for 150 ms, like a real press, so code that polls
@@ -476,6 +477,7 @@ static void push_click(int x, int y, int clicks) { push_click_button(x, y, click
 void scene_write_state(const char *frame_path);
 void scene_add_state(const char *name, uint32_t addr, uint32_t size);
 void scene_open(const char *name);
+void scene_poke(uint32_t addr, uint32_t value, int or_in);
 void scene_poll(void);
 
 static void run_action(const char *step) {
@@ -526,6 +528,11 @@ static void run_action(const char *step) {
         char region[32];
         unsigned addr, size;
         if (sscanf(step, " state %31s %i %i", region, &addr, &size) == 3) scene_add_state(region, addr, size);
+    } else if (!strncmp(step, " poke ", 6)) {
+        unsigned addr, value;
+        char how[8] = "";
+        // "poke ADDR VALUE or" sets the bits of VALUE in the word and leaves the others.
+        if (sscanf(step, " poke %i %i %7s", &addr, &value, how) >= 2) scene_poke(addr, value, !strcmp(how, "or"));
     } else if (!strncmp(step, " close", 6)) {
         SDL_Event e = {.type = SDL_QUIT};
         SDL_PushEvent(&e);

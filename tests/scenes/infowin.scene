@@ -1,0 +1,131 @@
+# The info panel under the map (InfoWin, see infowin.c): the two text boxes that type out the calendar, the economy and so on, a
+# letter at a time, and change by themselves. The panel's clock is stopped (its "suspended" word, 0x7ad34c) and the panel is put
+# in a known state, so it changes only when the scene makes it: left clicks (the first on a box still being typed finishes it,
+# a click with both done goes on to the next mode, which takes the other box), the right-click menu, and by-hand calls of the
+# clock's tick (open info_tick, which lifts the stop for the call). Pokes put the game where all eight modes can be shown and
+# the figures differ from zero: turn 300 (more turns than the chart is wide), a contact, the game flags the planet box needs, some
+# history for the chart, a share of energy for psychic, the counts that make the graphs' title capitals, a planet state.
+# What the first clicks do: the two boxes are redrawn from clean (a click on each unfinished box finishes it, then two goes on),
+# leaving mode 1 in the first box and mode 2 in the second. The panel's own state is the regions iw_*.
+# The typed text shows empty boxes (a character the original draws from its stack; infowin.c reproduces it).
+25 load
+45 click 362 734
+46 poke 0x7ad34c 1            # suspended
+46 poke 0x7ad320 1            # the box shown: the second
+46 poke 0x7ad328 0
+46 poke 0x7ad32c 0
+46 poke 0x7ad330 0xffffffff   # no mode to go on from
+46 poke 0x7ad334 0            # not flashing
+46 poke 0x7ad348 0            # not held
+46 poke 0x9a64d4 300
+46 poke 0x93fab4 1
+46 poke 0x9a64c0 0xd0 or
+46 poke 0x96edd0 2            # the player's psychic share
+46 poke 0x94b4c0 0
+46 poke 0x94b4c4 0
+46 poke 0x94b4c8 0
+46 poke 0x9a68be 0x00640032   # the chart's history: seven factions' strength each turn, 16 bytes a turn
+46 poke 0x9a68ce 0x00c80096
+46 poke 0x9a68de 0x012c00fa
+46 poke 0x9a68ee 0x019000c8
+47 state iw_rects 0x7ad2a0 0x30
+47 state iw_timer 0x7ad2d8 0x14
+47 state iw_body 0x7ad320 0x950
+47 state iw_strip 0x939ef8 0x10
+47 state iw_strip_flags 0x939ed8 4
+47 state iw_dirty 0x7af174 0x10
+47 state iw_click 0x6e8150 4
+48 click 380 640
+49 click 380 640
+50 click 380 640
+51 click 380 640
+52 click 380 640
+53 click 380 640
+56 snap start
+# each next mode: a click goes on (the box that changes starts empty), the next finishes it
+58 click 380 640
+60 snap advance-3
+63 click 380 640
+65 snap done-3
+68 click 380 640
+70 snap advance-4
+73 click 380 640
+75 snap done-4
+78 click 380 640
+80 click 380 640
+82 snap mode-5
+85 click 380 640
+87 click 380 640
+89 snap mode-6
+91 poke 0x945ae0 27
+92 click 380 640
+94 click 380 640
+96 snap mode-7
+99 click 380 640
+101 click 380 640
+103 snap mode-0
+# the right click: a menu of the modes that can be shown (and help)
+106 rclick 600 640
+109 snap menu
+112 move 690 536
+114 snap menu-hover
+117 click 200 200            # on the map, outside the menu: it closes (the original then reads the line before the first)
+119 snap menu-dismissed
+122 rclick 600 640
+125 click 680 498            # Enemy faction profile
+128 snap menu-pick-2
+131 rclick 600 640
+134 click 680 555            # Faction dominance chart
+137 snap menu-pick-5
+140 rclick 600 640
+143 click 680 631            # Help
+146 snap help
+149 key Escape
+152 snap help-closed
+# the mode to go on from, set by the game
+155 poke 0x7ad330 5
+156 click 380 640
+157 click 380 640
+159 snap go-on-from
+# the tick: typed a letter at a time, then held while the mouse is over the panel, then on to the next mode
+162 poke 0x7ad330 0xffffffff
+162 poke 0x6e8150 1
+163 click 380 640
+164 click 380 640
+165 move 380 640
+166 open info_state_a
+168 snap tick-start
+171 open info_tick
+173 snap tick-1
+176 open info_tick20
+177 open info_tick20
+179 snap tick-typed
+182 poke 0x7adc68 4096
+182 poke 0x7adc6c 4096
+183 open info_tick
+185 snap flash-on
+188 poke 0x7adc68 4096
+188 poke 0x7adc6c 4096
+189 open info_tick
+191 snap flash-off
+194 move 100 300
+195 poke 0x7adc68 4096
+195 poke 0x7adc6c 4096
+196 open info_tick
+198 snap tick-gone-on
+# the daemon, the reset of a held panel, set_state for modes that cannot be shown
+201 poke 0x7ad348 1
+202 open info_state_b
+203 open info_daemon
+205 snap daemon
+208 poke 0x7ad348 1
+209 open info_reset
+211 snap reset
+214 poke 0x9a64d4 0
+215 open info_state_a
+217 snap state-invalid
+220 open info_state_c
+221 open info_unk2
+222 open info_unk4
+224 snap unk
+228 close

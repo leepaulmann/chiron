@@ -571,6 +571,8 @@ void(__attribute__((thiscall)) *game_model_draw_unavailable)(void *m, void *buf,
 void (*game_model_build_chassis)(int faction, int chassis, int a, int b, int reactor, void *m);
 void (*game_model_build_weapon)(int faction, int chassis, int weapon, void *m);
 void (*game_model_build_armor)(int owner, int chassis, int weapon, int armor, int flag, void *m);
+void (*game_say_special)(char *dest, const char *src, int faction);
+void(__attribute__((thiscall)) * game_tutwin_draw_arrow)(void *win);
 void (*game_model_build_reactor)(int owner, int chassis, int weapon, int reactor, int abilities, void *m);
 void (*game_matrix_from_angles)(const float *angles, float *matrix);
 void(__attribute__((thiscall)) *game_scroll_init)(void *scroll, int x, int y, int w, int h, void *parent, void *owner, int last);
@@ -626,7 +628,7 @@ void (*game_scroll_show)(void *win, void *scroll);
 void (*game_scroll_hide)(void *win, void *scroll);
 void(__attribute__((thiscall)) * game_win_hide)(void *win);
 int(__attribute__((thiscall)) * game_pulldown_add_item)(void *pd, int id, const char *text);
-int(__attribute__((thiscall)) * game_pulldown_show)(void *pd, int x, int y, int unk);
+int(__attribute__((thiscall)) * game_pulldown_show)(void *pd, int x, int y, void *callback);
 void(__attribute__((thiscall)) * game_diplo_pop_start)(void *pop, int faction);
 void (*game_introduce)(int faction, int other);
 void (*game_report_intel)(int faction);
@@ -1814,4 +1816,6 @@ void game_bind(struct pe_image *exe) {
     game_get_system_metrics = *(void **)code_at(exe, 0x669334);
     game_is_zoomed = *(void **)code_at(exe, 0x669270);
     game_get_window_rect = *(void **)code_at(exe, 0x6692a8);
+    game_say_special = (void *)code_at(exe, 0x58f610);
+    game_tutwin_draw_arrow = (void *)code_at(exe, 0x4bdea0);
 }

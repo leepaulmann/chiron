@@ -1490,7 +1490,7 @@ extern void (*game_scroll_show)(void *win, void *scroll);
 extern void (*game_scroll_hide)(void *win, void *scroll);
 extern void(__attribute__((thiscall)) * game_win_hide)(void *win);
 extern int(__attribute__((thiscall)) * game_pulldown_add_item)(void *pd, int id, const char *text);
-extern int(__attribute__((thiscall)) * game_pulldown_show)(void *pd, int x, int y, int unk);
+extern int(__attribute__((thiscall)) * game_pulldown_show)(void *pd, int x, int y, void *callback);
 extern void(__attribute__((thiscall)) * game_diplo_pop_start)(void *pop, int faction);
 extern void (*game_introduce)(int faction, int other);
 extern void (*game_report_intel)(int faction);
@@ -3127,3 +3127,9 @@ static inline int game_rnd(int n) { return n - 1 > 0 ? game_rand() % n : 0; }
 
 // A label from labels.txt, by index.
 static inline char *game_label(int i) { return game_strings_get(game_strings, (*game_labels)[i]); }
+
+// What the info panel (src/ui/infowin.c) calls that Chiron doesn't reimplement yet: say_special (cdecl: puts the text of
+// `src` into `dest` with the faction's special words filled in), the tutorial window's arrow redraw, and the PullDown's
+// add of a line (id, text) and its show (x, y, and the callback the menu polls while it is up).
+extern void (*game_say_special)(char *dest, const char *src, int faction);
+extern void(__attribute__((thiscall)) * game_tutwin_draw_arrow)(void *win);

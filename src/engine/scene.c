@@ -146,6 +146,10 @@ struct open_entry {
     const char *name;
     uint32_t addr;
     int args[4];
+    uint32_t self;  // non-zero: a thiscall method of the object at this address (the integer arguments follow it)
+    int repeat;     // how many times to call it (0 is once)
+    uint32_t unsuspend;  // non-zero: the address of a word that is cleared during the calls and set to 1 again after them
+    int discard;         // the function answers nothing (a void one): the answer is not kept
     int (*host)(int, int, int, int);  // a step of the host's own, run instead of calling the game
 };
 // A scene's own step: the techs 0 up to `count` given to a faction by setting their bits (no New Tech window), so that a base has more to
@@ -156,12 +160,34 @@ static int give_techs(int faction, int count, int unused, int unused2) {
     return count;
 }
 static const struct open_entry open_table[] = {
-    {"hall_of_fame", 0x44ae50, {0}, NULL},  // void hall_of_fame(int final): 0 only shows the list
-    {"tech_pick", 0x5beb70, {1, 1, -1, 0}, NULL},  // int tech_pick(faction, unk, other, label): the research picker for faction 1 (the player in the scenes' save); unk is set because the save plays blind research, which has no picker
-    {"give_techs", 0, {1, 40}, give_techs},  // the techs 0 to 39 for faction 1: more than a screenful to build
+    {"hall_of_fame", 0x44ae50, {0}},  // void hall_of_fame(int final): 0 only shows the list
+    {"info_tick", 0x459150, {10, 0, 0, 0}, 0x7ad2a0, 0, 0x7ad34c},  // InfoWin_timer_proc(10): one tick of the info panel's clock, made by hand (a scene stops the real clock with the panel's `suspended` word, which is lifted for the call)
+    {"info_tick20", 0x459150, {10, 0, 0, 0}, 0x7ad2a0, 19, 0x7ad34c},  // twenty of them
+    {"info_daemon", 0x459260, {10, 0, 0, 0}, 0, 9, 0x7ad34c, 1},  // InfoWin_timer_daemon(10), the clock's callback: ten ticks
+    {"info_reset", 0x459280, {0}, 0x7ad2a0, 0, 0x7ad34c},  // InfoWin_reset: ticks once if the panel is held
+    {"info_state_a", 0x458f10, {3, 1, 0, 0}, 0x7ad2a0},  // InfoWin_set_state(3, 1)
+    {"info_state_b", 0x458f10, {5, 0, 0, 0}, 0x7ad2a0},  // InfoWin_set_state(5, 0)
+    {"info_state_c", 0x458f10, {-1, 1, 0, 0}, 0x7ad2a0},  // InfoWin_set_state(-1, 1)
+    {"info_unk2", 0x4588b0, {0}, 0x7ad2a0},  // an InfoWin function nothing calls: the box redrawn from the start
+    {"info_unk4", 0x458d60, {0}, 0, 0, 0, 1},  // another that nothing calls: registers the panel's strip
+    {"tech_pick", 0x5beb70, {1, 1, -1, 0}},  // int tech_pick(faction, unk, other, label): the research picker for faction 1 (the player in the scenes' save); unk is set because the save plays blind research, which has no picker
+    {"give_techs", 0, {1, 40}, .host = give_techs},  // the techs 0 to 39 for faction 1: more than a screenful to build
 };
 
 static const struct open_entry *pending;
+
+// "poke ADDR VALUE": set a word of the game's memory. Like an "open" it is only queued, and made from the game thread's
+// message pump, never while shadow mode has state protected.
+#define MAX_POKES 64
+static struct {
+    uint32_t addr, value;
+    int or_in;  // set the bits of `value` and keep the rest
+} pokes[MAX_POKES];
+static int npokes;
+
+void scene_poke(uint32_t addr, uint32_t value, int or_in) {
+    if (npokes < MAX_POKES) pokes[npokes].addr = addr, pokes[npokes].value = value, pokes[npokes++].or_in = or_in;
+}
 
 void scene_open(const char *name) {
     for (size_t i = 0; i < sizeof(open_table) / sizeof(open_table[0]); i++)
@@ -173,12 +199,26 @@ void scene_open(const char *name) {
 }
 
 void scene_poll(void) {
+    if (npokes && !hooks_protecting() && game_at(PREF_BASE)) {
+        for (int i = 0; i < npokes; i++) {
+            fprintf(stderr, "chiron: script: poke 0x%x = %u\n", pokes[i].addr, pokes[i].value);
+            if (pokes[i].or_in) *(uint32_t *)game_at(pokes[i].addr) |= pokes[i].value;
+            else *(uint32_t *)game_at(pokes[i].addr) = pokes[i].value;
+        }
+        npokes = 0;
+    }
     if (!pending || hooks_protecting() || !game_at(PREF_BASE)) return;
     const struct open_entry *e = pending;
     pending = NULL;
     fprintf(stderr, "chiron: script: opening %s\n", e->name);
     typedef int (*fn4)(int, int, int, int);
-    fn4 fn = e->host ? e->host : (fn4)game_at(e->addr);
-    open_result = fn(e->args[0], e->args[1], e->args[2], e->args[3]);
+    typedef int(__attribute__((thiscall)) * method)(void *self, int, int, int);
+    if (e->unsuspend) *(uint32_t *)game_at(e->unsuspend) = 0;
+    for (int n = 0; n <= e->repeat; n++)
+        if (e->host) open_result = e->host(e->args[0], e->args[1], e->args[2], e->args[3]);
+        else if (e->self) ((method)game_at(e->addr))(game_at(e->self), e->args[0], e->args[1], e->args[2]);  // (a method that answers nothing)
+        else if (e->discard) ((fn4)game_at(e->addr))(e->args[0], e->args[1], e->args[2], e->args[3]);
+        else open_result = ((fn4)game_at(e->addr))(e->args[0], e->args[1], e->args[2], e->args[3]);
+    if (e->unsuspend) *(uint32_t *)game_at(e->unsuspend) = 1;
     fprintf(stderr, "chiron: script: %s answered %d\n", e->name, open_result);
 }
