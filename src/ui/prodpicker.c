@@ -261,6 +261,13 @@ static struct game_strlist *plist(struct game_prodpicker *pp, int i) { return (s
 
 static int32_t word(uint32_t addr) { return *(int32_t *)game_at(addr); }
 static float real(uint32_t addr) { return *(float *)game_at(addr); }
+
+// The model's scale and light take a float's bits, as selpart.c passes its constants.
+static uint32_t float_bits(float f) {
+    uint32_t u;
+    memcpy(&u, &f, 4);
+    return u;
+}
 static char *text(uint32_t addr) { return game_at(addr); }
 // A string the game keeps by its place in its string table.
 static char *name_of(int32_t p) { return (char *)(uintptr_t)strings_get((struct game_strings *)game_strings, (unsigned)p); }
@@ -399,7 +406,7 @@ static void UI_THIS prodpicker_dtor(struct game_prodpicker *pp) {
     pp->buf.vtable = (void **)(uintptr_t)game_va(VTABLE_BUF);
     prodpicker_close(pp);
     for (int i = 2; i >= 0; i--) list_unbuild(pp->list[i]);
-    game_model_dtor(pp->model);
+    game_model_close(pp->model);
     scroll_dtor((struct game_scroll *)pp->scroll);
     for (int i = 8; i >= 0; i--) flat_button_dtor(&pp->button[i]);
     time_dtor(&pp->timer);
@@ -654,8 +661,8 @@ static void UI_THIS prodpicker_draw_item(struct game_prodpicker *pp, int index, 
         if (game_veh_draw(b, fake, x, y, 1, 0xcc, 0)) {
             *at32(pp, 0xa638) = 0;
             game_vehdraw_construct_vehicle(fake, pp->model);
-            game_model_set_scale(pp->model, (float)art * real(0x66aa30));
-            game_model_set_angle(pp->model, (float)(frame + 0x1e) * real(0x66aa2c), 0, 0);
+            game_model_scale(pp->model, float_bits((float)art * real(0x66aa30)));
+            game_model_light(pp->model, float_bits((float)(frame + 0x1e) * real(0x66aa2c)), 0, 0);
             game_model_draw(pp->model, b, (r.right - r.left) / 2 + r.left, (r.bottom - r.top) / 2 + r.top, 0);
         }
         *(int32_t *)game_at(ICON_SCALE) = -1;
@@ -942,16 +949,12 @@ static void model_start(struct game_prodpicker *pp) {
     ((uint8_t *)pp)[0x9310] = 0;
     *at32(pp, 0xa744) = 0x3f48f5c3;
     *at32(pp, 0xa73c) = 0;
-    game_model_aim(at32(pp, 0xa73c), at32(pp, 0xa748));
+    game_matrix_from_angles((const float *)at32(pp, 0xa73c), (float *)at32(pp, 0xa748));
     float *v = (float *)at32(pp, 0xa760);
     v[0] = -v[0], v[1] = -v[1], v[2] = -v[2];
     float view[3] = {v[0] * real(0x66aa40), v[1] * real(0x66aa40), v[2] * real(0x66aa40)};
-    game_model_set_view(pp->model, view, at32(pp, 0xa748));
-    union {
-        uint32_t u;
-        float f;
-    } tenth = {0x3dcccccd};
-    game_model_set_scale(pp->model, tenth.f);
+    game_model_view(pp->model, view, (const float *)at32(pp, 0xa748));
+    game_model_scale(pp->model, 0x3dcccccd); // 0.1
     int32_t *m = at32(pp, 0x92d8);
     m[0] = 0, m[1] = 0, m[2] = 0x3f800000;
     m = at32(pp, 0x92cc);

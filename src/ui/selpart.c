@@ -755,11 +755,11 @@ static int UI_THIS selpart_exec(struct game_selpart *pw, int x, int y, int facti
     }
     for (int i = pw->first; i < pw->first + pw->page; i++) selpart_draw_part(pw, i, pos == i);
     pw->hover = pos;
-    if (pw->page < pw->count) game_part_scroll_show(pw, sc);
+    if (pw->page < pw->count) game_scroll_show(pw, sc);
     live_state(pw, 1);
     UI_VCALL(void(UI_THIS *)(void *, int, int, int), pw, VT_SET_MODAL, 1, (int)(uintptr_t)game_pop_wait, 0);
     live_state(pw, 0);
-    if (pw->page < pw->count) game_part_scroll_hide(pw, sc);
+    if (pw->page < pw->count) game_scroll_hide(pw, sc);
     UI_VCALL(void(UI_THIS *)(void *, int), sc, 4, 0);
     vcall0(pw, 8);
     game_do_all_draws();
