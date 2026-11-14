@@ -153,3 +153,14 @@ void WIN_THIS graphic_win_close(struct game_win *w);
 
 // Win_set_caption (win.c): the window's caption; allocates, so in shadow mode the game's calls run the original.
 void WIN_THIS win_set_caption(struct game_win *w, const char *text);
+
+// Closing and initialising a window (win.c): Win_close, Win_init (x, y, width, height, caption, flags, parent, owner,
+// the three caption sizes), GraphicWin_init (the same, with a Buffer of the client size) and PullDown_init. They make
+// virtual calls and allocate, so in shadow mode the game's calls run the original and the sweep checks Chiron's code
+// on twin windows (life.c).
+void WIN_THIS win_close(struct game_win *w);
+int WIN_THIS win_init(struct game_win *w, int x, int y, int cw, int ch, const char *title, uint32_t flags, struct game_win *parent,
+                      struct game_win *owner, const int32_t *caption);
+int WIN_THIS graphic_win_init(struct game_win *w, int x, int y, int cw, int ch, const char *title, uint32_t flags,
+                              struct game_win *parent, struct game_win *owner, const int32_t *caption);
+int WIN_THIS pulldown_init(struct game_win *w, int arg);

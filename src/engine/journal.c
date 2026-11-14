@@ -66,6 +66,7 @@ static struct import imports[] = {
     {"timeSetEvent", 0x669384, 5, {V, V, V, V, V}},
     {"SetDIBColorTable", 0x6690b4, 4, {V, V, V, IN_ENTRIES}},
     {"AnimatePalette", 0x6690a8, 4, {V, V, V, IN_ENTRIES}},
+    {"Sleep", 0x66912c, 1, {V}},
 };
 enum { N_IMPORTS = sizeof imports / sizeof imports[0] };
 
@@ -200,12 +201,12 @@ static uint32_t journal_call(int fn, uint32_t *a) {
         return journal_call(i, (uint32_t[]){a, b, c, d, e, f});                                            \
     }
 W2(0) W1(1) W1(2) W2(3) W2(4) W2(5) W2(6) W0(7) W2(8) W4(9) W3(10) W2(11) W4(12) W2(13) W6(14) W1(15) W1(16) W1(17) W0(18)
-    W2(19) W4(20) W1(21) W1(22) W5(23) W4(24) W4(25)
+    W2(19) W4(20) W1(21) W1(22) W5(23) W4(24) W4(25) W1(26)
 static void *const wrappers[N_IMPORTS] = {
     (void *)wrap_0,  (void *)wrap_1,  (void *)wrap_2,  (void *)wrap_3,  (void *)wrap_4,  (void *)wrap_5,  (void *)wrap_6,
     (void *)wrap_7,  (void *)wrap_8,  (void *)wrap_9,  (void *)wrap_10, (void *)wrap_11, (void *)wrap_12, (void *)wrap_13,
     (void *)wrap_14, (void *)wrap_15, (void *)wrap_16, (void *)wrap_17, (void *)wrap_18, (void *)wrap_19, (void *)wrap_20,
-    (void *)wrap_21, (void *)wrap_22, (void *)wrap_23, (void *)wrap_24, (void *)wrap_25};
+    (void *)wrap_21, (void *)wrap_22, (void *)wrap_23, (void *)wrap_24, (void *)wrap_25, (void *)wrap_26};
 _Static_assert(sizeof wrappers / sizeof wrappers[0] == N_IMPORTS, "a wrapper for each import");
 
 void journal_install(struct pe_image *exe) {

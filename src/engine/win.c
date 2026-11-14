@@ -48,8 +48,8 @@
 // the cheat code (Win_on_key, Win_on_char), the palette and activation handlers, and the dialog
 // list's set-up and removal (they allocate); the scroll wheel handlers that call the Scroll class.
 //
-// Left with the original: the large frame-overlay function at 0x5f3b80, and do_caption_buttons
-// (frees the caption buttons).
+// Left with the original: the large frame-overlay function at 0x5f3b80, do_caption_buttons (frees the
+// caption buttons) and GraphicWin's compute_min_size, which Win_init and GraphicWin_init call.
 //
 // The path to the screen. A window's picture reaches the window in three steps: the window draws itself
 // into the back buffer (win_update_screen, above, and the GraphicWin's paint in the section below, which
@@ -3666,9 +3666,9 @@ static void sweep_overlay(uint32_t hwnd) {
 
 // Making and unmaking a window: the class under Win (a table of defaults the window's handlers start from,
 // copied from the game's data), Win and GraphicWin (a Win with a Buffer of its own at 0x444). The destructors
-// free the dialog list's nodes (Win) and the Buffer (GraphicWin), and the classes close through Win_close,
-// which is left with the original (it calls the window's virtual functions and takes it out of the game's
-// focus and mouse state). These allocate or free on the game's heap and make Windows objects, so in shadow
+// free the dialog list's nodes (Win) and the Buffer (GraphicWin), and the classes close through Win_close
+// (below, with Win_init: it calls the window's virtual functions and takes it out of the game's focus and
+// mouse state). These allocate or free on the game's heap and make Windows objects, so in shadow
 // mode the game's own calls run the original, and the sweep checks Chiron's code on twin windows (life.c): a
 // constructor's whole object, a destructor's frees of the dialog list's blocks and of what the Buffer holds.
 // The original's constructors and destructors set up an exception frame (a handler for the case a
@@ -3815,6 +3815,412 @@ void WIN_THIS win_set_caption(struct game_win *w, const char *text) {
     ((void(WIN_THIS *)(void *, int, int))w->vtable[0x128 / 4])(w, 0, -1);
 }
 
+void *WIN_THIS scroll_ctor(void *bar);  // scroll.c
+
+// ---- Win_close, Win_init, GraphicWin_init and PullDown_init -----------------------------------------------
+//
+// Closing a window takes it out of everything the game keeps of it (the press, capture, hover and bubble
+// text globals, its parent's list of children or the list of top-level windows, its parent's dialog list),
+// closes its children, gives back its scroll bars, caption buttons, caption and frame buffers, and puts the
+// fields back as the constructor leaves them. Init closes first, then lays the window out: the four frame
+// buffers (0xb4 to 0xc0, each a Buffer made with operator new), the caption's sizes, the position (a negative
+// x or y counts from the right or bottom of the parent's inner rectangle, or of the screen), the inner, outer
+// and clip rectangles, the caption copied onto the heap, the frame laid out through slot 0x108, the owner
+// (nc_owner, word 0xf0) asked through its slot 0x168, the scroll bars (made through slot 0x18 or with the Scroll
+// class), the entry in the parent's dialog list and the window's place in its parent's list or the top-level
+// list. GraphicWin_init adds the Buffer: its own copy of eleven of the game's frame picture pointers (when flag
+// 0x30000000 asks for them), a picture object at 0xa08 (flag 0x40000000), and a Buffer of the client size.
+// PullDown_init is GraphicWin_init with a menu's own words set around it.
+//
+// Quirks kept from the original: init's check against 150 children tests the window's own child count (not the
+// parent's), which is 0 after the close, so only the check against 40 top-level windows can ever stop the game;
+// a window with flag 0x100000 and without 0x1000 reads its parent's flags, so one with no parent crashes there;
+// a failed allocation of a dialog node leaves the ring with a hole where the new node was to go; slot 0xf4 is
+// asked only when one of the top four flag bits is set. Differences from OpenSMACX and Thinker: none of them has
+// the layout; the inventory names the functions, and Win_init's argument list (x, y, width, height, caption,
+// flags, parent, owner and a pointer to the three caption sizes) is read from the disassembly. Left out: the
+// exception frame the original sets up for a constructor that throws, which nothing reads.
+//
+// Checks. A sweep builds twin windows (life.c) with a stand-in vtable whose calls are logged and compared, and
+// compares the window, its parent, children and the lists the game keeps, the heap blocks made and freed, and
+// the globals the functions write. Not covered: the Scroll class's own creation in Win_init (flags 4 and 8 without
+// 0x40; real scroll bars draw when shown), the bubble text branch of Win_close (it redraws the screen), the
+// caption's redraw (slot 0x128 with the window shown, which a freshly closed window never is), and the stops the
+// game makes when it has too many windows (MessageBox and exit).
+
+static void free_dialog_list(struct game_win *w) {
+    if (!w->dlg_head) {
+        w->dlg_index = 0;
+        return;
+    }
+    if (!*(int32_t *)((uint8_t *)w + 0xdc)) {
+        for (int i = 0; i < w->dlg_count; i++) {
+            struct game_win_node *n = w->dlg_head;
+            w->dlg_cur = n->next;
+            void *payload = (void *)(uintptr_t)n->pad8;
+            if (payload) game_free(payload);
+            n->pad8 = 0;
+            game_free(n);
+            w->dlg_head = w->dlg_cur;
+        }
+    }
+    w->dlg_head = NULL, w->dlg_index = 0, w->dlg_count = 0;
+    w->dlg_index = 0;
+}
+
+// The fifteen words that get the game's defaults back (the same ones the constructor's table sets).
+static const struct life_set win_defaults_set[] = {
+    LZ(0x12c), LC(0x130, 1), LG(0xfc, 0x9b7af0), LG(0x100, 0x696d34), LG(0x104, 0x9b7af8), LG(0x108, 0x696d3c),
+    LG(0x10c, 0x696d40), LG(0x110, 0x696d44), LG(0x114, 0x696d38), LG(0x118, 0x696d48), LG(0x11c, 0x696d4c),
+    LG(0x120, 0x696d50), LG(0x124, 0x9b7afc), LG(0x128, 0x696d54), LG(0xf8, 0x9b7af4),
+};
+// What a close leaves once the caption buttons are gone: the words the constructor zeroes, or sets to 1 or 2.
+static const struct life_set win_closed_set[] = {
+    LZ(0xf4), LZ(0x98), LC(0x174, 1), LC(0x178, 1), LC(0x17c, 1), LC(0x180, 1),
+    LZ(0x15c), LZ(0x160), LZ(0x164), LZ(0x168), LZ(0x13c), LZ(0x140), LZ(0x144), LZ(0x148), LZ(0x14c), LZ(0x150), LZ(0x154),
+    LZ(0x158), LZ(0x16c), LZ(0x170), LZ(0x400), LZ(0x404), LZ(0x408), LZ(0x40c), LZ(0x410), LZ(0x414), LZ(0x418),
+    LZ(0x41c), LZ(0x420), LZ(0x424), LZ(0x428), LZ(0x42c), LZ(0x430), LZ(0x434), LZ(0x438), LC(0x1a0, 2), LZ(0x9c),
+    LZ(0xa0), LZ(0xa4), LZ(0x3fc),
+};
+
+// A scroll bar the window keeps (word `off`): given the window's own mapping (slot 0x1c, if flag 0x40), then deleted.
+static void close_bar(struct game_win *w, int off) {
+    void **slot = (void **)((uint8_t *)w + off);
+    if (!*slot) return;
+    if (w->flags & 0x40) *slot = (void *)(intptr_t)vcall1(w, 0x1c, (int)(intptr_t)*slot);
+    if (*slot) {
+        ((void(THISCALL *)(void *, int))(*(void ***)*slot)[0])(*slot, 1);
+        *slot = NULL;
+    }
+}
+// A Buffer, caption button or other object the window owns (word `off`): deleted through its first virtual function.
+static void delete_owned(struct game_win *w, int off) {
+    void **slot = (void **)((uint8_t *)w + off);
+    if (!*slot) return;
+    ((void(THISCALL *)(void *, int))(*(void ***)*slot)[0])(*slot, 1);
+    *slot = NULL;
+}
+
+void WIN_THIS win_close(struct game_win *w) {
+    // A press that went down in this window or in one below it is forgotten: the first of the two press words that is
+    // set is the one asked about.
+    struct game_win *first = *game_win_press1 ? *game_win_press1 : *game_win_press2;
+    int forget = first == w;
+    if (!forget && first) {
+        for (int i = 0; i < w->n_children; i++)
+            if (w->children[i] == first || win_is_descendant(w->children[i], first)) {
+                forget = 1;
+                break;
+            }
+    }
+    if (forget) *game_win_press1 = NULL, *game_win_press2 = NULL;
+    if (*game_win_capture == w) {
+        *game_win_capture = NULL;
+        vcall0(w, VT_CAPTURE_LOST);
+    }
+    if (*game_win_hover == w) *game_win_hover = NULL;
+    struct game_win **bubble_win = game_at(0x9b7a4c);
+    if (*bubble_win == w && *game_flip_text) {
+        *bubble_win = NULL, *game_flip_text = NULL;
+        game_flip_restore(game_flip_box, 0);
+        win_flip(game_flip_box);
+    }
+    struct game_win **draw_win = game_at(0x9b7a7c);
+    if (*draw_win == w) *draw_win = NULL;
+    vcall0(w, WIN_VT_HIDE);
+    close_bar(w, 0x43c);
+    close_bar(w, 0x440);
+    // Out of its parent's dialog list: the node is looked for from the list's cursor, which moves along as it looks.
+    if (w->flags & 0x100000) {
+        struct game_win *p = w->parent;
+        if (p && p->dlg_head) {
+            int found = 0;
+            for (int i = 0; i < p->dlg_count; i++) {
+                if (p->dlg_cur->win == w) {
+                    found = 1;
+                    break;
+                }
+                p->dlg_cur = p->dlg_cur->next;
+            }
+            if (found) {
+                struct game_win_node *n = p->dlg_cur;
+                n->next->prev = n->prev;
+                n->prev->next = n->next;
+                if (n == p->dlg_head) p->dlg_head = n->next;
+                p->dlg_cur = n->next;
+                if (!*(int32_t *)((uint8_t *)p + 0xdc)) {
+                    void *payload = (void *)(uintptr_t)n->pad8;
+                    if (payload) game_free(payload);
+                    n->pad8 = 0;
+                    game_free(n);
+                }
+                p->dlg_count--;
+            }
+            if (p->dlg_count == 0) p->dlg_head = NULL;
+            p->dlg_index = p->dlg_count - 1;
+        }
+    }
+    // The children close themselves, each taking itself out of this list: the loop's counter goes on while the list gets
+    // shorter, as in the original, and the count is read again each time round.
+    for (int i = 0; i < w->n_children; i++) win_close(w->children[i]);
+    if (w->parent) win_remove_child(w->parent, w);
+    else win_remove_parent(w);
+    w->parent = NULL;
+    *(uint32_t *)((uint8_t *)w + 0x19c) = 0;
+    *(uint32_t *)((uint8_t *)w + 0xac) = 0;
+    *(uint32_t *)((uint8_t *)w + 0xb0) = 0;
+    *(uint32_t *)((uint8_t *)w + 0x134) = 0;
+    *(uint32_t *)((uint8_t *)w + 0x138) = 0;
+    w->root = w;
+    for (int off = 0x184; off <= 0x198; off += 4) *(uint32_t *)((uint8_t *)w + off) = 0;
+    *game_dc = NULL;
+    w->nc_owner = NULL;
+    free_dialog_list(w);
+    life_apply(w, win_defaults_set, (int)(sizeof win_defaults_set / sizeof win_defaults_set[0]));
+    if (w->title) game_free((void *)(uintptr_t)w->title), w->title = NULL;
+    delete_owned(w, 0xe4);
+    delete_owned(w, 0xe8);
+    delete_owned(w, 0xec);
+    void *b4 = w->nc_buf_b4;
+    life_apply(w, win_closed_set, (int)(sizeof win_closed_set / sizeof win_closed_set[0]));
+    if (b4) {
+        ((void(THISCALL *)(void *, int))(*(void ***)b4)[0])(b4, 1);
+        w->nc_buf_b4 = NULL;
+    }
+    delete_owned(w, 0xb8);
+    delete_owned(w, 0xbc);
+    delete_owned(w, 0xc0);
+    winbase_reset(w);
+}
+
+// A frame buffer: a Buffer on the game's heap, made with operator new.
+static void *new_frame_buffer(void) {
+    void *b = game_operator_new(0x588);
+    return b ? buffer_ctor(b) : NULL;
+}
+// A node of a dialog list, or its payload: from the arena the list lives in (word 0xdc of the owner), or the heap.
+static void *dialog_alloc(struct game_win *owner, int size) {
+    void *arena = *(void **)((uint8_t *)owner + 0xdc);
+    return arena ? game_string_alloc(arena, size) : game_mem_get((size_t)size);
+}
+static void stop_with(uint32_t text, uint32_t title) {
+    game_message_box_a(NULL, game_at(text), game_at(title), 0);
+    game_exit(4);
+}
+
+// Puts `w` at the end of its parent's dialog list (the ring of windows the list takes the focus through), and makes it
+// the list's current one. The original's order is kept, including a hole left in the ring when a node can't be made.
+static void dialog_list_add(struct game_win *parent, struct game_win *w) {
+    struct game_win_node *n;
+    if (parent->dlg_count == 0) {
+        n = dialog_alloc(parent, 0x1c);
+        parent->dlg_head = n;
+        if (n) {
+            n->win = w;
+            n->next = n, n->prev = n;
+            n->pad8 = (int32_t)(uintptr_t)dialog_alloc(parent, 4);
+            if (n->pad8) {
+                parent->dlg_cur = n;
+                parent->dlg_index = parent->dlg_count;
+                parent->dlg_count++;
+            }
+        }
+    } else {
+        n = dialog_alloc(parent, 0x1c);
+        struct game_win_node *last = parent->dlg_head->prev;
+        last->next = n;
+        if (n) {
+            n->prev = last;
+            n->next = parent->dlg_head;
+            parent->dlg_head->prev = n;
+            parent->dlg_cur = n;
+            n->win = w;
+            n->pad8 = (int32_t)(uintptr_t)dialog_alloc(parent, 4);
+            if (n->pad8) {
+                parent->dlg_index = parent->dlg_count;
+                parent->dlg_count++;
+            }
+        }
+    }
+    if (parent->dlg_count - 1 >= 0) {
+        parent->dlg_index = 0;
+        parent->dlg_cur = parent->dlg_head;
+    }
+    w->parent = parent;
+}
+
+int WIN_THIS win_init(struct game_win *w, int x, int y, int cw, int ch, const char *title, uint32_t flags, struct game_win *parent,
+                      struct game_win *owner, const int32_t *caption) {
+    win_close(w);
+    if (caption) w->caption_h = caption[0], w->border = caption[1], w->bottom = caption[2];
+    *(uint32_t *)((uint8_t *)w + 0x1a0) |= 2;
+    if (!(w->nc_buf_b4 = new_frame_buffer())) return 4;
+    if (!(w->nc_buf_b8 = new_frame_buffer())) return 4;
+    if (!(w->nc_buf_bc = new_frame_buffer())) return 4;
+    if (!(w->nc_buf_c0 = new_frame_buffer())) return 4;
+    if ((flags & 0xf0000000) && !vcall0(w, 0xf4)) return 3;
+    if (flags & 0x80000) flags |= 0x20;
+    if (x < 0) x += parent ? parent->inner[2] - parent->inner[0] - cw : *game_win_screen_w - cw;
+    if (y < 0) y += (parent ? parent->inner[3] - parent->inner[1] : *game_win_screen_h) - ch;
+    w->flags = flags;
+    w->nc_owner = owner;
+    w->parent = parent;
+    if (title && title[0] && !(flags & 0x400080)) {
+        flags |= 0x10;
+        w->flags = flags;
+    }
+    if (parent) {
+        if (w->n_children == 150) {
+            win_close(w);
+            stop_with(0x696d80, 0x696d60);
+        }
+        int n = parent->n_children;
+        if (w->flags & 0x2000000) {
+            parent->children[n] = w;
+        } else {
+            for (int k = n; k > 0; k--) parent->children[k] = parent->children[k - 1];
+            parent->children[0] = w;
+        }
+        parent->n_children++;
+    } else {
+        int n = *game_win_parent_n;
+        if (n == 0x28) {
+            win_close(w);
+            stop_with(0x696db4, 0x696d94);
+        }
+        if (w->flags & 0x2000000) {
+            game_win_parents[n] = w;
+        } else {
+            for (int k = n; k > 0; k--) game_win_parents[k] = game_win_parents[k - 1];
+            game_win_parents[0] = w;
+        }
+        *game_win_parent_n = n + 1;
+    }
+    if (!(w->flags & 0x80) && (w->flags & 0x1d)) {
+        w->flags2 |= 2;
+    } else {
+        w->flags2 &= ~2u;
+        w->flags &= 0xfffffbeeu;
+    }
+    // The rectangles: `outer` is where the frame lies, `inner` the client area.
+    if (!(w->flags & 0x800) && (w->flags2 & 2)) {
+        w->outer[0] = x, w->outer[1] = y, w->outer[2] = x + cw, w->outer[3] = y + ch;
+        memcpy(w->inner, w->outer, sizeof w->inner);
+        win_nonclient_to_client_2(w, w->inner);
+        int ox = w->outer[0], oy = w->outer[1];
+        w->inner[0] -= ox, w->inner[2] -= ox;
+        w->inner[1] -= oy, w->inner[3] -= oy;
+    } else {
+        w->inner[0] = x, w->inner[1] = y, w->inner[2] = x + cw, w->inner[3] = y + ch;
+        if (w->flags2 & 2) {
+            memcpy(w->outer, w->inner, sizeof w->outer);
+            win_client_to_nonclient_2(w, w->outer);
+            int ox = w->outer[0], oy = w->outer[1];
+            w->inner[0] -= ox, w->inner[2] -= ox;
+            w->inner[1] -= oy, w->inner[3] -= oy;
+        }
+    }
+    memcpy(w->clip, w->inner, sizeof w->clip);
+    if (w->title) game_free((void *)(uintptr_t)w->title), w->title = NULL;
+    if (title) {
+        char *copy = game_mem_get(strlen(title) + 1);
+        w->title = copy;
+        if (copy) {
+            copy[0] = 0;
+            strcpy(copy, title);
+            if ((w->flags2 & WIN_F2_VISIBLE) && (!w->parent || win_is_visible(w->parent))) vcall2(w, 0x128, 0, -1);
+        }
+    }
+    vcall0(w, VT_LAYOUT);
+    if (owner) {
+        int r = vcall1(owner, 0x168, (int)(intptr_t)w);
+        if (r) {
+            win_close(w);
+            return r;
+        }
+    }
+    uint32_t f = w->flags;
+    if (f & 0x10) w->title_h = w->caption_h;
+    else if (!(f & 0x20)) w->title_h = w->border;
+    w->resize_border = (f & 0x400) ? w->border : 0;
+    if (f & 4) {
+        if (f & 0x40) w->scroll_h = (struct game_win_scroll *)(intptr_t)vcall0(w, 0x18);
+        if (!w->scroll_h) {
+            void *bar = game_operator_new(0x214c);
+            if (bar) bar = scroll_ctor(bar);
+            w->scroll_h = bar;
+            if (!bar) return 4;
+            int sb = *game_win_nc_margin;
+            int height = w->inner[3] - sb;
+            int width = w->inner[2] - w->inner[0] - ((w->flags & 8) ? sb : 0);
+            game_scroll_init_horz_nc(bar, 0, height, width, w, -2);
+            vcall1((struct game_win *)bar, WIN_VT_SHOW, 0);
+        }
+    }
+    if (w->flags & 8) {
+        if (w->flags & 0x40) w->scroll_v = (struct game_win_scroll *)(intptr_t)vcall0(w, 0x18);
+        if (!w->scroll_v) {
+            void *bar = game_operator_new(0x214c);
+            if (bar) bar = scroll_ctor(bar);
+            w->scroll_v = bar;
+            if (!bar) return 4;
+            int sb = *game_win_nc_margin;
+            int right = w->inner[2] - sb;
+            int height = w->inner[3] - w->inner[1] - ((w->flags & 4) ? sb : 0);
+            game_scroll_init_vert_nc(bar, right, 0, height, w, -1);
+            vcall1((struct game_win *)bar, WIN_VT_SHOW, 0);
+        }
+    }
+    game_win_do_caption_buttons(w);
+    *game_win_cur = w;
+    f = w->flags;
+    if ((f & 0x100000) && !(f & 0x200000) && !(w->flags2 & WIN_F2_BUSY) && !((f & 0x1000) && !parent) &&
+        !(parent->flags & 0x1000))
+        dialog_list_add(parent, w);
+    w->flags2 |= 4;
+    return 0;
+}
+
+int WIN_THIS graphic_win_init(struct game_win *w, int x, int y, int cw, int ch, const char *title, uint32_t flags,
+                              struct game_win *parent, struct game_win *owner, const int32_t *caption) {
+    graphic_win_close(w);
+    if (flags & 0x30000000) {
+        static const struct life_set own[] = {
+            LG(0x9cc, 0x9b3394), LG(0x9d4, 0x9b339c), LG(0x9d0, 0x9b3398), LG(0x9d8, 0x9b33a0), LG(0x9e8, 0x9b33a4), LG(0x9e4, 0x9b33a8),
+            LG(0x9dc, 0x9b33ac), LG(0x9e0, 0x9b33b0), LG(0x9ec, 0x9b33b8), LG(0x9f0, 0x9b33b4), LG(0x9f4, 0x9b33bc),
+        };
+        life_apply(w, own, (int)(sizeof own / sizeof own[0]));
+    }
+    if (flags & 0x40000000) *(void **)((uint8_t *)w + GW_PIC) = new_frame_buffer();
+    int r = win_init(w, x, y, cw, ch, title, flags, parent, owner, caption);
+    if (r) return r;
+    *(void **)((uint8_t *)w + 0x448) = w;
+    game_graphic_win_compute_min_size(w);
+    int32_t wd = cw, ht = ch;
+    if (!(flags & 0x800)) {
+        win_nonclient_to_client(w, &wd, &ht);
+    } else {
+        int sb = *game_win_nc_margin;
+        if (w->flags & 8) wd += sb;
+        if (w->flags & 4) ht += sb;
+    }
+    r = buffer_init(gw_buffer(w), wd, ht, 0, NULL);
+    if (r) return r;
+    buffer_sync_to_palette(gw_buffer(w), *game_palette_copy);
+    return 0;
+}
+
+// A menu's window: the game's default menu colours if none are set yet (word 0x9b7b68), the menu's own word at 0xf30, a
+// window with no size, and word 0x964 cleared. Answers GraphicWin_init's answer.
+int WIN_THIS pulldown_init(struct game_win *w, int arg) {
+    uint32_t *colour = game_at(0x9b7b68);
+    if (!*colour) *colour = *(uint32_t *)game_at(0x9bb484);
+    *(int32_t *)((uint8_t *)w + 0xf30) = arg;
+    int r = graphic_win_init(w, 0, 0, 0, 0, NULL, 0, NULL, NULL, NULL);
+    *(int32_t *)((uint8_t *)w + 0x964) = 0;
+    return r;
+}
+
 // ---- Life cycle: shadow mode and the sweep ----
 
 SHADOW_PASS_T(WIN, void, win_set_caption, (struct game_win * w, const char *text), (w, text))
@@ -3825,6 +4231,16 @@ SHADOW_PASS_T(WIN, void, win_dtor, (struct game_win * w), (w))
 SHADOW_PASS_T(WIN, void *, graphic_win_ctor, (struct game_win * w), (w))
 SHADOW_PASS_T(WIN, void, graphic_win_dtor, (struct game_win * w), (w))
 SHADOW_PASS_T(WIN, void, graphic_win_close, (struct game_win * w), (w))
+SHADOW_PASS_T(WIN, void, win_close, (struct game_win * w), (w))
+SHADOW_PASS_T(WIN, int, win_init,
+              (struct game_win * w, int x, int y, int cw, int ch, const char *title, uint32_t flags, struct game_win *parent,
+               struct game_win *owner, const int32_t *caption),
+              (w, x, y, cw, ch, title, flags, parent, owner, caption))
+SHADOW_PASS_T(WIN, int, graphic_win_init,
+              (struct game_win * w, int x, int y, int cw, int ch, const char *title, uint32_t flags, struct game_win *parent,
+               struct game_win *owner, const int32_t *caption),
+              (w, x, y, cw, ch, title, flags, parent, owner, caption))
+SHADOW_PASS_T(WIN, int, pulldown_init, (struct game_win * w, int arg), (w, arg))
 
 LIFE_FN(win_set_caption, orig_win_set_caption(o, x), win_set_caption(o, x))
 LIFE_FN(winbase_ctor, orig_winbase_ctor(o), winbase_ctor(o))
@@ -3965,6 +4381,520 @@ static void life_sweep_win(void) {
             if (which) orig_graphic_win_dtor((struct game_win *)life_a), orig_graphic_win_dtor((struct game_win *)life_b);
         }
     }
+}
+
+// ---- Win_close, Win_init, GraphicWin_init and PullDown_init: the sweeps -----------------------------------
+//
+// Twin windows (life.c), each class built as a block of several windows, so that what the functions do to a window's
+// parent, children and the nodes of dialog lists is compared too: the original's Win_close and Win_init on one block,
+// Chiron's on the other. Every virtual function the windows call goes to a stand-in that logs the call (which slot, which
+// window of the twin, the arguments) and answers from a table; the log is compared as a global. The globals the
+// functions use (the press, capture, hover, bubble and draw windows, the cached DC, the top-level list) are set up inside
+// the two runs, from offsets into the block, so each run sees its own windows named; the globals are compared after each,
+// windows by where in the block they lie.
+
+static struct {
+    uint32_t hash;
+    int32_t n;
+} wlog;
+static uint32_t static_deleted;
+static void THISCALL static_bar_delete(void *o, int flag) {
+    (void)o, (void)flag;
+    static_deleted++;
+}
+static void *static_bar_vt[1] = {(void *)static_bar_delete};
+static void *static_bar = &static_bar_vt;  // an object (its first word is its vtable) that isn't on the heap
+static int wanswer_copy, wanswer_owner;
+
+// Which of the twins' windows an address is, by offset into its block; anything else by its own address.
+static int wid(const void *o) {
+    const uint8_t *p = o;
+    if (p >= life_a && p < life_a + LIFE_MAX) return (int)(p - life_a);
+    if (p >= life_b && p < life_b + LIFE_MAX) return (int)(p - life_b);
+    return 0x7fff0000 + (int)((uintptr_t)o & 0xfffff);
+}
+static void wrec(int slot, const void *o, int a, int b) {
+    wlog.hash = (((wlog.hash * 31u + (uint32_t)slot) * 31u + (uint32_t)wid(o)) * 31u + (uint32_t)a) * 31u + (uint32_t)b * 7u;
+    wlog.n++;
+}
+static int THISCALL wst_hide(void *o) { return wrec(0x8, o, 0, 0), 0; }
+static int THISCALL wst_lost(void *o) { return wrec(0x10, o, 0, 0), 0; }
+// The window's own mapping of a scroll bar it holds: the static bar maps to nothing, any other to itself.
+static int THISCALL wst_bar_map(void *o, void *bar) {
+    wrec(0x1c, o, bar == (void *)&static_bar, bar != NULL);
+    return bar == (void *)&static_bar ? 0 : (int)(intptr_t)bar;
+}
+static int THISCALL wst_bar_make(void *o) { return wrec(0x18, o, 0, 0), (int)(intptr_t)&static_bar; }
+static int THISCALL wst_copy(void *o) { return wrec(0xf4, o, 0, 0), wanswer_copy; }
+static int THISCALL wst_layout(void *o) { return wrec(0x108, o, 0, 0), 0; }
+static int THISCALL wst_caption(void *o, int a, int b) { return wrec(0x128, o, a, b), 0; }
+static int THISCALL wst_owner(void *o, void *w) { return wrec(0x168, o, wid(w), 0), wanswer_owner; }
+static int THISCALL wst_nc_height(void *o) { return wrec(0x16c, o, 0, 0), 3; }
+static void *wstub_vt[0x180 / 4];
+static void *owner_obj = &wstub_vt;
+static void fill_wstub_vt(void) {
+    wstub_vt[0x8 / 4] = (void *)wst_hide, wstub_vt[0x10 / 4] = (void *)wst_lost, wstub_vt[0x1c / 4] = (void *)wst_bar_map;
+    wstub_vt[0x18 / 4] = (void *)wst_bar_make, wstub_vt[0xf4 / 4] = (void *)wst_copy, wstub_vt[0x108 / 4] = (void *)wst_layout;
+    wstub_vt[0x128 / 4] = (void *)wst_caption, wstub_vt[0x168 / 4] = (void *)wst_owner, wstub_vt[0x16c / 4] = (void *)wst_nc_height;
+}
+
+// The window at an offset into a twin's block; -1 names none, -2 a window that isn't one of the block's.
+static void *obj_at(void *o, int off) { return off == -1 ? NULL : off == -2 ? (void *)0x1234 : (uint8_t *)o + off; }
+
+// The game's globals the functions use, the same words in both runs (windows as offsets into the block).
+static struct {
+    int press1, press2, capture, hover, bubble, draw;
+    int dc;
+    int n_list, list[5];  // the top-level list
+    int margin, screen_w, screen_h;
+} cfg;
+static int init_result;
+static void apply_state(void *o) {
+    *game_win_press1 = obj_at(o, cfg.press1), *game_win_press2 = obj_at(o, cfg.press2);
+    *game_win_capture = obj_at(o, cfg.capture), *game_win_hover = obj_at(o, cfg.hover);
+    *(void **)game_at(0x9b7a4c) = obj_at(o, cfg.bubble), *(void **)game_at(0x9b7a7c) = obj_at(o, cfg.draw);
+    *game_dc = cfg.dc ? (void *)0x4242 : NULL;
+    *game_win_parent_n = cfg.n_list;
+    for (int i = 0; i < cfg.n_list; i++) game_win_parents[i] = obj_at(o, cfg.list[i]);
+    *game_win_nc_margin = cfg.margin, *game_win_screen_w = cfg.screen_w, *game_win_screen_h = cfg.screen_h;
+    *game_win_cur = NULL;
+    *game_flip_text = NULL;  // (no bubble text: the redraw of the screen under it isn't checked)
+    wlog.hash = 0, wlog.n = 0, static_deleted = 0;
+}
+// The words a check compares after each run: the globals above, the log, the number of static bars deleted and the answer.
+static uint32_t *state_words[24];
+static int n_state_words;
+static void collect_state_words(void) {
+    int n = 0;
+    state_words[n++] = (uint32_t *)game_win_press1, state_words[n++] = (uint32_t *)game_win_press2;
+    state_words[n++] = (uint32_t *)game_win_capture, state_words[n++] = (uint32_t *)game_win_hover;
+    state_words[n++] = game_at(0x9b7a4c), state_words[n++] = game_at(0x9b7a7c), state_words[n++] = (uint32_t *)game_dc;
+    state_words[n++] = (uint32_t *)game_win_parent_n;
+    for (int i = 0; i < 6; i++) state_words[n++] = (uint32_t *)&game_win_parents[i];
+    state_words[n++] = &wlog.hash, state_words[n++] = (uint32_t *)&wlog.n, state_words[n++] = &static_deleted;
+    state_words[n++] = (uint32_t *)&init_result, state_words[n++] = (uint32_t *)game_win_cur;
+    n_state_words = n;
+}
+// What the sweep puts back after a check.
+struct saved_state {
+    uint32_t words[24];
+    struct game_win *parents[44];
+    char *flip_text;
+    int32_t margin, screen_w, screen_h;
+    uint32_t pulldown_colour;
+};
+static void save_state(struct saved_state *s) {
+    for (int i = 0; i < n_state_words; i++) s->words[i] = *state_words[i];
+    memcpy(s->parents, game_win_parents, sizeof s->parents);
+    s->flip_text = *game_flip_text;
+    s->margin = *game_win_nc_margin, s->screen_w = *game_win_screen_w, s->screen_h = *game_win_screen_h;
+    s->pulldown_colour = *(uint32_t *)game_at(0x9b7b68);
+}
+static void restore_state(const struct saved_state *s) {
+    for (int i = 0; i < n_state_words; i++) *state_words[i] = s->words[i];
+    memcpy(game_win_parents, s->parents, sizeof s->parents);
+    *game_flip_text = s->flip_text;
+    *game_win_nc_margin = s->margin, *game_win_screen_w = s->screen_w, *game_win_screen_h = s->screen_h;
+    *(uint32_t *)game_at(0x9b7b68) = s->pulldown_colour;
+}
+
+static void put_both(int off, uint32_t v) {
+    *(uint32_t *)(life_a + off) = v;
+    *(uint32_t *)(life_b + off) = v;
+}
+static struct game_win *wb(uint8_t *obj, int base) { return (struct game_win *)(obj + base); }
+
+// A dialog list of `n` nodes on the game's heap in the window at `base` of both blocks (each node holds a payload block);
+// the node at index `own` names the window at offset `who`, the others the one at `other`. The cursor starts at a random
+// node. `own_node` gets each block's node `own`.
+static void build_ring(int base, int n, int own, int who, int other, int shared, struct game_win_node *own_node[2]) {
+    uint8_t *objs[2] = {life_a, life_b};
+    int start = n ? rnd_to(n) : 0, idx = n ? rnd_to(n) : 0;
+    for (int k = 0; k < 2; k++) {
+        struct game_win *w = wb(objs[k], base);
+        struct game_win_node *first = NULL, *prev = NULL, *cur = NULL;
+        own_node[k] = NULL;
+        for (int i = 0; i < n; i++) {
+            struct game_win_node *nd = game_mem_get(sizeof *nd);
+            memset(nd, 0, sizeof *nd);
+            nd->pad8 = (int32_t)(uintptr_t)game_mem_get(8);
+            nd->win = (struct game_win *)(objs[k] + (i == own ? who : other));
+            if (!first) first = nd;
+            if (prev) prev->next = nd, nd->prev = prev;
+            prev = nd;
+            if (i == start) cur = nd;
+            if (i == own) own_node[k] = nd;
+        }
+        if (first) first->prev = prev, prev->next = first;
+        w->dlg_head = first, w->dlg_cur = cur, w->dlg_count = n, w->dlg_index = idx;
+        *(int32_t *)((uint8_t *)w + 0xdc) = shared;
+    }
+}
+// Gives back the nodes of a ring the check left (and each node's payload).
+static void free_ring(uint8_t *obj, int base) {
+    struct game_win *w = wb(obj, base);
+    struct game_win_node *n = w->dlg_head;
+    for (int i = 0; i < w->dlg_count && n; i++) {
+        struct game_win_node *next = n->next;
+        if (n->pad8) game_free((void *)(uintptr_t)n->pad8);
+        game_free(n);
+        n = next;
+    }
+    w->dlg_head = NULL, w->dlg_count = 0;
+}
+static void free_node(struct game_win_node *n) {
+    if (!n) return;
+    if (n->pad8) game_free((void *)(uintptr_t)n->pad8);
+    game_free(n);
+}
+
+// ---- Win_close on a window with a parent, children, a grandchild and dialog lists ----
+
+enum { TW_W = 0, TW_P = 0x500, TW_C0 = 0xa00, TW_C1 = 0xf00, TW_G = 0x1400, TW_SIZE = 0x1900 };
+static const struct life_slot tree_slots[] = {
+    {0xcc, -1}, {0xd0, -1}, {0xe0, 0}, {0xe4, -1}, {0xe8, -1}, {0xec, -1}, {0xb4, -1}, {0xb8, -1}, {0xbc, -1}, {0xc0, -1}, {0x43c, -1},
+    {0x440, -1}, {TW_P + 0xcc, -1}, {TW_P + 0xd0, -1}, {TW_C0 + 0xe0, 0}, {TW_C0 + 0xb4, -1}, {TW_C1 + 0xe0, 0}, {TW_C1 + 0xb4, -1},
+    {TW_G + 0xe0, 0}, {TW_G + 0xb4, -1},
+};
+static const struct life_class tree_class = {"WinTree", TW_SIZE, tree_slots, (int)(sizeof tree_slots / sizeof tree_slots[0])};
+
+static void close_orig(void *o, void *x) {
+    (void)x;
+    apply_state(o);
+    orig_win_close(o);
+}
+static void close_ours(void *o, void *x) {
+    (void)x;
+    apply_state(o);
+    win_close(o);
+}
+
+// The words a close or an init puts back, given made-up values first so that a missed one shows.
+static const int junk_words[] = {0x19c, 0xac,  0xb0,  0x134, 0x138, 0x184, 0x188, 0x18c, 0x190, 0x194, 0x198, 0xf0,  0xf4,  0xf8,
+                                 0xfc,  0x100, 0x104, 0x108, 0x10c, 0x110, 0x114, 0x118, 0x11c, 0x120, 0x124, 0x128, 0x12c, 0x130,
+                                 0x13c, 0x140, 0x144, 0x148, 0x14c, 0x150, 0x154, 0x158, 0x15c, 0x160, 0x164, 0x168, 0x16c, 0x170,
+                                 0x174, 0x178, 0x17c, 0x180, 0x1a0, 0x9c,  0xa0,  0xa4,  0xa8,  0x400, 0x404, 0x408, 0x40c, 0x410,
+                                 0x414, 0x418, 0x41c, 0x420, 0x424, 0x428, 0x42c, 0x430, 0x434, 0x438};
+static void scribble(int base) {
+    for (size_t i = 0; i < sizeof junk_words / sizeof junk_words[0]; i++) put_both(base + junk_words[i], rnd());
+}
+
+static void sweep_close(void) {
+    static const int bases[5] = {TW_W, TW_P, TW_C0, TW_C1, TW_G};
+    life_fill(&tree_class, life_a, life_b, (uint8_t)rnd());
+    for (int k = 0; k < 2; k++) {
+        uint8_t *o = k ? life_b : life_a;
+        for (int i = 0; i < 5; i++) {
+            orig_win_ctor(wb(o, bases[i]));
+            wb(o, bases[i])->vtable = wstub_vt;
+        }
+    }
+    scribble(TW_W), scribble(TW_C0), scribble(TW_C1), scribble(TW_G);
+    uint32_t wf = (rnd_to(2) ? 0x40u : 0) | (rnd_to(2) ? 0x100000u : 0) | (rnd_to(4) == 0 ? 0x2000000u : 0);
+    int nch = rnd_to(3), grand = nch > 0 && rnd_to(2);
+    int kind = rnd_to(3);  // 0: in the top-level list, 1: a child of P, 2: a child of P at a place of its own
+    int own_child = kind == 1 ? rnd_to(3) : -1;
+    int nodes = rnd_to(4), shared = rnd_to(4) == 0, pn = 1 + rnd_to(3), pown = rnd_to(pn + 1) - 1, pshared = rnd_to(3) == 0;
+    int own_ring = rnd_to(2), p_ring = kind && (wf & 0x100000);
+    for (int k = 0; k < 2; k++) {
+        uint8_t *o = k ? life_b : life_a;
+        struct game_win *w = wb(o, TW_W), *p = wb(o, TW_P);
+        w->flags = wf;
+        w->n_children = nch;
+        for (int i = 0; i < nch; i++) {
+            w->children[i] = wb(o, i ? TW_C1 : TW_C0);
+            w->children[i]->parent = w;
+            w->children[i]->n_children = 0;
+            w->children[i]->flags = 0;
+        }
+        if (grand) {
+            wb(o, TW_C0)->children[0] = wb(o, TW_G);
+            wb(o, TW_C0)->n_children = 1;
+            wb(o, TW_G)->parent = wb(o, TW_C0);
+            wb(o, TW_G)->n_children = 0, wb(o, TW_G)->flags = 0;
+        }
+        w->parent = kind ? p : NULL;
+        if (kind) {
+            p->n_children = own_child >= 0 ? 3 : 2;
+            for (int i = 0; i < p->n_children; i++) p->children[i] = wb(o, TW_C1);
+            if (own_child >= 0) p->children[own_child] = w;
+        }
+    }
+    struct game_win_node *kept[2] = {NULL, NULL}, *pown_node[2] = {NULL, NULL};
+    if (own_ring) build_ring(TW_W, nodes, -1, 0, TW_C1, shared, kept);
+    if (p_ring) build_ring(TW_P, pn, pown, TW_W, TW_C1, pshared, pown_node);
+    // Scroll bars (a heap object, the static one or none), frame buffers, caption buttons and captions.
+    static const int bars[2] = {0x43c, 0x440};
+    for (int i = 0; i < 2; i++) {
+        int c = rnd_to(4);
+        if (c == 1 || c == 2) life_objects(bars[i], 1);
+        if (c == 3) put_both(bars[i], (uint32_t)(uintptr_t)&static_bar);
+    }
+    for (int i = 0; i < 4; i++)
+        if (rnd_to(4)) life_objects(0xb4 + 4 * i, 1);
+    for (int i = 0; i < 3; i++)
+        if (rnd_to(3) == 0) life_objects(0xe4 + 4 * i, 1);
+    if (rnd_to(2)) life_text(0xe0, "a caption");
+    static const int below[3] = {TW_C0, TW_C1, TW_G};
+    int exists[3] = {nch > 0, nch > 1, grand};
+    for (int i = 0; i < 3; i++) {
+        if (exists[i] && rnd_to(2)) life_text(below[i] + 0xe0, "below");
+        if (exists[i] && rnd_to(2)) life_objects(below[i] + 0xb4, 1);
+    }
+    // The globals: windows of the block named at random.
+    static const int named[] = {-1, TW_W, TW_C0, TW_C1, TW_G, TW_P, -2};
+    cfg.press1 = named[rnd_to(7)], cfg.press2 = named[rnd_to(7)], cfg.capture = named[rnd_to(7)], cfg.hover = named[rnd_to(7)];
+    cfg.bubble = named[rnd_to(7)], cfg.draw = named[rnd_to(7)];
+    cfg.dc = rnd_to(2);
+    cfg.n_list = rnd_to(5);
+    for (int i = 0; i < 5; i++) cfg.list[i] = rnd_to(4) ? -2 : TW_C1;
+    if (kind == 0) {
+        if (!cfg.n_list) cfg.n_list = 1;
+        if (rnd_to(6)) cfg.list[rnd_to(cfg.n_list)] = TW_W;
+    }
+    cfg.margin = rnd_to(10), cfg.screen_w = 640 + rnd_to(900), cfg.screen_h = 480 + rnd_to(600);
+    static struct saved_state before;
+    save_state(&before);
+    *game_flip_text = NULL;
+    life_run(&stats_win_close, &tree_class, close_orig, close_ours, NULL, state_words, n_state_words);
+    // Give back what the runs left (a child the loop skipped is closed by the original), then the game's own state.
+    for (int k = 0; k < 2; k++) {
+        uint8_t *o = k ? life_b : life_a;
+        for (int i = 0; i < 3; i++) orig_win_close(wb(o, below[i]));
+        if (p_ring) {
+            if (pshared && pown_node[k]) free_node(pown_node[k]);  // (taken out of the ring, but a shared list's nodes aren't freed)
+            free_ring(o, TW_P);
+        }
+        if (own_ring && shared) {
+            struct game_win_node *n = kept[k];
+            for (int i = 0; i < nodes && n; i++) {
+                struct game_win_node *next = n->next;
+                free_node(n);
+                n = next;
+            }
+        }
+    }
+    restore_state(&before);
+}
+
+// ---- Win_init, GraphicWin_init and PullDown_init ----
+
+enum { WI_P = 0x500, WI_SIZE = 0xa00, GI_P = 0xb00, GI_SIZE = 0x1000, PD_SIZE = 0xf48 };
+static const struct life_slot wi_slots[] = {
+    {0xcc, -1}, {0xd0, -1}, {0xe0, 0}, {0xe4, -1}, {0xe8, -1}, {0xec, -1}, {0xb4, -1}, {0xb8, -1}, {0xbc, -1}, {0xc0, -1},
+    {0x43c, -1}, {0x440, -1}, {WI_P + 0xcc, -1}, {WI_P + 0xd0, -1}, {WI_P + 0xdc, -1},
+};
+static const struct life_class wi_class = {"WinInit", WI_SIZE, wi_slots, (int)(sizeof wi_slots / sizeof wi_slots[0])};
+static const struct life_slot gi_slots[] = {
+    {0xcc, -1}, {0xd0, -1}, {0xe0, 0}, {0xe4, -1}, {0xe8, -1}, {0xec, -1}, {0xb4, -1}, {0xb8, -1}, {0xbc, -1}, {0xc0, -1},
+    {0x43c, -1}, {0x440, -1}, {GW_PIC, -1}, {GI_P + 0xcc, -1}, {GI_P + 0xd0, -1}, {GI_P + 0xdc, -1},
+};
+static const struct life_class gi_class = {"GraphicWin_init", GI_SIZE, gi_slots, (int)(sizeof gi_slots / sizeof gi_slots[0]), GW_BUFFER, GW_OWN};
+static const struct life_slot pd_slots[] = {
+    {0xcc, -1}, {0xd0, -1}, {0xe0, 0}, {0xb4, -1}, {0xb8, -1}, {0xbc, -1}, {0xc0, -1}, {GW_PIC, -1},
+};
+static const struct life_class pd_class = {"PullDown_init", PD_SIZE, pd_slots, (int)(sizeof pd_slots / sizeof pd_slots[0]), GW_BUFFER, GW_OWN};
+
+// The arguments of one call, and the arena the parent's dialog list may live in (one for each twin, big enough that it
+// never grows: the heap isn't touched).
+static struct {
+    int x, y, cw, ch;
+    const char *title;
+    uint32_t flags;
+    int parent, owner, caption;
+    int pd_arg, pd_colour;
+} args;
+static int32_t caption_sizes[3];
+static uint8_t arena_mem[2][4096];
+static uint32_t arena_obj[2][5];
+static int arena_in_use;
+static void arena_reset(void) {
+    for (int k = 0; k < 2; k++) {
+        memset(arena_mem[k], 0, sizeof arena_mem[k]);
+        arena_obj[k][0] = 0, arena_obj[k][1] = (uint32_t)(uintptr_t)arena_mem[k], arena_obj[k][2] = (uint32_t)(uintptr_t)arena_mem[k];
+        arena_obj[k][3] = sizeof arena_mem[k], arena_obj[k][4] = sizeof arena_mem[k];
+    }
+}
+
+enum { WHICH_WIN, WHICH_GRAPHIC, WHICH_PULLDOWN };
+static void run_init(void *o, int ours, int kind, int p_base) {
+    apply_state(o);
+    struct game_win *w = o, *parent = args.parent ? (struct game_win *)((uint8_t *)o + p_base) : NULL;
+    struct game_win *owner = args.owner ? (struct game_win *)&owner_obj : NULL;
+    const int32_t *caption = args.caption ? caption_sizes : NULL;
+    if (kind == WHICH_PULLDOWN) {
+        *(uint32_t *)game_at(0x9b7b68) = (uint32_t)args.pd_colour;
+        init_result = ours ? pulldown_init(w, args.pd_arg) : orig_pulldown_init(w, args.pd_arg);
+    } else if (kind == WHICH_GRAPHIC) {
+        init_result = ours ? graphic_win_init(w, args.x, args.y, args.cw, args.ch, args.title, args.flags, parent, owner, caption)
+                           : orig_graphic_win_init(w, args.x, args.y, args.cw, args.ch, args.title, args.flags, parent, owner, caption);
+    } else {
+        init_result = ours ? win_init(w, args.x, args.y, args.cw, args.ch, args.title, args.flags, parent, owner, caption)
+                           : orig_win_init(w, args.x, args.y, args.cw, args.ch, args.title, args.flags, parent, owner, caption);
+    }
+}
+static void win_init_orig(void *o, void *x) { (void)x, run_init(o, 0, WHICH_WIN, WI_P); }
+static void win_init_ours(void *o, void *x) { (void)x, run_init(o, 1, WHICH_WIN, WI_P); }
+static void gwin_init_orig(void *o, void *x) { (void)x, run_init(o, 0, WHICH_GRAPHIC, GI_P); }
+static void gwin_init_ours(void *o, void *x) { (void)x, run_init(o, 1, WHICH_GRAPHIC, GI_P); }
+static void pulldown_init_orig(void *o, void *x) { (void)x, run_init(o, 0, WHICH_PULLDOWN, 0); }
+static void pulldown_init_ours(void *o, void *x) { (void)x, run_init(o, 1, WHICH_PULLDOWN, 0); }
+
+// Random arguments (the flags that would make a real scroll bar are given the stand-in's; one that would stop the game
+// is left out) and the state of the globals a call sees.
+static void random_init_args(int graphic) {
+    static const char *const titles[] = {NULL, "", "A title", "a much longer caption, which takes more room on the game's heap"};
+    static const uint32_t bits[] = {0x1, 0x10, 0x20, 0x40, 0x80, 0x400, 0x800, 0x1000, 0x8000, 0x80000, 0x100000, 0x200000, 0x2000000,
+                                    0x10000000, 0x20000000, 0x80000000, 0x4, 0x8};
+    args.flags = 0;
+    for (size_t i = 0; i < sizeof bits / sizeof bits[0]; i++)
+        if (rnd_to(4) == 0) args.flags |= bits[i];
+    if (graphic && rnd_to(3) == 0) args.flags |= 0x40000000;
+    if (graphic && rnd_to(3) == 0) args.flags |= 0x30000000;
+    if (args.flags & 0xc) args.flags |= 0x40;
+    args.parent = rnd_to(3) != 0;
+    if (!args.parent && (args.flags & 0x100000)) args.flags |= 0x1000;
+    args.title = titles[rnd_to(4)];
+    args.x = rnd_to(200) - 60, args.y = rnd_to(200) - 60;
+    args.cw = graphic ? 20 + rnd_to(40) : rnd_to(200), args.ch = graphic ? 16 + rnd_to(30) : rnd_to(200);
+    args.owner = rnd_to(3) == 0, args.caption = rnd_to(2);
+    for (int i = 0; i < 3; i++) caption_sizes[i] = rnd_to(20);
+    wanswer_copy = rnd_to(4) != 0, wanswer_owner = rnd_to(5) == 0 ? 7 : 0;
+    cfg.press1 = rnd_to(3) ? -1 : 0, cfg.press2 = rnd_to(3) ? -1 : 0, cfg.capture = rnd_to(3) ? -1 : 0, cfg.hover = rnd_to(3) ? -1 : 0;
+    cfg.bubble = rnd_to(3) ? -1 : 0, cfg.draw = rnd_to(3) ? -1 : 0;
+    cfg.dc = rnd_to(2);
+    cfg.n_list = rnd_to(6);
+    for (int i = 0; i < 5; i++) cfg.list[i] = -2;
+    cfg.margin = 8 + rnd_to(10), cfg.screen_w = 640 + rnd_to(900), cfg.screen_h = 480 + rnd_to(600);
+}
+
+// The parent block: a few children already, flags that decide whether the window takes the dialog list, a dialog list
+// (on the heap, or in an arena), and the rectangle a negative position counts from.
+static void build_parent(int base) {
+    uint32_t pf = rnd_to(4) == 0 ? 0x1000u : 0;
+    int nch = rnd_to(4), ring_n = rnd_to(3), in_arena = ring_n == 0 && rnd_to(2);
+    int32_t inner[4] = {rnd_to(30), rnd_to(30), 100 + rnd_to(400), 80 + rnd_to(300)};
+    uint8_t *objs[2] = {life_a, life_b};
+    struct game_win_node *dummy[2];
+    if (ring_n) build_ring(base, ring_n, -1, 0, 0, 0, dummy);
+    for (int k = 0; k < 2; k++) {
+        struct game_win *p = wb(objs[k], base);
+        p->flags = pf, p->n_children = nch;
+        for (int i = 0; i < nch; i++) p->children[i] = wb(objs[k], 0);
+        memcpy(p->inner, inner, sizeof inner);
+        if (in_arena) *(uint32_t *)((uint8_t *)p + 0xdc) = (uint32_t)(uintptr_t)arena_obj[k], arena_in_use = 1;
+    }
+}
+
+// Closes what the runs made (with the original's close, which keeps the stand-in vtable) and gives back the parent's list.
+static void cleanup_init(int base, int graphic, int has_parent) {
+    for (int k = 0; k < 2; k++) {
+        uint8_t *o = k ? life_b : life_a;
+        if (graphic) orig_graphic_win_close(wb(o, 0)), orig_graphic_win_dtor(wb(o, 0));
+        else orig_win_close(wb(o, 0));
+        if (has_parent) {
+            struct game_win *p = wb(o, base);
+            if (!*(uint32_t *)((uint8_t *)p + 0xdc)) free_ring(o, base);
+            else p->dlg_head = NULL, p->dlg_count = 0;
+        }
+    }
+}
+
+static void sweep_init(void) {
+    static struct saved_state before;
+    save_state(&before);
+    *game_flip_text = NULL;
+    for (int round = 0; round < 40; round++) {
+        arena_reset();
+        arena_in_use = 0;
+        random_init_args(0);
+        life_fill(&wi_class, life_a, life_b, (uint8_t)rnd());
+        for (int k = 0; k < 2; k++) {
+            uint8_t *o = k ? life_b : life_a;
+            orig_win_ctor(wb(o, 0)), orig_win_ctor(wb(o, WI_P));
+            wb(o, 0)->vtable = wstub_vt;
+        }
+        // What the window had before (the init closes it first): made-up values, frame buffers, a caption, children.
+        scribble(0);
+        if (rnd_to(2)) life_text(0xe0, "an old caption");
+        for (int i = 0; i < 4; i++)
+            if (rnd_to(2)) life_objects(0xb4 + 4 * i, 1);
+        for (int i = 0; i < 3; i++)
+            if (rnd_to(4) == 0) life_objects(0xe4 + 4 * i, 1);
+        if (args.parent) build_parent(WI_P);
+        life_run(&stats_win_init, &wi_class, win_init_orig, win_init_ours, NULL, state_words, n_state_words);
+        if (arena_in_use && (arena_obj[0][2] - (uint32_t)(uintptr_t)arena_mem[0]) != (arena_obj[1][2] - (uint32_t)(uintptr_t)arena_mem[1]))
+            hooks_mismatch(&stats_win_init, ": the dialog list's arena was used differently");
+        cleanup_init(WI_P, 0, args.parent);
+        restore_state(&before);
+    }
+}
+
+// The Buffer of two GraphicWins an init made: the word at 0x448 names the window (so it is compared as where in its block it
+// lies), then the Buffers are compared with that word cleared.
+static void check_gw_buffer(struct hook_stats *s) {
+    uint32_t wa = *(uint32_t *)(life_a + 0x448), wb = *(uint32_t *)(life_b + 0x448);
+    if (wa != wb && wa - (uint32_t)(uintptr_t)life_a != wb - (uint32_t)(uintptr_t)life_b)
+        hooks_mismatch(s, " (Buffer): the window word at 0x448 = 0x%x, original 0x%x", (unsigned)wb, (unsigned)wa);
+    *(uint32_t *)(life_a + 0x448) = *(uint32_t *)(life_b + 0x448) = 0;
+    life_buffer_check_at(s, GW_BUFFER);
+}
+
+static void sweep_graphic_init(void) {
+    static struct saved_state before;
+    save_state(&before);
+    *game_flip_text = NULL;
+    for (int round = 0; round < 10; round++) {
+        arena_reset();
+        arena_in_use = 0;
+        random_init_args(1);
+        life_fill(&gi_class, life_a, life_b, (uint8_t)rnd());
+        for (int k = 0; k < 2; k++) {
+            uint8_t *o = k ? life_b : life_a;
+            orig_graphic_win_ctor(wb(o, 0)), orig_win_ctor(wb(o, GI_P));
+            wb(o, 0)->vtable = wstub_vt;
+        }
+        scribble(0);
+        if (args.parent) build_parent(GI_P);
+        life_run(&stats_graphic_win_init, &gi_class, gwin_init_orig, gwin_init_ours, NULL, state_words, n_state_words);
+        check_gw_buffer(&stats_graphic_win_init);
+        if (arena_in_use && (arena_obj[0][2] - (uint32_t)(uintptr_t)arena_mem[0]) != (arena_obj[1][2] - (uint32_t)(uintptr_t)arena_mem[1]))
+            hooks_mismatch(&stats_graphic_win_init, ": the dialog list's arena was used differently");
+        cleanup_init(GI_P, 1, args.parent);
+        restore_state(&before);
+    }
+}
+
+static void sweep_pulldown_init(void) {
+    static struct saved_state before;
+    save_state(&before);
+    *game_flip_text = NULL;
+    for (int round = 0; round < 8; round++) {
+        random_init_args(1);
+        args.parent = 0, args.owner = 0;
+        args.pd_arg = rnd_to(100), args.pd_colour = rnd_to(2) ? 0 : 1 + rnd_to(50);
+        cfg.n_list = rnd_to(4);
+        life_fill(&pd_class, life_a, life_b, (uint8_t)rnd());
+        for (int k = 0; k < 2; k++) {
+            uint8_t *o = k ? life_b : life_a;
+            ((void *(THISCALL *)(void *))(uintptr_t)game_va(0x5f8800))(o);
+            wb(o, 0)->vtable = wstub_vt;
+        }
+        life_run(&stats_pulldown_init, &pd_class, pulldown_init_orig, pulldown_init_ours, NULL, state_words, n_state_words);
+        check_gw_buffer(&stats_pulldown_init);
+        for (int k = 0; k < 2; k++) orig_graphic_win_dtor(wb(k ? life_b : life_a, 0));
+        restore_state(&before);
+    }
+}
+
+static void life_sweep_win_init(void) {
+    if (!game_mem_get || *game_ddraw || !hooks_dc_same || !game_string_alloc) return;
+    fill_wstub_vt();
+    collect_state_words();
+    for (int round = 0; round < 40; round++) sweep_close();
+    sweep_init();
+    sweep_graphic_init();
+    sweep_pulldown_init();
 }
 
 static void win_sweep(void) {
@@ -4109,6 +5039,7 @@ static void win_sweep(void) {
     }
     life_sweep_win();
     life_sweep_caption();
+    life_sweep_win_init();
     globals_restore(&saved);
     hooks_sweeping = sweeping;
 }
@@ -4254,5 +5185,9 @@ static const struct hook win_hooks[] = {
     // push esi; push edi; mov esi, ecx; call win_close
     HOOK(0x5edf50, win_set_caption, 0x56, 0x8b, 0xf1, 0x57, 0x8b, 0x86, 0xe0, 0x00, 0x00, 0x00),  // push esi; mov esi, ecx; push edi; mov eax, [esi+0xe0]
     HOOK_CALL(0x5d4e40, graphic_win_close, 0x56, 0x57, 0x8b, 0xf1, 0xe8, 0xf7, 0x67, 0x01, 0x00),
+    HOOK(0x5eb640, win_close, 0x51, 0xa1, 0xcc, 0x7a, 0x9b, 0x00, 0x8b, 0x15, 0xd0, 0x7a, 0x9b, 0x00),  // push ecx; mov eax, [press1]; mov edx, [press2]
+    HOOK(0x5ebd80, win_init, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00, 0x6a, 0xff, 0x68, 0xc2, 0x2c, 0x66, 0x00),  // mov eax, fs:0; push -1; push handler
+    HOOK(0x5d4ef0, graphic_win_init, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00, 0x6a, 0xff, 0x68, 0x3f, 0x2b, 0x66, 0x00),
+    HOOK(0x5f8920, pulldown_init, 0xa1, 0x68, 0x7b, 0x9b, 0x00, 0x56, 0x85, 0xc0, 0x8b, 0xf1),  // mov eax, [0x9b7b68]; push esi; test eax, eax
 };
 struct hook_module win_module = {"win", win_hooks, HOOK_COUNT(win_hooks), win_sweep, NULL, -1};

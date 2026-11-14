@@ -49,7 +49,7 @@ static void freed_slots(const struct life_class *c, const struct quiet_heap_log 
 const char *life_twin(const struct life_class *c, void *a, void *b, life_fn orig, life_fn ours, void *arg,
                       uint32_t *const *globals, int n_globals) {
     static char diff[200];
-    uint32_t before_a[32] = {0}, before_b[32] = {0}, saved[16], after_a[16], after_b[16];
+    uint32_t before_a[32] = {0}, before_b[32] = {0}, saved[32], after_a[32], after_b[32];
     static struct quiet_heap_log log_a, log_b;
     for (int s = 0; s < c->n_slots && s < 32; s++) before_a[s] = word(a, c->slots[s].off), before_b[s] = word(b, c->slots[s].off);
     for (int g = 0; g < n_globals; g++) saved[g] = *globals[g];

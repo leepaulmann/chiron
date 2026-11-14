@@ -563,6 +563,21 @@ static void test_life(void) {
 
 }
 
+static int held_answer, keystate;
+static uint32_t clock_;
+static int THIS s_0xa4(void *o, int a) { return rec(0xa4, o, a, 0, 0), held_answer; }
+static int THIS s_0xa8(void *o, int a) { return rec(0xa8, o, a, 0, 0), 0; }
+static int THIS s_0xac(void *o, int a) { return rec(0xac, o, a, 0, 0), 0; }
+static int THIS s_0x50(void *o, int a, int b) { return rec(0x50, o, a, b, 0), 0; }
+#define STDC __attribute__((stdcall))
+static uint32_t STDC t_clock(void) { return clock_; }
+static void STDC t_sleep(uint32_t ms) { rec(0x7002, NULL, (int)ms, 0, 0); }
+static uint32_t STDC t_set_timer(uint32_t hwnd, uint32_t id, uint32_t ms, void *proc) { return rec(0x7003, (void *)(uintptr_t)id, (int)ms, (int)hwnd, 0), id; }
+static int STDC t_kill_timer(uint32_t hwnd, uint32_t id) { return rec(0x7004, (void *)(uintptr_t)id, 0, 0, 0), 1; }
+static void t_clear_bubble(void) { rec(0x7001, NULL, 0, 0, 0); }
+static int16_t STDC t_async(int key) { return (int16_t)keystate; }
+static int STDC t_metrics(int index) { return 0; }
+
 int main(void) {
     game_win_capture = &capture, game_win_hover = &hover, game_win_press1 = &press1, game_win_press2 = &press2, game_win_cur = &cur;
     game_win_press_inside = &inside, game_button_hooks = (void *)hooks, game_button_defaults = &defaults, game_button_fonts = &fonts;
@@ -619,6 +634,126 @@ int main(void) {
     ncalls = 0, busy = 1, B[0].disabled = 1;
     button_on_left_click(&B[0], 0, 0);
     EXPECT(ncalls, 1), expect_call(0, 0x401, NULL, -1, 0, 0);
+
+    // The mouse: a press, a hold, a move and a release. The repeat's Time object (the delay at 0xa44) is started through the game's
+    // SetTimer (stand-in), the clock and Sleep are stand-ins too.
+    {
+        life_time_standins();
+        game_time_get_time = t_clock, game_sleep = t_sleep, game_set_timer = t_set_timer, game_kill_timer = t_kill_timer;
+        game_win_clear_bubble = t_clear_bubble, game_get_async_key_state = t_async, game_get_system_metrics = t_metrics;
+        game_time_set_event = (void *)t_set_timer;
+        vt[0xa4 / 4] = s_0xa4, vt[0xa8 / 4] = s_0xa8, vt[0xac / 4] = s_0xac, vt[0x50 / 4] = s_0x50;
+        uint8_t snd_first[16], snd_repeat[16], snd_up[16];
+        *(void ***)snd_first = *(void ***)snd_repeat = *(void ***)snd_up = vt;
+        // First press: capture is taken (if free) and hover let go, the bubble text goes, the parent hears it, the repeat starts.
+        reset();
+        *(void **)((uint8_t *)&P + 0x78) = snd_first, *(void **)((uint8_t *)&P + 0x70) = snd_repeat, *(void **)((uint8_t *)&P + 0x74) = snd_up;
+        capture = NULL, hover = &B[0].win, B[0].repeat_first = 500, B[0].on_press = cb_click, clock_ = 5000, cur = NULL;
+        button_on_left_down(&B[0], 1, 2);
+        EXPECT(capture == &B[0].win, 1), EXPECT(hover == NULL, 1), EXPECT(B[0].pressed, 1);
+        EXPECT(ncalls, 6);
+        expect_call(0, 0x7001, NULL, 0, 0, 0), expect_call(1, 0x5c, snd_first, 0, 0, 0), expect_call(2, 0x1c, snd_first, 0, 0, 0);
+        expect_call(3, 0xac, &P, 10, 0, 0), expect_call(4, 0xf8, &B[0], 0, 0, 0), expect_call(5, 0x7003, B[0].timer_repeat, 500, 1, 0);
+        struct game_time *rep = (struct game_time *)B[0].timer_repeat;
+        EXPECT(rep->cb2 == (void *)(uintptr_t)game_va(0x607b10), 1), EXPECT((intptr_t)rep->arg, 1), EXPECT(rep->arg2, (int)(intptr_t)&B[0]);
+        EXPECT(rep->delay, 500), EXPECT(rep->resolution, 5), EXPECT(rep->flags, 1), EXPECT(rep->id, (uint32_t)(uintptr_t)B[0].timer_repeat);  // (a pulse)
+        EXPECT(B[0].press_time, 0), EXPECT(cur == NULL, 1);  // (the time is noted only when pressed again)
+        // Another button has the capture already: it keeps it, and the hover stays; a busy sound isn't started again; no repeat at -1.
+        reset();
+        *(void **)((uint8_t *)&P + 0x78) = snd_first;
+        capture = &B[1].win, hover = &B[2].win, B[0].repeat_first = -1, busy = 1;
+        button_on_left_down(&B[0], 1, 2);
+        EXPECT(capture == &B[1].win, 1), EXPECT(hover == &B[2].win, 1), EXPECT(ncalls, 4);
+        expect_call(1, 0x5c, snd_first, 0, 0, 0), expect_call(2, 0xac, &P, 10, 0, 0), expect_call(3, 0xf8, &B[0], 0, 0, 0);
+        // Pressed again while held: the time is noted, the window the parent draws with is the parent, the sound at 0x70 plays, the
+        // parent is asked (slot 0xa4) whether to go on, the repeat's pulse starts if it says yes, and the button's own function is last.
+        reset();
+        *(void **)((uint8_t *)&P + 0x70) = snd_repeat;
+        capture = &B[0].win, B[0].pressed = 1, B[0].repeat_first = 40 + 20, B[0].on_press = cb_click, clock_ = 7777;
+        held_answer = 1;
+        button_on_left_down(&B[0], 1, 2);
+        EXPECT(B[0].press_time, 7777), EXPECT(cur == &P, 1), EXPECT(ncalls, 6);
+        expect_call(0, 0x7001, NULL, 0, 0, 0), expect_call(1, 0x5c, snd_repeat, 0, 0, 0), expect_call(2, 0x1c, snd_repeat, 0, 0, 0);
+        expect_call(3, 0xa4, &P, 10, 0, 0), expect_call(4, 0x7003, B[0].timer_repeat, 60, 1, 0), expect_call(5, 0x401, NULL, 10, 0, 0);
+        ncalls = 0, held_answer = 0;
+        button_on_left_down(&B[0], 1, 2);  // (no: the parent answers 0, no pulse)
+        EXPECT(ncalls, 5), expect_call(3, 0xa4, &P, 10, 0, 0), expect_call(4, 0x401, NULL, 10, 0, 0);
+        ncalls = 0, B[0].disabled = 1;  // a disabled button only calls its own function
+        button_on_left_down(&B[0], 1, 2);
+        EXPECT(ncalls, 2), expect_call(1, 0x401, NULL, 10, 0, 0);
+        ncalls = 0, B[0].disabled = 0, B[0].on_press = NULL, held_answer = 1, B[0].repeat_first = -1;
+        button_on_left_down(&B[0], 1, 2);
+        EXPECT(ncalls, 4);  // bubble, two for the sound, the parent's question; no pulse at -1 and no function
+
+        // The mouse over the button's rectangle (the Buffer's at 0x474, taken to start at 0, 0), with the press windows deciding who cares.
+        int32_t *full = (int32_t *)((uint8_t *)&B[0] + 0x474);
+        full[0] = 10, full[1] = 20, full[2] = 50, full[3] = 40;
+        reset();
+        *(void **)((uint8_t *)&P + 0x78) = snd_first, *(void **)((uint8_t *)&P + 0x74) = snd_up;
+        full = (int32_t *)((uint8_t *)&B[0] + 0x474);
+        full[0] = 10, full[1] = 20, full[2] = 50, full[3] = 40, B[0].repeat_first = 500;
+        press1 = NULL, press2 = &B[0].win, inside = 1;
+        // In, while the button is up: it goes down again (the repeat starts, repeating), with the sound at 0x78.
+        button_on_mouse_move(&B[0], 39, 19);
+        EXPECT(B[0].pressed, 1), EXPECT(ncalls, 5);
+        expect_call(0, 0x7003, B[0].timer_repeat, 500, 1, 0), expect_call(1, 0x5c, snd_first, 0, 0, 0), expect_call(2, 0x1c, snd_first, 0, 0, 0);
+        expect_call(3, 0xac, &P, 10, 0, 0), expect_call(4, 0xf8, &B[0], 0, 0, 0);
+        EXPECT(((struct game_time *)B[0].timer_repeat)->flags, 0);  // (not a pulse)
+        // Just out (the rectangle is 40 by 20): it goes up, the timer stopped (a timer id is there to kill), with the sound at 0x74.
+        ncalls = 0;
+        button_on_mouse_move(&B[0], 40, 5);
+        EXPECT(B[0].pressed, 0), EXPECT(ncalls, 5);
+        expect_call(0, 0x7004, B[0].timer_repeat, 0, 0, 0), expect_call(1, 0x5c, snd_up, 0, 0, 0), expect_call(2, 0x1c, snd_up, 0, 0, 0);
+        expect_call(3, 0xa8, &P, 10, 0, 0), expect_call(4, 0xf8, &B[0], 0, 0, 0);
+        // Out while it is up: nothing. In while it is held: only if the mouse button is down, and then the button's own slot 0x50.
+        ncalls = 0;
+        button_on_mouse_move(&B[0], -1, 5);
+        EXPECT(ncalls, 0);
+        B[0].pressed = 1;
+        keystate = 0;
+        button_on_mouse_move(&B[0], 5, 5);
+        EXPECT(ncalls, 0);
+        keystate = 0x8000;
+        button_on_mouse_move(&B[0], 5, 6);
+        EXPECT(ncalls, 1), expect_call(0, 0x50, &B[0], 5, 6, 0);
+        // Not the press window, or the press isn't inside: nothing.
+        ncalls = 0, press2 = &B[1].win;
+        button_on_mouse_move(&B[0], 5, 6);
+        EXPECT(ncalls, 0);
+        press1 = &B[0].win, press2 = NULL, inside = 0;
+        button_on_mouse_move(&B[0], 5, 6);
+        EXPECT(ncalls, 0);
+        press1 = &B[1].win, press2 = &B[0].win, inside = 1;  // (the first of the two that is set is the one that counts)
+        button_on_mouse_move(&B[0], 5, 6);
+        EXPECT(ncalls, 0);
+
+        // A release: capture and hover go (the owner told), the repeat stops, a press shorter than its minimum sleeps the rest, and a
+        // held button goes up (sound at 0x74, the parent told, redraw).
+        reset();
+        *(void **)((uint8_t *)&P + 0x74) = snd_up;
+        capture = hover = &B[0].win, B[0].pressed = 1, B[0].press_ms = 50, B[0].press_time = 9000, clock_ = 9020;
+        ((struct game_time *)B[0].timer_repeat)->id = 55, ((struct game_time *)B[0].timer_repeat)->delay = 500;
+        button_on_left_up(&B[0], 0, 0);
+        EXPECT(capture == NULL, 1), EXPECT(hover == NULL, 1), EXPECT(B[0].pressed, 0), EXPECT(ncalls, 7);
+        expect_call(0, 0x10, &B[0], 0, 0, 0), expect_call(1, 0x7004, (void *)55, 0, 0, 0), expect_call(2, 0x7002, NULL, 30, 0, 0);
+        expect_call(3, 0x5c, snd_up, 0, 0, 0), expect_call(4, 0x1c, snd_up, 0, 0, 0), expect_call(5, 0xa8, &P, 10, 0, 0);
+        expect_call(6, 0xf8, &B[0], 0, 0, 0);
+        // Long enough: no sleep; not held (or held in a group's way, another value): nothing more; another button's capture stays.
+        ncalls = 0, B[0].pressed = 1, capture = &B[1].win, clock_ = 9050;
+        button_on_left_up(&B[0], 0, 0);
+        EXPECT(capture == &B[1].win, 1), EXPECT(ncalls, 4);  // (no sleep for a press as long as its minimum; the timer is already stopped)
+        ncalls = 0, B[0].pressed = 2;
+        button_on_left_up(&B[0], 0, 0);
+        EXPECT(B[0].pressed, 2), EXPECT(ncalls, 0);
+        // The clock went backwards (an unsigned difference): no sleep. No parent: only the capture and hover go.
+        B[0].pressed = 0, B[0].press_time = 9500, clock_ = 9020, B[0].press_ms = 50;
+        button_on_left_up(&B[0], 0, 0);
+        EXPECT(ncalls, 0);
+        capture = hover = &B[0].win, B[0].win.parent = NULL, B[0].pressed = 1;
+        button_on_left_up(&B[0], 0, 0);
+        EXPECT(capture == NULL, 1), EXPECT(hover == NULL, 1), EXPECT(B[0].pressed, 1), EXPECT(ncalls, 1);
+        expect_call(0, 0x10, &B[0], 0, 0, 0);
+    }
 
     // A group: the selected button is set to 0 and the clicked one to 1, and the parent hears of it.
     reset();

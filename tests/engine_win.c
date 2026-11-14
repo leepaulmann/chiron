@@ -771,6 +771,316 @@ static void test_life(void) {
 
 }
 
+// ---- Win_close, Win_init, GraphicWin_init and PullDown_init ----
+
+// Stand-ins for the slots they call: each logs (slot, window, argument) and answers from a variable.
+static struct {
+    int slot;
+    void *w;
+    int a;
+} wlog_[64];
+static int nwlog, copy_answer_, owner_answer_;
+static uint8_t static_bar_obj_[16];
+static void wrec_(int slot, void *w, int a) {
+    if (nwlog < 64) wlog_[nwlog].slot = slot, wlog_[nwlog].w = w, wlog_[nwlog].a = a;
+    nwlog++;
+}
+static int WIN_THIS wt_hide(struct game_win *w) { return wrec_(0x8, w, 0), 0; }
+static int WIN_THIS wt_lost(struct game_win *w) { return wrec_(0x10, w, 0), 0; }
+static int WIN_THIS wt_make_bar(struct game_win *w) { return wrec_(0x18, w, 0), (int)(intptr_t)static_bar_obj_; }
+static int WIN_THIS wt_bar_map(struct game_win *w, void *bar) {
+    return wrec_(0x1c, w, bar == NULL), bar == (void *)static_bar_obj_ ? 0 : (int)(intptr_t)bar;
+}
+static int WIN_THIS wt_copy(struct game_win *w) { return wrec_(0xf4, w, 0), copy_answer_; }
+static int WIN_THIS wt_layout(struct game_win *w) { return wrec_(0x108, w, 0), 0; }
+static int WIN_THIS wt_caption(struct game_win *w, int a, int b) { return wrec_(0x128, w, a * 100 + b), 0; }
+static int WIN_THIS wt_owner(struct game_win *w, struct game_win *x) { return wrec_(0x168, w, x != NULL), owner_answer_; }
+static int WIN_THIS wt_nc_height(struct game_win *w) { return 0; }
+static void *wt_vtable[0x180 / 4];
+static int fakes_deleted_;
+static void WIN_THIS wt_fake_delete(void *o, int flag) { fakes_deleted_ += flag; }
+static void *wt_fake_vt[1] = {(void *)wt_fake_delete};
+static void *wt_fake_a = &wt_fake_vt, *wt_fake_c = &wt_fake_vt;
+
+static int new_calls_, new_fails_;
+static void *wt_new(size_t n) { return ++new_calls_ == new_fails_ ? NULL : calloc(1, n); }
+static void WIN_THIS wt_scroll_init(void *bar, int a, int b, int c, void *w, int d) {
+    wrec_(0x7000 + (d == -1), bar, a * 1000000 + b * 10000 + c * 100 + (w != NULL));
+}
+static void WIN_THIS wt_caption_buttons(void *w) { wrec_(0x7100, w, 0); }
+static void WIN_THIS wt_min_size(void *w) { wrec_(0x7200, w, 0); }
+static int STD wt_message_box(void *w, const char *t, const char *c, int type) { return 0; }
+static void wt_exit(int code) {}
+static void wt_flip_restore(const int32_t *box, int arg) { wrec_(0x7300, (void *)box, arg); }
+static void *wt_dc_;
+static char *wt_flip_text_;
+static void wt_clear_bubble(void) {}
+
+static struct game_win W1, P1, C0, C1, X1, Y1;
+static void wt_win(struct game_win *w) {
+    memset(w, 0xcc, sizeof *w);
+    win_ctor(w);
+    w->vtable = wt_vtable;
+}
+
+static void test_close_init(void) {
+    static int32_t screen_w = 640, screen_h = 480, margin = 17, flip_box[4] = {1, 2, 3, 4};
+    life_image_init();
+    life_buffer_standins();
+    game_buffer_vtable = wt_fake_vt;  // (the frame buffers a window makes are deleted through it)
+    wt_vtable[0x8 / 4] = (void *)wt_hide, wt_vtable[0x10 / 4] = (void *)wt_lost, wt_vtable[0x18 / 4] = (void *)wt_make_bar;
+    wt_vtable[0x1c / 4] = (void *)wt_bar_map, wt_vtable[0xf4 / 4] = (void *)wt_copy, wt_vtable[0x108 / 4] = (void *)wt_layout;
+    wt_vtable[0x128 / 4] = (void *)wt_caption, wt_vtable[0x168 / 4] = (void *)wt_owner, wt_vtable[0x16c / 4] = (void *)wt_nc_height;
+    game_operator_new = wt_new, game_scroll_init_vert_nc = wt_scroll_init, game_scroll_init_horz_nc = wt_scroll_init;
+    game_win_do_caption_buttons = wt_caption_buttons, game_graphic_win_compute_min_size = wt_min_size;
+    game_message_box_a = wt_message_box, game_exit = wt_exit, game_flip_restore = wt_flip_restore;
+    game_win_clear_bubble = wt_clear_bubble;
+    game_dc = &wt_dc_, game_flip_text = &wt_flip_text_, game_win_screen_w = &screen_w, game_win_screen_h = &screen_h;
+    game_win_nc_margin = &margin;
+    game_win_press1 = &press1_, game_win_press2 = &press2_, game_win_capture = &capture_, game_win_hover = &hover_;
+    game_win_cur = &cur_, game_win_parents = parents, game_win_parent_n = &parent_n;
+    game_flip_box = flip_box;
+
+    // --- Win_close ---
+    // A child of P: the press, capture and hover that named it are let go (the capture's owner is told), the window is hidden,
+    // taken out of P's list (hidden again there), and set back as the constructor leaves it; what it owned is freed.
+    wt_win(&P1), wt_win(&W1), wt_win(&X1), wt_win(&Y1);
+    P1.n_children = 3, P1.children[0] = &X1, P1.children[1] = &W1, P1.children[2] = &Y1;
+    W1.parent = &P1, W1.flags = 0x1234, W1.flags2 = 7, W1.n_children = 0;
+    OW(&W1, 0x19c) = 5, OW(&W1, 0xac) = 6, OW(&W1, 0x134) = 7, OW(&W1, 0x188) = 8, OW(&W1, 0xf0) = 9, OW(&W1, 0x1a0) = 0;
+    OW(&W1, 0x13c) = 3, OW(&W1, 0x16c) = 4, OW(&W1, 0x420) = 5, OW(&W1, 0xf4) = 6, OW(&W1, 0x12c) = 10, OW(&W1, 0xfc) = 11;
+    W1.title = strdup("caption");
+    OW(&W1, 0xe4) = (uint32_t)(uintptr_t)&wt_fake_a, OW(&W1, 0xec) = (uint32_t)(uintptr_t)&wt_fake_a;
+    OW(&W1, 0xb4) = (uint32_t)(uintptr_t)&wt_fake_c, OW(&W1, 0xc0) = (uint32_t)(uintptr_t)&wt_fake_c;
+    game_free = life_free;
+    life_freed = 0, fakes_deleted_ = 0, nwlog = 0;
+    press1_ = &W1, press2_ = NULL, capture_ = &W1, hover_ = &W1, wt_dc_ = &W1;
+    win_close(&W1);
+    EXPECT(press1_ == NULL, 1), EXPECT(capture_ == NULL, 1), EXPECT(hover_ == NULL, 1), EXPECT(wt_dc_ == NULL, 1);
+    EXPECT(nwlog, 3), EXPECT(wlog_[0].slot, 0x10), EXPECT(wlog_[1].slot, 0x8), EXPECT(wlog_[2].slot, 0x8), EXPECT(wlog_[2].w == &W1, 1);
+    EXPECT(P1.n_children, 2), EXPECT(P1.children[0] == &X1, 1), EXPECT(P1.children[1] == &Y1, 1);
+    EXPECT(W1.parent == NULL, 1), EXPECT(W1.root == &W1, 1), EXPECT(W1.flags, 0), EXPECT(W1.flags2, 0), EXPECT(OW(&W1, 0x19c), 0);
+    EXPECT(OW(&W1, 0xac), 0), EXPECT(OW(&W1, 0x134), 0), EXPECT(OW(&W1, 0x188), 0), EXPECT(OW(&W1, 0xf0), 0), EXPECT(OW(&W1, 0x1a0), 2);
+    EXPECT(OW(&W1, 0x13c), 0), EXPECT(OW(&W1, 0x16c), 0), EXPECT(OW(&W1, 0x420), 0), EXPECT(OW(&W1, 0xf4), 0);
+    EXPECT(OW(&W1, 0x12c), 0), EXPECT(OW(&W1, 0x130), 1), EXPECT(OW(&W1, 0xfc), IMGW(0x9b7af0)), EXPECT(OW(&W1, 0x128), IMGW(0x696d54));
+    EXPECT(OW(&W1, 0x174), 1), EXPECT(OW(&W1, 0x180), 1), EXPECT(W1.title == NULL, 1), EXPECT(life_freed, 1);
+    EXPECT(fakes_deleted_, 4), EXPECT(OW(&W1, 0xe4), 0), EXPECT(OW(&W1, 0xec), 0), EXPECT(OW(&W1, 0xb4), 0), EXPECT(OW(&W1, 0xc0), 0);
+    EXPECT(OW(&W1, 0x4), IMGW(0x9bc080)), EXPECT(OW(&W1, 0xc), IMGW(0x9bc084));  // the base class's defaults are back
+
+    // A top-level window leaves the game's list (hidden twice); a window that isn't in it is just hidden once.
+    wt_win(&W1), wt_win(&X1);
+    parents[0] = &X1, parents[1] = &W1, parents[2] = &Y1, parent_n = 3, nwlog = 0;
+    win_close(&W1);
+    EXPECT(parent_n, 2), EXPECT(parents[0] == &X1, 1), EXPECT(parents[1] == &Y1, 1), EXPECT(nwlog, 2);
+    nwlog = 0;
+    win_close(&W1);
+    EXPECT(parent_n, 2), EXPECT(nwlog, 1);
+
+    // The children close themselves, each leaving the list, so that the loop skips every other one; a press that went down in a
+    // child (or a window below one) is let go too.
+    wt_win(&W1), wt_win(&C0), wt_win(&C1), wt_win(&X1);
+    W1.n_children = 2, W1.children[0] = &C0, W1.children[1] = &C1, C0.parent = &W1, C1.parent = &W1;
+    C0.n_children = 1, C0.children[0] = &X1, X1.parent = &C0;
+    press1_ = NULL, press2_ = &X1, parent_n = 0;
+    win_close(&W1);
+    EXPECT(press2_ == NULL, 1), EXPECT(C0.parent == NULL, 1), EXPECT(X1.parent == NULL, 1), EXPECT(C1.parent == &W1, 1), EXPECT(W1.n_children, 0);
+    press1_ = &Y1, press2_ = &X1;  // the first one that is set decides: Y1 is not below W1
+    wt_win(&W1), wt_win(&C0), W1.n_children = 1, W1.children[0] = &C0, C0.parent = &W1;
+    win_close(&W1);
+    EXPECT(press1_ == &Y1, 1), EXPECT(press2_ == &X1, 1);
+    press1_ = press2_ = NULL;
+
+    // A scroll bar is first asked of the window (slot 0x1c) when flag 0x40 is set: the static bar maps to none, so isn't deleted.
+    wt_win(&W1);
+    W1.flags = 0x40;
+    OW(&W1, 0x43c) = (uint32_t)(uintptr_t)static_bar_obj_, OW(&W1, 0x440) = (uint32_t)(uintptr_t)&wt_fake_a;
+    fakes_deleted_ = 0, nwlog = 0, parent_n = 0;
+    win_close(&W1);
+    EXPECT(fakes_deleted_, 1), EXPECT(OW(&W1, 0x43c), 0), EXPECT(OW(&W1, 0x440), 0), EXPECT(nwlog, 3);  // hide, two maps
+
+    // The dialog list of the parent: the node is found from the cursor, taken out of the ring (and freed with its block, unless the
+    // list is shared), the head and cursor follow, and the count and index are set again.
+    for (int shared = 0; shared < 2; shared++) {
+        wt_win(&P1), wt_win(&W1);
+        struct game_win_node *n[3];
+        void *pay[3];
+        for (int i = 0; i < 3; i++) n[i] = calloc(1, sizeof *n[i]), pay[i] = calloc(1, 8), n[i]->pad8 = (int32_t)(uintptr_t)pay[i];
+        for (int i = 0; i < 3; i++) n[i]->next = n[(i + 1) % 3], n[i]->prev = n[(i + 2) % 3];
+        n[0]->win = &X1, n[1]->win = &Y1, n[2]->win = &W1;
+        P1.dlg_head = n[0], P1.dlg_cur = n[1], P1.dlg_count = 3, P1.dlg_index = 1;
+        OW(&P1, 0xdc) = (uint32_t)shared;
+        W1.parent = &P1, W1.flags = 0x100000;
+        P1.n_children = 1, P1.children[0] = &W1;
+        life_freed = 0;
+        win_close(&W1);
+        EXPECT(P1.dlg_count, 2), EXPECT(P1.dlg_head == n[0], 1), EXPECT(P1.dlg_cur == n[0], 1), EXPECT(P1.dlg_index, 1);
+        EXPECT(n[1]->next == n[0], 1), EXPECT(n[0]->prev == n[1], 1), EXPECT(life_freed, shared ? 0 : 2);
+        if (shared) free(pay[2]), free(n[2]);
+        // The head itself: the head moves to the next.
+        wt_win(&W1);
+        n[0]->win = &W1, W1.parent = &P1, W1.flags = 0x100000, P1.dlg_cur = n[1], P1.n_children = 1, P1.children[0] = &W1;
+        life_freed = 0;
+        win_close(&W1);
+        EXPECT(P1.dlg_count, 1), EXPECT(P1.dlg_head == n[1], 1), EXPECT(P1.dlg_cur == n[1], 1), EXPECT(P1.dlg_index, 0);
+        if (shared) free(pay[0]), free(n[0]);
+        free(pay[1]), free(n[1]);
+        // The last node: the list is empty, the head is cleared.
+        wt_win(&W1), wt_win(&P1);
+        OW(&P1, 0xdc) = (uint32_t)shared;
+        n[2] = calloc(1, sizeof *n[2]), n[2]->next = n[2]->prev = n[2], n[2]->win = &W1;
+        P1.dlg_head = P1.dlg_cur = n[2], P1.dlg_count = 1;
+        W1.parent = &P1, W1.flags = 0x100000, P1.n_children = 1, P1.children[0] = &W1;
+        win_close(&W1);
+        EXPECT(P1.dlg_count, 0), EXPECT(P1.dlg_head == NULL, 1), EXPECT(P1.dlg_index, -1);
+        if (shared) free(n[2]);
+    }
+
+    // The bubble text hangs from the window: with no text shown, the close leaves the word alone (taking the text away redraws
+    // the screen through win_flip, which this test can't run).
+    wt_win(&W1);
+    {
+        struct game_win **bubble = game_at(0x9b7a4c);
+        *bubble = &W1, wt_flip_text_ = NULL, nwlog = 0;
+        win_close(&W1);
+        EXPECT(*bubble == &W1, 1), EXPECT(nwlog, 1);
+        *bubble = NULL;
+    }
+
+    // --- Win_init ---
+    // A window with a frame, a title, a parent and flags that ask for nothing else: the frame buffers are made, the sizes
+    // set from the caption triple, the place counted from the parent, the title copied, the frame laid out (slot 0x108).
+    {
+        static int32_t caption[3] = {21, 5, -1};
+        wt_win(&P1), wt_win(&W1);
+        P1.inner[0] = 10, P1.inner[1] = 20, P1.inner[2] = 210, P1.inner[3] = 120;
+        P1.n_children = 1, P1.children[0] = &X1;
+        game_mem_get = life_mem_get;
+        nwlog = 0, parent_n = 0;
+        int r = win_init(&W1, -10, -20, 30, 40, "A title", 0x1, &P1, NULL, caption);
+        EXPECT(r, 0), EXPECT(W1.caption_h, 21), EXPECT(W1.border, 5), EXPECT(W1.bottom, -1);
+        EXPECT(W1.nc_buf_b4 != NULL, 1), EXPECT(W1.nc_buf_b8 != NULL, 1), EXPECT(W1.nc_buf_bc != NULL, 1), EXPECT(W1.nc_buf_c0 != NULL, 1);
+        EXPECT(W1.flags, 0x11), EXPECT(W1.flags2, 2 | 4), EXPECT(W1.parent == &P1, 1);
+        EXPECT(strcmp(W1.title, "A title"), 0), EXPECT(P1.n_children, 2), EXPECT(P1.children[0] == &W1, 1), EXPECT(P1.children[1] == &X1, 1);
+        EXPECT(cur_ == &W1, 1), EXPECT(W1.title_h, 21), EXPECT(W1.resize_border, 0), EXPECT(W1.root == &W1, 1);
+        // The frame lies at x = -10 + 200 - 30 = 160, y = -20 + 100 - 40 = 40; the client area is the frame less its edges, from 0.
+        int32_t want[4] = {160, 40, 190, 80};
+        win_nonclient_to_client_2(&W1, want);
+        EXPECT(W1.outer[0], 160), EXPECT(W1.outer[1], 40), EXPECT(W1.outer[2], 190), EXPECT(W1.outer[3], 80);
+        EXPECT(W1.inner[0], want[0] - 160), EXPECT(W1.inner[1], want[1] - 40), EXPECT(W1.inner[2], want[2] - 160), EXPECT(W1.inner[3], want[3] - 40);
+        EXPECT(W1.clip[0], W1.inner[0]), EXPECT(W1.clip[1], W1.inner[1]), EXPECT(W1.clip[2], W1.inner[2]), EXPECT(W1.clip[3], W1.inner[3]);
+        EXPECT(nwlog, 3), EXPECT(wlog_[0].slot, 0x8), EXPECT(wlog_[1].slot, 0x108), EXPECT(wlog_[2].slot, 0x7100);  // (the caption buttons made)
+        win_close(&W1);
+    }
+    // A window without a frame: its client area is where it was put, from the screen's size for a negative place, and it is
+    // the front of the top-level list, or the end with flag 0x2000000; an empty title is copied but doesn't make a caption.
+    wt_win(&W1), wt_win(&X1), wt_win(&Y1);
+    parents[0] = &X1, parents[1] = &Y1, parent_n = 2;
+    EXPECT(win_init(&W1, -10, -20, 30, 40, "", 0x20, NULL, NULL, NULL), 0);
+    EXPECT(W1.flags, 0x20), EXPECT(W1.flags2, 4), EXPECT(W1.inner[0], 600), EXPECT(W1.inner[1], 420), EXPECT(W1.inner[2], 630), EXPECT(W1.inner[3], 460);
+    EXPECT(W1.outer[0], 0), EXPECT(parent_n, 3), EXPECT(parents[0] == &W1, 1), EXPECT(parents[1] == &X1, 1), EXPECT(parents[2] == &Y1, 1);
+    EXPECT(W1.title != NULL, 1), EXPECT(W1.title[0], 0), EXPECT(W1.title_h, 0);
+    win_close(&W1);
+    EXPECT(parent_n, 2);
+    wt_win(&W1);
+    EXPECT(win_init(&W1, 1, 2, 3, 4, NULL, 0x2000000, NULL, NULL, NULL), 0);
+    EXPECT(parents[2] == &W1, 1), EXPECT(parent_n, 3);
+    win_close(&W1);
+    // Flags 0x80 (or none of 0x1d): no frame, and the bits that need one are cleared (the caption, the thick border, 1).
+    wt_win(&W1);
+    win_init(&W1, 0, 0, 5, 5, "x", 0x411 | 0x80, NULL, NULL, NULL);
+    EXPECT(W1.flags, 0x80), EXPECT(W1.flags2, 4);
+    win_close(&W1);
+    // Slot 0xf4 is asked when a top flag bit is set, and 0 stops the init (the frame buffers are already there); an owner that
+    // answers something stops it too, with that answer (the window is closed again).
+    wt_win(&W1);
+    copy_answer_ = 0, nwlog = 0;
+    EXPECT(win_init(&W1, 0, 0, 5, 5, NULL, 0x10000000, NULL, NULL, NULL), 3);
+    EXPECT(wlog_[nwlog - 1].slot, 0xf4), EXPECT(W1.nc_buf_b4 != NULL, 1);
+    win_close(&W1);
+    wt_win(&W1);
+    owner_answer_ = 9, nwlog = 0;
+    EXPECT(win_init(&W1, 0, 0, 5, 5, NULL, 0, NULL, (struct game_win *)&P1, NULL), 9);
+    EXPECT(wlog_[nwlog - 1].slot, 0x8), EXPECT(W1.nc_buf_b4 == NULL, 1), EXPECT(parent_n, 2);
+    owner_answer_ = 0;
+    EXPECT(win_init(&W1, 0, 0, 5, 5, NULL, 0, NULL, (struct game_win *)&P1, NULL), 0), EXPECT(W1.nc_owner == &P1, 1);
+    win_close(&W1);
+    // The scroll bars: made through slot 0x18 for flag 0x40.
+    wt_win(&P1), wt_win(&W1);
+    P1.flags = 0;
+    EXPECT(win_init(&W1, 0, 0, 5, 5, NULL, 0x40 | 0x4 | 0x8, &P1, NULL, NULL), 0);
+    EXPECT((void *)W1.scroll_h == (void *)static_bar_obj_, 1), EXPECT((void *)W1.scroll_v == (void *)static_bar_obj_, 1);
+    win_close(&W1);
+    // (The bars the Scroll class makes, for flags 4 and 8 without 0x40, build real Scroll objects, which this test has no
+    // stand-ins for: the soak and the scenes cover them.)
+    // The dialog list of the parent takes a window with flag 0x100000 (but not one whose parent is a dialog), the window
+    // first in it is the one the list starts at, and the nodes (and their blocks) go when the windows close.
+    wt_win(&P1), wt_win(&W1), wt_win(&X1);
+    P1.flags = 0x1000;
+    EXPECT(win_init(&X1, 0, 0, 5, 5, NULL, 0x100000, &P1, NULL, NULL), 0);
+    EXPECT(P1.dlg_count, 0);
+    win_close(&X1);
+    P1.flags = 0;
+    for (int i = 0; i < 2; i++) {
+        struct game_win *w = i ? &X1 : &W1;
+        if (i) wt_win(&X1);
+        EXPECT(win_init(w, 0, 0, 5, 5, NULL, 0x100000, &P1, NULL, NULL), 0);
+        EXPECT(P1.dlg_count, i + 1), EXPECT(P1.dlg_head != NULL, 1), EXPECT(P1.dlg_cur == P1.dlg_head, 1), EXPECT(P1.dlg_index, 0);
+        EXPECT(P1.dlg_head->win == &W1, 1), EXPECT(P1.dlg_head->pad8 != 0, 1);
+        if (i) EXPECT(P1.dlg_head->next->win == &X1, 1), EXPECT(P1.dlg_head->prev == P1.dlg_head->next, 1), EXPECT(P1.dlg_head->next->next == P1.dlg_head, 1);
+    }
+    life_freed = 0;
+    win_close(&X1), win_close(&W1);
+    EXPECT(P1.dlg_count, 0), EXPECT(life_freed, 4);
+    // An allocation that fails: 4, with the window left as far as it got.
+    wt_win(&W1);
+    int pn_before = parent_n;
+    new_calls_ = 0, new_fails_ = 2;
+    EXPECT(win_init(&W1, 0, 0, 5, 5, NULL, 0, NULL, NULL, NULL), 4);
+    EXPECT(W1.nc_buf_b4 != NULL, 1), EXPECT(W1.nc_buf_b8 == NULL, 1), EXPECT(parent_n, pn_before);
+    new_fails_ = 0;
+    win_close(&W1);
+
+    // --- GraphicWin_init and PullDown_init ---
+    // The frame's pictures (the eleven words the original copies from the game when flag 0x30000000 is set), the picture
+    // object at 0xa08 (flag 0x40000000), the window's own Buffer made as big as its client area, and the Buffer's word 4 naming
+    // the window; the minimum size is worked out in between.
+    {
+        static uint8_t gw[0xa40];
+        memset(gw, 0xcc, sizeof gw);
+        graphic_win_ctor((struct game_win *)gw);
+        ((struct game_win *)gw)->vtable = wt_vtable;
+        game_win_close = life_win_close;
+        nwlog = 0, parent_n = 0, new_calls_ = 0, copy_answer_ = 1;
+        int r = graphic_win_init((struct game_win *)gw, 3, 4, 30, 20, NULL, 0x40000000 | 0x30000000 | 0x800 | 0x80, NULL, NULL, NULL);
+        EXPECT(r, 0);
+        EXPECT(OW(gw, 0x9cc), IMGW(0x9b3394)), EXPECT(OW(gw, 0x9d0), IMGW(0x9b3398)), EXPECT(OW(gw, 0x9d4), IMGW(0x9b339c));
+        EXPECT(OW(gw, 0x9d8), IMGW(0x9b33a0)), EXPECT(OW(gw, 0x9dc), IMGW(0x9b33ac)), EXPECT(OW(gw, 0x9e0), IMGW(0x9b33b0));
+        EXPECT(OW(gw, 0x9e4), IMGW(0x9b33a8)), EXPECT(OW(gw, 0x9e8), IMGW(0x9b33a4)), EXPECT(OW(gw, 0x9ec), IMGW(0x9b33b8));
+        EXPECT(OW(gw, 0x9f0), IMGW(0x9b33b4)), EXPECT(OW(gw, 0x9f4), IMGW(0x9b33bc));
+        EXPECT(OW(gw, 0xa08) != 0, 1), EXPECT(OW(gw, 0x448), (uint32_t)(uintptr_t)gw), EXPECT(new_calls_, 5);  // (four frame buffers and the picture)
+        struct game_buffer *buf = (struct game_buffer *)(gw + 0x444);
+        EXPECT(buf->width, 30), EXPECT(buf->neg_height, -20);
+        EXPECT(wlog_[nwlog - 1].slot, 0x7200);
+        EXPECT(((struct game_win *)gw)->inner[0], 3), EXPECT(((struct game_win *)gw)->inner[3], 24);
+    }
+    // PullDown_init: the menu colour word (0x9b7b68) is taken from the game's default if it isn't set; the menu's own words are set
+    // before and after the window's init.
+    {
+        static uint8_t pd[0xf48];
+        memset(pd, 0xcc, sizeof pd);
+        graphic_win_ctor((struct game_win *)pd);
+        ((struct game_win *)pd)->vtable = wt_vtable;
+        IMGW(0x9b7b68) = 0;
+        nwlog = 0;
+        pulldown_init((struct game_win *)pd, 77);
+        EXPECT(IMGW(0x9b7b68), IMGW(0x9bb484)), EXPECT(OW(pd, 0xf30), 77), EXPECT(OW(pd, 0x964), 0);
+        EXPECT(((struct game_win *)pd)->flags2 & 4, 4);
+        IMGW(0x9b7b68) = 5;
+        pulldown_init((struct game_win *)pd, 78);
+        EXPECT(IMGW(0x9b7b68), 5), EXPECT(OW(pd, 0xf30), 78);
+    }
+}
+
 int main(void) {
     game_win_modal = &modal, game_win_modal_focus = &modal_focus, game_win_focus = &focus, game_win_def_focus = &def_focus;
     game_win_key = &key, game_win_opaque = &opaque, game_win_modals = modals, game_win_parents = parents;
@@ -1864,6 +2174,8 @@ int main(void) {
     test_events();
 
     test_life();
+
+    test_close_init();
 
     if (failures) return 1;
     printf("engine_win: ok\n");

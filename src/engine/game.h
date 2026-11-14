@@ -1855,7 +1855,17 @@ extern void(__attribute__((thiscall)) * game_spot_init)(void *spot, int n);
 extern void *(__attribute__((thiscall)) * game_dialog_ctor)(void *dialog);
 extern void(__attribute__((thiscall)) * game_dialog_dtor)(void *dialog);  // the original's: Dialog_dtor, GraphicWin_dtor (for sweeps)
 extern void(__attribute__((thiscall)) * game_graphic_win_dtor)(void *win);
-extern void(__attribute__((thiscall)) * game_win_close)(void *win);  // Win_close: the original's (not reimplemented)
+extern void(__attribute__((thiscall)) * game_win_close)(void *win);  // Win_close (0x5eb640): the game's calls reach Chiron's (or the original's in shadow mode)
+extern void *(*game_operator_new)(size_t size);  // 0x64558a: the game's operator new
+// The scroll bar a window makes for its own frame (Scroll_init_vert_nc and Scroll_init_horz_nc): the bar, then
+// four numbers the window works out and the window it belongs to, then -1 or -2.
+extern void(__attribute__((thiscall)) * game_scroll_init_vert_nc)(void *bar, int a, int b, int c, void *win, int d);
+extern void(__attribute__((thiscall)) * game_scroll_init_horz_nc)(void *bar, int a, int b, int c, void *win, int d);
+extern void(__attribute__((thiscall)) * game_win_do_caption_buttons)(void *win);       // 0x5f2700: deletes the caption buttons
+extern void(__attribute__((thiscall)) * game_graphic_win_compute_min_size)(void *win); // 0x5d7030
+extern void (*game_flip_restore)(const int32_t *box, int arg);  // 0x5f7320: puts back what the bubble text covered
+extern void (*game_win_clear_bubble)(void);  // 0x5f8500 (Win_clear_bubble_text): takes the bubble text away, if one is shown
+extern void(__attribute__((stdcall)) * game_sleep)(uint32_t ms);  // the game's Sleep import
 // The original's, called by the life cycle of the popup (dialog.c): the combined widget a BasePop holds (its constructor, given whether
 // it is the whole object, and the part of its destructor that lies before the bases'), the CheckBox's close, and the string arena's
 // constructor and close.
