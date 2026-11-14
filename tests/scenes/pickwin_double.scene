@@ -1,0 +1,9 @@
+# The faction picker closed by a double click on a list row (see pickwin_ok.scene): the game asks for the leader's
+# name of the faction double clicked.
+30 click 835 287
+40 key Return
+46 key Return
+52 key Return
+62 dblclick 500 243
+74 snap name-double
+78 close

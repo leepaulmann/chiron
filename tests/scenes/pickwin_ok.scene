@@ -1,0 +1,11 @@
+# The faction picker closed with a faction chosen (see pickwin.scene for the window): a row chosen and OK (Return).
+# The game goes on to ask for the leader's name, which shows the faction that was chosen (and so what the picker handed to config_game). The scene stops
+# there: the map built after that is not repeatable.
+30 click 835 287
+40 key Return
+46 key Return
+52 key Return
+60 click 500 205
+64 key Return
+76 snap name-ok
+80 close

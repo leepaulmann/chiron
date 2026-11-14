@@ -1314,6 +1314,15 @@ extern int (*game_tut_check)(int bit);
 extern int (*game_x_text_open)(char *file, char *label);
 extern void (*game_parse_string)(char *text, char *buffer);
 extern void(__attribute__((thiscall)) * game_dialogs_item)(void *dialogs, char *text, int id);
+// The toolkit functions the screens (src/ui) call that Chiron doesn't reimplement yet: BaseButton's init (name, id,
+// x, y, width, height, parent, and a last word every caller gives as 0), the ListBox's add of an item (text, id)
+// and its attach of the Dialog part (on the Dialog) to a window (window, two numbers read from the Dialog, flags), and
+// the popup menu: init, then exec (x, y, 0) which answers the id of the item chosen, or -1.
+extern int(__attribute__((thiscall)) * game_base_button_init)(void *b, const char *name, int id, int x, int y, int w, int h, void *parent, int last);
+extern void(__attribute__((thiscall)) * game_listbox_item)(void *listbox, const char *text, int id);
+extern void(__attribute__((thiscall)) * game_listbox_attach)(void *dialog, void *win, int a, int b, int flags);
+extern void(__attribute__((thiscall)) * game_popmenu_init)(void *menu);
+extern int(__attribute__((thiscall)) * game_popmenu_exec)(void *menu, int x, int y, int unused);
 extern void(__attribute__((thiscall)) * game_console_cursor_next)(void *console, int x, int y);
 extern void(__attribute__((thiscall)) * game_fx_engine_pitch)(void *fx, int pitch);
 extern int32_t *game_moved_quickly, *game_console_23be4;

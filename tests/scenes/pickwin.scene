@@ -1,0 +1,43 @@
+# The faction picker (PickWin, "CHOOSE YOUR FACTIONS"), reached from the title screen through Start Game, the
+# map, difficulty and rules menus (a Return each). It is opened by config_game, so this scene builds no map and
+# stops at Cancel. Steps: the window as it opens; the mouse over a group picture (its bubble text); a list row
+# chosen; Random (lines to every row) and Choose again; an arrow key and a letter key (the window ignores
+# them); a row's arrow button, which opens a menu of factions, and one chosen from it; the Alien Crossfire and
+# the custom groups; the menu left with Escape; the first group again; the mouse over a button (nothing
+# happens); Escape (Cancel). Leave time after each step; the snaps take 2 s each.
+30 click 835 287
+40 key Return
+46 key Return
+52 key Return
+60 snap open
+64 move 399 88
+70 snap hover-group
+72 click 500 205
+76 snap row-chosen
+78 click 118 173
+82 snap random
+84 click 118 148
+88 snap choose
+90 key Down
+94 snap key-down
+96 key a
+100 snap key-letter
+102 click 777 167
+106 snap menu
+108 click 820 198
+112 snap row-replaced
+114 click 399 88
+118 snap group-new
+120 click 658 88
+124 snap group-custom
+126 click 777 167
+130 snap menu-custom
+132 key Escape
+136 snap menu-dismissed
+138 click 139 88
+142 snap group-first
+144 move 300 287
+148 snap hover-button
+150 key Escape
+154 snap cancel
+158 close

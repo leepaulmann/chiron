@@ -69,6 +69,19 @@ CHIRON_REIMPL=shadow ...       # check reimplementations against the original; s
 - Verify with a shadow soak (0 mismatches) and a normal-mode soak. A planted bug that shadow mode catches is a good check that the sweep reaches the code. For a writer, also plant one that writes nothing: a check whose saved spans miss the memory the function really writes compares the wrong bytes and passes anyway (a buffer copy written in the wrong direction passed 134,000 game calls this way).
 - Write comments in plain prose describing behaviour, and note where the original differs from OpenSMACX.
 
+## Rebuilding a screen
+
+A screen (a window class the game builds as one global object) is rebuilt as clean code in `src/ui/<screen>.c`, as `pickwin.c` was (read it first). The pattern:
+
+- **Survey.** Find the object's size and fields past the Win base, the vtable (its slots tell which methods are reached only by virtual call), who outside the class touches it (search the disassembly for the object's address and field addresses; `config_game` reads PickWin's `action` and list box by absolute address), and the callbacks it hands the game (a function pointer the object stores is also a hook target: PickWin's list-double-click handler is a 14th function, not in the inventory). Static initializers run inside the entry point, after `hooks_apply`, so the constructor and destructor are Chiron's too.
+- **One module per class.** All of the class's functions are in one file and one `struct hook_module` (no sweep), listed in `hooks.c`, so `CHIRON_SKIP=<screen>` gives the class back as a whole. A function whose bytes are a lone `jmp` or `ret` is hooked by its bytes anyway; the trampoline is unused.
+- **No shadow checks.** `src/ui/ui.h` has `UI_HOOK`/`UI_HOOK_CALL`: the shadow entry is the function itself, so on and shadow mode run the same code. The check is the scene, not a function-level comparison.
+- **The object keeps the original's layout.** A struct overlays it with `GAME_AT` asserts and a size assert; embedded objects (buttons, sprites, the list box) are typed or opaque arrays, so other code can still read them. Name every field by what it holds; the original's scratch fields stay (their final values are state).
+- **Toolkit called directly.** Use Chiron's `win_*`, `button_*`, `buffer_*`, `sprite_*`, `listbox_*` functions, not `game_*` pointers; virtual calls go through `UI_VCALL` by slot, as the original makes them, so overrides still apply. What Chiron doesn't reimplement yet is called through a `game_*` pointer added to `game.c`/`game.h` (PickWin added BaseButton's init, the list box's item and attach, and the popup menu's init and exec). Game strings and tables are read by address (`text(addr)`, `game_label(i)`), never copied.
+- **Pure parts are separate and tested.** Layout arithmetic and text building are plain functions in the file (declared in `<screen>.h`) with a unit test, `tests/ui_<screen>.c`, whose numbers are worked out from the disassembly. The handlers call them.
+- **Behaviour is exact:** the same pixels in the same drawing order (scenes see intermediate frames), the same sounds, the same fields written, quirks included (PickWin's list loses its double-click handler after the group is changed, as the original's does). Things that cannot be seen may differ (a popup menu object built only when needed) and are noted in the file's header.
+- **Check with a scene.** `tests/scenes/<screen>.scene` walks every state: the window as it opens, hover, every button, keys, each list or tab change, and the closing paths, with a `snap` after each. Plant a wrong value in each function and check that a snap changes; a function whose plant changes nothing is not covered.
+
 ## Commits
 
 End commit messages with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. The repo is public at github.com/leepaulmann/chiron, and commits use the GitHub noreply email.
