@@ -21,6 +21,13 @@ void BUTTON_THIS button_on_left_click(struct game_button *b, int x, int y);
 void BUTTON_THIS button_on_left_down(struct game_button *b, int x, int y);
 void BUTTON_THIS button_on_left_up(struct game_button *b, int x, int y);
 void BUTTON_THIS button_on_mouse_move(struct game_button *b, int x, int y);
+// The mouse handlers of FlatButton (which has no left down or up of its own: BaseButton's), and BaseButton's timer callbacks (the
+// bubble text's delay, the auto-repeat; the first is the one the Time class calls, which finds the button in its second argument).
+void BUTTON_THIS flat_button_on_mouse_move(struct game_button *b, int x, int y);
+void BUTTON_THIS flat_button_on_mouse_leave(struct game_button *b, int x, int y);
+void BUTTON_THIS button_timer_callback(struct game_button *b, int which);
+void button_timer_callback_daemon(int which, struct game_button *b);
+
 void BUTTON_THIS button_set_text_color(struct game_button *b, int a, int c, int d, int e);
 void BUTTON_THIS button_set_text_color2(struct game_button *b, int a, int c, int d, int e);
 void BUTTON_THIS button_set_text_color3(struct game_button *b, int a, int c, int d, int e);

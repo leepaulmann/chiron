@@ -52,10 +52,11 @@ static int THIS s_0xf4(void *o) { return rec(0xf4, o, 0, 0, 0), 1; }
 static void *vt[0x180 / 4];
 static void cb_click(int id) { rec(0x401, NULL, id, 0, 0); }
 static void cb_hook(void) { rec(0x403, NULL, 0, 0, 0); }
+static void cb_hook2(void) { rec(0x405, NULL, 0, 0, 0); }
 
 static struct game_win *capture, *hover, *press1, *press2, *cur;
 static int32_t inside;
-static void(__attribute__((cdecl)) * hooks[2])(void);
+static void(__attribute__((cdecl)) * hooks[3])(void);
 static struct game_button_defaults defaults;
 static struct game_button_fonts fonts;
 static struct game_button B[3];
@@ -566,6 +567,8 @@ static void test_life(void) {
 static int held_answer, keystate;
 static uint32_t clock_;
 static int THIS s_0xa4(void *o, int a) { return rec(0xa4, o, a, 0, 0), held_answer; }
+static int THIS s_0xa0(void *o, int a, int b) { return rec(0xa0, o, a, b, 0), 0; }
+static void THIS t_bubble(void *w, const char *text, const int32_t *r) { rec(0x7005, w, (int)(intptr_t)text, r[0] * 1000 + r[1], r[2] * 1000 + r[3]); }
 static int THIS s_0xa8(void *o, int a) { return rec(0xa8, o, a, 0, 0), 0; }
 static int THIS s_0xac(void *o, int a) { return rec(0xac, o, a, 0, 0), 0; }
 static int THIS s_0x50(void *o, int a, int b) { return rec(0x50, o, a, b, 0), 0; }
@@ -753,6 +756,112 @@ int main(void) {
         button_on_left_up(&B[0], 0, 0);
         EXPECT(capture == NULL, 1), EXPECT(hover == NULL, 1), EXPECT(B[0].pressed, 1), EXPECT(ncalls, 1);
         expect_call(0, 0x10, &B[0], 0, 0, 0);
+
+        // FlatButton: the mouse resting on a button lights it (the third button hook, the parent told with the id and 1, the bubble text's
+        // delay started as a pulse, a redraw); leaving it unlights it (the delay stopped, the bubble text taken away, the parent told, a redraw).
+        vt[0xa0 / 4] = s_0xa0, game_win_set_bubble_text = t_bubble;
+        reset();
+        full = (int32_t *)((uint8_t *)&B[0] + 0x474);
+        full[0] = 10, full[1] = 20, full[2] = 50, full[3] = 40;
+        hooks[2] = cb_hook2, B[0].bubble = "tip", press1 = press2 = NULL, inside = 0;
+        flat_button_on_mouse_move(&B[0], 39, 19);
+        EXPECT(B[0].changed, 1), EXPECT(ncalls, 4);
+        expect_call(0, 0x405, NULL, 0, 0, 0), expect_call(1, 0xa0, &P, 10, 1, 0), expect_call(2, 0x7003, B[0].timer_hold, 1000, 1, 0);
+        expect_call(3, 0xf8, &B[0], 0, 0, 0);
+        struct game_time *hold = (struct game_time *)B[0].timer_hold;
+        EXPECT(hold->cb2 == (void *)(uintptr_t)game_va(0x607b10), 1), EXPECT(hold->cb == NULL, 1), EXPECT(hold->arg == NULL, 1);
+        EXPECT(hold->arg2, (int)(intptr_t)&B[0]), EXPECT(hold->delay, 1000), EXPECT(hold->resolution, 5), EXPECT(hold->flags, 1);
+        // (Already lit: nothing. Out of the rectangle by one: unlit.)
+        ncalls = 0;
+        flat_button_on_mouse_move(&B[0], 20, 10);
+        EXPECT(ncalls, 0);
+        flat_button_on_mouse_move(&B[0], 40, 5);
+        EXPECT(B[0].changed, 0), EXPECT(ncalls, 4);
+        expect_call(0, 0x7004, B[0].timer_hold, 0, 0, 0), expect_call(1, 0x7001, NULL, 0, 0, 0), expect_call(2, 0xa0, &P, 10, 0, 0);
+        expect_call(3, 0xf8, &B[0], 0, 0, 0);
+        // Out again while unlit: nothing; a lit word that isn't 1 is left alone out of the rectangle and in it.
+        ncalls = 0;
+        flat_button_on_mouse_move(&B[0], 40, 5);
+        B[0].changed = 2;
+        flat_button_on_mouse_move(&B[0], 40, 5), flat_button_on_mouse_move(&B[0], 5, 5);
+        EXPECT(ncalls, 0), EXPECT(B[0].changed, 2);
+        // No bubble text and no parent and no hook: only the light and the redraw.
+        B[0].changed = 0, B[0].bubble = NULL, B[0].win.parent = NULL, hooks[2] = NULL;
+        flat_button_on_mouse_move(&B[0], 0, 0);
+        EXPECT(B[0].changed, 1), EXPECT(ncalls, 1), expect_call(0, 0xf8, &B[0], 0, 0, 0);
+        ncalls = 0;
+        flat_button_on_mouse_move(&B[0], 40, 0);
+        EXPECT(B[0].changed, 0), EXPECT(ncalls, 1), expect_call(0, 0xf8, &B[0], 0, 0, 0);  // (the delay has no timer to stop)
+        // The button with the press goes to BaseButton's move (pressed down in it: the parent hears it).
+        reset();
+        full = (int32_t *)((uint8_t *)&B[0] + 0x474);
+        full[0] = 10, full[1] = 20, full[2] = 50, full[3] = 40, B[0].repeat_first = -1;
+        press1 = NULL, press2 = &B[0].win, inside = 1;
+        flat_button_on_mouse_move(&B[0], 5, 5);
+        EXPECT(B[0].pressed, 1), EXPECT(B[0].changed, 0), EXPECT(ncalls, 2), expect_call(0, 0xac, &P, 10, 0, 0), expect_call(1, 0xf8, &B[0], 0, 0, 0);
+#define ARM() (((struct game_time *)B[0].timer_hold)->id = 9, ((struct game_time *)B[0].timer_hold)->delay = 1000)
+        // Leaving: the press inside (the game's word 1) moves instead; otherwise a lit button unlights.
+        ncalls = 0;
+        flat_button_on_mouse_leave(&B[0], 4, 5);
+        EXPECT(ncalls, 1), expect_call(0, 0x44, &B[0], 4, 5, 0);
+        ncalls = 0, inside = 2, B[0].changed = 1, B[0].bubble = "tip", ARM();
+        flat_button_on_mouse_leave(&B[0], 4, 5);
+        EXPECT(B[0].changed, 0), EXPECT(ncalls, 4);
+        expect_call(0, 0x7004, (void *)9, 0, 0, 0), expect_call(1, 0x7001, NULL, 0, 0, 0), expect_call(2, 0xa0, &P, 10, 0, 0);
+        expect_call(3, 0xf8, &B[0], 0, 0, 0);
+        ncalls = 0, press2 = NULL;
+        flat_button_on_mouse_leave(&B[0], 4, 5);  // (not lit now)
+        B[0].changed = 2;
+        flat_button_on_mouse_leave(&B[0], 4, 5);
+        EXPECT(ncalls, 0), EXPECT(B[0].changed, 2);
+
+        // The timer callback. 0: the delay is stopped and the bubble text shown beside the button: its inner rectangle moved to the
+        // screen position of the button's origin (outer + inner, the parent's too for a child, less its inner rectangle for one placed from
+        // that); no bubble text, no showing.
+        reset();
+        B[0].bubble = "tip";
+        ARM();
+        B[0].win.inner[0] = 3, B[0].win.inner[1] = 4, B[0].win.inner[2] = 13, B[0].win.inner[3] = 24;
+        B[0].win.outer[0] = 100, B[0].win.outer[1] = 200, B[0].win.outer[2] = 100, B[0].win.outer[3] = 200;
+        P.outer[0] = 10, P.outer[1] = 20, P.inner[0] = 1, P.inner[1] = 2;
+        // inner = {3, 4, 13, 24}, outer = {100, 200, 100, 200}
+        button_timer_callback(&B[0], 0);
+        EXPECT(ncalls, 2), expect_call(0, 0x7004, (void *)9, 0, 0, 0), expect_call(1, 0x7005, &B[0], (int)(intptr_t)B[0].bubble, 103 * 1000 + 204, 113 * 1000 + 224);
+        ncalls = 0, B[0].win.flags = WIN_F_CHILD, ARM();
+        button_timer_callback(&B[0], 0);
+        expect_call(1, 0x7005, &B[0], (int)(intptr_t)B[0].bubble, 114 * 1000 + 226, 124 * 1000 + 246);
+        ncalls = 0, B[0].win.flags = WIN_F_CHILD | WIN_F_PARENT_INNER, ARM();
+        button_timer_callback(&B[0], 0);
+        expect_call(1, 0x7005, &B[0], (int)(intptr_t)B[0].bubble, 113 * 1000 + 224, 123 * 1000 + 244);
+        ncalls = 0, B[0].bubble = NULL, ARM();
+        button_timer_callback(&B[0], 0);
+        EXPECT(ncalls, 1), expect_call(0, 0x7004, (void *)9, 0, 0, 0);
+        // 1: the repeat starts over (not a pulse) with the second delay when it is above 0 and the first when not, and the argument 2.
+        ncalls = 0, B[0].repeat_first = 500, B[0].repeat_next = 60;
+        button_timer_callback(&B[0], 1);
+        EXPECT(ncalls, 1), expect_call(0, 0x7003, B[0].timer_repeat, 60, 1, 0);
+        struct game_time *rep2 = (struct game_time *)B[0].timer_repeat;
+        EXPECT(rep2->cb2 == (void *)(uintptr_t)game_va(0x607b10), 1), EXPECT((intptr_t)rep2->arg, 2), EXPECT(rep2->arg2, (int)(intptr_t)&B[0]);
+        EXPECT(rep2->delay, 60), EXPECT(rep2->resolution, 5), EXPECT(rep2->flags, 0);
+        ncalls = 0, B[0].repeat_next = 0;
+        button_timer_callback(&B[0], 1);
+        expect_call(1, 0x7003, B[0].timer_repeat, 500, 1, 0);
+        ncalls = 0, B[0].repeat_next = -3;
+        button_timer_callback(&B[0], 1);
+        expect_call(1, 0x7003, B[0].timer_repeat, 500, 1, 0);
+        // Anything else (the repeat's pulses): the button's own slot 0x50 with 0 and 0. The daemon takes the argument first and does nothing without a button.
+        ncalls = 0;
+        button_timer_callback(&B[0], 2), button_timer_callback(&B[0], -1);
+        EXPECT(ncalls, 2), expect_call(0, 0x50, &B[0], 0, 0, 0), expect_call(1, 0x50, &B[0], 0, 0, 0);
+        ncalls = 0;
+        button_timer_callback_daemon(5, NULL);
+        EXPECT(ncalls, 0);
+        button_timer_callback_daemon(5, &B[0]);
+        EXPECT(ncalls, 1), expect_call(0, 0x50, &B[0], 0, 0, 0);
+        B[0].bubble = "tip";
+        ncalls = 0, ARM();
+        button_timer_callback_daemon(0, &B[0]);
+        EXPECT(ncalls, 2), expect_call(1, 0x7005, &B[0], (int)(intptr_t)B[0].bubble, 113 * 1000 + 224, 123 * 1000 + 244);
     }
 
     // A group: the selected button is set to 0 and the clicked one to 1, and the parent hears of it.

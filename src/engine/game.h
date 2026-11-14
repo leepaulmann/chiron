@@ -1866,6 +1866,7 @@ extern void(__attribute__((thiscall)) * game_scroll_init_horz_nc)(void *bar, int
 extern void(__attribute__((thiscall)) * game_win_do_caption_buttons)(void *win);       // 0x5f2700: deletes the caption buttons
 extern void(__attribute__((thiscall)) * game_graphic_win_compute_min_size)(void *win); // 0x5d7030
 extern void (*game_flip_restore)(const int32_t *box, int arg);  // 0x5f7320: puts back what the bubble text covered
+extern void(__attribute__((thiscall)) * game_win_set_bubble_text)(void *win, const char *text, const int32_t *rect);  // 0x5f83d0: shows the bubble text in a box near the rectangle
 extern void (*game_win_clear_bubble)(void);  // 0x5f8500 (Win_clear_bubble_text): takes the bubble text away, if one is shown
 extern void(__attribute__((stdcall)) * game_sleep)(uint32_t ms);  // the game's Sleep import
 // The original's, called by the life cycle of the popup (dialog.c): the combined widget a BasePop holds (its constructor, given whether

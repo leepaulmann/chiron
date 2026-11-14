@@ -193,7 +193,7 @@ void BUTTON_THIS button_on_left_click(struct game_button *b, int x, int y) {
 // again while held (the mouse comes back in) it notes the time (timeGetTime), is again the window the parent draws
 // with, and, if it isn't disabled, plays the sound at 0x70, asks the parent (slot 0xa4) whether to go on and starts the
 // repeat's pulse if the parent says yes. Its own function for a press (word 0xab4) is called last, in that case only.
-// The repeat is a Time object with the timer callback at 0x607b10 (left with the original: it draws the bubble text),
+// The repeat is a Time object with the timer callback at 0x607b10 (below),
 // started with the delay at 0xa44 (the first) unless that is -1.
 // A release: capture and hover let go, the repeat stopped, and if the press was shorter than its minimum (word 0xaa0)
 // the thread sleeps the rest (Sleep, through the journal); a button that was held goes up (the parent hears it, with the
@@ -284,6 +284,94 @@ void BUTTON_THIS button_on_mouse_move(struct game_button *b, int x, int y) {
     play(parent, SND_FIRST);
     vcall1(parent, VT_PRESS_DOWN, b->id);
     vcall0(b, VT_REDRAW);
+}
+
+// ---- FlatButton's mouse, BaseButton's timer callbacks --------------------------------------------------------------
+//
+// A FlatButton has no left down or up of its own (BaseButton's do), only the mouse moving over it and leaving it, which
+// make it "lit": the word at 0xa74 (BaseButton's `changed`, which a group clears) is 1 while the mouse rests on it.
+// The mouse moving: if the button has the press (the first of the two press windows that is set), BaseButton's move does
+// it all. Otherwise, with the mouse in the button (its Buffer's rectangle taken to start at 0, 0) and not yet lit: the game's
+// function in the third button hook (0x9b7aa0, if one is set) is called, the button is lit, the parent is told (slot 0xa0:
+// the id, 1), the delay of the bubble text is made ready (a Time object that calls the timer callback with 0 after a second;
+// a button with bubble text only) and started as a pulse, and the button redraws. With the mouse out and the button lit: the
+// delay stops, the bubble text goes away (if the button has any), the button is no longer lit, the parent is told (the id, 0)
+// and the button redraws. The mouse leaving is the same second half, or, for a button that has the press with the press
+// inside (the game's word is 1), a move to where the mouse went.
+//
+// The timer callback (the Time class calls it, through a message the window handles, with the object it was made for in the
+// second argument and the first it was started with): 0 is the bubble text's delay running out. It stops the delay and, for a
+// button with bubble text, shows the text beside the button, the button's inner rectangle moved to where the button lies on
+// the screen (the game's function at 0x5f83d0). 1 is the first delay of the auto-repeat (a pulse) running out: the repeat starts
+// over with the second delay (the button's word at 0xa48, or the first if that isn't above 0) and the argument 2. Anything else
+// (the repeat's pulses) tells the button itself (slot 0x50, with 0 and 0). The daemon is what the Time class really calls
+// (cdecl, the argument first, then the button): it does nothing for no button.
+// Differences from OpenSMACX and Thinker: neither has these as more than names.
+
+static void hold_stop_and_unlight(struct game_button *b) {
+    time_stop((struct game_time *)b->timer_hold);
+    if (b->bubble) game_win_clear_bubble();
+    b->changed = 0;
+    struct game_win *parent = b->win.parent;
+    if (parent) vcall2(parent, 0xa0, b->id, 0);
+    vcall0(b, VT_REDRAW);
+}
+
+static struct game_win *press_window(void) { return *game_win_press1 ? *game_win_press1 : *game_win_press2; }
+
+void BUTTON_THIS flat_button_on_mouse_move(struct game_button *b, int x, int y) {
+    if (press_window() == &b->win) {
+        button_on_mouse_move(b, x, y);
+        return;
+    }
+    const int32_t *full = (const int32_t *)((uint8_t *)b + 0x474);
+    int32_t r[4] = {0, 0, full[2] - full[0], full[3] - full[1]};
+    if (!in_box_2(x, y, r)) {
+        if (b->changed == 1) hold_stop_and_unlight(b);
+        return;
+    }
+    if (b->changed) return;
+    if (game_button_hooks[2]) game_button_hooks[2]();
+    b->changed = 1;
+    struct game_win *parent = b->win.parent;
+    if (parent) vcall2(parent, 0xa0, b->id, 1);
+    if (b->bubble) {
+        struct game_time *hold = (struct game_time *)b->timer_hold;
+        time_init_2(hold, (void *)(uintptr_t)game_va(0x607b10), NULL, (int)(intptr_t)b, 1000, 5);
+        time_pulse_3(hold);
+    }
+    vcall0(b, VT_REDRAW);
+}
+
+void BUTTON_THIS flat_button_on_mouse_leave(struct game_button *b, int x, int y) {
+    if (press_window() == &b->win && *game_win_press_inside == 1) {
+        vcall2(b, VT_MOUSE_MOVE, x, y);
+        return;
+    }
+    if (b->changed == 1) hold_stop_and_unlight(b);
+}
+
+void BUTTON_THIS button_timer_callback(struct game_button *b, int which) {
+    if (which == 0) {
+        time_stop((struct game_time *)b->timer_hold);
+        if (!b->bubble) return;
+        const int32_t *inner = b->win.inner;
+        int32_t x = 0, y = 0;
+        win_client_to_screen_2(&b->win, &x, &y);
+        int32_t dx = x - inner[0], dy = y - inner[1];
+        int32_t r[4] = {inner[0] + dx, inner[1] + dy, inner[2] + dx, inner[3] + dy};
+        game_win_set_bubble_text(b, b->bubble, r);
+    } else if (which == 1) {
+        int32_t delay = b->repeat_next > 0 ? b->repeat_next : b->repeat_first;
+        time_start_2((struct game_time *)b->timer_repeat, (void *)(uintptr_t)game_va(0x607b10), (void *)2, (int)(intptr_t)b,
+                     (uint32_t)delay, 5);
+    } else {
+        vcall2(b, VT_PRESSED_MOVE, 0, 0);
+    }
+}
+
+void button_timer_callback_daemon(int which, struct game_button *b) {
+    if (b) button_timer_callback(b, which);
 }
 
 // The Buffer's text colours, once the button has a parent (and so a palette to sync to).
@@ -1116,6 +1204,21 @@ SWEEP_ONLY(void, button_on_left_click, (struct game_button * b, int x, int y), (
 SWEEP_ONLY(void, button_on_left_down, (struct game_button * b, int x, int y), (b, x, y), MOUSE_WRITES, "%d, %d, %d", P(b), x, y)
 SWEEP_ONLY(void, button_on_left_up, (struct game_button * b, int x, int y), (b, x, y), MOUSE_WRITES, "%d, %d, %d", P(b), x, y)
 SWEEP_ONLY(void, button_on_mouse_move, (struct game_button * b, int x, int y), (b, x, y), MOUSE_WRITES, "%d, %d, %d", P(b), x, y)
+// FlatButton's mouse and the timer callback also start and stop the bubble text's delay (the same Time object calls, through the journal) and
+// call the parent's slot 0xa0, the button hook and the function that shows the bubble text (a stand-in in the sweep, see bubble_logging).
+SWEEP_ONLY(void, flat_button_on_mouse_move, (struct game_button * b, int x, int y), (b, x, y), MOUSE_WRITES, "%d, %d, %d", P(b), x, y)
+SWEEP_ONLY(void, flat_button_on_mouse_leave, (struct game_button * b, int x, int y), (b, x, y), MOUSE_WRITES, "%d, %d, %d", P(b), x, y)
+SWEEP_ONLY(void, button_timer_callback, (struct game_button * b, int which), (b, which), MOUSE_WRITES, "%d, %d", P(b), which)
+// (cdecl, the Time class calls it)
+SHADOW_DECLARE(void, button_timer_callback_daemon, (int which, struct game_button *b))
+SHADOW_WRITER_BODY(void, button_timer_callback_daemon, (int which, struct game_button *b), (which, b), MOUSE_WRITES, "%d, %d", which, P(b))
+static void shadow_button_timer_callback_daemon(int which, struct game_button *b) {
+    if (!hooks_nested && !shadow_bypass()) {
+        stats_button_timer_callback_daemon.calls++;
+        shadow_tick(BUTTON);
+    }
+    orig_button_timer_callback_daemon(which, b);
+}
 #define TEXT_WRITES (WRITES(&b->buf, sizeof b->buf), hooks_writes_dc(&w_, (void *)(intptr_t)*(int32_t *)((uint8_t *)&b->buf + 0x64)))
 SWEEP_ONLY(void, button_set_text_color, (struct game_button * b, int a, int c, int d, int e), (b, a, c, d, e), TEXT_WRITES,
            "%d, %d, %d, %d, %d", P(b), a, c, d, e)
@@ -1306,7 +1409,7 @@ static void vrec(int slot, const void *o, int a, int b, int c) {
     static int THISCALL stub_##slot(void *o, int a, int b) { return vrec(slot, o, a, b, 0), slot + 1; }
 #define STUB3(slot) \
     static int THISCALL stub_##slot(void *o, int a, int b, int c) { return vrec(slot, o, a, b, c), slot + 1; }
-STUB0(0x10) STUB0(0x1c) STUB2(0x44) STUB1(0xb0) STUB2(0xb4) STUB3(0xb8) STUB2(0xbc) STUB0(0xf8) STUB1(0xa8) STUB1(0xac) STUB2(0x50)
+STUB0(0x10) STUB0(0x1c) STUB2(0x44) STUB1(0xb0) STUB2(0xb4) STUB3(0xb8) STUB2(0xbc) STUB0(0xf8) STUB1(0xa8) STUB1(0xac) STUB2(0x50) STUB2(0xa0)
 // The parent's question whether a held button goes on repeating: yes and no by turns.
 static int THISCALL stub_0xa4(void *o, int a) { return vrec(0xa4, o, a, 0, 0), vlog.n & 1; }
 // The slots the FlatButton's name, a box's background and a box item's background go through: each answers
@@ -1327,12 +1430,30 @@ static void fill_stub_vt(void) {
     stub_vt[0xb8 / 4] = (void *)stub_0xb8, stub_vt[0xbc / 4] = (void *)stub_0xbc, stub_vt[0xf8 / 4] = (void *)stub_0xf8, stub_vt[0xf4 / 4] = (void *)stub_0xf4;
     stub_vt[0x14 / 4] = (void *)stub_0x14, stub_vt[0x28 / 4] = (void *)stub_0x28, stub_vt[0x2c / 4] = (void *)stub_0x2c;
     stub_vt[0xa4 / 4] = (void *)stub_0xa4, stub_vt[0xa8 / 4] = (void *)stub_0xa8, stub_vt[0xac / 4] = (void *)stub_0xac;
-    stub_vt[0x50 / 4] = (void *)stub_0x50;
+    stub_vt[0x50 / 4] = (void *)stub_0x50, stub_vt[0xa0 / 4] = (void *)stub_0xa0;
 }
 static void cb_click(int id) { vrec(0x401, NULL, id, 0, 0); }
 static void cb_double(int id) { vrec(0x402, NULL, id, 0, 0); }
 static void cb_hook_a(void) { vrec(0x403, NULL, 0, 0, 0); }
 static void cb_hook_b(void) { vrec(0x404, NULL, 0, 0, 0); }
+static void cb_hook_c(void) { vrec(0x405, NULL, 0, 0, 0); }
+
+// The function that shows a button's bubble text (0x5f83d0) draws on the screen, which a sweep leaves alone: while the sweep checks the timer
+// callback, calls to it (the original's and Chiron's alike, as the original's code calls the address the game's hook is at) are logged, with the
+// text and the rectangle, and do nothing. Otherwise it is the original's. Its own drawing and boxes are checked by neither.
+static int bubble_logging;
+static int bubble_logged(void *w, const char *text, const int32_t *r) {
+    if (!bubble_logging) return 0;
+    int h = 0;
+    for (const char *c = text; c && *c; c++) h = h * 31 + (uint8_t)*c;
+    vrec(0x5f83d0, w, h, r[0] * 31 + r[1] * 131 + r[2] * 1031 + r[3] * 10007, text != NULL);
+    return 1;
+}
+SHADOW_DECLARE_T(void, win_set_bubble_text, (void *w, const char *text, const int32_t *rect))
+static void THISCALL win_set_bubble_text(void *w, const char *text, const int32_t *rect) {
+    if (!bubble_logged(w, text, rect)) orig_win_set_bubble_text(w, text, rect);
+}
+static void THISCALL shadow_win_set_bubble_text(void *w, const char *text, const int32_t *rect) { win_set_bubble_text(w, text, rect); }
 
 static const int IDS[] = {-2, -1, 0, 1, 2, 3, 4, 5};
 static struct game_button *any_btn(void) { return &S.btn[rnd_to(NB)]; }
@@ -1451,6 +1572,56 @@ static void mouse_sweep(struct game_button *b) {
         }
         *game_win_capture = rnd_to(2) ? &b->win : NULL, *game_win_hover = rnd_to(2) ? &b->win : NULL;
         check_button_on_left_up(b, x, y);
+        scrub_timers(mark);
+    }
+}
+
+// FlatButton's mouse (the press windows, the lit word, the bubble text, the parent, the button hook, the delay's Time object and the
+// rectangle at random) and the timer callback (each argument, with the button's inner and outer rectangles and its flags, for the
+// screen position, at random).
+static const char *const bubble_texts[] = {"A tip", "Two^lines of it", ""};
+static void flat_sweep(struct game_button *b) {
+    if (!*game_win_hwnd) return;
+    int32_t *full = (int32_t *)((uint8_t *)b + 0x474);
+    for (int m = 0; m < 8; m++) {
+        unsigned mark = hooks_timer_mark ? hooks_timer_mark() : 0;
+        struct game_time *hold = (struct game_time *)b->timer_hold, *rep = (struct game_time *)b->timer_repeat;
+        b->changed = rnd_to(3) == 0 ? 2 : rnd_to(2);
+        b->bubble = rnd_to(3) ? (char *)bubble_texts[rnd_to(3)] : NULL;
+        b->id = IDS[rnd_to(8)];
+        b->win.parent = rnd_to(6) ? &S.parent[rnd_to(NP)] : NULL;
+        game_button_hooks[2] = rnd_to(3) ? cb_hook_c : NULL;
+        hold->flags = (uint32_t)rnd_to(4), hold->delay = (uint32_t)rnd_to(3) * 100, hold->cb = NULL, hold->cb2 = NULL;
+        hold->id = rnd_to(2) ? 0 : 0x13370000u + (uint32_t)rnd_to(9000);
+        full[0] = rnd_to(20), full[1] = rnd_to(20), full[2] = full[0] + 10 + rnd_to(60), full[3] = full[1] + 8 + rnd_to(40);
+        for (int k = 0; k < 4; k++) {
+            *game_win_press1 = rnd_to(4) == 0 ? &b->win : NULL, *game_win_press2 = rnd_to(2) ? &b->win : NULL;
+            *game_win_press_inside = rnd_to(3);
+            int x = rnd_to(100) - 10, y = rnd_to(80) - 10;
+            if (rnd_to(2)) x = rnd_to(full[2] - full[0]), y = rnd_to(full[3] - full[1]);
+            if (k & 1) b->changed = rnd_to(3);
+            check_flat_button_on_mouse_move(b, x, y);
+            check_flat_button_on_mouse_leave(b, x, y);
+        }
+        // The timer callback: 0 with and without bubble text, 1 (with the second delay above 0 and not), 2 and others.
+        bubble_logging = 1;
+        for (int k = 0; k < 5; k++) {
+            b->win.flags = rnd_to(2) ? (uint32_t)rnd() : WIN_F_CHILD | (rnd_to(2) ? WIN_F_PARENT_INNER : 0);
+            for (int i = 0; i < 4; i++) b->win.inner[i] = rnd_to(100) - 20, b->win.outer[i] = rnd_to(100) - 20;
+            b->bubble = rnd_to(3) ? (char *)bubble_texts[rnd_to(3)] : NULL;
+            b->repeat_first = rnd_to(2) ? 500 : 0x40 + rnd_to(60);
+            b->repeat_next = rnd_to(4) == 0 ? 0 : rnd_to(3) == 0 ? -7 : rnd_to(2) ? 0x33 + rnd_to(50) : 700;
+            rep->flags = (uint32_t)rnd_to(4), rep->delay = (uint32_t)rnd_to(3) * 100, rep->cb = NULL, rep->cb2 = NULL;
+            rep->id = rnd_to(2) ? 0 : 0x13370000u + (uint32_t)rnd_to(9000);
+            hold->flags = (uint32_t)rnd_to(4), hold->delay = (uint32_t)rnd_to(3) * 100, hold->cb = NULL, hold->cb2 = NULL;
+            hold->id = rnd_to(2) ? 0 : 0x13370000u + (uint32_t)rnd_to(9000);
+            static const int which[] = {0, 0, 1, 1, 2, 3, -1, 99};
+            int w = which[rnd_to(8)];
+            if (rnd_to(2)) check_button_timer_callback(b, w);
+            else check_button_timer_callback_daemon(w, rnd_to(6) ? b : NULL);
+        }
+        bubble_logging = 0;
+        b->win.flags = 0;
         scrub_timers(mark);
     }
 }
@@ -1748,7 +1919,7 @@ static void button_sweep(void) {
     int32_t inside = *game_win_press_inside;
     char *flip_text = *game_flip_text;
     *game_flip_text = NULL;  // (no bubble text for a press to take away: that redraws the screen)
-    void(__attribute__((cdecl)) * hooks[2])(void) = {game_button_hooks[0], game_button_hooks[1]};
+    void(__attribute__((cdecl)) * hooks[3])(void) = {game_button_hooks[0], game_button_hooks[1], game_button_hooks[2]};
     struct game_button_defaults defaults = *game_button_defaults;
     struct game_button_fonts fonts = *game_button_fonts;
     // A Buffer with pixels of its own, made outside any check, for the text colours.
@@ -1793,6 +1964,7 @@ static void button_sweep(void) {
                 check_button_on_left_click(b, rnd_to(100), rnd_to(100));
             }
             if (b->win.parent) mouse_sweep(b);
+            flat_sweep(b);
             if (!k) {
                 check_button_set_text_color(b, (int)rnd(), (int)rnd(), (int)rnd(), (int)rnd());
                 check_button_set_text_color2(b, (int)rnd(), (int)rnd(), (int)rnd(), (int)rnd());
@@ -1856,7 +2028,7 @@ static void button_sweep(void) {
     *game_win_capture = capture, *game_win_hover = hover, *game_win_press1 = press1, *game_win_press2 = press2, *game_win_cur = cur;
     *game_win_press_inside = inside;
     *game_flip_text = flip_text;
-    game_button_hooks[0] = hooks[0], game_button_hooks[1] = hooks[1];
+    game_button_hooks[0] = hooks[0], game_button_hooks[1] = hooks[1], game_button_hooks[2] = hooks[2];
     *game_button_defaults = defaults;
     *game_button_fonts = fonts;
     life_sweep_button();
@@ -2367,6 +2539,11 @@ static const struct hook button_hooks[] = {
     HOOK(0x6075c0, button_on_left_down, 0xa1, 0xbc, 0x7a, 0x9b, 0x00, 0x56, 0x85, 0xc0, 0x57, 0x8b, 0xf1),  // mov eax, [capture]; push esi; test eax, eax
     HOOK(0x607720, button_on_left_up, 0xa1, 0xbc, 0x7a, 0x9b, 0x00, 0x56, 0x8b, 0xf1),
     HOOK(0x607850, button_on_mouse_move, 0x83, 0xec, 0x10, 0x53, 0x55, 0x56, 0x8b, 0xf1, 0x57),  // sub esp, 0x10; push ebx, ebp, esi
+    HOOK(0x608500, flat_button_on_mouse_move, 0xa1, 0xcc, 0x7a, 0x9b, 0x00, 0x83, 0xec, 0x10, 0x85, 0xc0, 0x56, 0x57),
+    HOOK(0x608660, flat_button_on_mouse_leave, 0xa1, 0xcc, 0x7a, 0x9b, 0x00, 0x56, 0x85, 0xc0, 0x8b, 0xf1),
+    HOOK(0x607b30, button_timer_callback, 0x8b, 0x44, 0x24, 0x04, 0x83, 0xec, 0x14, 0x56, 0x57, 0x33, 0xff),
+    HOOK(0x607b10, button_timer_callback_daemon, 0x8b, 0x4c, 0x24, 0x08, 0x85, 0xc9),
+    HOOK(0x5f83d0, win_set_bubble_text, 0x51, 0x53, 0x56, 0x57, 0x8b, 0x7c, 0x24, 0x14),  // push ecx; ebx; esi; edi; mov edi, [esp+0x14]
     HOOK(0x607a20, button_on_left_click, 0xa1, 0xbc, 0x7a, 0x9b, 0x00, 0x56, 0x8b, 0xf1),
     HOOK(0x607360, button_set_text_color, 0x8b, 0x81, 0xc4, 0x00, 0x00, 0x00, 0x85, 0xc0),
     HOOK(0x6073a0, button_set_text_color2, 0x8b, 0x81, 0xc4, 0x00, 0x00, 0x00, 0x85, 0xc0),

@@ -82,7 +82,8 @@ static void check_str_(const char *what, const char *got, const char *want) {
 #define EXPECT_STR_(expr, want) check_str_(#expr, (expr), (want))
 static int ll_slot1, ll_deleted, ll_data_closed, ll_add_calls, ll_alloc_fail;
 static int ll_data_alloc_size, ll_data_alloc_result;
-static char ll_arena[64];
+static char ll_arena[256];
+static int ll_fail_after = -1;  // the heap gives nothing after this many blocks
 static int ll_arena_used;
 static void LT_THIS ll_slot1_fn(void *l, void *item) { ll_slot1++; }
 static void LT_THIS ll_delete(void *o, int flag) { ll_deleted++; free(o); }
@@ -96,7 +97,114 @@ static void *LT_THIS ll_string_alloc(void *arena, int size) {
     return p;
 }
 static int LT_THIS ll_add(void *list, int arg) { return ll_add_calls++, *(const char **)((uint8_t *)list + 0x1c) != NULL; }
-static void *ll_mem_get(size_t n) { return ll_alloc_fail ? NULL : calloc(1, n); }
+static void *ll_mem_get(size_t n) {
+    if (ll_alloc_fail || ll_fail_after == 0) return NULL;
+    if (ll_fail_after > 0) ll_fail_after--;
+    return calloc(1, n);
+}
+static int ll_slot0_calls;
+static void *ll_slot0_item;
+static void LT_THIS ll_slot0_fn(void *l, void *item) { (void)l, ll_slot0_calls++, ll_slot0_item = item; }
+static void *ll_add_vtable[2] = {(void *)ll_slot0_fn, NULL};
+static int ll_boxes, ll_exits;
+static int STD ll_box(void *w, const char *text, const char *title, int type) { return (void)w, (void)text, (void)title, (void)type, ll_boxes++, 0; }
+static void ll_exit(int code) { (void)code, ll_exits++; }
+
+// StringStruct_add: nodes and items made for the list (from the heap, or an arena), linked in a ring.
+static void test_add(void) {
+    life_vbtable(0x6693b0, 0x1c, 0);  // the virtual base 0x1c in: its arena word is at 0x24
+    IMGW(0x6693c8 + 4) = 0x14, IMGW(0x6693bc + 4) = 0x10;  // where the node's and the item's part vtables lie
+    game_message_box_a = ll_box, game_exit = ll_exit;
+    static uint8_t obj[0x40];
+    struct game_strlist *l = (struct game_strlist *)obj;
+    uint32_t *head = game_at(0x9b3374);
+    memset(obj, 0, sizeof obj), ll_fail_after = -1, ll_alloc_fail = 0, ll_slot0_calls = 0;
+    l->vtable = ll_add_vtable, l->vbptr = (void *)(uintptr_t)game_va(0x6693b0);
+    *head = 0x1234;
+    // The first: a node that links to itself, an item, the entry function told, the cursor on the node; idx is the old count.
+    EXPECT(strlist_add(l, 7), 0);
+    struct game_strnode *n0 = l->head;
+    EXPECT(n0 != NULL, 1), EXPECT(l->cur == n0, 1), EXPECT(n0->id, 7), EXPECT(n0->next == n0, 1), EXPECT(n0->prev == n0, 1);
+    EXPECT(l->count, 1), EXPECT(l->idx, 0), EXPECT(*head, 0), EXPECT(ll_slot0_calls, 1), EXPECT(ll_slot0_item == n0->item, 1);
+    EXPECT(OW(n0, 0), game_va(0x6693c8)), EXPECT(OW(n0, 0x14), game_va(0x6693c4)), EXPECT(OW(n0, 0x18), 0);
+    EXPECT(OW(n0->item, 0), game_va(0x6693bc)), EXPECT(OW(n0->item, 0x10), game_va(0x6693b8)), EXPECT(OW(n0->item, 0x14), 0);
+    // The second goes in before the head, ahead of the cursor; the head stays.
+    EXPECT(strlist_add(l, 8), 0);
+    struct game_strnode *n1 = l->cur;
+    EXPECT(n1 != n0, 1), EXPECT(l->head == n0, 1), EXPECT(n1->id, 8), EXPECT(n0->next == n1, 1), EXPECT(n0->prev == n1, 1);
+    EXPECT(n1->next == n0, 1), EXPECT(n1->prev == n0, 1), EXPECT(l->count, 2), EXPECT(l->idx, 1), EXPECT(ll_slot0_calls, 2);
+    EXPECT(ll_slot0_item == n1->item, 1);
+    EXPECT(strlist_add(l, 9), 0);
+    struct game_strnode *n2 = l->cur;
+    EXPECT(n1->next == n2, 1), EXPECT(n2->prev == n1, 1), EXPECT(n2->next == n0, 1), EXPECT(n0->prev == n2, 1), EXPECT(l->idx, 2), EXPECT(l->count, 3);
+    // From the list's own arena (word 0x18): objects hold it, the heap is left alone.
+    ll_arena_used = 0;
+    OW(obj, 0x18) = 0x5151;
+    EXPECT(strlist_add(l, 10), 0);
+    EXPECT(OW(l->cur, 0x18), 0x5151), EXPECT(OW(l->cur->item, 0x14), 0x5151), EXPECT(ll_arena_used, 0x1c + 0x18);
+    EXPECT((char *)l->cur == ll_arena, 1), EXPECT(*head, 0);
+    // Else from the virtual base's arena (the word 8 into the base).
+    ll_arena_used = 0;
+    OW(obj, 0x18) = 0, OW(obj, 0x24) = 0x6262;
+    EXPECT(strlist_add(l, 11), 0);
+    EXPECT(OW(l->cur, 0x18), 0x6262), EXPECT(OW(l->cur->item, 0x14), 0x6262), EXPECT(ll_arena_used, 0x1c + 0x18);
+    // The heap gives out nothing for the node: an empty list's head is left empty; otherwise the last node's next is left empty, and 4 is answered.
+    OW(obj, 0x24) = 0;
+    int boxes = ll_boxes;
+    ll_alloc_fail = 1;
+    memset(&obj[8], 0, 16);
+    EXPECT(strlist_add(l, 1), 4), EXPECT(l->head == NULL, 1), EXPECT(l->count, 0);
+    l->head = n0, l->cur = n0, l->count = 3, l->idx = 1;
+    EXPECT(strlist_add(l, 1), 4), EXPECT(n0->prev->next == NULL, 1), EXPECT(l->count, 3), EXPECT(l->idx, 1), EXPECT(l->cur == n0, 1);
+    n0->prev->next = n0;
+    // ... or for the item (the node is in): 4, the count not changed, the entry function not called.
+    ll_alloc_fail = 0, ll_fail_after = 1, ll_slot0_calls = 0;
+    EXPECT(strlist_add(l, 12), 4), EXPECT(l->cur->id, 12), EXPECT(l->cur->item == NULL, 1), EXPECT(l->count, 3), EXPECT(ll_slot0_calls, 0);
+    ll_fail_after = -1;
+    memset(&obj[8], 0, 16);
+    ll_fail_after = 1;
+    EXPECT(strlist_add(l, 13), 4), EXPECT(l->head->item == NULL, 1), EXPECT(l->count, 0), EXPECT(ll_slot0_calls, 0);
+    ll_fail_after = -1;
+    // An arena with no room is the end of the game (no way back here; the message box and exit are stand-ins).
+    EXPECT(ll_boxes, boxes), EXPECT(ll_exits, 0);
+}
+
+// The timers' procedures: the object's message is posted once, unless the game's word lets only another object post.
+static int posted;
+static struct {
+    void *w;
+    unsigned msg;
+    uintptr_t wp;
+    intptr_t lp;
+} post[4];
+static int STD ll_post(void *w, unsigned msg, uintptr_t wp, intptr_t lp) {
+    if (posted < 4) post[posted].w = w, post[posted].msg = msg, post[posted].wp = wp, post[posted].lp = lp;
+    return posted++, 1;
+}
+static void test_procs(void) {
+    static struct game_time t, other;
+    game_post_message = ll_post;
+    uint32_t *only = game_at(0x9b90d0);
+    *only = 0, posted = 0, memset(&t, 0, sizeof t);
+    time_timer_proc((void *)7, 0x113, &t, 1000);
+    EXPECT(posted, 1), EXPECT(post[0].w == (void *)(uintptr_t)hwnd, 1), EXPECT(post[0].msg, 0x401), EXPECT(post[0].wp, (uintptr_t)&t), EXPECT(post[0].lp, 0);
+    EXPECT(t.fired, 1);
+    time_timer_proc((void *)7, 0x113, &t, 1000), time_mm_proc(1, 2, &t, 3, 4);  // (already on its way)
+    EXPECT(posted, 1);
+    t.fired = 0;
+    time_mm_proc(1, 2, &t, 3, 4);
+    EXPECT(posted, 2), EXPECT(t.fired, 1), EXPECT(post[1].wp, (uintptr_t)&t);
+    time_mm_proc(1, 2, NULL, 3, 4), time_timer_proc(NULL, 0, NULL, 0);
+    EXPECT(posted, 2);
+    // Only the object the word names posts.
+    t.fired = 0, other.fired = 0, *only = (uint32_t)(uintptr_t)&other;
+    time_timer_proc(NULL, 0, &t, 0);
+    EXPECT(posted, 2), EXPECT(t.fired, 0);
+    time_mm_proc(0, 0, &other, 0, 0);
+    EXPECT(posted, 3), EXPECT(other.fired, 1), EXPECT(post[2].wp, (uintptr_t)&other);
+    *only = 0;
+}
+
 
 static void test_life(void) {
     life_image_init();
@@ -366,6 +474,8 @@ int main(void) {
     make_list(0, NULL), strlist_sort(&L, 0);
 
     test_life();
+    test_add();
+    test_procs();
 
     if (failures) printf("%d failures\n", failures);
     else printf("ok\n");

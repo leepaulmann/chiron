@@ -9,12 +9,12 @@
 // (timeKillEvent or KillTimer) and, unless the object is a pulse made with SetTimer (flag 1), runs the
 // game's own message pump for its 0x401 messages (0x5fd370).
 //
-// Here are all of Time's functions that start, stop and set up the timer, StringStruct's seek and walk
-// functions, StringList's sort and the string table's lookup. Left to the original: the procedures the
-// timers call (TimerProc and MultimediaProc run on the timer's thread or in the window's handler and
-// post a message), StringStruct's constructor, destructor, close, add and remove_all and StringList's
-// fill_entry, kill_entry, load and add_special (they allocate and free on the game's heap, or read a
-// file), and Strings' constructor, init, shutdown and put (they allocate).
+// Here are all of Time's functions that start, stop and set up the timer and the procedures the timers
+// call (TimerProc and MultimediaProc: they post the message), StringStruct's seek and walk functions,
+// StringList's sort and the string table's lookup. StringStruct's constructor, destructor, close, add and
+// remove_all and StringList's fill_entry, kill_entry and add_special, and Strings' constructor, init,
+// shutdown, put and destructor allocate or free on the game's heap and are checked on twins (life.c);
+// StringList's load reads a file and is left to the original.
 //
 // Differences from OpenSMACX and Thinker: start and pulse are the same code in the original (both start a
 // repeating multimedia timer); start_2 and pulse_2 differ in whether the multimedia timer repeats and in
@@ -263,6 +263,29 @@ void STR_THIS strlist_sort(struct game_strlist *l, int unused) {
     } while (i < l->count - 1);
 }
 
+// The procedures a timer calls, on the timer's own thread (the multimedia one) or in the window's handler (SetTimer's): the first
+// takes the Time object it was started for as its third argument (the id of a SetTimer timer is the object; the user value of
+// a multimedia one is too). Unless the object's message is already on its way (its flag at 0x1c), the game's window is posted
+// message 0x401 with the object, and the flag is set (the handler clears it as it calls what the object holds). A word of the
+// game's (0x9b90d0), when set, lets only that object post. The two differ in how many arguments Windows gives them (4 and 5,
+// the callee pops them), and answer nothing.
+static void time_post(struct game_time *t) {
+    if (!t) return;
+    const struct game_time *only = *(struct game_time **)game_at(0x9b90d0);
+    if (only && t != only) return;
+    if (t->fired) return;
+    game_post_message((void *)(uintptr_t)*game_win_hwnd, 0x401, (uintptr_t)t, 0);
+    t->fired = 1;
+}
+void __attribute__((stdcall)) time_timer_proc(void *hwnd, unsigned msg, struct game_time *t, unsigned tick) {
+    (void)hwnd, (void)msg, (void)tick;
+    time_post(t);
+}
+void __attribute__((stdcall)) time_mm_proc(unsigned id, unsigned msg, struct game_time *t, unsigned dw1, unsigned dw2) {
+    (void)id, (void)msg, (void)dw1, (void)dw2;
+    time_post(t);
+}
+
 // ---- Shadow checks -------------------------------------------------------------------------------------------
 
 SHADOW_THIS_FN(STRINGS, unsigned, strings_get, (struct game_strings * t, unsigned p), (t, p), "%d, %d", P(t), (int)p)
@@ -289,6 +312,25 @@ SHADOW_WRITER_T(STRINGS, int, time_pulse_2,
 SHADOW_WRITER_T(STRINGS, int, time_start_3, (struct game_time * t), (t), TIME_WRITES, "%d", P(t))
 SHADOW_WRITER_T(STRINGS, int, time_pulse_3, (struct game_time * t), (t), TIME_WRITES, "%d", P(t))
 SHADOW_WRITER_T(STRINGS, void, time_stop, (struct game_time * t), (t), TIME_WRITES, "%d", P(t))
+
+// The timers' procedures run on whatever thread the timer fires on, where a check can't hold the others still, and a multimedia
+// timer's thread would count calls and tick the sweep on its own: the game's calls run the original (not counted), and the sweep
+// checks Chiron's code (the journal compares the PostMessage the original's run makes with Chiron's). Normal mode runs Chiron's.
+#define STD __attribute__((stdcall))
+static void(STD *orig_time_timer_proc)(void *hwnd, unsigned msg, struct game_time *t, unsigned tick);
+static struct hook_stats stats_time_timer_proc = {"time_timer_proc"};
+SHADOW_WRITER_BODY(void, time_timer_proc, (void *hwnd, unsigned msg, struct game_time *t, unsigned tick), (hwnd, msg, t, tick),
+                   (t ? WRITES(&t->fired, 4) : (void)0), "%d, %d", P(t), (int)msg)
+static void STD shadow_time_timer_proc(void *hwnd, unsigned msg, struct game_time *t, unsigned tick) {
+    orig_time_timer_proc(hwnd, msg, t, tick);
+}
+static void(STD *orig_time_mm_proc)(unsigned id, unsigned msg, struct game_time *t, unsigned dw1, unsigned dw2);
+static struct hook_stats stats_time_mm_proc = {"time_mm_proc"};
+SHADOW_WRITER_BODY(void, time_mm_proc, (unsigned id, unsigned msg, struct game_time *t, unsigned dw1, unsigned dw2),
+                   (id, msg, t, dw1, dw2), (t ? WRITES(&t->fired, 4) : (void)0), "%d, %d", P(t), (int)msg)
+static void STD shadow_time_mm_proc(unsigned id, unsigned msg, struct game_time *t, unsigned dw1, unsigned dw2) {
+    orig_time_mm_proc(id, msg, t, dw1, dw2);
+}
 
 // The list's cursor is `cur`, `count` and `idx` (which lie together: 12 bytes).
 #define LIST_CURSOR WRITES(&l->cur, 12)
@@ -468,6 +510,22 @@ static void strings_sweep(void) {
         build_list(1);
         check_strlist_sort(&L.list, 0), check_strlist_next_entry(&L.list), check_strlist_seek_pos(&L.list, -1);
     }
+    // The timers' procedures: the object posting or not (its flag set or clear, the word that lets only one post set to it, to
+    // another, or clear), and no object at all. The message the original's run posts is taken by the game's own pump
+    // (the objects hold functions that do nothing).
+    {
+        struct game_time **only = (struct game_time **)game_at(0x9b90d0), *saved_only = *only;
+        for (int k = 0; k < 16; k++) {
+            struct game_time *t = &T[k % NT];
+            randomize_time(t);
+            t->cb = stub_cb, t->cb2 = stub_cb2, t->id = 0;
+            *only = rnd_to(3) == 0 ? NULL : rnd_to(2) ? t : &T[(k + 1) % NT];
+            if (rnd_to(2)) check_time_timer_proc((void *)(uintptr_t)*game_win_hwnd, 0x113, rnd_to(8) ? t : NULL, (unsigned)rnd());
+            else check_time_mm_proc((unsigned)rnd(), 0x3b9, rnd_to(8) ? t : NULL, (unsigned)rnd(), (unsigned)rnd());
+            game_time_flush();
+        }
+        *only = saved_only;
+    }
     memset(T, 0, sizeof T);  // (a timer message that arrives later finds nothing to do)
     life_sweep_strings();
     hooks_sweeping = sweeping;
@@ -576,6 +634,73 @@ void *STR_THIS strlist_scalar_dtor(void *vb, int flag) {
     return l;
 }
 
+// The ring's nodes and items, made for a list by its "new": from the arena the list part names (word 0x18) if it has one, else
+// from the one its virtual base names (the word 8 into it), else from the game's heap. An arena that has no room, in either
+// case, is the end of the game (the game's message box, then exit(3)); the heap giving nothing makes no object. A new object
+// of the two classes begins with the class's vtable, then (at the virtual base's place) the base's vtable, the arena the object
+// was made in (what the global 0x9b3374 holds then; a heap object holds none) and last, where the vtable's second word puts it,
+// the part's vtable. The global ends up clear whichever way the object was made.
+enum { SL_NODE_VT = 0x6693c8, SL_NODE_PART_VT = 0x6693c4, SL_ITEM_VT = 0x6693bc, SL_ITEM_PART_VT = 0x6693b8, SL_VB_VT = 0x6693ac };
+static void *strlist_new(struct game_strlist *l, int size, uint32_t vtable, int vb_at, uint32_t part_vtable) {
+    uint8_t *o = (uint8_t *)l;
+    void *arena = *(void **)(o + 0x18);
+    if (!arena) arena = *(void **)(o + ((const int32_t *)(uintptr_t)l->vbptr)[1] + 8);
+    uint8_t *p;
+    uint32_t saved = 0;
+    if (arena) {
+        p = game_string_alloc(arena, size);
+        if (!p) {
+            game_message_box_a(NULL, (const char *)game_at(0x682724), (const char *)game_at(0x682700), 0);
+            game_exit(3);
+        }
+        saved = (uint32_t)(uintptr_t)arena;
+    } else {
+        p = game_mem_get((size_t)size);
+        if (!p) return NULL;
+    }
+    *(uint32_t *)game_at(SL_HEAD) = 0;
+    *(uint32_t *)p = game_va(vtable);
+    *(uint32_t *)(p + vb_at) = game_va(SL_VB_VT);
+    *(uint32_t *)(p + vb_at + 4) = saved;
+    *(uint32_t *)(p + ((const int32_t *)game_at(vtable))[1]) = game_va(part_vtable);
+    return p;
+}
+
+// Appends a node with the id and an item (told the list's own entry function, its vtable slot 0: StringList's copies the text and
+// the numbers in) at the end of the ring and makes it the cursor; answers 0, or 4 if a node or an item could not be had. A list
+// with a count of 0 starts a ring (its cursor is set after the entry function is called); the first node's links are to itself.
+// The index becomes the old count, and the count one more. A node that cannot be had is still stored: in an empty list as the head, and
+// otherwise as the old last node's next, where it is found missing and the call answers 4 (the ring is left broken, as the original's).
+int STR_THIS strlist_add(struct game_strlist *l, int id) {
+    struct game_strnode *n;
+    if (l->count == 0) {
+        n = strlist_new(l, 0x1c, SL_NODE_VT, 0x14, SL_NODE_PART_VT);
+        l->head = n;
+        if (!n) return 4;
+        n->id = id, n->next = n, n->prev = n;
+        void *item = strlist_new(l, 0x18, SL_ITEM_VT, 0x10, SL_ITEM_PART_VT);
+        l->head->item = item;
+        if (!item) return 4;
+        ((void(STR_THIS *)(void *, void *))l->vtable[0])(l, item);
+        l->cur = l->head;
+    } else {
+        n = strlist_new(l, 0x1c, SL_NODE_VT, 0x14, SL_NODE_PART_VT);
+        struct game_strnode *tail = l->head->prev;
+        tail->next = n;
+        if (!n) return 4;
+        n->prev = tail, n->next = l->head, l->head->prev = n;
+        l->cur = n;
+        n->id = id;
+        void *item = strlist_new(l, 0x18, SL_ITEM_VT, 0x10, SL_ITEM_PART_VT);
+        l->cur->item = item;
+        if (!item) return 4;
+        ((void(STR_THIS *)(void *, void *))l->vtable[0])(l, item);
+    }
+    l->idx = l->count;
+    l->count++;
+    return 0;
+}
+
 // StringList: the list part is followed by the arena the text comes from (0x18, none for the game's heap),
 // the text to add (0x1c) and two numbers (0x20, 0x24) that every new entry takes.
 int STR_THIS stringlist_fill_entry(struct game_strlist *l, void *item) {
@@ -648,6 +773,19 @@ int STR_THIS strings_shutdown(struct game_strings *t) {
     return 0;
 }
 
+// The arena (the first five words of Strings and of the Dialog's data): the block (word 1) is freed and the words cleared.
+void STR_THIS arena_close(struct game_strings *a) {
+    if (a->base) {
+        game_free((void *)(uintptr_t)a->base);
+        a->base = 0;
+    }
+    *(uint8_t *)a = 0;
+    a->f8 = 0, a->base = 0, a->f10 = 0, a->size = 0;
+}
+
+// Strings' destructor is a jump to the arena's close.
+void STR_THIS strings_dtor(struct game_strings *t) { arena_close(t); }
+
 // Copies a text into the arena and answers where it went.
 char *STR_THIS strings_put(struct game_strings *t, const char *text) {
     char *block = game_string_alloc(t, (int)strlen(text) + 1);
@@ -668,6 +806,18 @@ SHADOW_PASS_T(STRINGS, void *, strings_ctor, (struct game_strings * t), (t))
 SHADOW_PASS_T(STRINGS, int, strings_init, (struct game_strings * t, int size), (t, size))
 SHADOW_PASS_T(STRINGS, int, strings_shutdown, (struct game_strings * t), (t))
 SHADOW_PASS_T(STRINGS, char *, strings_put, (struct game_strings * t, const char *text), (t, text))
+SHADOW_PASS_T(STRINGS, int, strlist_add, (struct game_strlist * l, int id), (l, id))
+SHADOW_PASS_T(STRINGS, void, arena_close, (struct game_strings * a), (a))
+// (Strings' destructor is a jump in the original, which a hook's trampoline can't take: the original's run is the original's close.)
+static void(THISCALL *orig_strings_dtor)(struct game_strings *t);
+static struct hook_stats stats_strings_dtor = {"strings_dtor"};
+static void THISCALL shadow_strings_dtor(struct game_strings *t) {
+    if (!hooks_nested && !shadow_bypass()) {
+        stats_strings_dtor.calls++;
+        shadow_tick(STRINGS);
+    }
+    orig_arena_close(t);
+}
 
 static uint32_t put_result;
 static const char *put_text = "a line of text";
@@ -677,6 +827,42 @@ static uint32_t hash_text(const char *s) {
     return h;
 }
 
+// What an add made, as one number: the id, whether the ring is linked through the new node, the classes' words of the node and
+// its item (the vtables, the arena they were made in as set or not, the entry's numbers and text). It is read after the call,
+// so a node or an item that is not as the original's shows in the global the twin check compares.
+static uint32_t add_result;
+static uint32_t hmix(uint32_t h, uint32_t v) { return (h * 31u + v) * 2654435761u + 7; }
+static uint32_t ring_hash(struct game_strlist *l, int ret) {
+    uint32_t h = (uint32_t)ret;
+    struct game_strnode *c = l->cur;
+    if (ret || !c) return h;
+    const uint8_t *n = (const uint8_t *)c;
+    h = hmix(h, (uint32_t)c->id);
+    h = hmix(h, c->next == l->head);
+    h = hmix(h, c->prev && c->prev->next == c);
+    h = hmix(h, c->next && c->next->prev == c);
+    h = hmix(h, *(const uint32_t *)n);
+    h = hmix(h, *(const uint32_t *)(n + 0x14));
+    h = hmix(h, *(const uint32_t *)(n + 0x18) != 0);
+    const uint8_t *it = c->item;
+    h = hmix(h, it != NULL);
+    if (it) {
+        h = hmix(h, *(const uint32_t *)it);
+        h = hmix(h, *(const uint32_t *)(it + 0x10));
+        h = hmix(h, *(const uint32_t *)(it + 0x14) != 0);
+        h = hmix(h, *(const uint32_t *)(it + 8));
+        h = hmix(h, *(const uint32_t *)(it + 0xc));
+        // (The entry's text is only set when the list has text to add; otherwise the block's word is whatever was there.)
+        if (*(const char *const *)((const uint8_t *)l + 0x1c)) {
+            const char *text = *(const char *const *)(it + 4);
+            h = hmix(h, text != NULL);
+            h = hmix(h, hash_text(text));
+        }
+        h = hmix(h, *(const uint32_t *)(it + ((const int32_t *)game_at(SL_ITEM_VT))[1]));
+    }
+    h = hmix(h, *(const uint32_t *)(n + ((const int32_t *)game_at(SL_NODE_VT))[1]));
+    return hmix(h, *(uint32_t *)game_at(SL_HEAD));
+}
 LIFE_FN(strlist_ctor_most, orig_strlist_ctor(o, 1), strlist_ctor(o, 1))
 LIFE_FN(strlist_ctor_part, orig_strlist_ctor(o, 0), strlist_ctor(o, 0))
 LIFE_FN(strlist_close, orig_strlist_close((uint8_t *)o + 0x1c), strlist_close((uint8_t *)o + 0x1c))
@@ -685,6 +871,8 @@ LIFE_FN(strlist_scalar_dtor, orig_strlist_scalar_dtor((uint8_t *)o + 0x1c, 0), s
 LIFE_FN(strings_ctor, orig_strings_ctor(o), strings_ctor(o))
 LIFE_FN(strings_init, orig_strings_init(o, (int)(intptr_t)x), strings_init(o, (int)(intptr_t)x))
 LIFE_FN(strings_shutdown, orig_strings_shutdown(o), strings_shutdown(o))
+LIFE_FN(arena_close, orig_arena_close(o), arena_close(o))
+LIFE_FN(strings_dtor, orig_arena_close(o), strings_dtor(o))
 LIFE_FN(strings_put, put_result = hash_text(orig_strings_put(o, put_text)), put_result = hash_text(strings_put(o, put_text)))
 
 static const struct life_slot strlist_slots[] = {{8, -1}, {0xc, -1}};
@@ -707,12 +895,17 @@ LIFE_FN(stringlist_kill_entry, orig_stringlist_kill_entry(SL_LIST(o), SL_ITEM(o)
 LIFE_FN(stringlist_add_special, sl_result = (uint32_t)orig_stringlist_add_special(SL_LIST(o), sl_texts[(int)(intptr_t)x]),
         sl_result = (uint32_t)stringlist_add_special(SL_LIST(o), sl_texts[(int)(intptr_t)x]))
 
+#define SL_ADD(call) \
+    int r_ = call;   \
+    add_result = ring_hash(SL_LIST(o), r_)
+LIFE_FN(strlist_add, SL_ADD(orig_strlist_add(SL_LIST(o), (int)(intptr_t)x)), SL_ADD(strlist_add(SL_LIST(o), (int)(intptr_t)x)))
+
 // The Dialog's data and cursor, its list's head and cursor, and the item's text.
 static const struct life_slot stringlist_slots[] = {{8, -1}, {0xc, -1}, {0xc4, -1}, {0xc8, -1}, {0x104, 0}};
 static const struct life_class stringlist_class = {"StringList", 0x110, stringlist_slots, 5};
 
 static void life_sweep_stringlist(void) {
-    uint32_t *head_global[1] = {(uint32_t *)game_at(SL_HEAD)}, *result_global[1] = {&sl_result};
+    uint32_t *head_global[1] = {(uint32_t *)game_at(SL_HEAD)}, *result_global[1] = {&sl_result}, *add_globals[2] = {&add_result, (uint32_t *)game_at(SL_HEAD)};
     (void)head_global;
     if (!game_dialog_ctor || !game_dialog_dtor || !game_mem_get) return;
     for (int round = 0; round < 6; round++) {
@@ -745,6 +938,25 @@ static void life_sweep_stringlist(void) {
                     game_free(*(void **)(life_a + 0x104));
                     game_free(*(void **)(life_b + 0x104));
                 }
+                game_dialog_dtor(life_a), game_dialog_dtor(life_b);
+            }
+            // An add on lists of 0 to 3 nodes: the list's own arena (its data), or none.
+            for (int add = 0; add < 4; add++) {
+                life_build(&stringlist_class, fill, life_orig_sl_dialog_ctor, NULL);
+                if (arena) life_data(0, 1024);
+                life_nodes(0xbc, (round + add) % 4);
+                uint8_t *objs[2] = {life_a, life_b};
+                for (int k = 0; k < 2; k++) {
+                    uint8_t *o = objs[k];
+                    memset(o + 0x100, 0, 16);
+                    // (The word the list's base keeps its second arena in is another member's of the Dialog: clear.)
+                    const int32_t *vbt = (const int32_t *)(uintptr_t)*(uint32_t *)(o + 0xc0);
+                    *(uint32_t *)(o + 0xbc + vbt[1] + 8) = 0;
+                    *(void **)(o + 0xd4) = arena ? o + 4 : NULL;
+                    *(const char **)(o + 0xd8) = sl_texts[(round + add) % 3];  // (always text: an entry without it holds whatever the block did, which freeing it would trip on)
+                    *(int32_t *)(o + 0xdc) = 3 + round, *(int32_t *)(o + 0xe0) = 7 - add;
+                }
+                life_run(&stats_strlist_add, &stringlist_class, life_orig_strlist_add, life_ours_strlist_add, (void *)(intptr_t)(round * 10 + add - 3), add_globals, 2);
                 game_dialog_dtor(life_a), game_dialog_dtor(life_b);
             }
         }
@@ -788,6 +1000,14 @@ static void life_sweep_strings(void) {
             orig_strings_shutdown((struct game_strings *)life_a), orig_strings_shutdown((struct game_strings *)life_b);
         }
     }
+    // The arena's close and Strings' destructor, with and without a block.
+    for (int which = 0; which < 4; which++) {
+        life_build(&strings_class, (uint8_t)(which * 17 + 5), life_orig_strings_ctor, NULL);
+        if (which & 1) orig_strings_init((struct game_strings *)life_a, 64), orig_strings_init((struct game_strings *)life_b, 64);
+        if (which < 2) life_run(&stats_arena_close, &strings_class, life_orig_arena_close, life_ours_arena_close, NULL, none, 0);
+        else life_run(&stats_strings_dtor, &strings_class, life_orig_strings_dtor, life_ours_strings_dtor, NULL, none, 0);
+        orig_strings_shutdown((struct game_strings *)life_a), orig_strings_shutdown((struct game_strings *)life_b);
+    }
     life_sweep_stringlist();
 }
 
@@ -807,6 +1027,11 @@ static const struct hook strings_hooks[] = {
     HOOK(0x6168f0, strings_init, 0x56, 0x8b, 0xf1, 0x8b, 0x46, 0x14, 0x85, 0xc0),
     HOOK_CALL(0x616950, strings_shutdown, 0x56, 0x8b, 0xf1, 0xe8, 0x28, 0xdc, 0xfb, 0xff),
     HOOK(0x616970, strings_put, 0x56, 0x57, 0x8b, 0x7c, 0x24, 0x0c, 0x8b, 0xf1),
+    HOOK(0x5d45b0, arena_close, 0x53, 0x56, 0x8b, 0xf1, 0x33, 0xdb, 0x8b, 0x46, 0x04),  // push ebx; push esi; mov esi, ecx; xor ebx, ebx; mov eax, [esi+4]
+    HOOK(0x6169c0, strings_dtor, 0xe9, 0xeb, 0xdb, 0xfb, 0xff),  // jmp arena_close
+    HOOK(0x401100, strlist_add, 0x55, 0x8b, 0xec, 0x51, 0x53, 0x56, 0x8b, 0xf1, 0x33, 0xdb),
+    HOOK(0x6167e0, time_timer_proc, 0x56, 0x8b, 0x74, 0x24, 0x10, 0x85, 0xf6),  // push esi; mov esi, [esp+0x10]; test esi, esi
+    HOOK(0x616820, time_mm_proc, 0x56, 0x8b, 0x74, 0x24, 0x10, 0x85, 0xf6),
     HOOK(0x6169a0, strings_get, 0x8b, 0x41, 0x04, 0x8b, 0x54, 0x24, 0x04, 0x3b, 0xd0),
     HOOK(0x6161d0, time_ctor, 0x8b, 0xc1, 0x33, 0xc9, 0x89, 0x48, 0x04),
     HOOK(0x616200, time_dtor, TIME_PRO),

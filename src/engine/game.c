@@ -148,6 +148,7 @@ void(__attribute__((thiscall)) * game_scroll_init_horz_nc)(void *bar, int a, int
 void(__attribute__((thiscall)) * game_win_do_caption_buttons)(void *win);
 void(__attribute__((thiscall)) * game_graphic_win_compute_min_size)(void *win);
 void (*game_flip_restore)(const int32_t *box, int arg);
+void(__attribute__((thiscall)) * game_win_set_bubble_text)(void *win, const char *text, const int32_t *rect);
 void (*game_win_clear_bubble)(void);
 void(__attribute__((stdcall)) * game_sleep)(uint32_t ms);
 void *(__attribute__((thiscall)) * game_dialogs_ctor)(void *o, int most_derived);
@@ -1558,6 +1559,7 @@ void game_bind(struct pe_image *exe) {
     game_win_do_caption_buttons = (void *)code_at(exe, 0x5f2700);
     game_graphic_win_compute_min_size = (void *)code_at(exe, 0x5d7030);
     game_flip_restore = (void *)code_at(exe, 0x5f7320);
+    game_win_set_bubble_text = (void *)code_at(exe, 0x5f83d0);
     game_win_clear_bubble = (void *)code_at(exe, 0x5f8500);
     game_sleep = *(void **)code_at(exe, 0x66912c);  // filled in when imports were bound
     game_dialogs_ctor = (void *)code_at(exe, 0x612830);
