@@ -96,6 +96,8 @@ int pop_on_modal(void);
 void pop_fallout(void);
 void DLG_THIS pop_unk3(struct game_base_pop *p, int on);
 void DLG_THIS pop_unk4(struct game_base_pop *p, int on);
+void DLG_THIS pop_on_redraw(struct game_base_pop *p);
+int DLG_THIS pop_calculate_dimensions(struct game_base_pop *p);
 
 // Dialog.
 int DLG_THIS dialog_close(struct game_dialog *d);

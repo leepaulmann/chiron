@@ -1852,6 +1852,8 @@ extern const char *game_dib_error_text, *game_dib_error_title;
 extern void(__attribute__((thiscall)) * game_spot_ctor)(void *spot);
 extern void(__attribute__((thiscall)) * game_spot_dtor)(void *spot);
 extern void(__attribute__((thiscall)) * game_spot_init)(void *spot, int n);
+// The popup's combined widget's layout (0x6132a0): calls the layout of the part its type (at 0x180) says; answers 0, or what that did.
+extern int(__attribute__((thiscall)) * game_dialog_calc)(void *widget);
 extern void *(__attribute__((thiscall)) * game_dialog_ctor)(void *dialog);
 extern void(__attribute__((thiscall)) * game_dialog_dtor)(void *dialog);  // the original's: Dialog_dtor, GraphicWin_dtor (for sweeps)
 extern void(__attribute__((thiscall)) * game_graphic_win_dtor)(void *win);

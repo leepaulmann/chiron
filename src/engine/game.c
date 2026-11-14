@@ -137,6 +137,7 @@ const char *game_dib_error_text, *game_dib_error_title;
 void(__attribute__((thiscall)) * game_spot_ctor)(void *spot);
 void(__attribute__((thiscall)) * game_spot_dtor)(void *spot);
 void(__attribute__((thiscall)) * game_spot_init)(void *spot, int n);
+int(__attribute__((thiscall)) * game_dialog_calc)(void *widget);
 void *(__attribute__((thiscall)) * game_dialog_ctor)(void *dialog);
 void(__attribute__((thiscall)) * game_dialog_dtor)(void *dialog);
 void(__attribute__((thiscall)) * game_graphic_win_dtor)(void *win);
@@ -1549,6 +1550,7 @@ void game_bind(struct pe_image *exe) {
     game_spot_ctor = (void *)code_at(exe, 0x5fa860);
     game_spot_dtor = (void *)code_at(exe, 0x5fa870);
     game_spot_init = (void *)code_at(exe, 0x5fa8a0);
+    game_dialog_calc = (void *)code_at(exe, 0x6132a0);
     game_win_close = (void *)code_at(exe, 0x5eb640);
     game_operator_new = (void *)code_at(exe, 0x64558a);
     game_scroll_init_vert_nc = (void *)code_at(exe, 0x605910);

@@ -194,6 +194,20 @@ void THISCALL buffer_clear_links(buffer_t *b) {
         if (*at(b, HEAP + 4 * i)) game_free((void *)(intptr_t)*at(b, HEAP + 4 * i)), *at(b, HEAP + 4 * i) = 0;
 }
 
+// A check of a drawing function can't let Buffer_clear_links run: it makes room on the game's heap (which no check puts back). While
+// a check holds it (buffer_clear_links_held), a call is only logged (a count and a hash of the Buffers asked) and does nothing, in the
+// original's calls (through the hook, in shadow mode) and in Chiron's (through buffer_clear_links_draw) alike.
+int buffer_clear_links_held;
+struct buffer_clear_links_record buffer_clear_links_log;
+static void clear_links_note(buffer_t *b) {
+    buffer_clear_links_log.hash = buffer_clear_links_log.hash * 31u + (uint32_t)(uintptr_t)b;
+    buffer_clear_links_log.n++;
+}
+void buffer_clear_links_draw(buffer_t *b) {
+    if (buffer_clear_links_held) clear_links_note(b);
+    else buffer_clear_links(b);
+}
+
 void THISCALL buffer_dtor(buffer_t *b) {
     b->vtable = game_buffer_vtable;
     buffer_close(b);
@@ -440,7 +454,14 @@ void THISCALL buffer_box_sprite(buffer_t *b, const int32_t *rect, const struct g
 PASS_THROUGH(void *, buffer_ctor, (buffer_t * b), (b))
 PASS_THROUGH(void, buffer_dtor, (buffer_t * b), (b))
 PASS_THROUGH(void, buffer_close, (buffer_t * b), (b))
-PASS_THROUGH(void, buffer_clear_links, (buffer_t * b), (b))
+static void THISCALL shadow_buffer_clear_links(buffer_t *b) {
+    if (buffer_clear_links_held) return clear_links_note(b);
+    if (!hooks_nested && !shadow_bypass()) {
+        stats_buffer_clear_links.calls++;
+        shadow_tick(BUFOBJ);
+    }
+    orig_buffer_clear_links(b);
+}
 PASS_THROUGH(int, buffer_init, (buffer_t * b, int w, int h, int flags, void **surface), (b, w, h, flags, surface))
 PASS_THROUGH(int, buffer_resize, (buffer_t * b, int w, int h), (b, w, h))
 PASS_THROUGH(int, buffer_set_clip, (buffer_t * b, const int32_t *rect), (b, rect))

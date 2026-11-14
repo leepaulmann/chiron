@@ -4,9 +4,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../src/engine/bufobj.h"
 #include "../src/engine/dialog.h"
+#include "../src/engine/text.h"
 #include "../src/engine/game.h"
 #include "../src/engine/win.h"
+#define PTR_(o, off) (*(void **)((uint8_t *)(o) + (off)))
 #include "life_test.h"
 
 static int failures;
@@ -348,6 +351,282 @@ static void test_life(void) {
         free(d);
     }
 
+}
+
+
+// ---- BasePop layout and drawing ----
+//
+// A popup as the original lays it out (the table of its widget's virtual bases at 0x21d0, the Win at 0x188 and the Dialog at 0xba0 into
+// it), a Buffer with pixels of its own, text measured by a stand-in (6 pixels a character, a line 12 high), and the widget's layout, the
+// window's virtual functions and the function a screen set standing in with logs.
+static uint8_t PO[0x3230] __attribute__((aligned(16)));
+static int32_t pvbt[4] = {0, 0x188, 0xba0, 0};
+static void *pvt[0x200 / 4];
+static int pcalc_answer, pcalc_wide, pcalc_high, p180_answer;
+#define PI(off) (*(int32_t *)(PO + (off)))
+#define PD(off) (*(int32_t *)(PO + 0x2d70 + (off)))
+static int THIS p_calc(void *w) {
+    rec(0x500, w, PD(0x2c), PD(0x30), PD(0x20), 0);
+    PD(0x5c) = pcalc_wide, PD(0x60) = pcalc_high;
+    return pcalc_answer;
+}
+static int THIS p_174(void *o) { return rec(0x174, o, 0, 0, 0, 0), 0; }
+static int THIS p_180(void *o) { return rec(0x180, o, 0, 0, 0, 0), p180_answer; }
+static int p_handler(void *pic, void *host, int id, int x, int y) {
+    rec(0x300, pic, (int)(intptr_t)host, id, x * 1000 + y, *(int32_t *)game_at(0x9b8cf4) == (int32_t)(intptr_t)PO);
+    return 0;
+}
+static int p_fake_dc, p_spot_inits;
+static void *p_dc_slot, *p_default_font;
+static int32_t p_slack, p_fly_x, p_fly_y, p_fly_left, p_link_table[0x2c0 / 4], p_text_end;
+static char p_fly_text[1024];
+static void *p_selected;
+static void *__attribute__((stdcall)) p_select_object(void *dc, void *obj) {
+    void *old = p_selected;
+    p_selected = obj;
+    return old;
+}
+static void *__attribute__((stdcall)) p_stock_object(int which) { return (void *)(intptr_t)(0x1000 + which); }
+static int __attribute__((stdcall)) p_text_extent(void *dc, const char *s, int n, int32_t *size) {
+    size[0] = n * 6, size[1] = 12;
+    return 1;
+}
+static void THIS p_spot_init(void *s, int n) { p_spot_inits++; }
+static struct font pfont, pbfont;
+static uint8_t ppix[200 * 100 + 8];
+static struct game_sprite psp[3];
+static uint8_t pspd[3][64];
+static struct game_dlist_node pnode[3];
+static struct {
+    void *vt;
+    const char *text;
+    int32_t kind;
+} pitem[3];
+static struct game_dlist_node snode[2];
+static void *sitem_[2];
+
+static uint8_t PH[0x444 + sizeof(struct game_buffer) + 16] __attribute__((aligned(16)));
+static int p_nouts;
+static int __attribute__((stdcall)) p_intersect(int32_t *out, const int32_t *a, const int32_t *b) {
+    int32_t r[4] = {a[0] > b[0] ? a[0] : b[0], a[1] > b[1] ? a[1] : b[1], a[2] < b[2] ? a[2] : b[2], a[3] < b[3] ? a[3] : b[3]};
+    if (r[0] >= r[2] || r[1] >= r[3]) return memset(out, 0, 16), 0;
+    return memcpy(out, r, 16), 1;
+}
+static int __attribute__((stdcall)) p_equal(const int32_t *a, const int32_t *b) { return !memcmp(a, b, 16); }
+static char p_outs[8][16];
+static int __attribute__((stdcall)) p_set_bk_mode(void *dc, int mode) { return 0; }
+static uint32_t __attribute__((stdcall)) p_set_text_color(void *dc, uint32_t c) { return 0; }
+static int __attribute__((stdcall)) p_text_out(void *dc, int x, int y, const char *s, int n) {
+    if (p_nouts < 8) snprintf(p_outs[p_nouts], sizeof p_outs[0], "%.*s", n, s);
+    p_nouts++;
+    return 1;
+}
+
+static void p_reset(void) {
+    memset(PO, 0, sizeof PO), memset(ppix, 5, sizeof ppix), memset(psp, 0, sizeof psp);
+    PTR_(PO, 0) = pvt, PTR_(PO, 0x21d0) = pvbt, PTR_(PO, 0x2358) = pvt;
+    struct game_buffer *b = (struct game_buffer *)(PO + 0x444);
+    b->bits = ppix, b->width = 200, b->neg_height = -100, b->pitch = 200;
+    b->full[2] = 200, b->full[3] = 100, b->clip[2] = 200, b->clip[3] = 100;
+    PTR_(PO, 0xa3c) = PO;
+    for (int i = 0x3110; i <= 0x311c; i += 4) PTR_(PO, i) = &pfont;
+    PTR_(PO, 0x316c) = &pbfont;
+    PI(0x3104) = PI(0x3108) = 1, PI(0x2350) = -1, PI(0x21cc) = -1, PI(0xa44) = -1;
+    PI(0xa18) = PI(0xa1c) = 0x2000;
+    for (int i = 0; i < 3; i++) {
+        memset(pspd[i], 9 + i, sizeof pspd[i]);
+        psp[i].data = pspd[i], psp[i].key = 1, psp[i].width = psp[i].stride = 4, psp[i].height = 2, psp[i].full_w = 4, psp[i].full_h = 2;
+    }
+    ncalls = 0;
+}
+
+static void test_pop_layout(void) {
+    life_image_init();
+    game_select_object = p_select_object, game_get_stock_object = p_stock_object, game_get_text_extent = p_text_extent;
+    p_dc_slot = &p_fake_dc, game_font_dc = &p_dc_slot;
+    p_default_font = &pfont, game_font_default = &p_default_font;
+    game_font_slack = &p_slack, game_link_rects = p_link_table, game_text_end_x = &p_text_end;
+    game_flying_x = &p_fly_x, game_flying_y = &p_fly_y, game_flying_left = &p_fly_left, game_flying_text = p_fly_text;
+    game_flying_gap = " ", game_flying_pad_height = " ", game_flying_pad = " ", game_flying_pad_cent = " ";
+    game_set_bk_mode = p_set_bk_mode, game_set_text_color = p_set_text_color, game_text_out = p_text_out;
+    game_spot_init = p_spot_init, game_free = life_free;
+    game_dialog_calc = p_calc;
+    int32_t screen = 800;
+    game_win_screen_w = &screen;
+    pfont.hfont = (void *)1, pfont.first = -1, pfont.ascent = 9, pfont.height = 12;
+    pbfont.hfont = (void *)2, pbfont.first = -1, pbfont.ascent = 8, pbfont.height = 10;
+    pvt[0x174 / 4] = (void *)p_174, pvt[0x180 / 4] = (void *)p_180;
+    struct game_base_pop *p = (struct game_base_pop *)PO;
+    uint32_t handler = (uint32_t)(uintptr_t)game_at(0x6044d0);
+    int32_t *g_width = game_at(0x9b8cec), *g_height = game_at(0x9b8ce8), *g_drawing = game_at(0x9b8cf4);
+
+    // The layout with no picture, no lines, no external window: three rows of buttons (two asked for and one for the flags), margins
+    // as asked on a narrow screen, a width of what the widget asked (50) and the margins, a button seven quarters of the font high
+    // and the room shared by the rows.
+    p_reset();
+    PI(0x20f4) = 2, PI(0x21c0) = 4, PI(0x21c4) = 3, PI(0x21b0) = 2, PI(0x21b4) = 5, PI(0x21b8) = 6, PI(0x21bc) = 7;
+    PD(0x2c) = 50, PI(0x21c8) = 0;
+    pcalc_wide = pcalc_high = 0, pcalc_answer = 0;
+    EXPECT(pop_calculate_dimensions(p), 0);
+    EXPECT(PI(0x30b0), 3), EXPECT(PI(0x30e0), 4), EXPECT(PI(0x30e4), 3), EXPECT(PI(0x30e8), 6), EXPECT(PI(0x30ec), 7);
+    EXPECT(PI(0x30f0), 2), EXPECT(PI(0x30f4), 5), EXPECT(PI(0x30d8), 0), EXPECT(PI(0x30dc), 0);
+    EXPECT(PI(0x30d0), 17), EXPECT(PI(0x30cc), (58 - 8 - 2 * 3) / 3), EXPECT(PI(0x30bc), 58 + 5 + 2);
+    int text_h = PI(0x30d4);
+    EXPECT(PI(0x30c0), 8 + text_h + 17 + 3 + 7 + 6), EXPECT(*g_width, 2 + 4), EXPECT(*g_height, 4 + text_h + 6);
+    EXPECT(ncalls, 2), expect_call(0, 0x500, PO + 0x21d0, 50, 0, 0, 0), expect_call(1, 0x174, PO, 0, 0, 0, 0);
+    EXPECT(PI(0x3110) != 0, 1);
+    // A wide screen (a width of 1024) makes the margins one and a half times; flag 0x400 stops that; a widget of its own size (0x5c)
+    // is the width unless the picture is wider; a width asked for takes the margin (21cc) and the widget.
+    screen = 1024, PI(0x30a8) = 0;
+    pcalc_wide = 70, pcalc_high = 9;
+    EXPECT(pop_calculate_dimensions(p), 0);
+    EXPECT(PI(0x30e0), 6), EXPECT(PI(0x30e4), 4), EXPECT(PI(0x30bc), 70 + 12 + 5 + 2), EXPECT(PI(0x30c4), 9);
+    PI(0x30a8) = 0x400 | 0x100 | 0x40;
+    EXPECT(pop_calculate_dimensions(p), 0);
+    EXPECT(PI(0x30e0), 4), EXPECT(PI(0x30b0), 3), EXPECT(PI(0x30d0), 0);  // (flag 0x100: no button row of its own; 0x40 one more)
+    screen = 800, PI(0x30a8) = 0, PI(0x21cc) = 20;
+    EXPECT(pop_calculate_dimensions(p), 0), EXPECT(PI(0x30bc), 20 + 4 + 70 + 5 + 2);
+    // A picture, scaled 3 to 2: its size scaled, the width with the margin.
+    PI(0x21cc) = -1, PTR_(PO, 0x2144) = &psp[0], psp[0].full_w = 20, psp[0].full_h = 8, PI(0x3104) = 3, PI(0x3108) = 2;
+    EXPECT(pop_calculate_dimensions(p), 0), EXPECT(PI(0x30d8), 30 + 4), EXPECT(PI(0x30dc), 12);
+    EXPECT(PI(0x30bc), 70 + 8 + 5 + 2), EXPECT(*g_width, 2 + 4 + 34);
+    PTR_(PO, 0x2144) = NULL, PI(0x3104) = PI(0x3108) = 1;
+    // The widget's answer when it isn't 0 ends the layout where it was.
+    PI(0x30bc) = -1, pcalc_answer = 5, ncalls = 0;
+    EXPECT(pop_calculate_dimensions(p), 5), EXPECT(PI(0x30bc), -1), EXPECT(ncalls, 1);
+    pcalc_answer = 0;
+    // What a kind of widget is given: the double click function for kinds 1 and any other, the popup's own item, the text limits for
+    // kind 4, the picture's scale and the screen's function for kind 8.
+    PI(0x2350) = 1;
+    EXPECT(pop_calculate_dimensions(p), 0), EXPECT((uint32_t)PI(0x2234), handler);
+    PI(0x2350) = 0, PI(0xa44) = -1, PD(0xec) = 99;
+    EXPECT(pop_calculate_dimensions(p), 0), EXPECT((uint32_t)PI(0x2224), handler), EXPECT(PD(0xec), 0);
+    PI(0x2350) = 4, PI(0xa44) = 7;
+    EXPECT(pop_calculate_dimensions(p), 0), EXPECT(((struct game_editgroup *)(PO + 0x22c8))->limit[3], 7);
+    PI(0x2350) = 8, PI(0x3160) = 11, PI(0x3164) = 12, PI(0x3168) = 13, PI(0x3104) = 3, PI(0x3108) = 2;
+    EXPECT(pop_calculate_dimensions(p), 0);
+    EXPECT(PI(0x22a8), 11), EXPECT(PI(0x22c0), 12), EXPECT(PI(0x22a4), 13), EXPECT(PI(0x2260), 2), EXPECT(PI(0x225c), 3);
+    PI(0x3168) = 0, PI(0x3104) = PI(0x3108) = 1, PI(0x2350) = -1, PI(0xa44) = -1;
+    // An external window: no margin sideways, the widget given the window's room and laid out for it (its flags 3), the popup the window's
+    // size, and the widget's own height cleared when it has no kind.
+    PI(0xa14) = 1, PI(0xa18) = 0x2000, PI(0xa1c) = 7, PI(0xa20) = 100, PI(0xa24) = 60, PI(0x30f8) = 1, PI(0x30fc) = 2, pcalc_high = 4;
+    ncalls = 0;
+    EXPECT(pop_calculate_dimensions(p), 0);
+    EXPECT(PI(0x30e0), 0), EXPECT(PI(0x30e4), 3), EXPECT(PD(0x2c), 100 - 5 - 2), EXPECT(PI(0x30f8), 1), EXPECT(PI(0x30fc), 7);
+    EXPECT(PD(0x20) & 3, 3), EXPECT(PI(0x30bc), 100), EXPECT(PI(0x30c0), 60), EXPECT(PI(0x30c4), 0), EXPECT(PD(0x60), 0);
+    EXPECT(PD(0x30), 60 - 17 - PI(0x30d4) - 7 - 6), EXPECT(ncalls, 2);  // (flag 0x2 off: the widget is laid out once)
+    PI(0x30a8) = 2, PI(0x2350) = 3, ncalls = 0;
+    EXPECT(pop_calculate_dimensions(p), 0);
+    EXPECT(ncalls, 3), EXPECT(PI(0x30c4), 4), EXPECT(PD(0x20) & 3, 3);  // (laid out twice; kind 3 keeps its own height)
+    EXPECT(PD(0x60), 4), EXPECT(PI(0x30c0), 60);
+    // Drawn in another window (its Buffer measures the text), the width and height go to where the popup is put.
+    memcpy(PH + 0x444, PO + 0x444, sizeof(struct game_buffer));
+    PI(0xa14) = 0, PI(0x30a8) = 0, PI(0x2350) = -1, PI(0x30b4) = 11, PI(0x30b8) = 13, PTR_(PO, 0xa3c) = PH;
+    EXPECT(pop_calculate_dimensions(p), 0);
+    EXPECT(*g_width, 11 + 2 + 4 + 0), EXPECT(*g_height, 13 + 4 + PI(0x30d4) + 6);
+    PTR_(PO, 0xa3c) = PO;
+    // The lines: the list is walked from its first line (the place reset), each kind measured, and left at the last. A blank line
+    // (kind 3) is a font high.
+    p_reset();
+    PI(0x21c0) = 4, PD(0x2c) = 50, PI(0x20f4) = 1;
+    for (int i = 0; i < 3; i++) {
+        pitem[i].text = i == 1 ? "ab cd" : "hello", pitem[i].kind = i == 0 ? 3 : i == 1 ? 2 : 0;
+        pnode[i].item = &pitem[i], pnode[i].next = &pnode[(i + 1) % 3], pnode[i].prev = &pnode[(i + 2) % 3];
+    }
+    PTR_(PO, 0x2188) = pnode, PTR_(PO, 0x218c) = &pnode[2], PI(0x2190) = 3, PI(0x2194) = 2;
+    EXPECT(pop_calculate_dimensions(p), 0);
+    EXPECT(PTR_(PO, 0x218c) == &pnode[2], 1), EXPECT(PI(0x2194), 2), EXPECT(PI(0x30d4) >= 12 + 12, 1);
+    PI(0x2190) = 1, PTR_(PO, 0x218c) = &pnode[1], PI(0x2194) = 5;
+    EXPECT(pop_calculate_dimensions(p), 0);
+    EXPECT(PTR_(PO, 0x218c) == &pnode[0], 1), EXPECT(PI(0x2194), 0), EXPECT(PI(0x30d4), 9);  // (a blank line only, its text not measured: the line height, which with no leading is the font's 9)
+}
+
+static void test_pop_draw(void) {
+    struct game_base_pop *p = (struct game_base_pop *)PO;
+    struct game_win *w = (struct game_win *)PO;
+    int32_t *g_width = game_at(0x9b8cec), *g_height = game_at(0x9b8ce8), *g_drawing = game_at(0x9b8cf4);
+    static void *ddraw;
+    game_ddraw = &ddraw, game_intersect_rect = p_intersect, game_equal_rect = p_equal;
+    static struct game_sprite_scratch p_scratch;
+    static int32_t p_scale[4] = {1, 1, 0, 0}, p_min_size[2];
+    static float p_ratio;
+    static double p_max_ratio = 4.0;
+    static struct palette *p_pal;
+    static const uint8_t *p_tint;
+    static uint32_t p_hwnd = 1;
+    static int32_t p_copy_rem, p_fill_gap, p_mask_units, p_mask_gap_a, p_mask_gap_b;
+    game_win_tint = &p_tint, game_palette_copy = &p_pal, game_win_hwnd = &p_hwnd;
+    game_sprite_scale = p_scale, game_sprite_ratio = &p_ratio, game_sprite_max_ratio = &p_max_ratio, game_sprite_min_size = p_min_size;
+    game_sprite_scratch = &p_scratch;
+    game_copy_rem = &p_copy_rem, game_fill_gap = &p_fill_gap, game_mask_units = &p_mask_units, game_mask_gap_a = &p_mask_gap_a;
+    game_mask_gap_b = &p_mask_gap_b;
+    pvt[0x180 / 4] = (void *)p_180;
+    // The background is a fill (the popup's colour) unless the window's function (slot 0x180) says it has been drawn; the popup is
+    // put where it is asked to be, and Buffer_clear_links asks the Buffer for its links to be made anew.
+    p_reset();
+    PI(0x310c) = 77, PI(0x30b4) = 10, PI(0x30b8) = 20, p180_answer = 0, p_spot_inits = 0;
+    pop_on_redraw(p);
+    EXPECT(ppix[0], 77), EXPECT(ppix[200 * 99 + 199], 77), EXPECT(w->inner[0], 10), EXPECT(w->inner[1], 20), EXPECT(p_spot_inits, 1);
+    EXPECT(ncalls, 1), expect_call(0, 0x180, PO, 0, 0, 0, 0);
+    memset(ppix, 5, sizeof ppix), p180_answer = 1, ncalls = 0;
+    pop_on_redraw(p);
+    EXPECT(ppix[0], 5), EXPECT(ncalls, 1);
+    // A check can hold the link clearing: it is logged and does nothing.
+    p_spot_inits = 0, buffer_clear_links_held = 1, buffer_clear_links_log.n = 0, buffer_clear_links_log.hash = 0;
+    pop_on_redraw(p);
+    buffer_clear_links_held = 0;
+    EXPECT(p_spot_inits, 0), EXPECT(buffer_clear_links_log.n, 1), EXPECT(buffer_clear_links_log.hash, (uint32_t)(uintptr_t)(PO + 0x444));
+    // The background tile takes the place of the fill without an external window.
+    memset(ppix, 5, sizeof ppix), p180_answer = 0, PTR_(PO, 0x2148) = &psp[1];
+    pop_on_redraw(p);
+    EXPECT(ppix[0], 10), EXPECT(ppix[3], 10), EXPECT(ppix[4], 10), EXPECT(ppix[200 * 99 + 199], 10);  // (tiled over the whole Buffer)
+    PTR_(PO, 0x2148) = NULL;
+    // The frame picture, centred (with the indent) if it is narrower and lower than the Buffer.
+    memset(ppix, 5, sizeof ppix), p180_answer = 1, PI(0x21c8) = 1, PTR_(PO, 0x214c) = &psp[2];
+    pop_on_redraw(p);
+    EXPECT(ppix[49 * 200 + 98], 11), EXPECT(ppix[49 * 200 + 97], 5), EXPECT(ppix[48 * 200 + 98], 5);
+    psp[2].width = 300;
+    memset(ppix, 5, sizeof ppix);
+    pop_on_redraw(p);
+    EXPECT(ppix[49 * 200 + 98], 5);
+    psp[2].width = 4;
+    // The picture goes to the function a screen set, with the window, the id of the SpriteBox's first entry and the place (the popup
+    // is named in the global meanwhile), or is drawn scaled.
+    PTR_(PO, 0x214c) = NULL, PI(0x30e0) = 4, PI(0x30f0) = 2, PI(0x30e8) = 6;
+    PTR_(PO, 0x2144) = &psp[0], PTR_(PO, 0x3168) = (void *)p_handler;
+    snode[0].item = &sitem_[0], snode[0].key = 33, snode[0].next = &snode[1], snode[0].prev = &snode[1];
+    snode[1].item = &sitem_[1], snode[1].key = 34, snode[1].next = &snode[0], snode[1].prev = &snode[0];
+    PTR_(PO, 0x2264 + 8) = snode, PTR_(PO, 0x2264 + 0xc) = &snode[1], PI(0x2264 + 0x10) = 2, PI(0x2264 + 0x14) = 1;
+    memset(ppix, 5, sizeof ppix), ncalls = 0, PI(0x30d8) = 3, PI(0x30dc) = 5;
+    pop_on_redraw(p);
+    EXPECT(ncalls, 2), expect_call(1, 0x300, &psp[0], (int)(intptr_t)PO, 33, 7 * 1000 + 10, 1), EXPECT(*g_drawing, 0);
+    EXPECT(PTR_(PO, 0x2264 + 0xc) == snode, 1), EXPECT(PI(0x2264 + 0x14), 0), EXPECT(ppix[10 * 200 + 7], 5);
+    // (no text: the width without the picture and the indent, and the height at least the picture's below the margin)
+    EXPECT(*g_width, 7 + 3 - 3 - 1), EXPECT(*g_height, 10 > 5 + 10 ? 10 : 5 + 10);
+    PTR_(PO, 0x3168) = NULL;
+    pop_on_redraw(p);
+    EXPECT(ppix[10 * 200 + 7], 9), EXPECT(ppix[11 * 200 + 10], 9), EXPECT(ppix[10 * 200 + 6], 5), EXPECT(*g_drawing, 0);
+    PI(0x30dc) = 0, PI(0x3104) = 2, PI(0x3108) = 1;  // (twice as large)
+    memset(ppix, 5, sizeof ppix);
+    pop_on_redraw(p);
+    EXPECT(ppix[10 * 200 + 7], 9), EXPECT(ppix[10 * 200 + 14], 9), EXPECT(ppix[10 * 200 + 15], 5), EXPECT(*g_height, 10);
+    // Text: the lines are drawn from the right of the picture (width and height as far as they came) in the popup's colours.
+    PTR_(PO, 0x2144) = NULL, PI(0x30d8) = 0, PI(0x30d4) = 12, PI(0x30bc) = 100, PI(0x30dc) = 0;
+    pitem[0].text = "hi", pitem[0].kind = 0;
+    pnode[0].item = &pitem[0], pnode[0].next = pnode[0].prev = &pnode[0];
+    PTR_(PO, 0x2188) = pnode, PTR_(PO, 0x218c) = pnode, PI(0x2190) = 1, PI(0x2194) = 0;
+    PI(0x3120) = 31, PI(0x3124) = 32, PI(0x3128) = 33, PI(0x312c) = 34;
+    p_nouts = 0;
+    *(void **)(PO + 0x444 + 0x64) = &p_fake_dc;  // (the device context text is drawn through)
+    pop_on_redraw(p);
+    EXPECT(p_nouts >= 1, 1), EXPECT(strcmp(p_outs[0], "hi"), 0), EXPECT(*g_width, 7 - 0 - 1), EXPECT(*g_height > 10, 1);
+    // In another window (its Buffer is drawn in; the popup's own only has its links cleared), the place is added to where the popup is put
+    // and nothing is moved or filled.
+    memcpy(PH + 0x444, PO + 0x444, sizeof(struct game_buffer));
+    memset(ppix, 5, sizeof ppix), PTR_(PO, 0xa3c) = PH, PI(0x30b4) = 20, PI(0x30b8) = 30, p_nouts = 0, ncalls = 0;
+    pop_on_redraw(p);
+    EXPECT(w->inner[0], 10), EXPECT(ncalls, 1), EXPECT(p_nouts >= 1, 1), EXPECT(*g_width, 7 + 20 - 0 - 1);
+    PTR_(PO, 0xa3c) = PO;
 }
 
 int main(void) {
@@ -755,6 +1034,9 @@ int main(void) {
         SB.sb.fn[(i + 1) % 7 + 1] = sprite_fn, fn_id = -1, handlers[i](w, 15, 15), EXPECT(fn_id, -1);
     }
 
+    test_pop_layout();
+    test_pop_draw();
+    game_test_image = NULL;
     test_life();
 
     if (failures) printf("%d failures\n", failures);

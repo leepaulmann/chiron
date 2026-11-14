@@ -21,6 +21,14 @@ int __attribute__((thiscall)) buffer_tile(struct game_buffer *b, struct game_buf
 int __attribute__((thiscall)) buffer_tile_2(struct game_buffer *b, struct game_sprite *spr, int sx, int sy, int x, int y, int w, int h);
 void __attribute__((thiscall)) buffer_box_sprite(struct game_buffer *b, const int32_t *rect, const struct game_box_frame *f);
 void __attribute__((thiscall)) buffer_clear_links(struct game_buffer *b);
+// Buffer_clear_links as a drawing function calls it, which a check can hold (see bufobj.c): while buffer_clear_links_held is set a
+// call is logged in buffer_clear_links_log and does nothing.
+extern int buffer_clear_links_held;
+extern struct buffer_clear_links_record {
+    uint32_t hash;
+    int32_t n;
+} buffer_clear_links_log;
+void buffer_clear_links_draw(struct game_buffer *b);
 
 // The comparison of two twin Buffers a check makes (see bufobj.c): NULL if every field matches (handles and heap pointers by whether
 // they are set, the two device contexts by content, the results `got` and `want`), else what differs; and the pixels of the two.

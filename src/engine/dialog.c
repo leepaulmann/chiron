@@ -21,6 +21,10 @@
 // mouse functions that tell a screen's function which sprite was hit (and post the Enter key to the
 // game's window when it answers non-zero).
 //
+// The popup's layout and drawing: BasePop's calculate_dimensions (the size of the popup, its picture, its lines of text and the
+// widget it holds) and on_redraw (the background, the frame picture, the picture or the screen's function for it, and the text). The
+// widget's own layout (0x6132a0, which picks the part its kind says) stays with the original.
+//
 // The popup engine's text half: parse_string (fills the text variables into a line, with the choices by
 // gender and number and the French articles) and findnum; the script text's number readers stoi, btoi and
 // htoi, the item readers of the line that text_get holds (text_item and the number, binary and hex
@@ -34,16 +38,15 @@
 //    life cycle below: BasePop's init_class, close_class, basepop_alloc and UNK1, the six SpriteBox
 //    inits, and Dialog_item through StringStruct_add (the Dialog's, the BasePop's and the SpriteBox's
 //    constructors, destructors, closes and text setters are here: see "Life cycle");
-//  - everything that draws or measures with a Font and a Buffer (BasePop_calculate_dimensions and
-//    on_redraw, SpriteBox's calculate_dimensions, draw_item, on_left_click, on_key_down and on_redraw),
-//    runs the popup (BasePop_start and exec_3, which quiet.c already holds while state is protected)
+//  - everything that draws or measures with a Font and a Buffer in the SpriteBox (calculate_dimensions,
+//    draw_item, on_left_click, on_key_down and on_redraw; the popup's own layout and redraw are here: see
+//    "BasePop: layout and drawing"), runs the popup (BasePop_start and exec_3, which quiet.c already holds while state is protected)
 //    or calls a function that is not ours to run on a scratch object (BasePop_on_button_clicked calls
 //    Dialogs_UNK at 0x613740, the SpriteBox's attach and sprite, Dialog's UNK2, a window procedure);
 //  - the runs of a popup: pops_18 (0x6276a0), pop_ask_6 (0x627910), pop_ask_number and its three
 //    kin, BasePop_start and exec_3 (they open a window and run its loop, with the heap, the script file
 //    and the Font and Buffer in use; the entry points above call them, and a check of one keeps a log
-//    instead of calling them), the X_ functions that call the entry points, BasePop_calculate_dimensions
-//    and on_redraw, text_get and the other readers of the script's lines (they read a file with the C
+//    instead of calling them), the X_ functions that call the entry points, text_get and the other readers of the script's lines (they read a file with the C
 //    runtime's fgets), text_item_string (it adds the text to the string table, on the game's heap), and
 //    the make and close of the text indexes (they read the whole file and allocate);
 //  - set_width, BasePop_init and string, Dialogs_item and SpriteBox_sprite, which the quiet hooks
@@ -85,7 +88,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "bufobj.h"
 #include "button.h"
+#include "drawcheck.h"
 #include "dialog.h"
 #include "game.h"
 #include "hooks.h"
@@ -658,6 +663,286 @@ void pop_fallout(void) {
 void DLG_THIS pop_unk3(struct game_base_pop *p, int on) { p->f20 = on ? p->f20 | 1 : p->f20 & ~1u; }
 void DLG_THIS pop_unk4(struct game_base_pop *p, int on) { p->f20 = on ? p->f20 | 2 : p->f20 & ~2u; }
 
+// ---- BasePop: layout and drawing ----------------------------------------------------------------
+//
+// calculate_dimensions works out how big the popup is (and what the combined widget it holds at 0x21d0 has to be) from the margins, the
+// picture at 0x2144, the lines of text in the list at 0x2180 (measured with the string font and colours the popup holds, on the Buffer
+// of the window it is drawn in: 0xa3c, which is the popup itself unless an external window was set), the buttons' font height and the
+// window the popup is given (0xa14 set). on_redraw draws the background (the tile at 0x2148, or a fill), the frame picture at 0x214c,
+// the picture at 0x2144 (or hands it to the function the screen set at 0x3168) and the text.
+//
+// Fields (offsets into the popup): 0x20f4 buttons per row, 0x2144 the picture, 0x2148 the background tile, 0x214c the frame picture,
+// 0x2180 the list of lines (0x2188 head, 0x218c current, 0x2190 count, 0x2194 place), 0x21b0 to 0x21c4 margins asked for, 0x21c8 an
+// indent, 0x21cc a width asked for (-1: none), 0x2350 the kind of the combined widget (-1 for none), 0xa14 the external window set
+// (0xa18 to 0xa24: its position and size), 0xa3c the window drawn in, 0xa44 the item to select, 0x30a8 flags (0x2 the buttons are
+// separate, 0x40 and 0x10100 count rows, 0x100 and 0x400 layout), 0x30b0 the rows of buttons, 0x30b4 and 0x30b8 where it is put, 0x30bc
+// and 0x30c0 its size, 0x30c4 the widget's own height, 0x30cc and 0x30d0 a button's width and height, 0x30d4 the text's height, 0x30d8
+// and 0x30dc the picture's size, 0x30e0 and 0x30e4 the margins used, 0x30e8 to 0x30f4 the margins the widget gets, 0x3104 and 0x3108
+// the picture's scale (a ratio), 0x3110 to 0x315c the string font and the four colour rows of the Buffer, 0x316c the buttons' font.
+// The kinds of the lines: 0 plain, 2 centred, 3 a blank line of the font's height. Three globals are written: 0x9b8cec and 0x9b8ce8
+// (the width and the height the text took, for the screen that places the popup) and 0x9b8cf4 (the popup being drawn, set only around
+// the picture's drawing).
+//
+// Differences from the references: OpenSMACX and Thinker have the names but no bodies. The lines after the first that are centred are
+// measured on the popup's own Buffer, not the window's (the original does, and so does this). The original scales the height asked for
+// by 1.5 on a wide screen only when there is no external window, in code that runs with one, so it never does and is left out. Where
+// the original would read through a null pointer (a list with a head but no current line) this reads no text.
+
+#define I_(o, off) (*(int32_t *)((uint8_t *)(o) + (off)))
+#define PTR_(o, off) (*(void **)((uint8_t *)(o) + (off)))
+#define G_(addr) (*(int32_t *)game_at(addr))
+enum { BPG_WIDTH = 0x9b8cec, BPG_HEIGHT = 0x9b8ce8, BPG_DRAWING = 0x9b8cf4, BPG_HANDLER = 0x6044d0 };
+
+// The line a list's current node holds (its text at 0x4, its kind at 0x8); none without a head or a current node.
+static const char *line_text(const uint8_t *o) {
+    if (!I_(o, 0x2188) || !PTR_(o, 0x218c)) return NULL;
+    uint8_t *item = ((struct game_dlist_node *)PTR_(o, 0x218c))->item;
+    return item ? *(const char **)(item + 4) : NULL;
+}
+static int line_kind(const uint8_t *o) {
+    if (!I_(o, 0x2188) || !PTR_(o, 0x218c)) return 0;
+    uint8_t *item = ((struct game_dlist_node *)PTR_(o, 0x218c))->item;
+    return item ? *(int32_t *)(item + 8) : 0;
+}
+
+// The colours and the font the lines are drawn in, set on the Buffer of the window the popup is drawn in.
+static void pop_text_setup(const uint8_t *o, struct game_buffer *b) {
+    buffer_set_text_color(b, I_(o, 0x3120), I_(o, 0x3130), I_(o, 0x3140), I_(o, 0x3150));
+    buffer_set_text_color2(b, I_(o, 0x3124), I_(o, 0x3134), I_(o, 0x3144), I_(o, 0x3154));
+    buffer_set_text_color3(b, I_(o, 0x3128), I_(o, 0x3138), I_(o, 0x3148), I_(o, 0x3158));
+    buffer_set_text_color_hyper(b, I_(o, 0x312c), I_(o, 0x313c), I_(o, 0x314c), I_(o, 0x315c));
+    buffer_set_font(b, PTR_(o, 0x3110), PTR_(o, 0x3114), PTR_(o, 0x3118), PTR_(o, 0x311c));
+}
+
+// Draws the popup: the background, the frame picture, the picture and the text.
+void DLG_THIS pop_on_redraw(struct game_base_pop *p) {
+    uint8_t *o = (uint8_t *)p;
+    struct game_buffer *own = (struct game_buffer *)(o + 0x444);
+    buffer_clear_links_draw(own);
+    int32_t margin = I_(o, 0x30e0);
+    int32_t x = margin + I_(o, 0x30f0) + I_(o, 0x21c8);
+    int32_t top = I_(o, 0x30e8) + margin, y = top;
+    uint8_t *host = PTR_(o, 0xa3c);
+    if (host == o) {
+        win_move((struct game_win *)p, I_(o, 0x30b4), I_(o, 0x30b8));
+        if (!vcall0(p, 0x180)) {
+            struct game_sprite *tile = PTR_(o, 0x2148);
+            if (tile && !I_(o, 0xa14)) buffer_tile_2(own, tile, 0, 0, 0, 0, own->width, -own->neg_height);
+            else graphic_win_fill((struct game_win *)p, I_(o, 0x310c));
+        }
+        struct game_sprite *frame = PTR_(o, 0x214c);
+        if (!I_(o, 0xa14) && frame && frame->width < own->width && frame->height < -own->neg_height) {
+            int32_t indent = I_(o, 0x21c8);
+            sprite_draw_2(frame, own, frame->key, (own->width - frame->full_w - indent) / 2 + indent,
+                          -((frame->full_h + own->neg_height) / 2), 1, 1);
+        }
+    } else {
+        vcall0(p, 0x180);
+        x += I_(o, 0x30b4), y += I_(o, 0x30b8);
+    }
+    struct game_sprite *pic = PTR_(o, 0x2144);
+    if (pic) {
+        G_(BPG_DRAWING) = (int32_t)(intptr_t)p;
+        int(__attribute__((cdecl)) * handler)(void *, void *, int, int, int) = (void *)PTR_(o, 0x3168);
+        if (handler) {
+            int id = sprite_box_pos_to_id((struct game_sprite_box *)(o + 0x2240), 0);
+            handler(pic, host, id, x, y);
+        } else {
+            sprite_draw_2(pic, host ? (struct game_buffer *)(host + 0x444) : NULL, pic->key, x, y, I_(o, 0x3104), I_(o, 0x3108));
+        }
+        G_(BPG_DRAWING) = 0;
+    }
+    int32_t picture_w = I_(o, 0x30d8);
+    x += picture_w;
+    if (I_(o, 0x30d4) == 0) {
+        G_(BPG_WIDTH) = x - picture_w - I_(o, 0x21c8);
+        int32_t least = I_(o, 0x30dc) + top;
+        G_(BPG_HEIGHT) = y > least ? y : least;
+        return;
+    }
+    struct game_buffer *hb = (struct game_buffer *)(host + 0x444);
+    pop_text_setup(o, hb);
+    int32_t width = I_(o, 0x30bc) - 2 * margin - I_(o, 0x30f4) - picture_w - I_(o, 0x30f0) - I_(o, 0x21c8);
+    int32_t end = buffer_write_strings(hb, (struct str_list *)(o + 0x2180), x, y, width, 0);
+    G_(BPG_WIDTH) = x - picture_w - I_(o, 0x21c8);
+    int32_t least = top + I_(o, 0x30dc);
+    G_(BPG_HEIGHT) = end > least ? end : least;
+}
+
+// The Dialog the combined widget holds as a virtual base (found through the widget's table).
+static uint8_t *widget_dialog(uint8_t *o) { return o + 0x21d0 + (*(int32_t **)(o + 0x21d0))[2]; }
+#define D_(db, off) (*(int32_t *)((db) + (off)))
+
+// Works out the popup's size and the room the widget and the text take; answers 0, or what the widget's layout answered when that was
+// not 0 (the work is then left off where it was).
+int DLG_THIS pop_calculate_dimensions(struct game_base_pop *p) {
+    uint8_t *o = (uint8_t *)p;
+    uint8_t *host = PTR_(o, 0xa3c);
+    struct game_buffer *hb = (struct game_buffer *)(host + 0x444);
+    pop_text_setup(o, hb);
+    int ext = I_(o, 0xa14) != 0;
+    // The rows of buttons: as many as asked for, one more if flag 0x40, and one more unless flag 0x100 or 0x10000.
+    I_(o, 0x30b0) = I_(o, 0x20f4);
+    if (o[0x30a8] & 0x40) I_(o, 0x30b0)++;
+    if (!(I_(o, 0x30a8) & 0x10100)) I_(o, 0x30b0)++;
+    // The margins: none sideways with an external window; one and a half times as asked on a screen 1024 wide or more unless flag 0x400
+    // forbids it; otherwise as asked.
+    if (ext) {
+        I_(o, 0x30e0) = 0, I_(o, 0x30e4) = I_(o, 0x21c4);
+    } else if (!(I_(o, 0x30a8) & 0x400) && *game_win_screen_w >= 0x400) {
+        I_(o, 0x30e0) = I_(o, 0x21c0) * 3 / 2, I_(o, 0x30e4) = I_(o, 0x21c4) * 3 / 2;
+    } else {
+        I_(o, 0x30e0) = I_(o, 0x21c0), I_(o, 0x30e4) = I_(o, 0x21c4);
+    }
+    I_(o, 0x30e8) = I_(o, 0x21b8), I_(o, 0x30ec) = I_(o, 0x21bc);
+    int32_t side = I_(o, 0x21b0);
+    I_(o, 0x30f0) = side, I_(o, 0x30f4) = I_(o, 0x21b4);
+    // The picture's size, scaled (the width with the margin, and a gap if there are lines of text).
+    struct game_sprite *pic = PTR_(o, 0x2144);
+    if (pic) {
+        int32_t gap = I_(o, 0x2190) ? I_(o, 0x30e4) : 0;
+        int32_t num = I_(o, 0x3104), den = I_(o, 0x3108);
+        I_(o, 0x30d8) = pic->full_w * num / den + I_(o, 0x30e0) + gap;
+        I_(o, 0x30dc) = pic->full_h * num / den;
+    } else {
+        I_(o, 0x30d8) = 0, I_(o, 0x30dc) = 0;
+    }
+    int32_t font_height = ((struct font *)PTR_(o, 0x316c))->height;
+    uint8_t *db = widget_dialog(o);
+    if (ext) {
+        // The widget gets the window's room, and is laid out for it.
+        D_(db, 0x2c) = I_(o, 0xa20) - 2 * I_(o, 0x30e0) - I_(o, 0x21b4) - side;
+        D_(db, 0x30) = I_(o, 0xa24) - (I_(o, 0x30b0) ? I_(o, 0x30d0) : 0) - I_(o, 0x30ec) - I_(o, 0x30e8);
+        if (I_(o, 0xa18) != 0x2000) I_(o, 0x30f8) = I_(o, 0xa18);
+        if (I_(o, 0xa1c) != 0x2000) I_(o, 0x30fc) = I_(o, 0xa1c);
+        D_(db, 0x20) |= 1;
+        pop_unk4((struct game_base_pop *)db, 1);
+    }
+    int r = game_dialog_calc(o + 0x21d0);
+    if (r) return r;
+    // The popup's width: the widget's (what it made, or what it was asked for) or, without an external window, the picture's if wider,
+    // with the margins and the width asked for.
+    int32_t wide = D_(db, 0x5c) ? D_(db, 0x5c) : D_(db, 0x2c);
+    if (ext) {
+        I_(o, 0x30bc) = wide;
+        I_(o, 0x30c0) = D_(db, 0x60) ? D_(db, 0x60) : D_(db, 0x30);
+    } else {
+        int32_t widest = wide > I_(o, 0x30d8) ? wide : I_(o, 0x30d8);
+        I_(o, 0x30bc) = I_(o, 0x21cc) == -1 ? widest + 2 * I_(o, 0x30e0) : I_(o, 0x21cc) + I_(o, 0x30e0) + widest;
+    }
+    I_(o, 0x30c4) = D_(db, 0x60);
+    // What a widget of the popup's kind is given: the function that answers a double click (the popup's own) and the item selected.
+    int32_t item = I_(o, 0xa44);
+    int32_t handler = (int32_t)(intptr_t)game_at(BPG_HANDLER);
+    switch ((uint32_t)(I_(o, 0x2350) + 1)) {
+    case 0: break;
+    case 2: I_(o, 0x2234) = handler; break;
+    case 3:
+        if (item != -1) listbox_set_selected_id((struct game_listbox *)(o + 0x21d0), item);
+        else listbox_set_selected_pos((struct game_listbox *)(o + 0x21d0), 0, 1);
+        I_(o, 0x2210) = handler;
+        break;
+    case 5:
+        if (item != -1) group_set_text_limits((struct game_editgroup *)(o + 0x22c8), item);
+        break;
+    case 9:
+        I_(o, 0x22a8) = I_(o, 0x3160), I_(o, 0x22c0) = I_(o, 0x3164), I_(o, 0x22a4) = I_(o, 0x3168);
+        I_(o, 0x2260) = I_(o, 0x3108), I_(o, 0x225c) = I_(o, 0x3104);
+        break;
+    default:
+        if (item != -1) dialog_set_selected_id((struct game_dlg *)db, item);
+        else D_(db, 0xec) = 0;
+        I_(o, 0x2224) = handler;
+    }
+    // The height of the lines: the first, then each in turn, as the Buffer lays flying text out.
+    if (I_(o, 0x2190) - 1 >= 0) I_(o, 0x218c) = I_(o, 0x2188), I_(o, 0x2194) = 0;
+    int32_t room = I_(o, 0x30bc) - 2 * I_(o, 0x30e0) - I_(o, 0x21c8) - I_(o, 0x30d8);
+    int kind = line_kind(o);
+    I_(o, 0x30d4) = 0;
+    if (kind == 3) {
+        I_(o, 0x30d4) += buffer_text_line_height(hb);
+        buffer_wrap_height_flying(hb, NULL, room);
+    } else if (kind == 2) {
+        I_(o, 0x30d4) += buffer_wrap_height(hb, line_text(o), room);
+        buffer_wrap_height_flying(hb, NULL, room);
+    } else {
+        buffer_wrap_height_flying(hb, line_text(o), room);
+    }
+    if (I_(o, 0x2190) - 1 > 0) {
+        int i = 0;
+        do {
+            if (I_(o, 0x2188)) {
+                struct game_dlist_node *cur = PTR_(o, 0x218c);
+                int32_t at = I_(o, 0x2194) + 1;
+                PTR_(o, 0x218c) = cur->next;
+                I_(o, 0x2194) = at;
+                if (at == I_(o, 0x2190)) I_(o, 0x2194) = 0;
+            }
+            const char *text = line_text(o);
+            if (I_(o, 0x2188)) {
+                int k = line_kind(o);
+                if (k != 0) {
+                    I_(o, 0x30d4) += buffer_wrap_height_flying_flush(hb);
+                    int h;
+                    if (k == 2) {
+                        h = buffer_wrap_height((struct game_buffer *)(o + 0x444), text, room);
+                    } else if (k == 3) {
+                        h = buffer_text_line_height(hb);
+                    } else {
+                        buffer_wrap_height_flying(hb, text, room);
+                        goto next;
+                    }
+                    I_(o, 0x30d4) += h;
+                    buffer_wrap_height_flying(hb, NULL, room);
+                } else {
+                    buffer_wrap_height_flying_2(hb, text);
+                }
+            } else {
+                buffer_wrap_height_flying_2(hb, NULL);
+            }
+        next:
+            i++;
+        } while (i < I_(o, 0x2190) - 1);
+    }
+    I_(o, 0x30d4) += buffer_wrap_height_flying_flush(hb);
+    int32_t text_h = I_(o, 0x30d4);
+    // A button: seven quarters of a font high, and the row's room shared by the rows of buttons.
+    if (I_(o, 0x30b0)) {
+        I_(o, 0x30d0) = font_height * 7 / 4;
+        I_(o, 0x30cc) = (I_(o, 0x30bc) - 2 * I_(o, 0x30e0) - (I_(o, 0x30b0) - 1) * I_(o, 0x30e4)) / I_(o, 0x30b0);
+    } else {
+        I_(o, 0x30d0) = 0, I_(o, 0x30cc) = 0;
+    }
+    if (ext && (I_(o, 0x30a8) & 2)) {
+        D_(db, 0x30) = I_(o, 0xa24) - 2 * I_(o, 0x30e4) - I_(o, 0x30d0) - text_h;
+        r = game_dialog_calc(o + 0x21d0);
+        if (r) return r;
+    }
+    vcall0(p, 0x174);
+    if (I_(o, 0x30a8) & 0x100) I_(o, 0x30d0) = 0;
+    int32_t taller = I_(o, 0x30d4) > I_(o, 0x30dc) ? I_(o, 0x30d4) : I_(o, 0x30dc);
+    if (ext) {
+        D_(db, 0x2c) = I_(o, 0xa20) - 2 * I_(o, 0x30e0) - I_(o, 0x30f4) - I_(o, 0x30f0);
+        D_(db, 0x30) = I_(o, 0xa24) - (I_(o, 0x30b0) ? I_(o, 0x30d0) : 0) - taller - I_(o, 0x30ec) - I_(o, 0x30e8);
+        if (I_(o, 0xa18) != 0x2000) I_(o, 0x30f8) = I_(o, 0xa18);
+        if (I_(o, 0xa1c) != 0x2000) I_(o, 0x30fc) = I_(o, 0xa1c);
+        D_(db, 0x20) |= 3;
+        I_(o, 0x30bc) = I_(o, 0xa20), I_(o, 0x30c0) = I_(o, 0xa24);
+        if (I_(o, 0x2350) == -1) I_(o, 0x30c4) = 0, D_(db, 0x60) = 0;
+    } else {
+        int32_t own = I_(o, 0x30c4), gap = I_(o, 0x30e4);
+        int32_t h = own + 2 * I_(o, 0x30e0) + taller + I_(o, 0x30d0);
+        if (own) h += gap;
+        if (I_(o, 0x30d0)) h += gap;
+        I_(o, 0x30c0) = h + I_(o, 0x30ec) + I_(o, 0x30e8);
+        I_(o, 0x30bc) += I_(o, 0x30f4) + I_(o, 0x30f0);
+    }
+    int apart = host != o;
+    G_(BPG_WIDTH) = (apart ? I_(o, 0x30b4) : 0) + I_(o, 0x30f0) + I_(o, 0x30e0) + I_(o, 0x30d8);
+    G_(BPG_HEIGHT) = (apart ? I_(o, 0x30b8) : 0) + I_(o, 0x30e0) + I_(o, 0x30d4) + I_(o, 0x30e8);
+    return 0;
+}
+
 // ---- Dialog -------------------------------------------------------------------------------------
 
 // Empty the list: each item is told to the list (slot 1) and deleted, then its node; the count is read
@@ -1121,6 +1406,46 @@ SHADOW_FN(DLG, int, pop_on_modal, (void), (), "%s", "")
 SHADOW_WRITER(DLG, void, pop_fallout, (void), (), WRITES(game_pop_open, 4), "%s", "")
 SHADOW_WRITER_T(DLG, void, pop_unk3, (struct game_base_pop * p, int on), (p, on), WRITES(&p->f20, 4), "%d, %d", P(p), on)
 SHADOW_WRITER_T(DLG, void, pop_unk4, (struct game_base_pop * p, int on), (p, on), WRITES(&p->f20, 4), "%d, %d", P(p), on)
+static void vrec(int slot, const void *o, int a, int b, int c, int d);
+
+// The popup's layout and drawing call the window's virtual functions, the function a screen set and the widget's layout, whose effects no
+// check can put back, so the game's calls run the original and the sweep checks them on scratch popups (px_sweep, below). What they
+// write: the popup (the widget and the Dialog it holds lie inside it), the Buffers of the popup and of the window it draws in (the
+// object, the pixels and the device contexts text goes through), the globals text leaves, the three the popup's size is given in, and
+// the logs of the stand-ins. Buffer_clear_links is held in the checks of the drawing (see bufobj.c) and logged.
+#define PXG(addr) ((void *)game_at(addr))
+static void writes_pop_draw(struct hook_writes *w, struct game_base_pop *p) {
+    uint8_t *o = (uint8_t *)p;
+    hooks_writes_add(w, p, sizeof *p);
+    struct game_buffer *own = (struct game_buffer *)(o + 0x444);
+    dc_writes_pixels(w, own), dc_writes_text_state(w, own);
+    uint8_t *host = PTR_(o, 0xa3c);
+    if (host && host != o) {
+        struct game_buffer *hb = (struct game_buffer *)(host + 0x444);
+        dc_writes_pixels(w, hb), dc_writes_text_state(w, hb);
+    }
+    hooks_writes_add(w, PXG(BPG_WIDTH), 4), hooks_writes_add(w, PXG(BPG_HEIGHT), 4), hooks_writes_add(w, PXG(BPG_DRAWING), 4);
+    hooks_writes_add(w, &buffer_clear_links_log, sizeof buffer_clear_links_log);
+    writes_vlog(w);
+}
+SWEEP_ONLY(void, pop_on_redraw, (struct game_base_pop * p), (p), writes_pop_draw(&w_, p), "%d", P(p))
+SWEEP_ONLY(int, pop_calculate_dimensions, (struct game_base_pop * p), (p), writes_pop_draw(&w_, p), "%d", P(p))
+
+// The widget's layout (0x6132a0) is not ours: in a check of the two above it is a stand-in that logs the call and answers from its count
+// (the same for both runs), and gives the widget a size of its own half the time. Otherwise it is the original.
+static int px_logging;
+static int(THISCALL *orig_dialog_calc)(void *);
+static struct hook_stats stats_dialog_calc = {"(logged dialog_calc)"};
+static int THISCALL shadow_dialog_calc(void *w) {
+    if (!px_logging) return orig_dialog_calc(w);
+    stats_dialog_calc.calls++;
+    uint8_t *db = (uint8_t *)w + (*(int32_t **)w)[2];
+    vrec(0x500, w, I_(w, 0x180), D_(db, 0x2c), D_(db, 0x30), D_(db, 0x20));
+    int n = vlog.n;
+    D_(db, 0x5c) = n % 3 ? 0 : 150 + n % 17;
+    D_(db, 0x60) = n % 4 ? 0 : 10 + n % 13;
+    return n % 11 == 0 ? 5 : 0;
+}
 
 // ---- Dialog. The init functions and close empty a list through vtables and free the data, so the game's
 // calls run the original; the sweep checks them on scratch Dialogs.
@@ -1379,6 +1704,170 @@ static void random_line(char *buf, size_t cap) {
         n += l;
     }
     if (need_digit || !rnd_to(4)) snprintf(buf + n, cap - n, "%s%d", rnd_to(2) ? " " : "", rnd_to(10));
+}
+
+
+// ---- Sweep of the popup's layout and drawing ------------------------------------------------------
+//
+// A scratch popup in static memory laid out as the game's (the table of its widget's virtual bases at 0x21d0 gives the Win at 0x188 and
+// the Dialog at 0xba0 into it), a window it may be drawn in, a parent it may take its background from, sprites, a list of lines of text of
+// every kind, and a real Buffer with a device context and a font (the button sweep's), so the text is really measured and drawn. The
+// window's virtual functions log, and the function a screen may set logs what it is given and what the global that names the popup
+// holds. The widget's layout is the logged stand-in above. Each round the numbers the layout reads are made at random, the layout is
+// checked, and the drawing on what it made.
+enum { PXL = 6 };
+_Static_assert(sizeof(struct game_win) == 0x444, "a window ends where its Buffer starts");
+static struct px {
+    uint8_t obj[0x3230] __attribute__((aligned(16)));
+    struct {
+        struct game_win win;
+        struct game_buffer buf;
+    } host, parent;
+    int32_t vbt[4];
+    struct game_dlist_node lnodes[PXL], snodes[PXL];
+    struct {
+        void *vt;
+        const char *text;
+        int32_t kind;
+    } litems[PXL];
+    void *sitems[PXL];
+    struct game_sprite spr[3];
+    uint8_t sdata[3][1024], pix[72 * 48 + 16];
+    struct font bfont;
+} PX;
+static void *px_vt[0x200 / 4];
+static int THISCALL px_s174(void *o) { return vrec(0x174, o, 0, 0, 0, 0), 0; }
+static int THISCALL px_s180(void *o) { return vrec(0x180, o, 0, 0, 0, 0), vlog.n & 1; }
+static int THISCALL px_sf4(void *o) { return vrec(0xf4, o, 0, 0, 0, 0), (vlog.n & 2) != 0; }
+static int px_handler(void *pic, void *host, int id, int x, int y) {
+    return vrec(0x300, pic, (int)(intptr_t)host, id, x * 1000 + y, G_(BPG_DRAWING) == (int32_t)(intptr_t)PX.obj), 0;
+}
+static const char *const PX_WORDS[] = {"Ok", "Alpha beta", "A line with enough words in it that it has to wrap in the width", "", "x",
+                                       "WWWW MMMM iiii", "Wide wide wide wide wide wide wide wide wide wide"};
+
+static void px_hand_buffer(struct game_buffer *b, uint8_t *pixels, int w, int h) {
+    memset(b, 0, sizeof *b);
+    for (int i = 0; i < w * h + 8; i++) pixels[i] = (uint8_t)rnd();
+    b->bits = pixels;
+    b->width = w, b->neg_height = -h, b->pitch = w;
+    b->full[2] = w, b->full[3] = h;
+    b->clip[2] = w, b->clip[3] = h;
+}
+static void px_sprite(struct game_sprite *s, uint8_t *data) {
+    memset(s, 0, sizeof *s);
+    int w = 1 + rnd_to(18), h = 1 + rnd_to(14), key = rnd_to(8);
+    for (int i = 0; i < 1024; i++) {
+        int c = rnd_to(6);
+        data[i] = c == 0 ? (uint8_t)key : c == 1 ? 0 : (uint8_t)(1 + rnd_to(7));
+    }
+    s->data = data, s->key = (uint8_t)key;
+    s->width = w, s->stride = w, s->height = h, s->full_w = w + rnd_to(6), s->full_h = h + rnd_to(6);
+}
+
+// The numbers the layout reads, at random (`font` is the real Font, `big` the real Buffer).
+static void px_numbers(uint8_t *o, struct font *font) {
+    // (Not the list box's kind, 2: selecting in a list box moves its scroll bar and calls the function a screen set for it; those are
+    // checked on list boxes of their own, in scroll.c.)
+    int32_t kinds[] = {-1, 0, 1, 3, 4, 5, 8, 9, 12, 20};
+    I_(o, 0x20f4) = rnd_to(4);
+    I_(o, 0x21b0) = rnd_to(12), I_(o, 0x21b4) = rnd_to(12), I_(o, 0x21b8) = rnd_to(12), I_(o, 0x21bc) = rnd_to(12);
+    I_(o, 0x21c0) = rnd_to(12), I_(o, 0x21c4) = rnd_to(12), I_(o, 0x21c8) = rnd_to(6), I_(o, 0x21cc) = rnd_to(2) ? -1 : rnd_to(100);
+    I_(o, 0x2350) = kinds[rnd_to(10)];
+    // (The text is laid out in what the widget and the picture leave, which the original would never come to the end of if it were
+    // nothing: the widget is wide.)
+    D_(o + 0x2d70, 0x2c) = 150 + rnd_to(100), D_(o + 0x2d70, 0x30) = 20 + rnd_to(100);
+    I_(o, 0xa14) = rnd_to(3) == 0 ? 1 : 0;
+    I_(o, 0xa18) = rnd_to(3) ? rnd_to(40) : 0x2000, I_(o, 0xa1c) = rnd_to(3) ? rnd_to(40) : 0x2000;
+    I_(o, 0xa20) = 200 + rnd_to(200), I_(o, 0xa24) = 40 + rnd_to(120);
+    I_(o, 0xa44) = rnd_to(2) ? -1 : rnd_to(5);
+    I_(o, 0x30a8) = (rnd_to(2) ? 0x2 : 0) | (rnd_to(2) ? 0x40 : 0) | (rnd_to(2) ? 0x100 : 0) | (rnd_to(2) ? 0x400 : 0) |
+                    (rnd_to(4) == 0 ? 0x10000 : 0);
+    I_(o, 0x30b4) = rnd_to(30), I_(o, 0x30b8) = rnd_to(30);
+    I_(o, 0x30f8) = rnd_to(50), I_(o, 0x30fc) = rnd_to(50);
+    I_(o, 0x3104) = 1 + rnd_to(2), I_(o, 0x3108) = 1 + rnd_to(2), I_(o, 0x310c) = rnd_to(256);
+    for (int i = 0x3120; i < 0x3160; i += 4) I_(o, i) = rnd_to(256);
+    I_(o, 0x3160) = (int32_t)rnd(), I_(o, 0x3164) = (int32_t)rnd();
+    for (int i = 0x3110; i <= 0x311c; i += 4) PTR_(o, i) = font;
+    PTR_(o, 0x3168) = rnd_to(2) ? (void *)px_handler : NULL;
+    PX.bfont.height = 6 + rnd_to(14);
+    // What the layout makes and the drawing reads.
+    I_(o, 0x30bc) = 150 + rnd_to(100), I_(o, 0x30c0) = 20 + rnd_to(80), I_(o, 0x30c4) = rnd_to(20), I_(o, 0x30cc) = rnd_to(40);
+    I_(o, 0x30d0) = rnd_to(20), I_(o, 0x30d4) = rnd_to(3) ? 5 + rnd_to(40) : 0, I_(o, 0x30d8) = rnd_to(3) ? rnd_to(30) : 0;
+    I_(o, 0x30dc) = rnd_to(30), I_(o, 0x30e0) = rnd_to(8), I_(o, 0x30e4) = rnd_to(8), I_(o, 0x30e8) = rnd_to(8);
+    I_(o, 0x30ec) = rnd_to(8), I_(o, 0x30f0) = rnd_to(8), I_(o, 0x30f4) = rnd_to(8), I_(o, 0x21c8) = rnd_to(6);
+}
+
+static void px_build(struct game_buffer *big, struct font *font) {
+    memset(&PX, 0, sizeof PX);
+    uint8_t *o = PX.obj;
+    PTR_(o, 0) = px_vt;
+    PX.vbt[1] = 0x188, PX.vbt[2] = 0xba0;
+    PTR_(o, 0x21d0) = PX.vbt;
+    PTR_(o, 0x21d0 + 0x188) = px_vt;  // (the widget's own Win)
+    PX.host.win.vtable = px_vt, PX.parent.win.vtable = px_vt;
+    for (int i = 0; i < 3; i++) px_sprite(&PX.spr[i], PX.sdata[i]);
+    px_hand_buffer(&PX.parent.buf, PX.pix, 72, 48);
+    memcpy(o + 0x444, big, sizeof *big);
+    memcpy(&PX.host.buf, big, sizeof *big);
+    PTR_(o, 0xa3c) = rnd_to(2) ? (void *)o : (void *)&PX.host;
+    struct game_win *w = (struct game_win *)o;
+    w->parent = rnd_to(2) ? &PX.parent.win : NULL;
+    w->flags = rnd_to(2) ? 0x80000 : 0;
+    for (int i = 0; i < 4; i++) w->inner[i] = rnd_to(20) - 5, w->outer[i] = rnd_to(20) - 5;
+    w->flags2 = rnd_to(2) ? 0x1 : 0;
+    PTR_(o, 0x2144) = rnd_to(2) ? &PX.spr[0] : NULL;
+    PTR_(o, 0x2148) = rnd_to(2) ? &PX.spr[1] : NULL;
+    PTR_(o, 0x214c) = rnd_to(2) ? &PX.spr[2] : NULL;
+    PTR_(o, 0x316c) = &PX.bfont;
+    // The lines: a ring of nodes holding items of text, kind and next.
+    int n = rnd_to(PXL + 1);
+    struct game_dlist *l = (struct game_dlist *)(o + 0x2180);
+    for (int i = 0; i < n; i++) {
+        PX.litems[i].text = PX_WORDS[rnd_to(7)], PX.litems[i].kind = rnd_to(4);
+        PX.lnodes[i].item = &PX.litems[i], PX.lnodes[i].key = 20 + i;
+        PX.lnodes[i].next = &PX.lnodes[(i + 1) % n], PX.lnodes[i].prev = &PX.lnodes[(i + n - 1) % n];
+    }
+    l->head = n ? PX.lnodes : NULL, l->cur = n ? &PX.lnodes[rnd_to(n)] : NULL, l->count = n, l->idx = n ? rnd_to(n) : 0;
+    // The SpriteBox's list (the picture's id is its first entry's).
+    random_list((struct game_dlist *)(o + 0x2264), PX.snodes, PX.sitems);
+    px_numbers(o, font);
+}
+
+static void px_sweep(struct game_buffer *big, struct font *font) {
+    int32_t screen = *game_win_screen_w, g_w = G_(BPG_WIDTH), g_h = G_(BPG_HEIGHT), g_d = G_(BPG_DRAWING);
+    const uint8_t *tint = *game_win_tint;
+    *game_win_tint = NULL;
+    memset(px_vt, 0, sizeof px_vt);
+    px_vt[0x174 / 4] = (void *)px_s174, px_vt[0x180 / 4] = (void *)px_s180, px_vt[0xf4 / 4] = (void *)px_sf4;
+    for (int round = 0; round < 30; round++) {
+        px_build(big, font);
+        struct game_base_pop *p = (struct game_base_pop *)PX.obj;
+        static const int widths[] = {640, 800, 1024, 1280};
+        for (int k = 0; k < 4; k++) {
+            *game_win_screen_w = widths[rnd_to(4)];
+            // (A check leaves the state as it found it in a sweep, and what the stand-ins log is put back too: so the stand-ins' count is
+            // started from a number of its own. What the layout makes is not there for the drawing to work from: px_numbers gives the
+            // drawing sizes of its own.)
+            px_logging = 1;
+            vlog.n = (int)rnd();
+            check_pop_calculate_dimensions(p);
+            px_logging = 0;
+            vlog.n = (int)rnd();
+            buffer_clear_links_held = 1;
+            check_pop_on_redraw(p);
+            buffer_clear_links_held = 0;
+            // Something else next time: where it is drawn, the lines, the flags.
+            memcpy(PX.obj + 0x444, big, sizeof *big);
+            if (rnd_to(2)) memcpy(&PX.host.buf, big, sizeof *big);
+            px_numbers(PX.obj, font);
+            PTR_(PX.obj, 0xa3c) = rnd_to(2) ? (void *)PX.obj : (void *)&PX.host;
+            struct game_dlist *l = (struct game_dlist *)(PX.obj + 0x2180);
+            if (l->count) l->cur = &PX.lnodes[rnd_to(l->count)], l->idx = rnd_to(l->count);
+            for (int i = 0; i < l->count; i++) PX.litems[i].kind = rnd_to(4);
+        }
+    }
+    *game_win_screen_w = screen, G_(BPG_WIDTH) = g_w, G_(BPG_HEIGHT) = g_h, G_(BPG_DRAWING) = g_d;
+    *game_win_tint = tint;
 }
 
 static void life_sweep_dialog(void);
@@ -1706,6 +2195,9 @@ static void dialog_sweep(void) {
     life_sweep_pop();
     life_sweep_sprite_box();
     life_sweep_dialog_scalar();
+    struct font *real_font;
+    struct game_buffer *real_buf = button_sweep_buffer(&real_font);
+    if (real_buf) px_sweep(real_buf, real_font);
     hooks_sweeping = sweeping;
 }
 
@@ -2307,6 +2799,10 @@ static const struct hook dialog_hooks[] = {
      (void **)&orig_pops_18, &stats_pops_18, 1, 0},
     {0x627910, (const uint8_t[]){0x8b, 0x0d, 0x74, 0xc0, 0x9b, 0x00, 0x56}, 7, NULL, (void *)shadow_pop_ask_6,
      (void **)&orig_pop_ask_6, &stats_pop_ask_6, 1, 0},
+    HOOK(0x604ab0, pop_on_redraw, 0x51, 0x53, 0x55, 0x56, 0x8b, 0xf1),
+    HOOK(0x603800, pop_calculate_dimensions, 0x83, 0xec, 0x08, 0x53, 0x55, 0x56, 0x8b, 0xf1),
+    {0x6132a0, (const uint8_t[]){0x8b, 0x81, 0x80, 0x01, 0x00, 0x00}, 6, NULL, (void *)shadow_dialog_calc, (void **)&orig_dialog_calc,
+     &stats_dialog_calc, 1, 0},
     HOOK(0x601ac0, pop_set_height, 0x8b, 0x81, 0x14, 0x0a, 0x00, 0x00),
     HOOK(0x601b80, pop_set_loc, 0x8b, 0x44, 0x24, 0x04, 0x3d, 0x00, 0x20, 0x00, 0x00),
     HOOK(0x601bd0, pop_read_check, 0x8b, 0x81, 0x28, 0x22, 0x00, 0x00),
