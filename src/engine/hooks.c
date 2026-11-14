@@ -89,7 +89,10 @@ static void on_signal(int sig) {
 
 void hooks_apply(struct pe_image *exe, enum hook_mode mode) {
     hooks_mode = mode;
-    if (mode == HOOKS_OFF) return;
+    if (mode == HOOKS_OFF) {
+        game_bind(exe);  // only pointers, so scenes can read the original's state (scene.c)
+        return;
+    }
     // In shadow mode some Windows calls go through the journal (journal.c); its wrappers
     // must be in the import table before game_bind reads it.
     if (mode == HOOKS_SHADOW) journal_install(exe);

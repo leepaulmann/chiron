@@ -62,6 +62,7 @@ add_executable(chiron
   src/engine/quiet.c
   src/engine/upkeep.c
   src/engine/soak.c
+  src/engine/scene.c
   src/engine/social.c
   src/engine/faction.c
   src/engine/diplomacy.c

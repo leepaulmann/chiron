@@ -1,0 +1,10 @@
+# The Hall of Fame, which no click reaches (the game shows it at a game's
+# end): opened with the script host's "open" step on the loaded first turn,
+# snapped, closed with Escape, and the map snapped again.
+25 load
+42 snap map
+44 open hall_of_fame
+50 snap fame
+53 key Escape
+58 snap map-after
+62 close

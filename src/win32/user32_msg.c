@@ -434,7 +434,9 @@ void user32_present_if_due(void) {
 // "click X Y" (left click in screen coordinates), "dblclick X Y",
 // "move X Y", "key NAME" (an SDL key name such as Return or Escape,
 // optionally "Ctrl+NAME"), "type TEXT" (typed characters, up to the next
-// ';'), "snap FILE" (save the frame on screen as a BMP) or "close" (the
+// ';'), "snap FILE" (save the frame on screen as a BMP, and the game's state
+// beside it as FILE.state), "state NAME ADDR SIZE" (add a region to the
+// state), "open NAME" (call a screen's entry point, see scene.c) or "close" (the
 // window's close button).
 // "<seconds> every <interval> <action>" repeats an action from then on:
 //   CHIRON_SCRIPT="25 click 835 362; 40 every 0.5 key Return; 600 close"
@@ -467,6 +469,12 @@ static void push_click(int x, int y, int clicks) {
     e.type = SDL_MOUSEBUTTONUP, e.button.state = SDL_RELEASED;
     SDL_PushEvent(&e);
 }
+
+// scene.c: a scene's snap (the game's state), state and open steps
+void scene_write_state(const char *frame_path);
+void scene_add_state(const char *name, uint32_t addr, uint32_t size);
+void scene_open(const char *name);
+void scene_poll(void);
 
 static void run_action(const char *step) {
     int x, y;
@@ -501,7 +509,14 @@ static void run_action(const char *step) {
         if (sscanf(step, " snap %511[^;]", path) == 1) {
             for (char *e = path + strlen(path); e > path && e[-1] == ' ';) *--e = 0;
             sdl_host_save_frame(path);
+            scene_write_state(path);
         }
+    } else if (sscanf(step, " open %63[^;]", name) == 1) {
+        scene_open(name);
+    } else if (!strncmp(step, " state ", 7)) {
+        char region[32];
+        unsigned addr, size;
+        if (sscanf(step, " state %31s %i %i", region, &addr, &size) == 3) scene_add_state(region, addr, size);
     } else if (!strncmp(step, " close", 6)) {
         SDL_Event e = {.type = SDL_QUIT};
         SDL_PushEvent(&e);
@@ -564,6 +579,7 @@ static void pump_sdl(int wait_ms) {
     run_test_script();
     if (wait_ms != 0 && SDL_WaitEventTimeout(&e, wait_ms < 0 ? 100 : wait_ms)) handle_sdl_event(&e);
     while (SDL_PollEvent(&e)) handle_sdl_event(&e);
+    scene_poll();
     ddraw_present_pending();
     sdl_host_snapshot_tick();
 }

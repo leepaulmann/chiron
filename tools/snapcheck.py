@@ -31,6 +31,23 @@ game's randomness while a map is built depends on timing, so a scene that
 builds its own map can come out slightly different between runs; a loaded
 game doesn't.
 
+Each snap also saves the game's state (src/engine/scene.c), NAME.K.state
+beside each frame: for the faction tables, bases, units, prototypes, the map
+and a block of game globals, a hash of the whole region and of each 64 bytes
+of it. The state at the first and last frame of each snap's burst is compared
+between the modes, and a difference is reported as "state: REGION differs at
+record N / offset 0x..." (the first differing 64 bytes, as a record of the
+region's table and a byte offset in it) and counts as a difference. A scene
+line "<seconds> state NAME ADDR SIZE" adds a region of the game's memory to
+every later snap (a screen object's fields, say; ADDR is the game's own
+address, in hex with 0x). Parts of the globals that vary with timing are
+left out inside scene.c (globals_skip).
+
+A scene's "<seconds> open NAME" step calls a screen's game entry point from
+the game thread's message pump (the table is in scene.c), for screens no click
+reaches; a modal screen keeps the script running inside it, so the scene's
+later steps (a snap, a key that closes it) go on as usual.
+
 Exit status: 0 when every snap matches, 1 when any differ or are missing.
 Needs the game set up (see README). Nothing it writes belongs in the repo.
 """
@@ -56,6 +73,41 @@ def read_scene(path):
             elif line:
                 steps.extend(s.strip() for s in line.split(";") if s.strip())
     return steps, masks
+
+
+def read_state(path):
+    """A .state file as {region: (rec size, total hash, [chunk hashes])}."""
+    regions = {}
+    with open(path) as f:
+        for line in f:
+            name, _addr, _size, rec, total, chunks = line.split()
+            regions[name] = (int(rec, 16), total, chunks.split(","))
+    return regions
+
+
+STATE_CHUNK = 64
+
+
+def compare_state(a_path, b_path):
+    """A list of problems between two state files (empty when they match)."""
+    try:
+        a, b = read_state(a_path), read_state(b_path)
+    except OSError as e:
+        return [f"state file missing: {e.filename}"]
+    problems = []
+    for name in sorted(set(a) | set(b)):
+        if name not in a or name not in b:
+            problems.append(f"state: {name} only in one run")
+            continue
+        rec, total_a, ca = a[name]
+        _, total_b, cb = b[name]
+        if total_a == total_b:
+            continue
+        diff = [i for i in range(min(len(ca), len(cb))) if ca[i] != cb[i]]
+        first = diff[0] * STATE_CHUNK if diff else 0
+        problems.append(f"state: {name} differs at record {first // rec} / offset 0x{first % rec:x} "
+                        f"({len(diff)} of {len(ca)} chunks of {STATE_CHUNK} bytes)")
+    return problems
 
 
 def read_bmp(path):
@@ -157,7 +209,7 @@ def run(mode, steps, out, binary, timeout, save=None):
         os.makedirs(os.path.join(user, "saves"))
         shutil.copy(save, os.path.join(user, "saves", "scene.SAV"))
     for f in os.listdir(out):
-        if f.startswith(mode + "-") and f.endswith(".bmp"):
+        if f.startswith(mode + "-") and f.endswith((".bmp", ".state")):
             os.remove(os.path.join(out, f))
     script = []
     for s in steps:
@@ -207,6 +259,11 @@ def attempt(a, steps, snaps, modes, save, masks):
             r, note = compare(paths[modes[0]], paths[m], os.path.join(a.out, f"diff-{name}.bmp"), masks)
             print(f"{name}: " + (r or "match") + note)
             results[name] = results[name] or r
+            for k in (0, len(BURST) - 1):
+                for problem in compare_state(os.path.join(a.out, f"{modes[0]}-{name}.{k}.state"),
+                                             os.path.join(a.out, f"{m}-{name}.{k}.state")):
+                    print(f"{name}: {problem} (burst frame {k}, {modes[0]} vs {m})")
+                    results[name] = results[name] or problem
     return results
 
 
