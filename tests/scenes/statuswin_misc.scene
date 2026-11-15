@@ -1,0 +1,59 @@
+# The small functions of the status panel (see statuswin.c): the title line's text (set_title writes the game's scratch text at
+# 0x9b86a0, compared as the state sw_text) for each kind of title and for a view or the map, the end of a battle's report (reset: the
+# panel's word at 0x8c6b3c says one is shown), the fonts made again (resize), the registered-strip flag word (0x939ed8), the hidden
+# destination window, and the panel's own redraw. The panel looks at the first unit's square, which the three units there share.
+25 load
+45 click 362 734
+46 state sw_math 0x8c6a68 0x30
+46 state sw_fa0 0x8c6a98 8
+46 state sw_fb0 0x8c6aa4 0x14
+46 state sw_fa1 0x8c6ac0 8
+46 state sw_fb1 0x8c6acc 0x14
+46 state sw_fa2 0x8c6ae8 8
+46 state sw_fb2 0x8c6af4 0x14
+46 state sw_fields 0x8c6b10 0x38
+46 state sw_spot 0x8c6b4c 8
+46 state sw_text 0x9b86a0 0x80
+46 state sw_misc 0x6874c4 4
+46 state sw_flags 0x939ed8 4
+47 host status_stack 3 0 1 0
+48 host status_look 0 0
+50 open status_title_0
+53 snap title-map
+55 poke 0x939288 1
+56 poke 0x93928c 6
+57 open status_title_0
+60 snap title-view
+62 poke 0x93928c 0xffffffff
+63 open status_title_0
+66 snap title-view-none
+68 open status_title_1
+71 snap title-1
+73 open status_title_2
+76 snap title-2
+78 open status_title_4
+81 snap title-4
+83 open status_title_8
+86 snap title-8
+88 open status_title_10
+91 snap title-10
+93 poke 0x939288 0
+94 open status_flag
+97 snap flag
+99 poke 0x6874c4 5
+100 open status_hide
+103 snap hide
+105 open status_resize
+107 open status_on_redraw
+110 snap on-redraw
+112 poke 0x8c6b3c 1
+113 open status_reset
+116 snap reset-battle
+118 open status_reset
+121 snap reset-none
+123 open status_close
+125 open status_redraw
+128 snap redraw
+130 host status_draw 0 1 0 0
+134 snap battle
+136 close

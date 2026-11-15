@@ -478,6 +478,7 @@ void scene_write_state(const char *frame_path);
 void scene_add_state(const char *name, uint32_t addr, uint32_t size);
 void scene_open(const char *name);
 void scene_poke(uint32_t addr, uint32_t value, int or_in);
+void scene_host(const char *name, int a, int b, int c, int d);
 void scene_poll(void);
 
 static void run_action(const char *step) {
@@ -533,6 +534,10 @@ static void run_action(const char *step) {
         char how[8] = "";
         // "poke ADDR VALUE or" sets the bits of VALUE in the word and leaves the others.
         if (sscanf(step, " poke %i %i %7s", &addr, &value, how) >= 2) scene_poke(addr, value, !strcmp(how, "or"));
+    } else if (!strncmp(step, " host ", 6)) {
+        char hname[32];
+        int a[4] = {0, 0, 0, 0};
+        if (sscanf(step, " host %31s %i %i %i %i", hname, &a[0], &a[1], &a[2], &a[3]) >= 1) scene_host(hname, a[0], a[1], a[2], a[3]);
     } else if (!strncmp(step, " close", 6)) {
         SDL_Event e = {.type = SDL_QUIT};
         SDL_PushEvent(&e);

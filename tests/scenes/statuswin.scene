@@ -1,0 +1,125 @@
+# The status panel on the main screen (StatusWin, see statuswin.c): the square the panel is looking at, in the box at the lower
+# left (its picture and the lines under it). The mouse can't be moved over the squares one at a time (the console only moves
+# the panel with the cursor), so the scene points the panel at squares by hand (host status_look dx dy, relative to the first unit's
+# square) and changes the squares' records (host status_tile dx dy OFFSET VALUE; offset bit 8 sets bits, bit 9 clears them, bit 10 sets
+# one byte; 0 and 4 are the climate/contour/site/region and visibility/rock/territory words, 8 and 12 the bits and landmark words).
+# This scene is the terrain lines: ocean and land, altitude, rainfall, rockiness, the river, fungus and forest, flooding and the
+# climate change, the improvements, a monolith, a resource and the landmarks, the square never seen, and the debug flags.
+# The panel's fields (the state regions sw_*: the camera, the fonts without their handles, the square and picks, the Spot list's counts) and the text buffer are compared with every snap.
+25 load
+45 click 362 734
+46 state sw_math 0x8c6a68 0x30
+46 state sw_fa0 0x8c6a98 8
+46 state sw_fb0 0x8c6aa4 0x14
+46 state sw_fa1 0x8c6ac0 8
+46 state sw_fb1 0x8c6acc 0x14
+46 state sw_fa2 0x8c6ae8 8
+46 state sw_fb2 0x8c6af4 0x14
+46 state sw_fields 0x8c6b10 0x38
+46 state sw_spot 0x8c6b4c 8
+46 state sw_text 0x9b86a0 0x80
+46 state sw_misc 0x6874c4 4
+48 host status_look 0 0
+51 snap pod
+53 host status_look 2 0
+56 snap east
+58 host status_look -2 0
+61 snap west
+63 host status_look 0 2
+66 snap south
+68 host status_look 0 -2
+71 snap north
+73 host status_look 0 0
+74 host status_tile 0 0 0x108 0x80
+77 snap river
+79 host status_tile 0 0 0x108 0x20
+82 snap fungus
+84 host status_tile 0 0 0x208 0x20
+85 host status_tile 0 0 0x108 0x200000
+88 snap forest
+90 host status_tile 0 0 0x208 0x200000
+91 host status_tile 0 0 0x405 0x40
+94 snap rock-rolling
+96 host status_tile 0 0 0x405 0x80
+99 snap rock-rocky
+101 host status_tile 0 0 0x405 0
+102 host status_tile 0 0 0x400 0x20
+105 snap ocean-deep
+107 host status_tile 0 0 0x400 0x40
+110 snap ocean
+112 host status_tile 0 0 0x400 0x60
+115 snap shelf-ish
+117 host status_tile 0 0 0x108 0x20
+120 snap ocean-fungus
+122 host status_tile 0 0 0x208 0x20
+123 poke 0x9a67d8 0xfffffff0
+124 host status_tile 0 0 0x401 0x40
+127 snap flood-down
+129 poke 0x9a67d8 0x10
+132 snap flood-up
+134 poke 0x9a67d8 0
+135 host status_tile 0 0 0x400 0x78
+138 snap land-rain
+140 host status_tile 0 0 0x400 0x98
+143 snap land-high
+145 host status_tile 0 0 0x108 0x2000
+148 snap monolith
+150 host status_tile 0 0 0x20c 0x2000
+151 host status_tile 0 0 0x10c 0x2
+154 snap landmark-2
+156 host status_tile 0 0 0x10c 0x80000001
+159 snap landmark-off
+161 host status_tile 0 0 0x20c 0x80000001
+162 host status_tile 0 0 0x10c 0x4
+165 snap landmark-4
+167 host status_tile 0 0 0x10c 0x8
+170 snap landmark-8-4
+172 host status_tile 0 0 0x10c 0x40
+175 snap landmark-40
+177 host status_tile 0 0 0x10c 0x100
+180 snap landmark-100
+182 host status_tile 0 0 0x10c 0x200
+185 snap landmark-200
+187 host status_tile 0 0 0x10c 0x800
+190 snap landmark-800
+192 host status_tile 0 0 0x10c 0x2000
+195 snap landmark-2000
+197 poke 0x9a6488 1
+198 host status_tile 0 0 0x10c 0x4000
+201 snap landmark-4000
+203 host status_tile 0 0 0x20c 0x6f4f
+204 host status_tile 0 0 0x400 0x20
+205 host status_tile 0 0 0x10c 0x8000
+208 snap sea-landmark-8000
+210 host status_tile 0 0 0x10c 0x80
+213 snap sea-landmark-80
+215 host status_tile 0 0 0x20c 0x80
+216 host status_tile 0 0 0x10c 0x400
+219 snap sea-landmark-400
+221 host status_tile 0 0 0x20c 0x400
+222 host status_tile 0 0 0x400 0x98
+223 host status_tile 0 0 0x108 0x400
+226 snap resource
+228 host status_tile 0 0 0x108 0x4
+229 host status_tile 0 0 0x108 0x10
+230 host status_tile 0 0 0x108 0x40
+231 host status_tile 0 0 0x108 0x8000
+232 host status_tile 0 0 0x108 0x80000
+233 host status_tile 0 0 0x108 0x400000
+234 host status_tile 0 0 0x108 0x800000
+235 host status_tile 0 0 0x108 0x1000000
+236 host status_tile 0 0 0x108 0x10000
+237 host status_tile 0 0 0x108 0x20000
+238 host status_tile 0 0 0x108 0x20000000
+239 host status_tile 0 0 0x108 0x2000
+242 snap improvements
+244 host status_tile 0 0 0x404 0
+247 snap unexplored
+249 host status_tile 0 0 0x404 0xff
+250 poke 0x9a64c0 0x1040 or
+253 snap debug
+255 poke 0x9a64c0 0x80 or
+256 host status_tile 0 0 0x404 0
+259 snap all-seen-unexplored
+261 poke 0x9a64c0 0x1040 or
+263 close

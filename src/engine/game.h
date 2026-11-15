@@ -1715,6 +1715,19 @@ extern void (*game_draw_tile_fixup_2)(int x1, int y1, int x2, int y2, int a, int
 extern int (*game_do_unity_crash)(int x, int y, int faction);
 extern void (*game_my_srand)(int seed);  // srand(), logged, for network games
 extern void (*game_say_morale_2)(int veh, int unk);  // a unit's morale, into game_battle_text
+// What StatusWin (src/ui/statuswin.c) calls that isn't rebuilt: the text of a unit's morale (into game_battle_text) and
+// orders, the window for a unit's destination, the battle window's report and the end of its mode, and the base window's
+// zoom, production, hurry and governor calls and the editor's unit call that its menu makes.
+extern void (*game_say_morale)(char *buf, int veh, int unk);
+extern void (*game_say_orders)(char *buf, int veh);
+extern void (*game_draw_my_dest)(int veh);
+extern void(__attribute__((thiscall)) * game_battle_report)(void *win, int veh_att, int veh_def, int off, int def, int combat);
+extern void(__attribute__((thiscall)) * game_release_iface_mode)(void *win);
+extern void(__attribute__((thiscall)) * game_base_win_soft_zoom)(void *win, int base);
+extern void(__attribute__((thiscall)) * game_base_win_production)(void *win, int a, int b);
+extern void(__attribute__((thiscall)) * game_base_win_hurry)(void *win);
+extern void(__attribute__((thiscall)) * game_base_win_gov_on)(void *win, int flag);
+extern void(__attribute__((thiscall)) * game_editor_edit_veh)(void *console, int veh);
 // Sound effects faded out or stopped (by id).
 extern void(__attribute__((thiscall)) * game_fx_fade)(void *fx, int id);
 extern void(__attribute__((thiscall)) * game_fx_stop)(void *fx, int id);

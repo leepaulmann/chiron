@@ -61,16 +61,6 @@ static void __attribute__((thiscall)) shadow_map_win_clear_alt(void *win, int x,
 }
 
 QUIET(draw_tiles, "(quiet draw_tiles)", (int x, int y, int unk), (x, y, unk))
-static void(__attribute__((thiscall)) * orig_status_win_redraw)(void *win);
-static struct hook_stats stats_status_win_redraw = {"(quiet StatusWin_redraw)"};
-static void __attribute__((thiscall)) shadow_status_win_redraw(void *win) {
-    if (hooks_protecting()) {
-        stats_status_win_redraw.calls++;
-        return;
-    }
-    orig_status_win_redraw(win);
-}
-
 // A held call: `fill` puts the arguments in c, `replay` makes the call from
 // them. Returns `quiet` while held.
 #define HELD(ret, fn, quiet, params, args, fill, replay_call)                \
@@ -529,9 +519,6 @@ QUIET(help_tech_info_2, "(quiet help_tech_info_2)", (void *pop, int tech, int fa
 QUIET(flush_input, "(quiet flush_input)", (void), ())
 QUIET(draw_tile_fixup, "(quiet draw_tile_fixup)", (int x, int y, int a, int b), (x, y, a, b))
 QUIET(draw_tile_fixup_2, "(quiet draw_tile_fixup_2)", (int x1, int y1, int x2, int y2, int a, int b), (x1, y1, x2, y2, a, b))
-QUIET_THIS(void, status_win_draw, (void)0, (void *win, int veh_att, int veh_def, int off, int def, int combat),
-           (win, veh_att, veh_def, off, def, combat))
-QUIET_THIS(void, status_win_reset, (void)0, (void *win), (win))
 QUIET_THIS(void, battle_win_clear, (void)0, (void *win), (win))
 HELD_THIS(set_iface_mode, (void *self), (self), (void)0, orig_set_iface_mode(SELF))
 HELD_THIS(battle_win_pulse_timer, (void *self), (self), (void)0, orig_battle_win_pulse_timer(SELF))
@@ -669,7 +656,6 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x5beca0, x_text_open, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0x0c, 0x1b, 0x69, 0x00),  // mov eax, [0x691b0c]
     QUIET_HOOK(0x5fd570, text_get, 0xa1, 0xf4, 0x7c, 0x9b, 0x00),                         // mov eax, [0x9b7cf4]
     QUIET_HOOK(0x46b140, draw_tiles, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x8b, 0x5d, 0x0c),            // push ebx; mov ebx, [ebp+12]
-    QUIET_HOOK(0x4b9ea0, status_win_redraw, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10),           // sub esp, 16
     QUIET_HOOK(0x514880, console_update_data, PUSH_EBP_MOV_EBP_ESP, 0x8b, 0x45, 0x08),         // mov eax, [ebp+8]
     QUIET_HOOK(0x515400, console_center, 0xa1, 0xb8, 0x92, 0x93, 0x00),                       // mov eax, [0x9392b8]
     QUIET_HOOK(0x46b1f0, map_win_set_center, PUSH_EBP_MOV_EBP_ESP, 0x51, 0x53, 0x56, 0x8b, 0xf1),  // push ecx, ebx, esi; mov esi, ecx
@@ -698,8 +684,6 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x5fd120, flush_input, 0x83, 0xec, 0x1c, 0x8d, 0x44, 0x24, 0x00),               // sub esp, 28; lea eax, [esp]
     QUIET_HOOK(0x46af90, draw_tile_fixup, PUSH_EBP_MOV_EBP_ESP, 0xa0, 0x94, 0x64, 0x9a, 0x00),  // mov al, [0x9a6494]
     QUIET_HOOK(0x46b040, draw_tile_fixup_2, PUSH_EBP_MOV_EBP_ESP, 0xa0, 0x94, 0x64, 0x9a, 0x00),
-    QUIET_HOOK(0x4b8830, status_win_draw, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x10),             // sub esp, 16
-    QUIET_HOOK(0x4b8970, status_win_reset, 0x8b, 0x81, 0xd4, 0x15, 0x00, 0x00),                // mov eax, [ecx+0x15d4]
     QUIET_HOOK(0x422c50, battle_win_clear, 0x56, 0x8b, 0xf1, 0x68, 0x28, 0xd5, 0x78, 0x00),   // push esi; mov esi, ecx; push 0x78d528
     QUIET_HOOK(0x45d310, set_iface_mode, 0x56, 0x8b, 0xf1, 0x8b, 0x0d, 0x2c, 0x39, 0x7d, 0x00),  // push esi; mov esi, ecx; mov ecx, [0x7d392c]
     QUIET_HOOK(0x421b20, battle_win_pulse_timer, 0x6a, 0x05, 0x68, 0x88, 0x13, 0x00, 0x00),    // push 5; push 5000

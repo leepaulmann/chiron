@@ -1,0 +1,91 @@
+# The status panel's mouse (StatusWin_on_right_click and on_left_click, see statuswin.c): the menu on the right button over the
+# square's picture (a menu of three: its feature or resource view, and the Datalinks), over the active unit and the unit icons (activate,
+# select, help), over the base icon (zoom, production, hurry and the governor's four settings), and the choices; the left button on the
+# picture (flips what it shows), on a unit icon (makes it the unit the player moves), and a double click (which does nothing). A base
+# and a stack of three units are on the first unit's square; unit 6 is picked (sel_veh 0x8c6b24). The Datalinks screen the menu and Help
+# open is closed with its EXIT button.
+25 load
+45 click 362 734
+46 state sw_math 0x8c6a68 0x30
+46 state sw_fa0 0x8c6a98 8
+46 state sw_fb0 0x8c6aa4 0x14
+46 state sw_fa1 0x8c6ac0 8
+46 state sw_fb1 0x8c6acc 0x14
+46 state sw_fa2 0x8c6ae8 8
+46 state sw_fb2 0x8c6af4 0x14
+46 state sw_fields 0x8c6b10 0x38
+46 state sw_spot 0x8c6b4c 8
+46 state sw_text 0x9b86a0 0x80
+46 state sw_misc 0x6874c4 4
+47 host status_base 0 0 1 3
+47.5 host status_stack 3 0 1 0
+48 host status_look 0 0
+49 poke 0x8c6b24 6
+50 open status_redraw
+53 rclick 190 620
+55 snap menu-square
+58 click 250 651
+61 snap resource-mode
+63 rclick 190 620
+65 click 243 632
+68 snap feature-mode
+70 rclick 190 620
+72 click 256 670
+76 snap datalinks
+78 click 636 512
+81 snap after-datalinks
+83 rclick 70 620
+85 snap menu-unit
+88 click 115 651
+91 snap unit-selected
+93 rclick 70 620
+95 click 115 632
+98 snap unit-activated
+100 rclick 70 620
+102 click 96 689
+106 snap help
+108 click 636 512
+111 snap after-help
+113 rclick 70 620
+115 click 400 300
+118 snap menu-dismissed
+120 poke 0x9a64c0 0x40 or
+121 rclick 70 620
+123 snap menu-unit-debug
+125 click 400 300
+128 snap debug-dismissed
+130 rclick 160 735
+132 snap menu-base
+135 click 230 631
+138 snap governor-explore
+140 rclick 160 735
+142 click 231 650
+145 snap governor-discover
+147 rclick 160 735
+149 click 216 669
+152 snap governor-build
+154 rclick 160 735
+156 click 228 688
+159 snap governor-conquer
+161 rclick 160 735
+163 click 185 726
+167 snap base-help
+169 click 636 512
+172 snap after-base-help
+174 rclick 231 735
+176 snap menu-icon
+179 click 400 300
+182 snap icon-dismissed
+184 click 190 620
+187 snap left-picture
+189 click 190 620
+192 snap left-picture-again
+194 click 231 735
+197 snap left-unit
+199 open status_dblclick
+201 snap double-click
+203 rclick 600 735
+206 snap menu-help-only
+208 click 400 300
+211 snap help-only-dismissed
+213 close

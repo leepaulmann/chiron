@@ -1,0 +1,133 @@
+# The status panel's active unit (StatusWin_draw_active, see statuswin.c): the picture, name and stats of the unit on the square,
+# and the lines under them: the faction (for another's unit), the stats and abilities, the morale, home base, moves, flight turns,
+# cargo, damage, orders. A stack of three units (ids 6 to 8, scout patrols of the player's faction) is made on the first unit's
+# square, unit 6 is picked (the panel's sel_veh, 0x8c6b24), and the units' fields are changed with pokes; the unit table is at
+# 0x952828, 0x34 a unit, so unit 6 is at 0x952960 (+4 the state, +0xc the faction in the high half, +0x10 damage and order, +0x24 the
+# turns flown in the second byte, +0x28 the moves spent, +0x2c the home base in the high half). The prototype's words are at
+# 0x9ab868 + 0x34 * id (proto 0 here: +0x20 the abilities, +0x24 chassis, weapon, armor and reactor, +0x28 carry, cost, plan, group).
+25 load
+45 click 362 734
+46 state sw_math 0x8c6a68 0x30
+46 state sw_fa0 0x8c6a98 8
+46 state sw_fb0 0x8c6aa4 0x14
+46 state sw_fa1 0x8c6ac0 8
+46 state sw_fb1 0x8c6acc 0x14
+46 state sw_fa2 0x8c6ae8 8
+46 state sw_fb2 0x8c6af4 0x14
+46 state sw_fields 0x8c6b10 0x38
+46 state sw_spot 0x8c6b4c 8
+46 state sw_text 0x9b86a0 0x80
+46 state sw_misc 0x6874c4 4
+47 host status_stack 3 0 1 0
+48 host status_look 0 0
+49 poke 0x8c6b24 6
+50 open status_redraw
+53 snap unit
+55 poke 0x952970 4
+56 open status_redraw
+59 snap damage-yellow
+61 poke 0x952970 8
+62 open status_redraw
+65 snap damage-red
+67 poke 0x952970 200
+68 open status_redraw
+71 snap damage-over
+73 poke 0x952970 0
+74 poke 0x952988 3
+75 open status_redraw
+78 snap no-moves
+80 poke 0x952988 1
+81 open status_redraw
+84 snap part-moves
+86 poke 0x952988 0
+87 poke 0x95296c 0x00020000
+88 open status_redraw
+91 snap foreign
+93.5 poke 0x9bc054 1
+94 open status_redraw
+97 snap foreign-noun
+98.5 poke 0x9bc054 0
+99 poke 0x96eaa8 1
+100 open status_redraw
+103 snap foreign-treaty
+105 poke 0x952964 0x80 or
+106 open status_redraw
+109 snap probe
+111 poke 0x952964 0
+112 poke 0x96eaa8 0
+113 poke 0x9a64c0 0x80 or
+114 open status_redraw
+117 snap foreign-all
+119 poke 0x952970 0x1800
+120 open status_redraw
+123 snap order-dest
+125 poke 0x952970 0x0500
+126 open status_redraw
+129 snap order-terraform
+131 poke 0x952970 0x1700
+132 open status_redraw
+135 snap order-terraform-last
+137 poke 0x952970 0x0300
+138 open status_redraw
+141 snap order-3
+143 poke 0x952970 0
+144 poke 0x95296c 0x00010000
+145 poke 0x9ab8f0 0x1ffff
+146 open status_redraw
+149 snap abilities
+151 poke 0x9ab8f0 0
+152 poke 0x9ab8f8 0x000b0a00
+153 open status_redraw
+156 snap plan-0xb
+158 poke 0x9ab8f8 0x000c0a00
+159 open status_redraw
+162 snap plan-0xc
+164 poke 0x9ab8f8 0x000b0a00
+165 poke 0x95296c 0
+166 open status_redraw
+169 snap native
+171 poke 0x952970 0x0805
+172 open status_redraw
+175 snap native-orders
+177 poke 0x95296c 0x00010000
+178 poke 0x9ab8f8 0x00000a00
+179 poke 0x952970 0
+180 poke 0x9ab8f4 0x01000105
+181 poke 0x952984 0x00000200
+182 open status_redraw
+185 snap copter
+187 poke 0x952984 0x00000100
+188 poke 0x952988 3
+189 open status_redraw
+192 snap copter-flown
+194 poke 0x952988 0
+195 poke 0x952984 0x00000500
+196 open status_redraw
+199 snap copter-late
+201 poke 0x9ab8f4 0x01000104
+202 poke 0x952984 0x00000100
+203 open status_redraw
+206 snap jet
+208 poke 0x9ab8f4 0x01000000
+209 poke 0x9ab8f8 0x00000a05
+210 open status_redraw
+213 snap cargo
+228 poke 0x8c6b24 0xffffffff
+229 open status_redraw
+232 snap none-picked
+234 poke 0x9a6494 0x2000000 or
+235 poke 0x952970 0x1800
+236 poke 0x8c6b24 6
+237 open status_redraw
+240 snap dest-hidden-by-pref
+242 open status_active_v0
+245 snap active-v0
+247 open status_active_v0r
+250 snap active-v0r
+252 open status_active_none
+255 snap active-none
+257 poke 0x9a64c0 0x1040 or
+258 open status_redraw
+261 snap debug
+263 open status_hide
+265 close

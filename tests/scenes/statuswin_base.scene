@@ -1,0 +1,81 @@
+# The status panel's active base (StatusWin_draw_active with a base, see statuswin.c): the base's picture and name, for another
+# faction's base its faction, headquarters or size, defences and unrest, and for the player's own (or one with a treaty or under
+# spies, or with the view of everything) what it is building. A base is made on the square two to the east of the first unit's (host
+# status_base), the panel is pointed at it and the base picked (sel_base 0x8c6b28, sel_veh 0x8c6b24 -1). The game already has four bases (0 to 3), so the new one is base 4, at 0x97d510 (+4 the
+# faction, former faction, size and assimilation in a word, +8 nerve staple turns, +0x30 the state, +0x40 the minerals, +0x50 what
+# it builds, +0x8c the facilities).
+25 load
+45 click 362 734
+46 state sw_math 0x8c6a68 0x30
+46 state sw_fa0 0x8c6a98 8
+46 state sw_fb0 0x8c6aa4 0x14
+46 state sw_fa1 0x8c6ac0 8
+46 state sw_fb1 0x8c6acc 0x14
+46 state sw_fa2 0x8c6ae8 8
+46 state sw_fb2 0x8c6af4 0x14
+46 state sw_fields 0x8c6b10 0x38
+46 state sw_spot 0x8c6b4c 8
+46 state sw_text 0x9b86a0 0x80
+46 state sw_misc 0x6874c4 4
+47 host status_base 2 0 1 2
+48 host status_look 2 0
+49 poke 0x8c6b24 0xffffffff
+49 poke 0x8c6b28 4
+50 open status_redraw
+53 snap own
+55 poke 0x97d560 0xfffffffb
+56 open status_redraw
+59 snap own-facility
+61 poke 0x97d560 0xffffffbb
+62 open status_redraw
+65 snap own-stockpile
+67 poke 0x97d550 7
+68 poke 0x97d560 1
+69 open status_redraw
+72 snap own-minerals
+74 poke 0x97d514 0x00010202
+75 open status_redraw
+78 snap foreign-small
+80 poke 0x97d514 0x00030202
+81 open status_redraw
+84 snap foreign-medium
+86 poke 0x97d514 0x000c0202
+87 open status_redraw
+90 snap foreign-large
+92 poke 0x97d59c 0x02
+93 open status_redraw
+96 snap foreign-hq
+98 poke 0x97d59c 0x10
+99 open status_redraw
+102 snap foreign-defence-4
+104 poke 0x97d59c 0x20
+105 open status_redraw
+108 snap foreign-defence-5
+110 poke 0x97d59c 0x30
+111 poke 0x97d540 2
+112 open status_redraw
+115 snap foreign-unrest
+117 poke 0x97d518 0x00ff0003
+118 open status_redraw
+121 snap foreign-staple
+123 poke 0x96eaa8 1
+124 open status_redraw
+127 snap foreign-treaty
+129 poke 0x96eaa8 0
+130 poke 0x97d514 0x00030303
+131 open status_redraw
+134 snap other-faction
+136 poke 0x9a64c0 0x80 or
+137 open status_redraw
+140 snap foreign-all
+142 poke 0x9a64c0 0x1040 or
+143 open status_redraw
+146 snap debug
+148 open status_active_b0
+151 snap active-b0
+153 open status_active_b0r
+156 snap active-b0r
+159 poke 0x8c6b28 0xffffffff
+160 open status_redraw
+163 snap base-not-picked
+165 close

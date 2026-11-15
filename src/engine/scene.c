@@ -255,6 +255,29 @@ static int tut_set_win(int on, int unused, int unused2, int unused3) {
     return on;
 }
 static const struct open_entry open_table[] = {
+    {"status_redraw", 0x4b9ea0, {0}, 0x8c5568},  // StatusWin_redraw: the panel drawn again
+    {"status_on_redraw", 0x4b8890, {0}, 0x8c5568},
+    {"status_resize", 0x4b4990, {0}, 0x8c5568},  // StatusWin_UNK1: the fonts made again
+    {"status_left", 0x4b89c0, {0}, 0x8c5568},  // the arrows
+    {"status_right", 0x4b8bd0, {0}, 0x8c5568},
+    {"status_activate", 0x4b8df0, {0}, 0x8c5568},
+    {"status_reset", 0x4b8970, {0}, 0x8c5568},
+    {"status_reset_active", 0x4b6530, {0}, 0x8c5568},
+    {"status_title_0", 0x4b4a20, {0}, 0x8c5568},  // StatusWin_set_title(flags)
+    {"status_title_1", 0x4b4a20, {1}, 0x8c5568},
+    {"status_title_2", 0x4b4a20, {2}, 0x8c5568},
+    {"status_title_4", 0x4b4a20, {4}, 0x8c5568},
+    {"status_title_8", 0x4b4a20, {8}, 0x8c5568},
+    {"status_title_10", 0x4b4a20, {0x10}, 0x8c5568},
+    {"status_hide", 0x4b4cd0, {0}, 0x8c5568},  // StatusWin_UNK2 (hides the destination window)
+    {"status_flag", 0x4b9e90, {0}, 0x8c5568},  // StatusWin_UNK4
+    {"status_close", 0x4b9f80, {0}, 0x8c5568},
+    {"status_active_v0", 0x4b4cf0, {0, -1, 0}, 0x8c5568},  // draw_active(unit 0, no base, no hit rectangle)
+    {"status_active_v0r", 0x4b4cf0, {0, -1, 1}, 0x8c5568},
+    {"status_active_b0", 0x4b4cf0, {-1, 0, 0}, 0x8c5568},
+    {"status_active_b0r", 0x4b4cf0, {-1, 0, 1}, 0x8c5568},
+    {"status_active_none", 0x4b4cf0, {-1, -1, 0}, 0x8c5568},
+    {"status_dblclick", 0x4b8990, {190, 640}, 0x8c5568},
     {"hall_of_fame", 0x44ae50, {0}},  // void hall_of_fame(int final): 0 only shows the list
     {"info_tick", 0x459150, {10, 0, 0, 0}, 0x7ad2a0, 0, 0x7ad34c},  // InfoWin_timer_proc(10): one tick of the info panel's clock, made by hand (a scene stops the real clock with the panel's `suspended` word, which is lifted for the call)
     {"info_tick20", 0x459150, {10, 0, 0, 0}, 0x7ad2a0, 19, 0x7ad34c},  // twenty of them
@@ -345,6 +368,85 @@ static const struct open_entry open_table[] = {
     {"tut_draw_base", 0, {2, -2, 150, 60}, .host = tut_draw},
 };
 
+// ---- Steps for the status panel (src/ui/statuswin.c) ----
+// The panel shows the square (sw->x, sw->y) and the units there; a click or the mouse can't reach most kinds of square, so a scene
+// puts the game there with "host NAME a b c d": `status_look dx dy` moves the panel to the square (dx, dy) from the first unit's and
+// redraws it, `status_tile dx dy offset value` writes a word of that square (offset 0, 4, 8 or 12 of the map record), `status_stack
+// count proto faction damage` makes `count` more units on the first unit's square (copies of it), `status_base dx dy faction size` a
+// base on that square, `status_draw a b c d` calls the panel's battle entry (five arguments, which an open entry can't carry). Both
+// modes do the same, and the tables are part of the state compared.
+static struct map_tile *status_tile_at(int dx, int dy) {
+    int x = game_vehs[0].x + dx, y = game_vehs[0].y + dy;
+    return &(*game_map)[(x >> 1) + y * *game_map_half_width];
+}
+static int status_look(int dx, int dy, int unused, int unused2) {
+    (void)unused, (void)unused2;
+    typedef void(__attribute__((thiscall)) * set_loc_call)(void *, int, int);
+    typedef void(__attribute__((thiscall)) * redraw_call)(void *);
+    ((set_loc_call)game_at(0x4b9f90))(game_at(0x8c5568), game_vehs[0].x + dx, game_vehs[0].y + dy);
+    ((redraw_call)game_at(0x4b9ea0))(game_at(0x8c5568));
+    return 0;
+}
+static int status_tile(int dx, int dy, int offset, int value) {
+    // (offset bit 8: set the bits of the value and keep the rest; bit 9: clear them; bit 10: set one byte only)
+    uint32_t *w = (uint32_t *)((uint8_t *)status_tile_at(dx, dy) + (offset & 0xff));
+    if (offset & 0x100) *w |= (uint32_t)value;
+    else if (offset & 0x200) *w &= ~(uint32_t)value;
+    else if (offset & 0x400) *(uint8_t *)w = (uint8_t)value;
+    else *w = (uint32_t)value;
+    return value;
+}
+static int status_stack(int count, int proto, int faction, int damage) {
+    int first = *game_veh_count;
+    for (int i = 0; i < count; i++) {
+        int id = first + i;
+        game_vehs[id] = game_vehs[0];
+        game_vehs[id].proto = (int16_t)proto;
+        game_vehs[id].faction = (uint8_t)faction;
+        game_vehs[id].damage = (uint8_t)damage;
+        game_vehs[id].prev_in_stack = i + 1 < count ? (int16_t)(id + 1) : -1;  // (the game walks the stack from its top by +0x32)
+        game_vehs[id].next_in_stack = i > 0 ? (int16_t)(id - 1) : -1;
+    }
+    if (count) *game_veh_count = first + count;
+    status_tile_at(0, 0)->bits |= MAP_UNIT;
+    return first;
+}
+static int status_base(int dx, int dy, int faction, int size) {
+    int id = *game_base_count;
+    struct base *b = &game_bases[id];
+    memset(b, 0, sizeof(*b));
+    b->x = (int16_t)(game_vehs[0].x + dx);
+    b->y = (int16_t)(game_vehs[0].y + dy);
+    b->faction = b->faction_former = (uint8_t)faction;
+    b->pop_size = (int8_t)size;
+    b->visibility = 0xff;
+    strcpy(b->name, "Testbase");
+    b->queue[0] = 0;
+    *game_base_count = id + 1;
+    status_tile_at(dx, dy)->bits |= MAP_BASE;
+    return id;
+}
+static int status_draw(int a, int b, int c, int d) {
+    typedef void(__attribute__((thiscall)) * draw_call)(void *, int, int, int, int, int);
+    ((draw_call)game_at(0x4b8830))(game_at(0x8c5568), a, b, c, d, 0);
+    return 0;
+}
+static const struct {
+    const char *name;
+    int (*fn)(int, int, int, int);
+} host_table[] = {{"status_look", status_look}, {"status_tile", status_tile}, {"status_stack", status_stack}, {"status_base", status_base}, {"status_draw", status_draw}};
+static int host_pending = -1, host_args[4];
+
+void scene_host(const char *name, int a, int b, int c, int d) {
+    for (size_t i = 0; i < sizeof(host_table) / sizeof(host_table[0]); i++)
+        if (!strcmp(host_table[i].name, name)) {
+            host_pending = (int)i;
+            host_args[0] = a, host_args[1] = b, host_args[2] = c, host_args[3] = d;
+            return;
+        }
+    fprintf(stderr, "chiron: script: no host step \"%s\"\n", name);
+}
+
 static const struct open_entry *pending;
 
 // "poke ADDR VALUE": set a word of the game's memory. Like an "open" it is only queued, and made from the game thread's
@@ -377,6 +479,13 @@ void scene_poll(void) {
             else *(uint32_t *)game_at(pokes[i].addr) = pokes[i].value;
         }
         npokes = 0;
+    }
+    if (host_pending >= 0 && !hooks_protecting() && game_at(PREF_BASE)) {
+        int i = host_pending;
+        host_pending = -1;
+        fprintf(stderr, "chiron: script: host %s\n", host_table[i].name);
+        int answer = host_table[i].fn(host_args[0], host_args[1], host_args[2], host_args[3]);
+        fprintf(stderr, "chiron: script: host %s answered %d\n", host_table[i].name, answer);
     }
     if (!pending || hooks_protecting() || !game_at(PREF_BASE)) return;
     const struct open_entry *e = pending;
