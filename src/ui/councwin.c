@@ -650,7 +650,7 @@ static void UI_THIS councwin_on_redraw(struct game_councwin *cw) {
     struct game_buffer *ib = iface_buf(), *b = &cw->buf;
     buffer_set_clip(ib, ib->full);
     buffer_set_clip(b, b->full);
-    game_iface_frame(iface_win(), 1);
+    game_main_interface_restore_back(iface_win(), 1);
     int32_t r[4] = {word(IFACE_PANEL) + 4, word(IFACE_PANEL + 4) + 4, word(IFACE_PANEL + 8) - 4, word(IFACE_PANEL + 12) - 4};
     buffer_box_sprite(ib, r, frame_at(FRAME_AREA));
     int32_t back[4] = {0x17, 0, b->width - 0x37, 1 - b->neg_height};

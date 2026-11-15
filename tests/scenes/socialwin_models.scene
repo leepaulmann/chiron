@@ -1,0 +1,62 @@
+# The Social Engineering window (see socialwin.c) with every model to choose from (give_techs_all): the window as it opens, the mouse
+# over models of each category (the box tells what each does: the effects with their pictures, a plus in green and a minus in
+# red), a click on a model (the effects and the energy numbers are worked out again, the upheaval's cost shown), on the models
+# of the other categories, an effect's button (every category takes the model that brings the most of it: the overview shows the
+# effect in yellow while it works), Reset (back to the models the faction began with) and Cancel (the pending models stand).
+# A place in the window is (111 + x, 203 + y); the model buttons are 150 wide at x 213, 361, 511 and 657 and 73 apart in y from 242.
+# Leave time after each step; the snaps take 2 s each.
+25 load
+42 state ifc 0x8a6c9c 8
+42 state work 0x8a6f64 0x74
+42 state alloc 0x8a8e94 0x3c
+42 state rects 0x8c5240 0x320
+42 state lock0 0x8a79f0 4
+42 state lock1 0x8a841c 4
+42 state lock2 0x8a8e48 4
+42 state energy_a 0x749ae4 4
+42 state energy_b 0x749c0c 4
+42 state parse 0x9bbfec 8
+42 state bufword 0x7aec74 4
+42 state curiface 0x7ae7f8 4
+44 click 362 734
+46 open give_techs_all
+50 open social_open
+56 click 475 736
+60 snap open
+62 move 361 242
+65 snap hover-politics-1
+67 move 511 242
+70 snap hover-politics-2
+72 move 657 242
+75 snap hover-politics-3
+77 move 361 315
+80 snap hover-economics-1
+82 move 511 388
+85 snap hover-values-2
+87 move 657 461
+90 snap hover-future-3
+92 move 361 461
+95 snap hover-future-1
+97 click 361 242
+101 snap click-politics-1
+103 click 511 315
+107 snap click-economics-2
+109 click 657 388
+113 snap click-values-3
+115 click 361 461
+119 snap click-future-1
+121 click 810 242
+125 snap maximize-economy
+127 click 810 352
+131 snap maximize-growth
+133 click 810 440
+137 snap maximize-research
+139 click 810 286
+143 snap maximize-support
+145 click 511 527
+149 snap reset
+151 click 361 242
+155 snap model-after-maximize
+157 click 676 527
+161 snap closed
+163 close

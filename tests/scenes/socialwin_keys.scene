@@ -1,0 +1,36 @@
+# The Social Engineering window (see socialwin.c) and its keys. The allocation is changed with the - of the economy bar; Escape then
+# resets (the allocation put back as the window opened with it, the faction's pending effects worked out again) and ends the window as
+# Cancel does. Opened again (no note this time), the allocation is changed twice and Return ends the window with them kept; the key is
+# not taken by the window alone: the main screen goes on to open the base (the leader's portrait in its screen turns slowly, which a
+# mask leaves out). A key the window doesn't know ends nothing (a letter: the window stays up).
+# Leave time after each step; the snaps take 2 s each.
+mask 270 625 305 655
+25 load
+42 state ifc 0x8a6c9c 8
+42 state work 0x8a6f64 0x74
+42 state alloc 0x8a8e94 0x3c
+42 state rects 0x8c5240 0x320
+42 state lock0 0x8a79f0 4
+42 state lock1 0x8a841c 4
+42 state lock2 0x8a8e48 4
+42 state energy_a 0x749ae4 4
+42 state energy_b 0x749c0c 4
+42 state parse 0x9bbfec 8
+42 state bufword 0x7aec74 4
+42 state curiface 0x7ae7f8 4
+44 click 362 734
+50 open social_open
+56 click 475 736
+60 click 24 719
+64 snap changed
+66 key x
+69 snap letter
+71 key Escape
+76 snap escaped
+78 open social_open
+84 snap reopened
+86 click 24 719
+88 click 24 719
+90 key Return
+96 snap returned
+98 close

@@ -1,0 +1,54 @@
+# The Social Engineering window (see socialwin.c) and what a change of models costs. Every model can be chosen (give_techs_all). Police
+# State is chosen: the energy box shows the upheaval's cost (in red) and OK asks the faction to pay it: "Never mind" (the default)
+# leaves the window up, "Pay 8 energy credits" pays it and ends the window. Opened again, the faction's models are Police State and
+# going back to the first model costs less than what was paid: the energy box shows what comes back (in green), and OK takes it back.
+# With almost no energy credits (poked) a change that costs more than the faction has is refused by a pop-up that leaves the window
+# up; with the faction's rules flag for the aliens set (poked) the question is the aliens' own. A place in the window is
+# (111 + x, 203 + y).
+# Leave time after each step; the snaps take 2 s each.
+25 load
+42 state ifc 0x8a6c9c 8
+42 state work 0x8a6f64 0x74
+42 state alloc 0x8a8e94 0x3c
+42 state rects 0x8c5240 0x320
+42 state energy_a 0x749ae4 4
+42 state energy_b 0x749c0c 4
+42 state parse 0x9bbfec 8
+42 state bufword 0x7aec74 4
+42 state curiface 0x7ae7f8 4
+44 click 362 734
+46 open give_techs_all
+50 open social_open
+56 click 475 736
+60 click 361 242
+64 snap cost
+66 click 346 527
+71 snap confirm
+73 click 510 489
+77 snap never-mind
+79 click 346 527
+83 click 510 458
+85 click 510 489
+90 snap paid
+92 open social_open
+98 click 213 242
+102 snap refund
+104 click 346 527
+109 snap refunded
+111 poke 0x96eccc 3
+112 open social_open
+118 click 511 242
+122 snap cost-again
+124 click 346 527
+129 snap too-much
+131 key Return
+135 snap too-much-closed
+137 poke 0x96eccc 30
+138 poke 0x9474f4 0x80 or
+140 click 346 527
+145 snap alien
+147 key Return
+151 snap alien-never-mind
+153 click 676 527
+157 snap cancelled
+159 close

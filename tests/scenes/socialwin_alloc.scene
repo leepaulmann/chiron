@@ -1,0 +1,77 @@
+# The Social Engineering window (see socialwin.c): the three allocation bars along the foot of the main screen (economy, psych and
+# labs, in tenths of the energy), each with a - and a + button at its ends and a lock at its foot. The faction starts at economy
+# 50%, psych 0% and labs 50%. A - on economy gives a tenth to the next bar round (psych); the loss a skewed allocation brings
+# shows in the energy box (labs over economy first, then economy over labs, then with labs at none); a lock keeps a bar from giving or
+# taking. The bars' buttons are at y 719 (the locks at y 745): economy - 24 and + 244, psych - 271 and + 496, labs - 522 and + 748;
+# the locks at x 22, 270 and 522.
+# Leave time after each step; the snaps take 2 s each.
+25 load
+42 state ifc 0x8a6c9c 8
+42 state work 0x8a6f64 0x74
+42 state alloc 0x8a8e94 0x3c
+42 state rects 0x8c5240 0x320
+42 state lock0 0x8a79f0 4
+42 state lock1 0x8a841c 4
+42 state lock2 0x8a8e48 4
+42 state energy_a 0x749ae4 4
+42 state energy_b 0x749c0c 4
+42 state parse 0x9bbfec 8
+42 state bufword 0x7aec74 4
+42 state curiface 0x7ae7f8 4
+44 click 362 734
+48 open social_open
+56 click 475 736
+60 snap open
+62 click 24 719
+65 snap econ-minus
+67 click 24 719
+69 click 24 719
+72 snap econ-minus-3
+74 click 748 719
+77 snap labs-plus
+79 click 24 719
+81 click 24 719
+83 click 24 719
+86 snap econ-zero
+88 click 522 719
+90 click 522 719
+92 click 522 719
+95 snap labs-minus
+97 click 522 719
+99 click 522 719
+101 click 522 719
+104 snap labs-low
+106 click 522 719
+108 click 522 719
+110 click 522 719
+113 snap labs-zero
+115 click 496 719
+117 click 496 719
+119 click 496 719
+122 snap psych-plus
+124 click 22 745
+127 snap lock-economy
+129 click 270 745
+132 snap lock-psych
+134 click 244 719
+136 click 244 719
+139 snap econ-plus-locked
+141 click 22 745
+143 click 270 745
+145 click 244 719
+148 snap econ-plus
+150 click 271 719
+153 snap psych-minus
+155 click 496 719
+157 click 496 719
+159 click 496 719
+161 click 496 719
+163 click 496 719
+165 click 496 719
+168 snap psych-high
+170 click 748 719
+172 click 748 719
+175 snap labs-plus-capped
+177 click 346 527
+181 snap ok
+183 close

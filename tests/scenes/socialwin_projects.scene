@@ -1,0 +1,42 @@
+# The Social Engineering window (see socialwin.c) for a faction that holds the Network Backbone and the Cloning Vats (the words at
+# 0x9a6568 and 0x9a6574 name base 0, which is made the faction's by its owner byte): the penalties of Power (Values), Cybernetic and
+# Thought Control (Future Society) that those cancel are not drawn on the model's button and not counted in the box that tells what it
+# does. Every model can be chosen (give_techs_all). The mouse is over Power, Thought Control and Cybernetic, and over Power with the
+# projects gone again for comparison; clicking Power and Cybernetic shows the effects of the models chosen.
+# A place in the window is (111 + x, 203 + y); the model buttons are at x 213, 361, 511 and 657 and y 242, 315, 388 and 461.
+# Leave time after each step; the snaps take 2 s each.
+25 load
+42 state ifc 0x8a6c9c 8
+42 state work 0x8a6f64 0x74
+42 state alloc 0x8a8e94 0x3c
+42 state rects 0x8c5240 0x320
+42 state energy_a 0x749ae4 4
+42 state energy_b 0x749c0c 4
+42 state parse 0x9bbfec 8
+42 state bufword 0x7aec74 4
+42 state curiface 0x7ae7f8 4
+44 click 362 734
+46 open give_techs_all
+47 poke 0x9a6568 0
+47 poke 0x9a6574 0
+47 poke 0x97d044 1
+50 open social_open
+56 click 475 736
+60 snap open
+62 move 361 388
+65 snap hover-power
+67 move 657 461
+70 snap hover-thought-control
+72 move 361 461
+75 snap hover-cybernetic
+77 click 361 388
+81 snap click-power
+83 click 361 461
+87 snap click-cybernetic
+89 click 657 461
+93 snap click-thought-control
+95 click 511 527
+99 snap reset
+101 click 676 527
+104 snap closed
+106 close

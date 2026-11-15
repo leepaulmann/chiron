@@ -580,6 +580,13 @@ int (*game_terrain_poly)(void *buf, int a, int b, int faction, int c, int d, int
 int (*game_base_draw)(void *buf, int base, int x, int y, int a, int b);
 void(__attribute__((thiscall)) * game_tutwin_tour)(void *win);
 void(__attribute__((thiscall)) * game_tutwin_draw_arrow)(void *win);
+void(__attribute__((thiscall)) * game_check_button_init)(void *check, int x, int y, void *parent, int flag);
+void(__attribute__((thiscall)) * game_main_interface_restore_back)(void *iface, int flag);
+void (*game_synch_alloc)(int faction);
+void (*game_net_energy)(int faction, int amount, int a, int b, int c);
+void(__attribute__((thiscall)) * game_tutwin_reset)(void *tut);
+int(__attribute__((thiscall)) * game_tutwin_soc_rect)(void *tut, const void *rect, int *x, int *y);
+int(__attribute__((thiscall)) * game_tutwin_note)(void *tut, void *win, const char *label, int x, int y, void *sprite, int mode, int x2, int y2);
 void(__attribute__((thiscall)) * game_checkbox_item)(void *box, const char *text, int id, int flag);
 void(__attribute__((thiscall)) * game_scroll_init_bar)(void *scroll, int x, int y, int w, void *parent, int id);
 void(__attribute__((thiscall)) * game_sound_master)(void *sound, int volume);
@@ -704,7 +711,6 @@ void (*game_tech_analysis)(int player, int rival), (*game_say_tech)(char *out, i
 int(__attribute__((thiscall)) * game_net_talk)(void *daemon, int player, int faction);
 void(__attribute__((thiscall)) * game_window_closing)(void *object), (__attribute__((thiscall)) * game_overlay_open)(void *object),
     (__attribute__((thiscall)) * game_overlay_close)(void *object);
-void(__attribute__((thiscall)) * game_iface_frame)(void *iface, int clip);
 int (*game_diplo_lock)(int unk);
 void (*game_diplo_unlock)(void);
 void (*game_wait_loop)(void);
@@ -1456,7 +1462,6 @@ void game_bind(struct pe_image *exe) {
     game_window_closing = (void *)code_at(exe, 0x403680);
     game_overlay_open = (void *)code_at(exe, 0x479c00);
     game_overlay_close = (void *)code_at(exe, 0x479970);
-    game_iface_frame = (void *)code_at(exe, 0x45c290);
     game_diplo_lock = (void *)code_at(exe, 0x539820);
     game_diplo_unlock = (void *)code_at(exe, 0x5398c0);
     game_wait_loop = (void *)code_at(exe, 0x51f200);
@@ -1887,6 +1892,13 @@ void game_bind(struct pe_image *exe) {
     game_terrain_poly = (void *)code_at(exe, 0x4632d0);
     game_base_draw = (void *)code_at(exe, 0x55af20);
     game_tutwin_tour = (void *)code_at(exe, 0x4bc6e0);
+    game_check_button_init = (void *)code_at(exe, 0x6337e0);
+    game_main_interface_restore_back = (void *)code_at(exe, 0x45c290);
+    game_synch_alloc = (void *)code_at(exe, 0x593390);
+    game_net_energy = (void *)code_at(exe, 0x539460);
+    game_tutwin_soc_rect = (void *)code_at(exe, 0x4bc640);
+    game_tutwin_reset = (void *)code_at(exe, 0x4bdde0);
+    game_tutwin_note = (void *)code_at(exe, 0x4bdfe0);
     game_checkbox_item = (void *)code_at(exe, 0x60e980);
     game_scroll_init_bar = (void *)code_at(exe, 0x6058d0);
     game_sound_master = (void *)code_at(exe, 0x4c5150);

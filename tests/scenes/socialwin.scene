@@ -1,0 +1,61 @@
+# The Social Engineering window (SocialWin, see socialwin.c) on the first turn, opened as the F key opens it (social_select, here by
+# an open step: the key is the host's own). The faction has only the first model of each category, so the other twelve model places
+# are empty frames. The state before the window is first opened (the object as the static initializer leaves it), the note of the
+# screen's first visit (with its Tour and Continue buttons), the window as it opens, the mouse over a model button (the box tells what
+# it does), over an empty place, over the faction's own box, over each of the effects' buttons (the overview lights the line) and off
+# them all; the right button on an empty place of a category panel, on the faction's box and outside them, on the main screen's overview and on an allocation bar (help bubbles, which take a few seconds to come up); the mouse over a model and then the window's own leave handler called by hand (the host sends none); Cancel. The window sits at the
+# lower middle of the screen: a place in it is (111 + x, 203 + y) with x and y the object's own.
+# The state regions are the window's working numbers (the faction, the models chosen, the effects, the energy numbers), the hover
+# markers, the allocation, the rectangles, the three locks, and the game's words the energy and the text variables are kept in.
+# Leave time after each step; the snaps take 2 s each.
+25 load
+42 state ifc 0x8a6c9c 8
+42 state work 0x8a6f64 0x74
+42 state alloc 0x8a8e94 0x3c
+42 state rects 0x8c5240 0x320
+42 state lock0 0x8a79f0 4
+42 state lock1 0x8a841c 4
+42 state lock2 0x8a8e48 4
+42 state energy_a 0x749ae4 4
+42 state energy_b 0x749c0c 4
+42 state parse 0x9bbfec 8
+42 state bufword 0x7aec74 4
+42 state curiface 0x7ae7f8 4
+44 click 362 734
+48 snap pre
+52 open social_open
+58 snap note
+60 click 475 736
+64 snap open
+66 move 213 242
+70 snap hover-model
+72 move 361 242
+75 snap hover-empty
+77 move 808 480
+80 snap hover-basal
+82 move 810 242
+85 snap hover-economy
+87 move 810 308
+90 snap hover-morale
+92 move 810 440
+95 snap hover-research
+97 move 700 130
+100 snap hover-off
+102 rclick 361 242
+107 snap right-panel
+109 rclick 808 480
+114 snap right-basal
+116 rclick 213 100
+121 snap right-outside
+123 rclick 900 680
+128 snap right-overview
+130 rclick 130 740
+135 snap right-bar
+137 move 600 640
+140 snap bubble-off
+142 move 213 242
+146 open social_leave
+148 snap leave
+150 click 676 527
+154 snap closed
+156 close

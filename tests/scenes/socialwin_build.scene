@@ -1,0 +1,59 @@
+# The Social Engineering window (see socialwin.c) made without being shown (init with a negative faction: as the tutorial's tour makes
+# it), then shown (the sub interface's mode is set and the main screen's panels fill), hidden and closed: the way the tour drives it. With
+# the window up, the functions that answer no event (the sub interface's handlers) and the two that do nothing are called by hand, the
+# window's two bubble helpers draw a bubble each (a bubble takes a few seconds to come up, so the snaps wait), and the penalty check is
+# asked about the models a project cancels. Every model can be chosen (give_techs_all) and the faction holds the Cloning Vats (as
+# socialwin_projects.scene makes it) so that the check says yes.
+# Leave time after each step; the snaps take 2 s each.
+25 load
+42 state ifc 0x8a6c9c 8
+42 state work 0x8a6f64 0x74
+42 state alloc 0x8a8e94 0x3c
+42 state rects 0x8c5240 0x320
+42 state lock0 0x8a79f0 4
+42 state lock1 0x8a841c 4
+42 state lock2 0x8a8e48 4
+42 state energy_a 0x749ae4 4
+42 state energy_b 0x749c0c 4
+42 state parse 0x9bbfec 8
+42 state bufword 0x7aec74 4
+42 state curiface 0x7ae7f8 4
+44 click 362 734
+46 open give_techs_all
+47 poke 0x9a6568 0
+47 poke 0x9a6574 0
+47 poke 0x97d044 1
+50 open social_build
+55 snap built
+57 open social_show
+63 snap shown
+65 open social_unk2
+66 open social_unk3
+67 open social_iface_ldown
+68 open social_iface_rdown
+69 open social_iface_selected
+70 open social_iface_ldouble
+71 open social_iface_rdouble
+72 open social_iface_toggled
+73 open social_iface_group
+74 open social_iface_left
+75 open social_left_click
+76 open social_immune_a
+77 open social_immune_b
+78 open social_immune_c
+80 open social_bubble_win
+87 snap bubble-win
+90 open social_bubble_main
+97 snap bubble-main
+99 open social_iface_move
+100 open social_iface_leave
+102 snap bubble-off
+104 open social_status_off
+108 snap status-off
+110 open social_status_on
+115 snap status-on
+117 open social_hide
+121 snap hidden
+123 open social_close
+127 snap closed
+129 close

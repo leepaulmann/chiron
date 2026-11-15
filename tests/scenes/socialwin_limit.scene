@@ -1,0 +1,37 @@
+# The Social Engineering window (see socialwin.c) and the limit of one bar of the energy allocation (10 tenths). From economy 50%, psych
+# 0% and labs 50%, nine clicks on the + of psych take it to 90% (labs first, then economy, give it up: the first five from labs); the
+# - of economy then takes economy's last tenth, which the next bar round (psych) takes up to its limit, 100%; the allocation then
+# is economy 0%, psych 100% and labs 0%, and the + of psych can take no more: a click on it leaves the bars as they are. A - on labs, at
+# none already, gives nothing and takes from the next (economy) that has none: nothing changes.
+# The bars' buttons are at y 719: economy - 24 and + 244, psych - 271 and + 496, labs - 522 and + 748.
+# Leave time after each step; the snaps take 2 s each.
+25 load
+42 state ifc 0x8a6c9c 8
+42 state work 0x8a6f64 0x74
+42 state alloc 0x8a8e94 0x3c
+42 state rects 0x8c5240 0x320
+42 state energy_a 0x749ae4 4
+42 state energy_b 0x749c0c 4
+44 click 362 734
+50 open social_open
+56 click 475 736
+60 snap open
+62 click 496 719
+63 click 496 719
+64 click 496 719
+65 click 496 719
+66 click 496 719
+67 click 496 719
+68 click 496 719
+69 click 496 719
+70 click 496 719
+72 snap psych-90
+74 click 24 719
+77 snap psych-limit
+79 click 496 719
+82 snap psych-full
+84 click 522 719
+87 snap labs-minus-none
+89 click 676 527
+93 snap closed
+95 close

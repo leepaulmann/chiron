@@ -1,0 +1,36 @@
+# The Social Engineering window (see socialwin.c) opened for faction 2, another faction's models, effects, energy numbers and its own
+# values (the box under the effects' buttons: the faction's own effects): the window as it opens, the mouse over the faction's own
+# box (what its base values do), a model button, and an effect's button; a click on the effect (every category takes the model
+# that brings the most), on Reset, and Return (OK: the same models, no upheaval to pay).
+# A place in the window is (111 + x, 203 + y).
+# Leave time after each step; the snaps take 2 s each. (Return is also taken by the main screen, which opens the base; the leader's
+# portrait there turns slowly, which the mask leaves out.)
+mask 270 625 305 655
+25 load
+42 state ifc 0x8a6c9c 8
+42 state work 0x8a6f64 0x74
+42 state alloc 0x8a8e94 0x3c
+42 state rects 0x8c5240 0x320
+42 state energy_a 0x749ae4 4
+42 state energy_b 0x749c0c 4
+42 state parse 0x9bbfec 8
+42 state bufword 0x7aec74 4
+42 state curiface 0x7ae7f8 4
+44 click 362 734
+48 open social_open_2
+54 snap note
+56 click 475 736
+60 snap open
+62 move 808 480
+65 snap hover-basal
+67 move 213 242
+70 snap hover-model
+72 move 810 264
+75 snap hover-effic
+77 click 810 264
+81 snap maximize
+83 click 511 527
+87 snap reset
+89 key Return
+93 snap closed
+95 close

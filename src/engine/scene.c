@@ -160,6 +160,15 @@ static int give_techs(int faction, int count, int unused, int unused2) {
     for (int t = 0; t < count && t < TECH_COUNT; t++) game_tech_achieved[t] |= (uint8_t)(1u << (faction & 7));
     return count;
 }
+// A scene's own step: the Social Engineering window's two bubble helpers (src/ui/socialwin.c), which take a text and a point of the
+// screen: `which` 0 the window's own (bubble_me_elmo2), 1 the main screen's. The text is one of the game's own (the tutorial note's
+// label).
+static int social_bubble(int which, int x, int y, int unused) {
+    (void)unused;
+    typedef void(__attribute__((thiscall)) * bubble_call)(void *, const char *, int, int);
+    ((bubble_call)game_at(which ? 0x4b1b70 : 0x4b1b30))(game_at(0x8a6270), game_at(0x6874bc), x, y);
+    return which;
+}
 // A scene's own step: the Monuments window's records (see monuwin.c). Faction 1's table (0x94ca08, 0x4f4 bytes a faction) gets
 // the kinds of `used_mask` (bit k for kind k, 0 to 20) in use, in an order of dates that is not the order of the kinds; the kinds
 // of `first_mask` are the first to have it (else the faction that had it before is 2 to 4, whose own record of that kind has a
@@ -381,6 +390,34 @@ static const struct open_entry open_table[] = {
     {"prefs_redraw_volume", 0x491860, {0}, 0x8578d8},  // and another (the sliders' frame, when the audio page is shown)
     {"prefs_key_up", 0x48fcd0, {0, 0x26}, 0x8578d8},  // PrefWin_on_key_click(0, VK_UP): the Preferences window's Up key (an arrow key of the host goes to the focused box, so the call is made here)
     {"prefs_key_down", 0x48fcd0, {0, 0x28}, 0x8578d8},  // and its Down key
+    {"social_open", 0x5b5620, {1}, 0, 0, 0, 1},  // social_select(1): the Social Engineering window (src/ui/socialwin.c), modal
+    {"social_open_2", 0x5b5620, {2}, 0, 0, 0, 1},  // for faction 2: another faction's models and effects
+    {"give_techs_all", 0, {1, 99}, .host = give_techs},  // every tech for faction 1: every social model can be chosen
+    {"social_build", 0x4b2740, {-1}, 0x8a6270},  // SocialWin_init(-1): made, not shown (as the tutorial's tour makes it)
+    {"social_show", 0x4b2690, {0}, 0x8a6270},  // show: the sub interface's mode set while the window is not up
+    {"social_hide", 0x4b26b0, {0}, 0x8a6270},
+    {"social_close", 0x4b26d0, {0}, 0x8a6270},
+    {"social_unk2", 0x4aef00, {0}, 0x8a6270},  // two functions that do nothing
+    {"social_unk3", 0x4b1790, {0}, 0x8a6270},
+    {"social_status_on", 0x4b2120, {1}, 0x8a6c84},  // the sub interface (0xa14 in the object): shown, and hidden
+    {"social_status_off", 0x4b2120, {0}, 0x8a6c84},
+    {"social_iface_ldown", 0x4b2400, {0, 0}, 0x8a6c84},  // its handlers that do nothing
+    {"social_iface_rdown", 0x4b2410, {0, 0}, 0x8a6c84},
+    {"social_iface_selected", 0x4b2440, {0, 0}, 0x8a6c84},
+    {"social_iface_ldouble", 0x4b2450, {0, 0}, 0x8a6c84},
+    {"social_iface_rdouble", 0x4b2460, {0, 0}, 0x8a6c84},
+    {"social_iface_toggled", 0x4b2670, {0, 0}, 0x8a6c84},
+    {"social_iface_group", 0x4b2680, {0, 0, 0}, 0x8a6c84},
+    {"social_iface_left", 0x4b2210, {0, 0}, 0x8a6c84},
+    {"social_iface_move", 0x4b2420, {0, 0}, 0x8a6c84},
+    {"social_iface_leave", 0x4b2430, {0, 0}, 0x8a6c84},
+    {"social_left_click", 0x4b1b20, {0, 0}, 0x8a6270},
+    {"social_leave", 0x4b1fc0, {0, 0}, 0x8a6270},  // the mouse left the window (the host sends no such event when it goes out of the window)
+    {"social_bubble_win", 0, {0, 300, 300, 0}, .host = social_bubble},  // the bubble helpers: a bubble at a point
+    {"social_bubble_main", 0, {1, 400, 400, 0}, .host = social_bubble},
+    {"social_immune_a", 0x4b0fa0, {3, 1, 0}, 0x8a6270},  // SocialWin_immune(category, model, effect)
+    {"social_immune_b", 0x4b0fa0, {2, 1, 0}, 0x8a6270},
+    {"social_immune_c", 0x4b0fa0, {3, 3, 0}, 0x8a6270},
     {"give_techs", 0, {1, 40}, .host = give_techs},  // the techs 0 to 39 for faction 1: more than a screenful to build
     {"give_techs_2", 0, {2, 20}, .host = give_techs},  // the techs 0 to 19 for faction 2 (an AI that then has techs to offer the player), and for faction 3
     {"give_techs_3", 0, {3, 20}, .host = give_techs},

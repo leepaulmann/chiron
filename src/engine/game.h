@@ -1572,7 +1572,6 @@ extern void (*game_tech_analysis)(int player, int rival), (*game_say_tech)(char 
 extern int(__attribute__((thiscall)) * game_net_talk)(void *daemon, int player, int faction);
 extern void(__attribute__((thiscall)) * game_window_closing)(void *object), (__attribute__((thiscall)) * game_overlay_open)(void *object),
     (__attribute__((thiscall)) * game_overlay_close)(void *object);
-extern void(__attribute__((thiscall)) * game_iface_frame)(void *iface, int clip);
 // Network games: the diplomacy lock, the wait for other players, a
 // faction's leader state sent, and the message bar cleared.
 extern int (*game_diplo_lock)(int unk);
@@ -3192,3 +3191,14 @@ extern void(__attribute__((thiscall)) * game_window_opening)(void *object);
 extern void(__attribute__((thiscall)) * game_numdlg_ctor)(void *dlg);
 extern float(__attribute__((thiscall)) * game_numdlg_run)(void *dlg, void *palette, float value, int flag);
 extern void(__attribute__((thiscall)) * game_numdlg_dtor)(void *dlg);
+// What the Social Engineering window (src/ui/socialwin.c) calls that Chiron doesn't reimplement yet: CheckButton's init (left, top,
+// parent, a flag), the main interface's restore of its back picture, the two network messages a change of social models sends (the
+// allocation and the models, cdecl, one faction), the energy a faction gains or loses (sent to the other players, cdecl), and the
+// tutorial's calls: taking a note down, the rectangle a note about a picture goes at, and the note itself.
+extern void(__attribute__((thiscall)) * game_check_button_init)(void *check, int x, int y, void *parent, int flag);
+extern void(__attribute__((thiscall)) * game_main_interface_restore_back)(void *iface, int flag);
+extern void (*game_synch_alloc)(int faction);
+extern void (*game_net_energy)(int faction, int amount, int a, int b, int c);
+extern void(__attribute__((thiscall)) * game_tutwin_reset)(void *tut);
+extern int(__attribute__((thiscall)) * game_tutwin_soc_rect)(void *tut, const void *rect, int *x, int *y);
+extern int(__attribute__((thiscall)) * game_tutwin_note)(void *tut, void *win, const char *label, int x, int y, void *sprite, int mode, int x2, int y2);
