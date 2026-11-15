@@ -254,6 +254,28 @@ static int tut_set_win(int on, int unused, int unused2, int unused3) {
     ((set_call)game_at(0x4bddd0))(game_tut_win, on ? (uint8_t *)map + ((int32_t *)*(void **)map)[1] : NULL);  // (its Win part)
     return on;
 }
+// A scene's own step: the votes the factions have in the Council (src/ui/councwin.c). The pop size of the first base of faction n
+// (1 to 7) is the n-th digit of `digits` counted from the left, so that who may stand for governor (fewer than two others have more
+// votes) and how many votes each leader shows can be chosen. (Both modes do the same; the bases are part of the state compared.)
+static int give_votes(int digits, int unused, int unused2, int unused3) {
+    (void)unused, (void)unused2, (void)unused3;
+    int pop[8] = {0};
+    for (int f = 7; f >= 1; f--) pop[f] = digits % 10, digits /= 10;
+    for (int f = 1; f <= 7; f++)
+        for (int b = 0; b < *game_base_count; b++)
+            if (game_bases[b].faction == f) {
+                game_bases[b].pop_size = (int8_t)pop[f];
+                break;
+            }
+    return 0;
+}
+// A scene's own step: the tutorial's notes switched off (bit 0x20 of the preferences), so that none comes up over a window the scene
+// has opened. (Both modes do the same; the word is part of the globals compared.)
+static int tutorial_off(int unused, int unused2, int unused3, int unused4) {
+    (void)unused, (void)unused2, (void)unused3, (void)unused4;
+    *(uint32_t *)game_at(0x9a6490) &= ~0x20u;
+    return 0;
+}
 static const struct open_entry open_table[] = {
     {"status_redraw", 0x4b9ea0, {0}, 0x8c5568},  // StatusWin_redraw: the panel drawn again
     {"status_on_redraw", 0x4b8890, {0}, 0x8c5568},
@@ -278,6 +300,72 @@ static const struct open_entry open_table[] = {
     {"status_active_b0r", 0x4b4cf0, {-1, 0, 1}, 0x8c5568},
     {"status_active_none", 0x4b4cf0, {-1, -1, 0}, 0x8c5568},
     {"status_dblclick", 0x4b8990, {190, 640}, 0x8c5568},
+    {"tut_off", 0, {0}, .host = tutorial_off},
+    // The Council's window (src/ui/councwin.c), opened the way the game opens it, with council(faction, proposal, candidate) for the
+    // player (faction 1), and its methods called by hand (on the window at 0x6fec80, or on its interface part, 0xa14 into it).
+    {"council_gov", 0x428350, {1, 0, 1, 0}, .discard = 1},  // the election of a governor, the player standing
+    {"council_gov_2", 0x428350, {1, 0, 2, 0}, .discard = 1},
+    {"council_p1", 0x428350, {1, 1, 2, 0}, .discard = 1},   // the Supreme Leader (the candidate named)
+    {"council_p2", 0x428350, {1, 2, 0, 0}, .discard = 1},   // the proposals with a yea and a nay
+    {"council_p3", 0x428350, {1, 3, 0, 0}, .discard = 1},
+    {"council_p5", 0x428350, {1, 5, 0, 0}, .discard = 1},
+    {"council_p8", 0x428350, {1, 8, 0, 0}, .discard = 1},
+    {"votes_all", 0, {1111111, 0, 0, 0}, .host = give_votes},     // everyone equal: all seven may stand
+    {"votes_two", 0, {7654321, 0, 0, 0}, .host = give_votes},     // distinct: the two with the most may stand
+    {"votes_three", 0, {7665432, 0, 0, 0}, .host = give_votes},   // a tie for second: three may stand
+    {"votes_me_low", 0, {1765432, 0, 0, 0}, .host = give_votes},  // the player (faction 1) is not among the ones that may stand
+    {"votes_four", 0, {7777321, 0, 0, 0}, .host = give_votes},    // four of equal strength
+    {"votes_pivot", 0, {4552100, 0, 0, 0}, .host = give_votes},   // two others have more than the player: it may not stand, but its votes could decide between them
+    {"cw_set_vote", 0x424720, {1, -1, 0, 0}, 0x6fec80},     // set_vote(1, -1): the player votes yea
+    {"cw_set_vote_n", 0x424720, {1, -2, 0, 0}, 0x6fec80},
+    {"cw_set_vote_a", 0x424720, {1, -3, 0, 0}, 0x6fec80},
+    {"cw_set_vote_c", 0x424720, {1, 2, 0, 0}, 0x6fec80},    // the player votes for faction 2
+    {"cw_set_vote_ai", 0x424720, {2, 3, 0, 0}, 0x6fec80},   // a vote by an AI faction
+    {"cw_resolve_check", 0x424410, {0, 0, 0, 0}, 0x6fec80},  // make_resolution(0)
+    {"cw_resolve", 0x424410, {1, 0, 0, 0}, 0x6fec80},        // make_resolution(1)
+    {"cw_redraw", 0x426aa0, {0}, 0x6fec80},
+    {"cw_draw_info", 0x426470, {0}, 0x6fec80},
+    {"cw_draw_all", 0x425d90, {0}, 0x6fec80},
+    {"cw_draw_1", 0x425db0, {1, 0, 0, 0}, 0x6fec80},
+    {"cw_draw_2", 0x425db0, {2, 0, 0, 0}, 0x6fec80},
+    {"cw_draw_3", 0x425db0, {3, 0, 0, 0}, 0x6fec80},
+    {"cw_draw_0", 0x425db0, {0, 0, 0, 0}, 0x6fec80},
+    {"cw_draw_7", 0x425db0, {7, 0, 0, 0}, 0x6fec80},
+    {"cw_click_1", 0x424870, {1, 0, 0, 0}, 0x6fec80},  // the window's own button handler, called with the ids of the buttons
+    {"cw_click_2", 0x424870, {2, 0, 0, 0}, 0x6fec80},
+    {"cw_click_3", 0x424870, {3, 0, 0, 0}, 0x6fec80},
+    {"cw_click_4", 0x424870, {4, 0, 0, 0}, 0x6fec80},
+    {"cw_click_5", 0x424870, {5, 0, 0, 0}, 0x6fec80},
+    {"cw_click_m2", 0x424870, {-2, 0, 0, 0}, 0x6fec80},
+    {"cw_click_m1", 0x424870, {-1, 0, 0, 0}, 0x6fec80},
+    {"cw_key_return", 0x425ba0, {0, 0xd, 0, 0}, 0x6fec80},
+    {"cw_key_escape", 0x425ba0, {0, 0x1b, 0, 0}, 0x6fec80},
+    {"cw_key_x", 0x425ba0, {0, 0x78, 0, 0}, 0x6fec80},
+    {"cw_leave", 0x426ec0, {0, 0, 0, 0}, 0x6fec80},
+    {"cw_group", 0x426eb0, {0, 0, 0, 0}, 0x6fec80},
+    {"cw_passover", 0x426f80, {0, 0, 0, 0}, 0x6fec80},
+    {"cw_text_draw", 0x426f90, {0, 0, 0, 0}, 0x6fec80},
+    {"cw_arrived_1", 0x4271c0, {1, 0, 0, 0}, 0x6fec80},
+    {"cw_arrived_2", 0x4271c0, {2, 0, 0, 0}, 0x6fec80},
+    {"cw_is_visible", 0x427150, {0, 0, 0, 0}, 0x6fec80},
+    {"cw_show", 0x427130, {0, 0, 0, 0}, 0x6fec80},
+    {"cw_status_off", 0x426fa0, {0, 0, 0, 0}, 0x6ff694},  // the interface part's calls (the part is 0xa14 into the window)
+    {"cw_status_on", 0x426fa0, {1, 0, 0, 0}, 0x6ff694},
+    {"cw_iface_1", 0x4270f0, {1, 0, 0, 0}, 0x6ff694},  // the interface's forwarding of a button click, and its calls that do nothing
+    {"cw_iface_2", 0x4270f0, {2, 0, 0, 0}, 0x6ff694},
+    {"cw_iface_5", 0x4270f0, {5, 0, 0, 0}, 0x6ff694},
+    {"cw_iface_s0", 0x427060, {0, 0, 0, 0}, 0x6ff694},
+    {"cw_iface_s1", 0x427070, {0, 0, 0, 0}, 0x6ff694},
+    {"cw_iface_s2", 0x427080, {0, 0, 0, 0}, 0x6ff694},
+    {"cw_iface_s3", 0x427090, {0, 0, 0, 0}, 0x6ff694},
+    {"cw_iface_s4", 0x4270a0, {0, 0, 0, 0}, 0x6ff694},
+    {"cw_iface_s5", 0x4270b0, {0, 0, 0, 0}, 0x6ff694},
+    {"cw_iface_s6", 0x4270c0, {0, 0, 0, 0}, 0x6ff694},
+    {"cw_iface_s7", 0x4270d0, {0, 0, 0, 0}, 0x6ff694},
+    {"cw_iface_s8", 0x4270e0, {0, 0, 0, 0}, 0x6ff694},
+    {"cw_iface_s9", 0x427110, {0, 0, 0, 0}, 0x6ff694},
+    {"cw_iface_s10", 0x427120, {0, 0, 0, 0}, 0x6ff694},
+    {"cw_close", 0x427160, {0}, 0x6fec80},
     {"hall_of_fame", 0x44ae50, {0}},  // void hall_of_fame(int final): 0 only shows the list
     {"info_tick", 0x459150, {10, 0, 0, 0}, 0x7ad2a0, 0, 0x7ad34c},  // InfoWin_timer_proc(10): one tick of the info panel's clock, made by hand (a scene stops the real clock with the panel's `suspended` word, which is lifted for the call)
     {"info_tick20", 0x459150, {10, 0, 0, 0}, 0x7ad2a0, 19, 0x7ad34c},  // twenty of them
@@ -294,6 +382,8 @@ static const struct open_entry open_table[] = {
     {"prefs_key_up", 0x48fcd0, {0, 0x26}, 0x8578d8},  // PrefWin_on_key_click(0, VK_UP): the Preferences window's Up key (an arrow key of the host goes to the focused box, so the call is made here)
     {"prefs_key_down", 0x48fcd0, {0, 0x28}, 0x8578d8},  // and its Down key
     {"give_techs", 0, {1, 40}, .host = give_techs},  // the techs 0 to 39 for faction 1: more than a screenful to build
+    {"give_techs_2", 0, {2, 20}, .host = give_techs},  // the techs 0 to 19 for faction 2 (an AI that then has techs to offer the player), and for faction 3
+    {"give_techs_3", 0, {3, 20}, .host = give_techs},
     {"hall_of_fame_new", 0x44ae50, {1}},  // hall_of_fame(1): as at a game's end, the loaded game is added to the list, with a picture of the screen
     {"monument_list", 0x476a50, {0}, .discard = 1},  // monument(0): the Monuments window on its list (the records are given first)
     {"monument_zoom", 0x476a50, {1}, .discard = 1},  // monument(1): the same, at the monument last shown, zoomed

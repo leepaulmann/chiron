@@ -1,0 +1,75 @@
+# The Planetary Council's window (CouncWin, see src/ui/councwin.c): the ways a vote ends (make_resolution, called by hand with the votes poked
+# into the window's own table: 0x6ff6d4 is the vote of faction 0 and each faction's is 4 bytes on; -1 yea, -2 nay, a faction's number a vote
+# for it). A proposal with a yea and a nay that fails on the nays (the result box says so, and the panel counts them); the election of a
+# governor that ends in a tie (no one is elected); the governor elected again (the label that follows the name differs); the Supreme Leader
+# proposal that gets a majority but not three fourths of the votes (it fails, and says what he would have been), the same with all
+# in favour, which passes. The windows are closed by Escape, which carries the proposal out when it passed (the last one is not closed:
+# a Supreme Leader's victory would end the game). The state regions are as in councwin_vote.scene.
+# Leave time after each step; the snaps take 2 s each.
+25 load
+42 state cw_a 0x6ff698 0x20
+42 state cw_b 0x6ff6bc 0xc
+42 state cw_votes 0x6ff6d4 0x40
+42 state cw_rects 0x6ff824 0x170
+42 state btn_vis0 0x6ffaac 4
+42 state btn_id0 0x70048c 4
+42 state btn_vis1 0x7005f8 4
+42 state btn_id1 0x700fd8 4
+42 state btn_vis2 0x701144 4
+42 state btn_id2 0x701b24 4
+42 state btn_vis3 0x701c90 4
+42 state btn_id3 0x702670 4
+42 state btn_vis4 0x7027dc 4
+42 state btn_id4 0x7031bc 4
+42 state btn_vis5 0x703328 4
+42 state btn_id5 0x703d08 4
+42 state cw_glob 0x703de0 0x50
+42 state governor 0x9a6614 4
+42 state pturn 0x9a6644 0x2c
+44 click 362 735
+45 open tut_off
+46 open votes_two
+48 open council_p2
+52 open cw_resolve_check
+53 poke 0x6ff6d8 -1
+54 poke 0x6ff6dc -2
+55 poke 0x6ff6e0 -2
+56 poke 0x6ff6e4 -2
+57 open cw_resolve
+62 snap p2-failed
+64 key Escape
+70 open votes_all
+72 open council_gov
+76 poke 0x6ff6d8 2
+77 poke 0x6ff6dc 3
+78 poke 0x6ff6e0 2
+79 poke 0x6ff6e4 3
+80 open cw_resolve
+84 snap tie
+86 key Escape
+92 poke 0x9a6614 2
+93 open votes_two
+94 open council_gov_2
+98 poke 0x6ff6d8 2
+99 poke 0x6ff6dc 2
+100 poke 0x6ff6e0 2
+101 poke 0x6ff6e4 2
+102 open cw_resolve
+106 snap re-elected
+108 key Escape
+114 open council_p1
+118 poke 0x6ff6d8 -1
+119 poke 0x6ff6dc -1
+120 poke 0x6ff6e0 -2
+121 poke 0x6ff6e4 -2
+122 open cw_resolve
+126 snap p1-failed
+128 key Escape
+134 open council_p1
+138 poke 0x6ff6d8 -1
+139 poke 0x6ff6dc -1
+140 poke 0x6ff6e0 -1
+141 poke 0x6ff6e4 -1
+142 open cw_resolve
+146 snap p1-passed
+150 close

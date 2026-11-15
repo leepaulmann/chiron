@@ -414,8 +414,6 @@ HELD_THIS(fx_stop, (void *self, int id), (self, id), c_.arg[0] = id, orig_fx_sto
 // quickly, and the engine's pitch for a slow one.
 HELD_THIS(console_cursor_next, (void *self, int x, int y), (self, x, y), (c_.arg[0] = x, c_.arg[1] = y),
           orig_console_cursor_next(SELF, a_[0], a_[1]))
-HELD_THIS(council_win_set_vote, (void *self, int faction, int vote), (self, faction, vote),
-          (c_.arg[0] = faction, c_.arg[1] = vote), orig_council_win_set_vote(SELF, a_[0], a_[1]))
 HELD_THIS(fx_engine_pitch, (void *self, int pitch), (self, pitch), c_.arg[0] = pitch, orig_fx_engine_pitch(SELF, a_[0]))
 // Movies and help for secret projects.
 HELD(void, amovie_project, (void)0, (int project), (project), (c_.arg[0] = project), orig_amovie_project(a_[0]))
@@ -650,7 +648,6 @@ static const struct hook quiet_hooks[] = {
     QUIET_HOOK(0x477100, mon_secret_project, MON_PROLOGUE),
     QUIET_HOOK(0x4779d0, mon_winning_trans, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0xd4, 0x64, 0x9a, 0x00),
     QUIET_HOOK(0x428350, council, PUSH_EBP_MOV_EBP_ESP, 0x83, 0xec, 0x08),  // sub esp, 8
-    QUIET_HOOK(0x424720, council_win_set_vote, PUSH_EBP_MOV_EBP_ESP, 0x53, 0x8b, 0xd9),  // push ebx; mov ebx, ecx
     QUIET_HOOK(0x612a70, dialogs_item, 0x8b, 0xc1, 0x8b, 0x88, 0x80, 0x01, 0x00, 0x00),  // mov eax, ecx; mov ecx, [eax+0x180]
     QUIET_HOOK(0x6108e0, sprite_box_sprite, 0x8b, 0x44, 0x24, 0x04, 0x53),  // mov eax, [esp+4]; push ebx
     QUIET_HOOK(0x5beca0, x_text_open, PUSH_EBP_MOV_EBP_ESP, 0xa1, 0x0c, 0x1b, 0x69, 0x00),  // mov eax, [0x691b0c]

@@ -1,0 +1,53 @@
+# The Planetary Council's window (CouncWin, see src/ui/councwin.c): how a seat shows a faction's vote and its votes. The Supreme Leader
+# proposal (council_p1 after votes_two) shows each faction's number of votes under its portrait. The window's own votes are poked in
+# (-1 yea, -2 nay, -3 abstain, -4 and -5 the two other words, a faction's number a vote for it; faction n's is at 0x6ff6d4 + 4n) and the
+# seats drawn again (all of them, then the whole window): the five words and a candidate's name in the candidate's colour. The mouse over a
+# seat (the hover field at 0x6ff6b4 is poked, and the seat drawn): the picture under the portrait changes; the mouse leaving puts it
+# back. A faction with a major atrocity (a poke on its table) shows no votes. The state regions are as in councwin_vote.scene.
+# Leave time after each step; the snaps take 2 s each.
+25 load
+42 state cw_a 0x6ff698 0x20
+42 state cw_b 0x6ff6bc 0xc
+42 state cw_votes 0x6ff6d4 0x40
+42 state cw_rects 0x6ff824 0x170
+42 state btn_vis0 0x6ffaac 4
+42 state btn_id0 0x70048c 4
+42 state btn_vis1 0x7005f8 4
+42 state btn_id1 0x700fd8 4
+42 state btn_vis2 0x701144 4
+42 state btn_id2 0x701b24 4
+42 state btn_vis3 0x701c90 4
+42 state btn_id3 0x702670 4
+42 state btn_vis4 0x7027dc 4
+42 state btn_id4 0x7031bc 4
+42 state btn_vis5 0x703328 4
+42 state btn_id5 0x703d08 4
+42 state cw_glob 0x703de0 0x50
+42 state governor 0x9a6614 4
+42 state pturn 0x9a6644 0x2c
+44 click 362 735
+45 open tut_off
+46 open votes_two
+48 open council_p1
+54 snap counts
+56 poke 0x6ff6d8 -3
+57 poke 0x6ff6dc -4
+58 poke 0x6ff6e0 3
+59 poke 0x6ff6e4 -5
+60 open cw_draw_all
+64 snap looks-a
+66 poke 0x6ff6d8 -1
+67 poke 0x6ff6dc -2
+68 poke 0x6ff6e0 1
+69 poke 0x6ff6e4 2
+70 open cw_redraw
+74 snap looks-b
+76 poke 0x6ff6b4 3
+77 open cw_draw_3
+80 snap hover
+82 open cw_leave
+86 snap leave
+88 poke 0x972e1c 1
+89 open cw_draw_3
+92 snap atrocity
+96 close

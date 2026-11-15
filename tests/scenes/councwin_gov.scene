@@ -1,0 +1,78 @@
+# The Planetary Council's window on the election of a governor (CouncWin, see src/ui/councwin.c; opened with council_gov, which is
+# council(1, 0, 1), after votes_all has given every faction one vote, so that all may stand). The panel lists the candidates and
+# their votes at its foot, but the original's drawing of it gives up when the list is longer than three (it draws the panel again
+# with no list in it): five may stand here, and the list is empty. The button that chooses (id 4, the one with the whole width)
+# opens a popup of the candidates and Abstain; one is picked and OK made; every faction has then voted, and the window decides
+# (make_resolution picks the winner by the votes, the turn deciding a tie) and shows who was elected, with the seats rearranged
+# round the governor (the leaders are drawn again, the middle seat the governor's). Escape closes the window and the game carries
+# out the election. Then a second election, with the new governor in the middle seat and distinct votes (two candidates stand, the
+# list is shown, the player Abstains), and a third with no governor and a tie for second (three stand, the third line of the list
+# in the middle of the panel), where a click on a seat asks the leader for his vote for a candidate (the popup of the candidates; the first
+# Leave time after each step; the snaps take 2 s each.
+25 load
+42 state cw_a 0x6ff698 0x20
+42 state cw_b 0x6ff6bc 0xc
+42 state cw_votes 0x6ff6d4 0x40
+42 state cw_rects 0x6ff824 0x170
+42 state btn_vis0 0x6ffaac 4
+42 state btn_id0 0x70048c 4
+42 state btn_vis1 0x7005f8 4
+42 state btn_id1 0x700fd8 4
+42 state btn_vis2 0x701144 4
+42 state btn_id2 0x701b24 4
+42 state btn_vis3 0x701c90 4
+42 state btn_id3 0x702670 4
+42 state btn_vis4 0x7027dc 4
+42 state btn_id4 0x7031bc 4
+42 state btn_vis5 0x703328 4
+42 state btn_id5 0x703d08 4
+42 state cw_glob 0x703de0 0x50
+42 state governor 0x9a6614 4
+42 state pturn 0x9a6644 0x2c
+42 state parse 0x9bb570 0xa84
+44 click 362 735
+45 open tut_off
+46 open votes_all
+48 open council_gov
+54 snap five
+56 click 512 665
+60 snap choose
+62 click 512 441
+64 snap selected
+66 click 345 522
+72 snap elected
+74 key Escape
+80 snap closed
+82 open votes_two
+84 open council_gov_2
+90 snap two
+92 click 512 665
+96 snap choose-two
+98 click 512 397
+100 click 345 522
+106 snap abstained
+108 key Escape
+114 snap closed-two
+116 open votes_three
+118 poke 0x9a6614 -1
+120 open council_gov
+126 snap three
+128 click 409 300
+134 snap ask-list
+136 key Return
+142 snap ask-list-ok
+144 key Return
+148 snap bought-gov
+150 click 512 665
+154 snap choose-three
+156 click 675 522
+160 snap cancelled
+162 key Return
+166 snap ai-voted
+168 click 512 665
+172 click 512 419
+174 click 345 522
+180 snap decided-three
+182 key Escape
+186 snap closed-three
+192 close

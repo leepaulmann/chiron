@@ -1,0 +1,68 @@
+# The Planetary Council's window (CouncWin, see src/ui/councwin.c): the functions no click reaches, called by hand with the script
+# host's open steps (the methods of the window at 0x6fec80 and of its interface part, 0xa14 into it). The window as it opens; the seat
+# of faction 0 and of faction 7 drawn (nothing: neither has a seat); the calls that do nothing (the group click, the button's pass-over
+# and text, and the interface part's nine and three stubs); the arrival of the human (faction 1: the window is drawn again and, with every human come, a
+# notice shown); the interface's status off, which puts the window away (the buttons hidden, the window slid out and hidden), then show,
+# which asks the interface for the mode again, then status on; the interface's forwarding of a button click (Yea); the mouse leaving
+# a seat; and close(), which puts the buttons and the fonts away (after it nothing more is drawn). The state regions are as in
+# councwin_vote.scene.
+# Leave time after each step; the snaps take 2 s each.
+25 load
+42 state cw_a 0x6ff698 0x20
+42 state cw_b 0x6ff6bc 0xc
+42 state cw_votes 0x6ff6d4 0x40
+42 state cw_rects 0x6ff824 0x170
+42 state btn_vis0 0x6ffaac 4
+42 state btn_id0 0x70048c 4
+42 state btn_vis1 0x7005f8 4
+42 state btn_id1 0x700fd8 4
+42 state btn_vis2 0x701144 4
+42 state btn_id2 0x701b24 4
+42 state btn_vis3 0x701c90 4
+42 state btn_id3 0x702670 4
+42 state btn_vis4 0x7027dc 4
+42 state btn_id4 0x7031bc 4
+42 state btn_vis5 0x703328 4
+42 state btn_id5 0x703d08 4
+42 state cw_glob 0x703de0 0x50
+42 state governor 0x9a6614 4
+42 state pturn 0x9a6644 0x2c
+44 click 362 735
+45 open tut_off
+46 open votes_two
+48 open council_p2
+54 snap open
+56 open cw_draw_0
+57 open cw_draw_7
+58 open cw_group
+59 open cw_passover
+60 open cw_text_draw
+61 open cw_iface_s0
+62 open cw_iface_s1
+63 open cw_iface_s2
+64 open cw_iface_s3
+65 open cw_iface_s4
+66 open cw_iface_s5
+67 open cw_iface_s6
+68 open cw_iface_s7
+69 open cw_iface_s8
+70 open cw_iface_s9
+71 open cw_iface_s10
+72 open cw_is_visible
+74 snap stubs
+76 open cw_arrived_1
+80 snap arrived
+82 open cw_status_off
+88 snap status-off
+90 open cw_show
+96 snap shown
+98 open cw_status_on
+102 snap status-on
+104 open cw_iface_1
+110 snap iface-click
+112 poke 0x6ff6b4 3
+113 open cw_leave
+118 snap leave
+120 open cw_close
+124 snap widgets-closed
+128 close

@@ -38,13 +38,14 @@ extern struct hook_module monuwin_module;
 extern struct hook_module tutwin_module;
 extern struct hook_module prefwin_module;
 extern struct hook_module statuswin_module;
+extern struct hook_module councwin_module;
 extern struct hook_module dialog_module;
 extern struct hook_module strings_module;
 extern struct hook_module edit_module;
 extern struct hook_module tech_module, map_module, mapgen_module, base_module, production_module, upkeep_module, social_module,
     faction_module, strategy_module, build_module, veh_module, spot_module, council_module, path_module, score_module, move_module, combat_module, events_module, ai_module, setup_module, probe_module, save_module, rules_module, diplomacy_module, palette_module, buffer_module, text_module, quiet_module;
 static struct hook_module *const modules[] = {&tech_module, &map_module, &mapgen_module, &base_module, &production_module,
-                                              &upkeep_module, &social_module, &faction_module, &strategy_module, &build_module, &veh_module, &spot_module, &council_module, &path_module, &score_module, &move_module, &combat_module, &events_module, &ai_module, &setup_module, &probe_module, &save_module, &rules_module, &diplomacy_module, &palette_module, &buffer_module, &text_module, &sprite_module, &texture_module, &bufobj_module, &bufimg_module, &bufdraw_module, &font_module, &win_module, &screen_module, &button_module, &scroll_module, &menu_module, &pickwin_module, &picktech_module, &selpart_module, &prodpicker_module, &infowin_module, &famewin_module, &dialog_module, &strings_module, &edit_module, &monuwin_module, &tutwin_module, &prefwin_module, &statuswin_module, &quiet_module};
+                                              &upkeep_module, &social_module, &faction_module, &strategy_module, &build_module, &veh_module, &spot_module, &council_module, &path_module, &score_module, &move_module, &combat_module, &events_module, &ai_module, &setup_module, &probe_module, &save_module, &rules_module, &diplomacy_module, &palette_module, &buffer_module, &text_module, &sprite_module, &texture_module, &bufobj_module, &bufimg_module, &bufdraw_module, &font_module, &win_module, &screen_module, &button_module, &scroll_module, &menu_module, &pickwin_module, &picktech_module, &selpart_module, &prodpicker_module, &infowin_module, &famewin_module, &dialog_module, &strings_module, &edit_module, &monuwin_module, &tutwin_module, &prefwin_module, &statuswin_module, &councwin_module, &quiet_module};
 
 #define N_MODULES (sizeof(modules) / sizeof(modules[0]))
 

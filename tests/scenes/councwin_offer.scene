@@ -1,0 +1,57 @@
+# The Planetary Council's window (CouncWin, see src/ui/councwin.c): the offers the AI makes the player for his vote. On the election of a
+# governor, with the player (faction 1) among the weaker so that it may not stand (votes_pivot gives the factions their votes) but its
+# votes could decide between two others, a faction offers its price: with the turn poked to 100 and energy given to factions 2 and 3,
+# energy credits (the first popup; the second of its choices casts the vote, and OK takes it: the energy changes hands and the player's
+# vote is cast, which decides the election); then, with less energy (the price rounds to nothing) and techs to offer (give_techs_2 and
+# give_techs_3 give factions 2 and 3 the first twenty), two techs, which the player takes (the New Tech window shows for each). The
+# state regions are as in councwin_vote.scene, and the factions' tables (energy, techs).
+# Leave time after each step; the snaps take 2 s each.
+25 load
+42 state cw_a 0x6ff698 0x20
+42 state cw_b 0x6ff6bc 0xc
+42 state cw_votes 0x6ff6d4 0x40
+42 state cw_rects 0x6ff824 0x170
+42 state btn_vis0 0x6ffaac 4
+42 state btn_id0 0x70048c 4
+42 state btn_vis1 0x7005f8 4
+42 state btn_id1 0x700fd8 4
+42 state btn_vis2 0x701144 4
+42 state btn_id2 0x701b24 4
+42 state btn_vis3 0x701c90 4
+42 state btn_id3 0x702670 4
+42 state btn_vis4 0x7027dc 4
+42 state btn_id4 0x7031bc 4
+42 state btn_vis5 0x703328 4
+42 state btn_id5 0x703d08 4
+42 state cw_glob 0x703de0 0x50
+42 state governor 0x9a6614 4
+42 state pturn 0x9a6644 0x2c
+42 state parse 0x9bb570 0xa84
+44 click 362 735
+45 open tut_off
+46 open votes_pivot
+47 poke 0x9a64d4 100
+48 poke 0x970d98 1000
+49 poke 0x972e64 1000
+50 open council_gov
+56 snap money-offer
+58 click 511 477
+60 click 511 508
+66 snap money-taken
+68 key Escape
+76 open votes_pivot
+77 open give_techs_2
+78 open give_techs_3
+79 poke 0x970d98 20
+80 poke 0x972e64 20
+81 poke 0x9a6614 -1
+82 open council_gov
+88 snap tech-offer
+90 click 511 477
+91 click 511 508
+96 snap tech-1
+98 key Return
+104 snap tech-2
+106 key Return
+112 snap tech-after
+116 close

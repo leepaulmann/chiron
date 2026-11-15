@@ -1,0 +1,49 @@
+# The Planetary Council's window (CouncWin, see src/ui/councwin.c): the governor's veto. A poke sets the living to factions 1 to 5 (faction 5 is not in the game in
+# this save), so that five factions vote, and another poke makes faction 2 the governor. On the Unity Fusion Core proposal
+# (a yea and a nay) the governor votes nay with one other against and three for: the proposal would pass, but it fails on the veto (the
+# result box says so; make_resolution gives -2). Escape closes it. On the next proposal the governor alone votes nay: the others being all
+# for it, the veto is dropped and it passes (this one is not closed, which would carry it out). The window's own votes are poked in (-1 yea,
+# -2 nay; faction n's is at 0x6ff6d4 + 4n). The state regions are as in councwin_vote.scene.
+# Leave time after each step; the snaps take 2 s each.
+25 load
+42 state cw_a 0x6ff698 0x20
+42 state cw_b 0x6ff6bc 0xc
+42 state cw_votes 0x6ff6d4 0x40
+42 state cw_rects 0x6ff824 0x170
+42 state btn_vis0 0x6ffaac 4
+42 state btn_id0 0x70048c 4
+42 state btn_vis1 0x7005f8 4
+42 state btn_id1 0x700fd8 4
+42 state btn_vis2 0x701144 4
+42 state btn_id2 0x701b24 4
+42 state btn_vis3 0x701c90 4
+42 state btn_id3 0x702670 4
+42 state btn_vis4 0x7027dc 4
+42 state btn_id4 0x7031bc 4
+42 state btn_vis5 0x703328 4
+42 state btn_id5 0x703d08 4
+42 state cw_glob 0x703de0 0x50
+42 state governor 0x9a6614 4
+42 state pturn 0x9a6644 0x2c
+44 click 362 735
+45 open tut_off
+46 open votes_two
+47 poke 0x9a64e9 0x3e
+48 poke 0x9a6614 2
+49 open council_p2
+54 snap five-vote
+56 poke 0x6ff6dc -2
+57 poke 0x6ff6e0 -2
+58 poke 0x6ff6e4 -1
+59 poke 0x6ff6e8 -1
+60 click 349 665
+66 snap vetoed
+68 key Escape
+74 open council_p3
+78 poke 0x6ff6dc -2
+79 poke 0x6ff6e0 -1
+80 poke 0x6ff6e4 -1
+81 poke 0x6ff6e8 -1
+82 click 349 665
+88 snap veto-dropped
+92 close

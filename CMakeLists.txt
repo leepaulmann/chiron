@@ -110,6 +110,7 @@ add_executable(chiron
   src/ui/tutwin.c
   src/ui/prefwin.c
   src/ui/statuswin.c
+  src/ui/councwin.c
   src/loader/pe.c
   src/loader/teb.c
   src/loader/thunks.c

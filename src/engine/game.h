@@ -1561,6 +1561,18 @@ extern int32_t *game_council_net_call;  // [3] an AI's call in a network game: f
 extern void (*game_council)(int faction, int prop, int target);
 extern void *game_council_win;
 extern void(__attribute__((thiscall)) * game_council_win_set_vote)(void *win, int faction, int vote);
+// The Council's logic the window (src/ui/councwin.c) asks of the engine: a faction's votes, whether it may stand for governor, its
+// vote on a proposal (and the proposal carried out, and a vote bought for the player), and the AI's offers to the player (the techs
+// tech_analysis finds, said into a text variable by say_tech); and what the window calls of other windows and of the interface:
+// asking a human over the network to talk (the net daemon's), a window put out of the way while the Council is on (Win_closing, and a
+// second window's hide and show), the interface part's mode undone, and the interface's panel frame drawn.
+extern int (*game_council_votes)(int faction), (*game_council_eligible)(int faction), (*game_council_get_vote)(int faction, int prop, int target);
+extern void (*game_council_action)(int prop, int target), (*game_buy_council_vote)(int player, int ai, int prop, int target);
+extern void (*game_tech_analysis)(int player, int rival), (*game_say_tech)(char *out, int tech, int category);
+extern int(__attribute__((thiscall)) * game_net_talk)(void *daemon, int player, int faction);
+extern void(__attribute__((thiscall)) * game_window_closing)(void *object), (__attribute__((thiscall)) * game_overlay_open)(void *object),
+    (__attribute__((thiscall)) * game_overlay_close)(void *object);
+extern void(__attribute__((thiscall)) * game_iface_frame)(void *iface, int clip);
 // Network games: the diplomacy lock, the wait for other players, a
 // faction's leader state sent, and the message bar cleared.
 extern int (*game_diplo_lock)(int unk);

@@ -1,0 +1,48 @@
+# The Planetary Council's window (CouncWin, see src/ui/councwin.c): the Abstain button (id 3: the vote -3, which takes no part in the count)
+# and the popups of a click on a seat cancelled with Escape (nothing is bought). On a proposal with a yea and a nay (council_p2 after
+# votes_two): a click on a seat asks yea or nay and Escape cancels it; the Abstain button votes, the vote is decided on the AIs' yeas
+# alone, and Escape closes the window, which carries the proposal out. Then the election of a governor: a click on a seat opens the list
+# of the candidates, and Escape cancels it. The state regions are as in councwin_vote.scene.
+# Leave time after each step; the snaps take 2 s each.
+25 load
+42 state cw_a 0x6ff698 0x20
+42 state cw_b 0x6ff6bc 0xc
+42 state cw_votes 0x6ff6d4 0x40
+42 state cw_rects 0x6ff824 0x170
+42 state btn_vis0 0x6ffaac 4
+42 state btn_id0 0x70048c 4
+42 state btn_vis1 0x7005f8 4
+42 state btn_id1 0x700fd8 4
+42 state btn_vis2 0x701144 4
+42 state btn_id2 0x701b24 4
+42 state btn_vis3 0x701c90 4
+42 state btn_id3 0x702670 4
+42 state btn_vis4 0x7027dc 4
+42 state btn_id4 0x7031bc 4
+42 state btn_vis5 0x703328 4
+42 state btn_id5 0x703d08 4
+42 state cw_glob 0x703de0 0x50
+42 state governor 0x9a6614 4
+42 state pturn 0x9a6644 0x2c
+42 state parse 0x9bb570 0xa84
+44 click 362 735
+45 open tut_off
+46 open votes_two
+48 open council_p2
+54 snap open
+56 click 409 300
+62 snap ask
+64 key Escape
+70 snap ask-cancelled
+72 click 675 665
+78 snap abstained
+80 key Escape
+86 snap closed
+88 open votes_two
+90 open council_gov
+96 snap gov
+98 click 409 300
+104 snap ask-list
+106 key Escape
+112 snap ask-list-cancelled
+116 close

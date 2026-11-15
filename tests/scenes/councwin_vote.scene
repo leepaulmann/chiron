@@ -1,0 +1,55 @@
+# The Planetary Council's window (CouncWin, see src/ui/councwin.c) on a proposal with a yea and a nay (the Unity Fusion Core's, which the
+# AIs vote yea on), opened the way the game opens it (council_p2: council(1, 2, 0), after votes_two has given the factions distinct
+# votes). The window as it opens (the seats with the AIs' votes, the proposal and the yea and nay totals at the foot of the panel, the
+# three vote buttons); the mouse over a seat (the picture under the portrait changes), off every seat and over the player's own (nothing changes); a click on a seat, which asks
+# for his vote (yea, nay) and, answered, buys it (the engine's buy_council_vote, which tells the window with set_vote) and the AI's
+# message; then the player's own Yea, which decides the vote (make_resolution: the result box, the buttons put away but OK), after which the mouse over a seat changes nothing; and OK,
+# which closes the window and carries the proposal out (+500 energy credits to every faction). The state regions are the window's
+# fields (proposal, candidate, result, the governor then, the seat the mouse is over, the arrivals), its votes and the votes' counts,
+# the rectangles it laid out, each button's visible flag and id, the Council's globals (in session, pending, the per-faction records),
+# the governor, the turns each proposal was last put, and (in the faction tables) the energy and the pledges.
+# Leave time after each step; the snaps take 2 s each.
+25 load
+42 state cw_a 0x6ff698 0x20
+42 state cw_b 0x6ff6bc 0xc
+42 state cw_votes 0x6ff6d4 0x40
+42 state cw_rects 0x6ff824 0x170
+42 state btn_vis0 0x6ffaac 4
+42 state btn_id0 0x70048c 4
+42 state btn_vis1 0x7005f8 4
+42 state btn_id1 0x700fd8 4
+42 state btn_vis2 0x701144 4
+42 state btn_id2 0x701b24 4
+42 state btn_vis3 0x701c90 4
+42 state btn_id3 0x702670 4
+42 state btn_vis4 0x7027dc 4
+42 state btn_id4 0x7031bc 4
+42 state btn_vis5 0x703328 4
+42 state btn_id5 0x703d08 4
+42 state cw_glob 0x703de0 0x50
+42 state governor 0x9a6614 4
+42 state pturn 0x9a6644 0x2c
+44 click 362 735
+45 open tut_off
+46 open votes_two
+48 open council_p2
+54 snap open
+56 move 410 300
+60 snap hover
+62 move 600 520
+66 snap leave
+68 move 306 300
+72 snap hover-own
+74 click 410 300
+80 snap ask
+82 key Return
+88 snap bought
+90 key Return
+94 snap bought-ok
+96 click 349 665
+102 snap decided
+104 move 410 300
+108 snap hover-decided
+110 click 512 665
+116 snap closed
+122 close

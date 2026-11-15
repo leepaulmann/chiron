@@ -1,0 +1,48 @@
+# The Planetary Council's window (CouncWin, see src/ui/councwin.c) in a hotseat or e-mail game (a poke sets the flag the game keeps for one, at
+# 0x93a95c, before the window opens): the window starts with every faction's arrival marked and the Council waiting on its players (the
+# word at 0x703de8). Return before the player has voted fills in the AIs' votes; the player's own Yea decides the vote and, as in such a
+# game, puts the other buttons away and leaves OK; Escape then ends the window. A second window, with the player's vote poked in but the
+# vote not decided, ends on Escape without carrying anything out (the light closing for a game that waits on its players). The state
+# regions are as in councwin_vote.scene.
+# Leave time after each step; the snaps take 2 s each.
+25 load
+42 state cw_a 0x6ff698 0x20
+42 state cw_b 0x6ff6bc 0xc
+42 state cw_votes 0x6ff6d4 0x40
+42 state cw_rects 0x6ff824 0x170
+42 state btn_vis0 0x6ffaac 4
+42 state btn_id0 0x70048c 4
+42 state btn_vis1 0x7005f8 4
+42 state btn_id1 0x700fd8 4
+42 state btn_vis2 0x701144 4
+42 state btn_id2 0x701b24 4
+42 state btn_vis3 0x701c90 4
+42 state btn_id3 0x702670 4
+42 state btn_vis4 0x7027dc 4
+42 state btn_id4 0x7031bc 4
+42 state btn_vis5 0x703328 4
+42 state btn_id5 0x703d08 4
+42 state cw_glob 0x703de0 0x50
+42 state governor 0x9a6614 4
+42 state pturn 0x9a6644 0x2c
+44 click 362 735
+45 open tut_off
+46 open votes_two
+47 poke 0x93a95c 1
+48 open council_p2
+54 snap open
+56 poke 0x6ff6dc 0
+57 open cw_redraw
+60 snap emptied
+62 key Return
+66 snap filled
+68 click 349 665
+74 snap decided
+76 key Escape
+82 snap closed
+84 open council_p2
+90 snap again
+92 poke 0x6ff6d8 -1
+93 key Escape
+98 snap light-closed
+102 close

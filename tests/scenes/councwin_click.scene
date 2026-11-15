@@ -1,0 +1,66 @@
+# The Planetary Council's window (CouncWin, see src/ui/councwin.c) on a proposal with a yea and a nay (council_p2 after votes_two), and
+# the clicks on the leaders' seats, which ask for a vote: the player's own seat (nothing happens), the seat of the faction that is not
+# in the game (a notice), a faction at vendetta with the player (a poke gives faction 2 the status bit: it refuses, in a popup), a
+# faction that has promised its vote to the player (a poke gives faction 3 the pledge: left be), a click on the window where there is no
+# seat, a key that is not Return or Escape (ignored), a seat of an AI that will talk (the popup of yea and nay: Nay chosen, which buys
+# the vote, the AI's message), then the player's own Nay button, which decides the vote, a click on a seat after the vote is decided
+# (ignored) and Escape, which closes the window (the proposal failed, so it is not carried out). The state regions are as in
+# councwin_vote.scene, and the factions' tables (the pledges and the treaty bits are in them).
+# Leave time after each step; the snaps take 2 s each.
+25 load
+42 state cw_a 0x6ff698 0x20
+42 state cw_b 0x6ff6bc 0xc
+42 state cw_votes 0x6ff6d4 0x40
+42 state cw_rects 0x6ff824 0x170
+42 state btn_vis0 0x6ffaac 4
+42 state btn_id0 0x70048c 4
+42 state btn_vis1 0x7005f8 4
+42 state btn_id1 0x700fd8 4
+42 state btn_vis2 0x701144 4
+42 state btn_id2 0x701b24 4
+42 state btn_vis3 0x701c90 4
+42 state btn_id3 0x702670 4
+42 state btn_vis4 0x7027dc 4
+42 state btn_id4 0x7031bc 4
+42 state btn_vis5 0x703328 4
+42 state btn_id5 0x703d08 4
+42 state cw_glob 0x703de0 0x50
+42 state governor 0x9a6614 4
+42 state pturn 0x9a6644 0x2c
+42 state parse 0x9bb570 0xa84
+44 click 362 735
+45 open tut_off
+46 open votes_two
+48 open council_p2
+54 snap open
+56 click 306 300
+60 snap own
+62 click 718 300
+68 snap dead
+70 poke 0x970b94 0x10 or
+72 click 409 300
+76 snap refuses
+78 key Return
+82 snap refuses-ok
+84 poke 0x97304c 1
+85 poke 0x973078 1
+88 click 512 300
+92 snap pledged
+94 click 150 200
+98 snap nospot
+100 key x
+104 snap key-x
+106 click 615 300
+110 snap ask
+112 click 512 408
+114 click 511 440
+118 snap bought-nay
+120 key Return
+124 snap bought-msg
+126 click 512 665
+132 snap decided
+136 click 512 300
+140 snap after-result
+142 key Escape
+148 snap closed
+152 close

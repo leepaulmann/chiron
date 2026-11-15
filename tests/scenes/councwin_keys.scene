@@ -1,0 +1,63 @@
+# The Planetary Council's window (CouncWin, see src/ui/councwin.c): the keys and the button no one has. A key that is not Return or Escape
+# does nothing. Return, before the player has voted, makes the AIs vote that have not (a poke empties faction 2's vote; the seat shows it
+# again). The button -2 (the window's own handler, called by hand) does the same while no human has voted, and nothing after. Then the
+# player's own Yea decides the vote; the button -2 then ends the window (the vote is decided), which carries the proposal out (+500
+# energy credits to every faction: the tables are in the state). A second window, opened in the scenario editor's debugging mode (a poke
+# sets the bits), ends on Return without a vote (the proposal is not carried out), and a third on the button -2. The state regions are as in
+# councwin_vote.scene.
+# Leave time after each step; the snaps take 2 s each.
+25 load
+42 state cw_a 0x6ff698 0x20
+42 state cw_b 0x6ff6bc 0xc
+42 state cw_votes 0x6ff6d4 0x40
+42 state cw_rects 0x6ff824 0x170
+42 state btn_vis0 0x6ffaac 4
+42 state btn_id0 0x70048c 4
+42 state btn_vis1 0x7005f8 4
+42 state btn_id1 0x700fd8 4
+42 state btn_vis2 0x701144 4
+42 state btn_id2 0x701b24 4
+42 state btn_vis3 0x701c90 4
+42 state btn_id3 0x702670 4
+42 state btn_vis4 0x7027dc 4
+42 state btn_id4 0x7031bc 4
+42 state btn_vis5 0x703328 4
+42 state btn_id5 0x703d08 4
+42 state cw_glob 0x703de0 0x50
+42 state governor 0x9a6614 4
+42 state pturn 0x9a6644 0x2c
+44 click 362 735
+45 open tut_off
+46 open votes_two
+48 open council_p2
+52 open cw_key_x
+54 snap key-x
+56 poke 0x6ff6dc 0
+57 open cw_redraw
+60 snap emptied
+62 open cw_key_return
+66 snap filled
+68 poke 0x6ff6e0 0
+69 open cw_redraw
+72 snap emptied-2
+74 open cw_click_m2
+78 snap filled-by-button
+80 open cw_click_m1
+81 open cw_click_5
+82 open cw_click_m2
+84 snap human-not-voted
+86 click 349 665
+92 snap decided
+94 open cw_click_m2
+100 snap closed
+104 poke 0x9a64c0 0x1040 or
+105 open votes_two
+106 open council_p2
+112 snap editor
+114 open cw_key_return
+120 snap editor-closed
+122 open council_p2
+128 snap editor-2
+130 open cw_click_m2
+136 snap editor-2-closed
+140 close
