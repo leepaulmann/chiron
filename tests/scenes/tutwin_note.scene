@@ -1,0 +1,21 @@
+# The tutorial's window (TutWin, see tutwin.c): a note about the square of the first unit, asked for the way the game asks (the script
+# host's "open tut_terrain" calls tut_map, which moves the map to the square and opens the note, a modal popup at the bottom left with
+# an arrow from it to the square, and a Close button). The note is mode 0: one button, and the arrow to the square. The state
+# regions are the window object's fields from tile_x (0x8cc1e4) on (the square, the arrow's ends, whether a note is up, what it is about,
+# what answered it), the two flags at 0x8cc244, the tutorial's "shown" words at 0x9a64ac, the callback the popup draws its picture with
+# (0x8c9fd0) and the popup's size (0x8c9f24).
+25 load
+26 state tw_fields 0x8cc1e4 0x5c
+26 state tw_flags 0x8cc244 8
+26 state tw_seen 0x9a64ac 0x14
+26 state tw_draw 0x8c9fd0 4
+26 state tw_size 0x8c9f24 8
+44 open tut_terrain
+50 snap open
+52 move 324 736
+56 snap hover
+58 move 800 300
+62 snap hover-out
+64 click 324 736          # the Close button
+68 snap closed
+70 close

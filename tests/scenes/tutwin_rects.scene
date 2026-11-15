@@ -1,0 +1,34 @@
+# The tutorial tour's helpers that point a note at a rectangle of one of the game's screens (see tutwin.c): the centre of a made-up
+# rectangle as a point on each of the four screens (the answer, x * 10000 + y, is in the open_result region; the screens are not
+# open, so their positions are what the game keeps for them), the plain centre, and the notes that point at it (Return closes each).
+25 load
+26 state tw_fields 0x8cc1e4 0x5c
+26 state tw_flags 0x8cc244 8
+44 open tut_rect_base
+48 snap rect-base
+50 open tut_rect_iface
+54 snap rect-iface
+56 open tut_rect_soc
+60 snap rect-soc
+62 open tut_rect_des
+66 snap rect-des
+68 open tut_centre
+72 snap centre
+74 open tut_do_base
+80 snap do-base
+82 key Return
+86 open tut_do_iface
+92 snap do-iface
+94 key Return
+98 open tut_do_soc
+104 snap do-soc
+106 key Return
+110 open tut_do_des
+116 snap do-des
+118 key Return
+122 snap closed
+124 close
+# The base screen can open under the notes (Return reaches the game too): its leader portraits (and a pixel at the left panel's corner) animate slower than a snap's burst.
+mask 265 625 310 680
+mask 700 625 760 680
+mask 134 709 138 713

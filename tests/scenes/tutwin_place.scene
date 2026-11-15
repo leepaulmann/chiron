@@ -1,0 +1,35 @@
+# Where a tutorial note stands for a point of the screen (see tutwin.c, tutwin_place): the points here are given to tut_win itself (the
+# way the tour's helpers do), so the popup goes to the side and the height the point asks for, not to the first unit's square's. A point
+# low on the screen puts the popup at an eighth of its y with the arrow from the popup's bottom edge; one high up puts it at the bottom
+# of the screen. Right of the middle puts it at the right. The last are modes 3, 4 and 5 with the point under their limits, and one
+# note has a second arrow. Return closes each.
+25 load
+26 state tw_fields 0x8cc1e4 0x5c
+26 state tw_flags 0x8cc244 8
+44 open tut_at_low_right
+50 snap low-right
+52 key Return
+56 open tut_at_low_left
+62 snap low-left
+64 key Return
+68 open tut_at_high_right
+74 snap high-right
+76 key Return
+80 open tut_at_second
+86 snap second-arrow
+88 key Return
+92 open tut_at_m3_low
+98 snap m3-low
+100 key Return
+104 open tut_at_m4_low
+110 snap m4-low
+112 key Return
+116 open tut_at_m5_low
+122 snap m5-low
+124 key Return
+128 snap closed
+130 close
+# The base screen can open under the notes (Return reaches the game too): its leader portraits (and a pixel at the left panel's corner) animate slower than a snap's burst.
+mask 265 625 310 680
+mask 700 625 760 680
+mask 134 709 138 713

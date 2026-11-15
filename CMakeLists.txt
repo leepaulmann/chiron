@@ -107,6 +107,7 @@ add_executable(chiron
   src/ui/infowin.c
   src/ui/famewin.c
   src/ui/monuwin.c
+  src/ui/tutwin.c
   src/loader/pe.c
   src/loader/teb.c
   src/loader/thunks.c

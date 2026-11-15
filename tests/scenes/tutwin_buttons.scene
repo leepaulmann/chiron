@@ -1,0 +1,30 @@
+# The buttons of a tutorial note (see tutwin.c): a note with Continue and End Tour (mode 2) at the left and (mode 3) at the right of the
+# screen: hover over each, click Continue, click End Tour. A click takes the note down through the window's button handler (which
+# keeps the button's id in the object, clears the answer for the ones that end the tour, and notes the answered note's bits).
+25 load
+26 state tw_fields 0x8cc1e4 0x5c
+26 state tw_flags 0x8cc244 8
+26 state tw_button 0x8cc224 8
+26 state tw_seen 0x9a64ac 0x14
+26 state tw_ans 0x9a64b8 8
+44 open tut_terrain_m2
+50 snap open
+52 move 172 736
+56 snap hover-continue
+58 move 475 736
+62 snap hover-end
+64 click 172 736          # Continue
+68 snap continue
+70 open tut_terrain_m2
+76 snap open-again
+78 click 475 736          # End Tour
+82 snap end-tour
+84 open tut_terrain_m3
+90 snap right
+92 click 546 736          # Continue
+96 snap right-continue
+98 open tut_terrain_m3
+104 snap right-again
+106 click 849 736         # End Tour
+110 snap right-end
+112 close

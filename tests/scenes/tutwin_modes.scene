@@ -1,0 +1,32 @@
+# Where a tutorial note stands (see tutwin.c): modes 2 to 6 of the note about the first unit's square, which place it by the square's
+# side of the screen and height (tutwin_place): mode 2 at the left (the square is left of five eighths of the width), mode 3 at the
+# right (the side limit moves an eighth in), mode 4 at the right and, the point being under a lower limit, below... the arrows
+# leave the popup's top or bottom edge accordingly. Mode 6 sets no place for the popup (the popup's own). Each note has the Continue
+# and End Tour buttons and is closed with Return.
+25 load
+26 state tw_fields 0x8cc1e4 0x5c
+26 state tw_flags 0x8cc244 8
+26 state tw_seen 0x9a64ac 0x14
+26 state tw_draw 0x8c9fd0 4
+26 state tw_size 0x8c9f24 8
+44 open tut_terrain_m2
+50 snap mode2
+52 key Return
+56 open tut_terrain_m3
+62 snap mode3
+64 key Return
+68 open tut_terrain_m4
+74 snap mode4
+76 key Return
+80 open tut_terrain_m5
+86 snap mode5
+88 key Return
+92 open tut_terrain_m6
+98 snap mode6
+100 key Return
+104 snap closed
+106 close
+# The base screen can open under the notes (Return reaches the game too): its leader portraits (and a pixel at the left panel's corner) animate slower than a snap's burst.
+mask 265 625 310 680
+mask 700 625 760 680
+mask 134 709 138 713

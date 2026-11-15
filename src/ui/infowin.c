@@ -16,7 +16,7 @@
 // CHIRON_SKIP=infowin gives them all back. The object keeps the original's layout, the toolkit is called directly, and
 // what it draws, in what order, and what it writes are the original's. What isn't rebuilt: the game functions the text
 // is built from (the year, the rankings, the energy figures, say_special, the council's votes), the PullDown's line
-// add and show, and the arrow the tutorial draws over the screen.
+// add and show. The arrow the tutorial draws over the screen is tutwin.c's (tutwin_draw_arrow, called directly).
 //
 // Differences from the original that can't be seen: the exception frames are not reproduced; the original's mode
 // handling of a word at +0xb0 (a size selector nothing ever sets, whose cases only fed locals that the text builder
@@ -43,6 +43,7 @@
 #include "../engine/strlist.h"
 #include "../engine/text.h"
 #include "../engine/win.h"
+#include "tutwin.h"
 
 // ---- Pure arithmetic ----------------------------------------------------------------------------------------
 
@@ -840,7 +841,7 @@ static void draw_text_b(struct game_infowin *iw, int arg, uint8_t stale_byte) {
     }
     buffer_set_clip(buf, buffer_full(buf));
     graphic_win_update_2(main_win(), (int32_t *)(arg == -1 ? &iw->bounds : &iw->box[arg]), 0);
-    game_tutwin_draw_arrow(text(TUT_WIN));
+    tutwin_draw_arrow(text(TUT_WIN));
 }
 static void UI_THIS infowin_draw_text(struct game_infowin *iw, int arg) { draw_text_b(iw, arg, 0); }
 

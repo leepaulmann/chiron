@@ -3130,7 +3130,16 @@ static inline int game_rnd(int n) { return n - 1 > 0 ? game_rand() % n : 0; }
 static inline char *game_label(int i) { return game_strings_get(game_strings, (*game_labels)[i]); }
 
 // What the info panel (src/ui/infowin.c) calls that Chiron doesn't reimplement yet: say_special (cdecl: puts the text of
-// `src` into `dest` with the faction's special words filled in), the tutorial window's arrow redraw, and the PullDown's
+// `src` into `dest` with the faction's special words filled in), and the PullDown's
 // add of a line (id, text) and its show (x, y, and the callback the menu polls while it is up).
 extern void (*game_say_special)(char *dest, const char *src, int faction);
-extern void(__attribute__((thiscall)) * game_tutwin_draw_arrow)(void *win);
+// What the tutorial's window (src/ui/tutwin.c) calls that Chiron doesn't reimplement: the popups' colours and fonts set for the
+// tutorial's notes (0x5888e0) and put back (0x588460), the console's key handler (cdecl-free: thiscall with the key's two
+// arguments), the terrain picture and the base picture the popup draws (cdecl), and the tutorial's tours (the five scripts, run by
+// 0x4bc6e0).
+extern void (*game_pop_style_tutorial)(void);
+extern void (*game_pop_style_normal)(void);
+extern void(__attribute__((thiscall)) * game_console_on_key_click)(void *console, int key, int aux);
+extern int (*game_terrain_poly)(void *buf, int a, int b, int faction, int c, int d, int tile_x, int tile_y, int x, int y);
+extern int (*game_base_draw)(void *buf, int base, int x, int y, int a, int b);
+extern void(__attribute__((thiscall)) * game_tutwin_tour)(void *win);

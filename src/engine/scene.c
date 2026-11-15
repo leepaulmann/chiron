@@ -22,6 +22,7 @@
 #include "../loader/modules.h"
 #include "game.h"
 #include "hooks.h"
+#include "screen.h"
 
 enum { CHUNK = 64, MAX_EXTRA = 16, PREF_BASE = 0x400000 };
 
@@ -187,6 +188,72 @@ static int give_monuments(int used_mask, int first_mask, int variant, int shown)
     strcpy((char *)table + 0x4f4 + 0x4dc, "Gammaville");
     return used_mask;
 }
+// A scene's own step: a tutorial note (src/ui/tutwin.c) asked for the way the game asks for one, with tut_map. The note is about
+// the square of the first unit; `kind` says what with (0 the square's terrain, 1 a unit and, `dx` and `dy` squares away, a second
+// point, 2 a picture and no unit, 3 a base), `mode` how it is placed (0 to 6; see tutwin_place). The labels and the picture are the
+// ones the game's own code uses for such notes. The call is modal: it returns when the note has been answered.
+static int tut_note(int kind, int mode, int dx, int dy) {
+    int x = game_vehs[0].x, y = game_vehs[0].y;
+    switch (kind) {
+    case 0: return game_tut_map(game_tut_win, game_at(0x68ed18), x, y, -1, NULL, mode, -1, -1);
+    case 1: return game_tut_map(game_tut_win, game_at(0x68fd20), x, y, 0, NULL, mode, x + dx, y + dy);
+    case 2: return game_tut_map(game_tut_win, game_at(0x687c5c), x, y, -1, game_sprite_farm, mode, -1, -1);
+    case 3: return game_tut_map(game_tut_win, game_at(0x68fd20), x, y, -2, NULL, mode, -1, -1);
+    case 4:  // the view first moved away from the square, which the note brings back (and a second square, in view only then)
+        game_map_win_set_center(game_map_wins[0], x + 9, y + 5, 1);
+        return game_tut_map(game_tut_win, game_at(0x68fd20), x, y, 0, NULL, mode, x + dx, y + dy);
+    }
+    return -1;
+}
+// The tutorial window's helpers that take a rectangle of one of the game's screens (src/ui/tutwin.c): `which` picks the screen
+// (0 base, 1 interface, 2 social, 3 design) and `what` the function: 0 the rectangle's centre as a point on that screen (the *_rect
+// function), 1 the same without the screen (the plain centre), 2 a note pointing at that centre (the do_* function; modal, and
+// answers the note's own answer). The rectangle is made up. The answer is the point as x * 10000 + y for the first two.
+static int tut_rect(int which, int what, int unused, int unused2) {
+    static const uint32_t rect_fn[4] = {0x4bc5f0, 0x4bc5a0, 0x4bc640, 0x4bc690}, do_fn[4] = {0x4ba870, 0x4ba8f0, 0x4ba970, 0x4ba9f0};
+    int32_t rect[4] = {13, 22, 97, 61}, x = -1, y = -1;
+    typedef void(__attribute__((thiscall)) * rect_call)(void *, int32_t *, int32_t *, int32_t *);
+    typedef int(__attribute__((thiscall)) * do_call)(void *, int32_t *, char *, int);
+    if (what == 0) ((rect_call)game_at(rect_fn[which & 3]))(NULL, rect, &x, &y);
+    else if (what == 1) ((rect_call)game_at(0x4ba830))(NULL, rect, &x, &y);
+    else return ((do_call)game_at(do_fn[which & 3]))(game_tut_win, rect, game_at(0x68ed18), 0);
+    return x * 10000 + y;
+}
+// The three functions that draw a note's picture (the terrain, a unit, a base), called the way the popup calls them: with the
+// picture, the window to draw in, an id and a position. The popup's own Buffer is not copied to the screen until the popup redraws,
+// so the window given here is a made-up one whose Buffer (0x444 in) is the main Buffer, which is then flipped to the screen, and the
+// picture is seen. `which` is 0 terrain (of the first unit's square, which the note's fields hold while it is up, and are put there
+// here), 1 unit, 2 base (id -2 is the first).
+static int tut_draw(int which, int id, int x, int y) {
+    static const uint32_t draw_fn[3] = {0x4bdf20, 0x4bdf70, 0x4bdfa0};
+    typedef int(__attribute__((cdecl)) * draw_call)(void *, void *, int, int, int);
+    *(int32_t *)game_at(0x8cc1e4) = game_vehs[0].x, *(int32_t *)game_at(0x8cc1e8) = game_vehs[0].y;
+    int answer = ((draw_call)game_at(draw_fn[which % 3]))(NULL, (uint8_t *)game_at(0x8ea3a4) - 0x444, id, x, y);
+    win_flip(NULL);
+    return answer;
+}
+// A note at a point of the screen (tut_win, as the tour's helpers call it, with the map window and no picture): `mode` as for
+// tut_note, `second` non-zero for a second arrow to the point (300, 200). Modal.
+static int tut_at(int x, int y, int mode, int second) {
+    typedef int(__attribute__((thiscall)) * win_call)(void *, void *, char *, int, int, void *, int, int, int);
+    void *map = game_map_wins[0];
+    return ((win_call)game_at(0x4bdfe0))(game_tut_win, (uint8_t *)map + ((int32_t *)*(void **)map)[1], game_at(0x68ed18), x, y, NULL, mode,
+                                          second ? 300 : -1, second ? 200 : -1);
+}
+// TutWin_on_button_clicked(id), called by hand: the notes' own buttons answer 0 (Continue and Close) or -2 (End Tour) and never a
+// positive id (only the tour's notes have such buttons), so the branches for them are reached this way, with the object's fields
+// put where the branch wants them by pokes.
+static int tut_click(int id, int unused, int unused2, int unused3) {
+    typedef int(__attribute__((thiscall)) * click_call)(void *, int);
+    return ((click_call)game_at(0x4bdcc0))(game_tut_win, id);
+}
+// TutWin_UNK3: the window the arrows lie over set to the map window (on) or to none.
+static int tut_set_win(int on, int unused, int unused2, int unused3) {
+    typedef void(__attribute__((thiscall)) * set_call)(void *, void *);
+    void *map = game_map_wins[0];
+    ((set_call)game_at(0x4bddd0))(game_tut_win, on ? (uint8_t *)map + ((int32_t *)*(void **)map)[1] : NULL);  // (its Win part)
+    return on;
+}
 static const struct open_entry open_table[] = {
     {"hall_of_fame", 0x44ae50, {0}},  // void hall_of_fame(int final): 0 only shows the list
     {"info_tick", 0x459150, {10, 0, 0, 0}, 0x7ad2a0, 0, 0x7ad34c},  // InfoWin_timer_proc(10): one tick of the info panel's clock, made by hand (a scene stops the real clock with the panel's `suspended` word, which is lifted for the call)
@@ -218,6 +285,60 @@ static const struct open_entry open_table[] = {
     {"mon_win_5", 0, {0xf8001, 0, 0, 19}, .host = give_monuments},
     {"mon_win_6", 0, {0x1f8001, 0, 0, 20}, .host = give_monuments},
     {"mon_win_gap", 0, {0x28001, 0, 0, 17}, .host = give_monuments},  // wins 15 and 17 with 16 unused
+    {"tut_terrain", 0, {0, 0}, .host = tut_note},   // the tutorial's note on the first unit's square, mode 0
+    {"tut_terrain_m2", 0, {0, 2}, .host = tut_note},  // the modes that place it to one side or the other and high or low, and ask for a Cancel button
+    {"tut_terrain_m3", 0, {0, 3}, .host = tut_note},
+    {"tut_terrain_m4", 0, {0, 4}, .host = tut_note},
+    {"tut_terrain_m5", 0, {0, 5}, .host = tut_note},
+    {"tut_terrain_m6", 0, {0, 6}, .host = tut_note},
+    {"tut_terrain_held", 0, {0, 0x102}, .host = tut_note},   // mode 2 with a bit in the second byte: the note is held (the flag at 0x8cc244; the button then sets the one at 0x8cc248)
+    {"tut_terrain_bits", 0, {0, 0x10002}, .host = tut_note},  // mode 2 with a bit above the low half: the button's answer adds it to the word at 0x9a64bc
+    {"tut_terrain_both", 0, {0, 0x20102}, .host = tut_note},
+    {"tut_terrain_held0", 0, {0, 0x100}, .host = tut_note},   // the same on mode 0, whose Close button answers with a positive id
+    {"tut_terrain_bits0", 0, {0, 0x10000}, .host = tut_note},
+    {"tut_terrain_both0", 0, {0, 0x20100}, .host = tut_note},
+    {"tut_unit", 0, {1, 0, 3, 0}, .host = tut_note},   // a unit, with a second arrow to a square three to the right
+    {"tut_unit_far", 0, {1, 0, 60, 0}, .host = tut_note},  // the second square off the screen: no second arrow
+    {"tut_picture", 0, {2, 1}, .host = tut_note},   // a note with a picture of its own (the farm's), mode 1 (goes on to a tour)
+    {"tut_base", 0, {3, 0}, .host = tut_note},   // a note about a base
+    {"tut_scrolled", 0, {4, 0, 2, 0}, .host = tut_note},   // the view moved away first: the map is brought back to the square, and a second square is in view
+    {"tut_at_low_right", 0, {900, 600, 0, 0}, .host = tut_at},   // notes at points of the screen: low and right, low and left, high and right, with a second arrow
+    {"tut_at_low_left", 0, {100, 600, 0, 0}, .host = tut_at},
+    {"tut_at_high_right", 0, {900, 100, 0, 0}, .host = tut_at},
+    {"tut_at_second", 0, {500, 300, 0, 1}, .host = tut_at},
+    {"tut_at_m3_low", 0, {500, 500, 3, 0}, .host = tut_at},   // modes 3, 4 and 5 with the point below their height limits
+    {"tut_at_m4_low", 0, {500, 400, 4, 0}, .host = tut_at},
+    {"tut_at_m5_low", 0, {800, 400, 5, 0}, .host = tut_at},
+    {"tut_click_1", 0, {1}, .host = tut_click},  // the button handler given a positive id, and the ids around the ones the notes' buttons give
+    {"tut_click_2", 0, {2}, .host = tut_click},
+    {"tut_click_0", 0, {0}, .host = tut_click},
+    {"tut_click_m1", 0, {-1}, .host = tut_click},
+    {"tut_click_m2", 0, {-2}, .host = tut_click},
+    {"tut_click_m3", 0, {-3}, .host = tut_click},
+    {"tut_reset", 0x4bdde0, {0}, 0x8c6e68, 0, 0, 1},  // TutWin_reset: takes the note down if one is up
+    {"tut_clear", 0x4ba720, {0}, 0x8c6e68, 0, 0, 1},  // the forgetting of the note's fields (TutWin_UNK1)
+    {"tut_setwin", 0x4bddd0, {0}, 0x8c6e68, 0, 0, 1},  // the window the arrows lie over, set to none (TutWin_UNK3)
+    {"tut_setwin_map", 0, {1}, .host = tut_set_win},  // and to the map window
+    {"tut_move", 0x4bddb0, {0, 0}, 0x8c6e68, 0, 0, 1},  // the window was moved or redrawn: the arrows' window redrawn
+    {"tut_arrow", 0x4bdea0, {0}, 0x8c6e68, 0, 0, 1},  // the arrows drawn again
+    {"tut_key_x", 0x4ba770, {0, 0x78}, 0x8c6e68, 0, 0, 1},  // a key (the letter x) given to the note
+    {"tut_key_esc", 0x4ba770, {0, 0x1b}, 0x8c6e68, 0, 0, 1},  // Escape given to the note: the answer is cleared too
+    {"tut_check_1", 0x4ba5f0, {1}},  // the test of whether the note for bit 1 is due (marks it shown if so)
+    {"tut_check_4", 0x4ba5f0, {4}},
+    {"tut_check2_1", 0x4ba650, {1}},
+    {"tut_check2_8", 0x4ba650, {8}},
+    {"tut_rect_base", 0, {0, 0}, .host = tut_rect},  // a rectangle's centre as a point on the base screen
+    {"tut_rect_iface", 0, {1, 0}, .host = tut_rect},
+    {"tut_rect_soc", 0, {2, 0}, .host = tut_rect},
+    {"tut_rect_des", 0, {3, 0}, .host = tut_rect},
+    {"tut_centre", 0, {0, 1}, .host = tut_rect},  // a rectangle's centre
+    {"tut_do_base", 0, {0, 2}, .host = tut_rect},  // a note pointing at a rectangle of the base screen
+    {"tut_do_iface", 0, {1, 2}, .host = tut_rect},
+    {"tut_do_soc", 0, {2, 2}, .host = tut_rect},
+    {"tut_do_des", 0, {3, 2}, .host = tut_rect},
+    {"tut_draw_terrain", 0, {0, 0, 150, 60}, .host = tut_draw},  // the three picture callbacks, called with a note up
+    {"tut_draw_veh", 0, {1, 0, 150, 60}, .host = tut_draw},
+    {"tut_draw_base", 0, {2, -2, 150, 60}, .host = tut_draw},
 };
 
 static const struct open_entry *pending;

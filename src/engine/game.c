@@ -573,7 +573,12 @@ void (*game_model_build_chassis)(int faction, int chassis, int a, int b, int rea
 void (*game_model_build_weapon)(int faction, int chassis, int weapon, void *m);
 void (*game_model_build_armor)(int owner, int chassis, int weapon, int armor, int flag, void *m);
 void (*game_say_special)(char *dest, const char *src, int faction);
-void(__attribute__((thiscall)) * game_tutwin_draw_arrow)(void *win);
+void (*game_pop_style_tutorial)(void);
+void (*game_pop_style_normal)(void);
+void(__attribute__((thiscall)) * game_console_on_key_click)(void *console, int key, int aux);
+int (*game_terrain_poly)(void *buf, int a, int b, int faction, int c, int d, int tile_x, int tile_y, int x, int y);
+int (*game_base_draw)(void *buf, int base, int x, int y, int a, int b);
+void(__attribute__((thiscall)) * game_tutwin_tour)(void *win);
 void (*game_model_build_reactor)(int owner, int chassis, int weapon, int reactor, int abilities, void *m);
 void (*game_matrix_from_angles)(const float *angles, float *matrix);
 void(__attribute__((thiscall)) *game_scroll_init)(void *scroll, int x, int y, int w, int h, void *parent, void *owner, int last);
@@ -1818,6 +1823,11 @@ void game_bind(struct pe_image *exe) {
     game_is_zoomed = *(void **)code_at(exe, 0x669270);
     game_get_window_rect = *(void **)code_at(exe, 0x6692a8);
     game_say_special = (void *)code_at(exe, 0x58f610);
-    game_tutwin_draw_arrow = (void *)code_at(exe, 0x4bdea0);
     game_crt_fopen = (void *)code_at(exe, 0x645646);
+    game_pop_style_tutorial = (void *)code_at(exe, 0x5888e0);
+    game_pop_style_normal = (void *)code_at(exe, 0x588460);
+    game_console_on_key_click = (void *)code_at(exe, 0x5178c0);
+    game_terrain_poly = (void *)code_at(exe, 0x4632d0);
+    game_base_draw = (void *)code_at(exe, 0x55af20);
+    game_tutwin_tour = (void *)code_at(exe, 0x4bc6e0);
 }

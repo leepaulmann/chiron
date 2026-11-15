@@ -1,0 +1,53 @@
+# The tutorial window's smaller functions, called the way the game calls them (see tutwin.c): the tests of whether a note is due
+# (tut_check and tut_check2: each marks the note shown, so the same bit is due once; the answer is the state's open_result region),
+# the window's reset with no note up and with one up, the arrows' window set and the window told it moved, the arrows redrawn, the
+# key handler given a key (a letter, which a mode 2 note takes as a key that ends it, and Escape, which also clears the answer), and
+# the three callbacks that draw a note's picture (called with a note up).
+25 load
+26 state tw_fields 0x8cc1e4 0x5c
+26 state tw_flags 0x8cc244 8
+26 state tw_seen 0x9a64ac 0x14
+26 state tw_ans 0x9a64b8 8
+26 state tw_draw 0x8c9fd0 4
+20 state tw_fields 0x8cc1e4 0x5c
+20 state tw_flags 0x8cc244 8
+22 snap title            # on the title screen, before a game is loaded: the window as its constructor left it
+44 open tut_check_1
+48 snap check
+50 open tut_check_1
+54 snap check-again
+56 open tut_check_4
+60 snap check-4
+62 open tut_check2_1
+66 snap check2
+68 open tut_check2_8
+72 snap check2-8
+74 open tut_reset
+78 snap reset-none
+80 open tut_setwin_map
+84 snap setwin
+86 open tut_move
+90 snap move
+92 open tut_reset
+96 snap reset-win
+98 open tut_terrain
+104 snap note
+106 open tut_move
+110 snap moved
+112 open tut_arrow
+114 snap arrow
+115 open tut_key_esc
+116 snap key-esc-mode0
+118 open tut_draw_terrain
+122 snap draw-terrain
+124 open tut_draw_veh
+128 snap draw-veh
+130 open tut_draw_base
+134 snap draw-base
+136 open tut_reset
+140 snap reset-up
+142 open tut_terrain_m2
+148 snap mode2
+150 open tut_key_x
+154 snap key-x
+156 close

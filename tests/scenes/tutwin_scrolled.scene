@@ -1,0 +1,15 @@
+# A tutorial note asked for with the map view somewhere else (see tutwin.c, tut_map): the map is brought back to the square (the
+# note's own call into the map window) so the arrow points at it, and a second square three away is on the screen, so the second
+# arrow is drawn; Return closes it. A note about the same square without the scroll is the one in tutwin_note.scene.
+25 load
+26 state tw_fields 0x8cc1e4 0x5c
+26 state tw_flags 0x8cc244 8
+44 open tut_scrolled
+52 snap scrolled
+54 key Return
+58 snap closed
+60 close
+# The base screen can open under the notes (Return reaches the game too): its leader portraits (and a pixel at the left panel's corner) animate slower than a snap's burst.
+mask 265 625 310 680
+mask 700 625 760 680
+mask 134 709 138 713

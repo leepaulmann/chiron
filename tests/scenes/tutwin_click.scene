@@ -1,0 +1,35 @@
+# The tutorial window's button handler given every kind of id (see tutwin.c). The notes' buttons answer 0 (Continue, Close) or -2 (End
+# Tour), so the rest is called by hand (open tut_click_N) with the object's fields set by pokes: 0x8cc244 the held flag, 0x8cc238 the
+# bits above the mode that the answer adds to the word at 0x9a64bc, 0x8cc21c the tour's "answer" word. A positive id with the answer
+# clear and the note held sets the flag at 0x8cc248; with the answer set it clears the answer. Below -1 the answer is cleared.
+25 load
+26 state tw_fields 0x8cc1e4 0x5c
+26 state tw_flags 0x8cc244 8
+26 state tw_button 0x8cc224 8
+26 state tw_ans 0x9a64b8 8
+44 poke 0x8cc244 1
+44 poke 0x8cc238 0x10000
+46 open tut_click_1
+50 snap id1-held
+52 poke 0x8cc21c 1
+52 poke 0x8cc244 1
+52 poke 0x8cc238 0x20000
+54 open tut_click_2
+58 snap id2-answered
+60 poke 0x8cc21c 1
+62 open tut_click_m2
+66 snap idm2
+68 poke 0x8cc21c 1
+70 open tut_click_m1
+74 snap idm1
+76 poke 0x8cc21c 1
+78 open tut_click_0
+82 snap id0
+84 poke 0x8cc21c 1
+86 open tut_click_m3
+90 snap idm3
+92 poke 0x8cc238 0x40000
+94 poke 0x8cc244 0
+96 open tut_click_1
+100 snap id1-not-held
+102 close

@@ -1,0 +1,37 @@
+# The bits a tutorial note's mode can carry beyond its low byte (see tutwin.c): a bit in the second byte holds the note (the flag at
+# 0x8cc244 is set while it is up, and the button that answers it sets the flag at 0x8cc248), a bit in the high half is kept in the
+# object and the answer adds it to the word at 0x9a64bc. Each is opened, shown and answered with Continue, then with End Tour.
+25 load
+26 state tw_fields 0x8cc1e4 0x5c
+26 state tw_flags 0x8cc244 8
+26 state tw_button 0x8cc224 8
+26 state tw_ans 0x9a64b8 8
+44 open tut_terrain_held
+50 snap held
+52 click 172 736          # Continue
+56 snap held-continue
+58 open tut_terrain_bits
+64 snap bits
+66 click 172 736
+70 snap bits-continue
+72 open tut_terrain_both
+78 snap both
+80 click 475 736          # End Tour
+84 snap both-end
+86 open tut_terrain_held
+92 snap held-again
+94 click 475 736
+98 snap held-end
+100 open tut_terrain_held0
+106 snap held0
+108 click 324 736          # Close: a positive id
+112 snap held0-close
+114 open tut_terrain_bits0
+120 snap bits0
+122 click 324 736
+126 snap bits0-close
+128 open tut_terrain_both0
+134 snap both0
+136 click 324 736
+140 snap both0-close
+142 close
