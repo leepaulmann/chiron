@@ -1,0 +1,157 @@
+# The Preferences window's options: every item of every box is clicked (each turns over and redraws), a snap for each page, then OK
+# applies them (the boxes are read into the eleven words, merged into the game's three and saved, and the game's words are compared in
+# the state), and the window is opened again, so that its boxes are set from the new words (get_preferences), a snap for each page.
+25 load
+42 state words 0x8582ec 0x4c
+42 state box0 0x85dd4c 0x28
+42 state box1 0x85e874 0x28
+42 state box2 0x85f39c 0x28
+42 state box3 0x85fec4 0x28
+42 state box4 0x8609ec 0x28
+42 state box5 0x861514 0x28
+42 state box6 0x86203c 0x28
+42 state bar0 0x862a84 0x10
+42 state bar1 0x864bd0 0x10
+42 state bar2 0x866d1c 0x10
+42 state bar3 0x868e68 0x10
+42 state btn0 0x86d0f8 0x4
+42 state btn1 0x86dc44 0x4
+42 state btn2 0x86e790 0x4
+42 state btn3 0x86f2dc 0x4
+42 state vis_box0 0x85d304 0x4
+42 state vis_box1 0x85de2c 0x4
+42 state vis_box2 0x85e954 0x4
+42 state vis_box3 0x85f47c 0x4
+42 state vis_box4 0x85ffa4 0x4
+42 state vis_box5 0x860acc 0x4
+42 state vis_box6 0x8615f4 0x4
+42 state vis_bar0 0x862100 0x4
+42 state vis_bar1 0x86424c 0x4
+42 state vis_bar2 0x866398 0x4
+42 state vis_bar3 0x8684e4 0x4
+42 state vis_btn0 0x86c77c 0x4
+42 state vis_btn1 0x86d2c8 0x4
+42 state vis_btn2 0x86de14 0x4
+42 state vis_btn3 0x86e960 0x4
+42 state vis_btn5 0x86fff8 0x4
+42 state vis_btn6 0x870b44 0x4
+42 state vis_btn7 0x871690 0x4
+42 state vis_btn8 0x8721dc 0x4
+42 state group 0x8577f0 0x94
+42 state prefs 0x9a6490 0x10
+42 state out 0x94b464 0xc
+42 state flags 0x6970dc 0x4
+42 state uiflags 0x90d91c 0x4
+42 state sound0 0x90d99c 0x8
+42 state sound1 0x90d9b4 0x8
+46 click 63 538           # MENU
+50 click 27 358           # GAME
+54 click 190 410          # Preferences...
+60 snap open
+63 click 301 170
+66 click 500 173
+67 click 500 197
+68 click 500 221
+69 click 500 245
+70 click 500 269
+71 click 500 293
+72 click 500 317
+73 click 500 341
+74 snap page0
+77 click 301 192
+80 click 500 173
+81 click 500 197
+82 click 500 221
+83 click 500 245
+84 click 500 269
+85 click 500 293
+86 click 500 317
+87 click 500 341
+88 click 500 365
+89 click 500 389
+90 click 500 413
+91 click 500 437
+92 snap page1
+95 click 301 214
+98 click 500 173
+99 click 500 197
+100 click 500 221
+101 click 500 245
+102 click 500 269
+103 click 500 293
+104 click 500 317
+105 click 500 341
+106 click 500 365
+107 click 500 389
+108 click 500 413
+109 click 500 437
+110 click 500 461
+111 snap page2
+114 click 525 520  # More
+116 click 500 173
+117 click 500 197
+118 click 500 221
+119 click 500 245
+120 snap page2b
+124 click 525 520  # Fewer
+126 click 301 236
+129 click 500 173
+130 click 500 197
+131 click 500 221
+132 click 500 245
+133 click 500 269
+134 click 500 293
+135 click 500 317
+136 click 500 341
+137 click 500 365
+138 click 500 389
+139 click 500 413
+140 click 500 437
+141 click 500 461
+142 click 500 485
+143 snap page3
+146 click 301 258
+149 click 500 173
+150 click 500 197
+151 click 500 221
+152 click 500 245
+153 click 500 269
+154 click 500 293
+155 click 500 317
+156 click 500 341
+157 snap page4
+160 click 301 280
+163 click 500 173
+164 click 500 197
+165 click 500 221
+166 click 500 245
+167 click 500 269
+168 click 500 293
+169 click 500 317
+170 click 500 341
+171 snap page5
+174 click 301 170
+177 click 301 497  # OK
+183 snap applied
+186 click 63 538           # MENU
+190 click 27 358           # GAME
+194 click 190 410          # Preferences...
+200 snap again
+203 click 301 170
+206 snap again0
+210 click 301 192
+213 snap again1
+216 click 301 214
+219 snap again2
+222 click 525 520  # More
+224 snap again2b
+227 click 525 520  # Fewer
+229 click 301 236
+232 snap again3
+235 click 301 258
+238 snap again4
+242 click 301 280
+245 snap again5
+248 click 301 520  # Cancel
+254 snap closed
+259 close

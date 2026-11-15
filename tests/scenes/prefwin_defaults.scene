@@ -1,0 +1,101 @@
+# The Preferences window's Restore Defaults button: every page as it opens, then the button (the eleven words become the game's default
+# words, the sound buttons are all on and the sliders are put at their default places, the boxes are set from the words), every page
+# again, OK (which applies and saves them), the window opened again, and every page once more.
+25 load
+42 state words 0x8582ec 0x4c
+42 state box0 0x85dd4c 0x28
+42 state box1 0x85e874 0x28
+42 state box2 0x85f39c 0x28
+42 state box3 0x85fec4 0x28
+42 state box4 0x8609ec 0x28
+42 state box5 0x861514 0x28
+42 state box6 0x86203c 0x28
+42 state bar0 0x862a84 0x10
+42 state bar1 0x864bd0 0x10
+42 state bar2 0x866d1c 0x10
+42 state bar3 0x868e68 0x10
+42 state btn0 0x86d0f8 0x4
+42 state btn1 0x86dc44 0x4
+42 state btn2 0x86e790 0x4
+42 state btn3 0x86f2dc 0x4
+42 state vis_box0 0x85d304 0x4
+42 state vis_box1 0x85de2c 0x4
+42 state vis_box2 0x85e954 0x4
+42 state vis_box3 0x85f47c 0x4
+42 state vis_box4 0x85ffa4 0x4
+42 state vis_box5 0x860acc 0x4
+42 state vis_box6 0x8615f4 0x4
+42 state vis_bar0 0x862100 0x4
+42 state vis_bar1 0x86424c 0x4
+42 state vis_bar2 0x866398 0x4
+42 state vis_bar3 0x8684e4 0x4
+42 state vis_btn0 0x86c77c 0x4
+42 state vis_btn1 0x86d2c8 0x4
+42 state vis_btn2 0x86de14 0x4
+42 state vis_btn3 0x86e960 0x4
+42 state vis_btn5 0x86fff8 0x4
+42 state vis_btn6 0x870b44 0x4
+42 state vis_btn7 0x871690 0x4
+42 state vis_btn8 0x8721dc 0x4
+42 state group 0x8577f0 0x94
+42 state prefs 0x9a6490 0x10
+42 state out 0x94b464 0xc
+42 state flags 0x6970dc 0x4
+42 state uiflags 0x90d91c 0x4
+42 state sound0 0x90d99c 0x8
+42 state sound1 0x90d9b4 0x8
+46 click 63 538           # MENU
+50 click 27 358           # GAME
+54 click 190 410          # Preferences...
+60 click 301 170
+63 snap a0
+67 click 301 192
+70 snap a1
+74 click 301 214
+77 snap a2
+81 click 525 520  # More
+83 snap a2b
+87 click 525 520  # Fewer
+89 click 301 236
+92 snap a3
+96 click 301 258
+99 snap a4
+103 click 301 280
+106 snap a5
+110 click 301 474  # Restore Defaults
+114 click 301 170
+117 snap d0
+121 click 301 192
+124 snap d1
+128 click 301 214
+131 snap d2
+135 click 525 520  # More
+137 snap d2b
+141 click 525 520  # Fewer
+143 click 301 236
+146 snap d3
+150 click 301 258
+153 snap d4
+157 click 301 280
+160 snap d5
+164 click 301 170
+167 click 301 497  # OK
+173 snap applied
+177 click 63 538           # MENU
+181 click 27 358           # GAME
+185 click 190 410          # Preferences...
+191 click 301 170
+194 snap e0
+198 click 301 192
+201 snap e1
+205 click 301 214
+208 snap e2
+212 click 301 236
+215 snap e3
+219 click 301 258
+222 snap e4
+226 click 301 280
+229 snap e5
+233 click 301 520  # Cancel
+239 snap closed
+245 close

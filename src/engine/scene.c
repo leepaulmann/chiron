@@ -24,7 +24,7 @@
 #include "hooks.h"
 #include "screen.h"
 
-enum { CHUNK = 64, MAX_EXTRA = 16, PREF_BASE = 0x400000 };
+enum { CHUNK = 64, MAX_EXTRA = 64, PREF_BASE = 0x400000 };
 
 static uint32_t fnv(const uint8_t *p, size_t n, uint32_t h) {
     while (n--) h = (h ^ *p++) * 16777619u;
@@ -266,6 +266,10 @@ static const struct open_entry open_table[] = {
     {"info_unk2", 0x4588b0, {0}, 0x7ad2a0},  // an InfoWin function nothing calls: the box redrawn from the start
     {"info_unk4", 0x458d60, {0}, 0, 0, 0, 1},  // another that nothing calls: registers the panel's strip
     {"tech_pick", 0x5beb70, {1, 1, -1, 0}},  // int tech_pick(faction, unk, other, label): the research picker for faction 1 (the player in the scenes' save); unk is set because the save plays blind research, which has no picker
+    {"prefs_redraw_option", 0x491810, {0}, 0x8578d8},  // PrefWin_redraw_option: a function of the Preferences window nothing calls (the options' frame drawn)
+    {"prefs_redraw_volume", 0x491860, {0}, 0x8578d8},  // and another (the sliders' frame, when the audio page is shown)
+    {"prefs_key_up", 0x48fcd0, {0, 0x26}, 0x8578d8},  // PrefWin_on_key_click(0, VK_UP): the Preferences window's Up key (an arrow key of the host goes to the focused box, so the call is made here)
+    {"prefs_key_down", 0x48fcd0, {0, 0x28}, 0x8578d8},  // and its Down key
     {"give_techs", 0, {1, 40}, .host = give_techs},  // the techs 0 to 39 for faction 1: more than a screenful to build
     {"hall_of_fame_new", 0x44ae50, {1}},  // hall_of_fame(1): as at a game's end, the loaded game is added to the list, with a picture of the screen
     {"monument_list", 0x476a50, {0}, .discard = 1},  // monument(0): the Monuments window on its list (the records are given first)

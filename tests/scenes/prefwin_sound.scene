@@ -1,0 +1,120 @@
+# The sound page of the Preferences window: the four buttons (Main, Voice, SFX, Music: each turns over, and the Main one turns the
+# others with it; one turned on while Main is off turns Main on) and the four sliders (a click on the track, on each arrow, the mouse
+# wheel), each followed by a snap (the sound object, the preference words and the music object are in the state), then Cancel, and OK
+# once with the sliders where they are, so that their places are saved and read back when the window is opened again.
+25 load
+42 state words 0x8582ec 0x4c
+42 state box0 0x85dd4c 0x28
+42 state box1 0x85e874 0x28
+42 state box2 0x85f39c 0x28
+42 state box3 0x85fec4 0x28
+42 state box4 0x8609ec 0x28
+42 state box5 0x861514 0x28
+42 state box6 0x86203c 0x28
+42 state bar0 0x862a84 0x10
+42 state bar1 0x864bd0 0x10
+42 state bar2 0x866d1c 0x10
+42 state bar3 0x868e68 0x10
+42 state btn0 0x86d0f8 0x4
+42 state btn1 0x86dc44 0x4
+42 state btn2 0x86e790 0x4
+42 state btn3 0x86f2dc 0x4
+42 state vis_box0 0x85d304 0x4
+42 state vis_box1 0x85de2c 0x4
+42 state vis_box2 0x85e954 0x4
+42 state vis_box3 0x85f47c 0x4
+42 state vis_box4 0x85ffa4 0x4
+42 state vis_box5 0x860acc 0x4
+42 state vis_box6 0x8615f4 0x4
+42 state vis_bar0 0x862100 0x4
+42 state vis_bar1 0x86424c 0x4
+42 state vis_bar2 0x866398 0x4
+42 state vis_bar3 0x8684e4 0x4
+42 state vis_btn0 0x86c77c 0x4
+42 state vis_btn1 0x86d2c8 0x4
+42 state vis_btn2 0x86de14 0x4
+42 state vis_btn3 0x86e960 0x4
+42 state vis_btn5 0x86fff8 0x4
+42 state vis_btn6 0x870b44 0x4
+42 state vis_btn7 0x871690 0x4
+42 state vis_btn8 0x8721dc 0x4
+42 state group 0x8577f0 0x94
+42 state prefs 0x9a6490 0x10
+42 state out 0x94b464 0xc
+42 state flags 0x6970dc 0x4
+42 state uiflags 0x90d91c 0x4
+42 state sound0 0x90d99c 0x8
+42 state sound1 0x90d9b4 0x8
+46 click 63 538           # MENU
+50 click 27 358           # GAME
+54 click 190 410          # Preferences...
+60 click 301 258
+63 snap audio
+66 click 480 472  # voice
+68 snap voice-1
+71 click 480 472  # voice
+73 snap voice-2
+76 click 480 494  # sfx
+78 snap sfx-1
+81 click 480 494  # sfx
+83 snap sfx-2
+87 click 480 516  # music
+89 snap music-1
+92 click 480 516  # music
+94 snap music-2
+97 click 480 450  # main
+99 snap main-1
+102 click 480 450  # main
+104 snap main-2
+107 click 480 450  # main off
+109 click 480 472  # voice on
+111 snap voice-from-off
+115 click 480 472  # voice off
+117 snap voice-off-again
+120 click 480 450  # main off
+122 click 480 494  # sfx on
+124 snap sfx-from-off
+127 click 480 494  # sfx off
+129 snap sfx-off-again
+132 click 480 450  # main off
+134 click 480 516  # music on
+136 snap music-from-off
+139 click 480 516  # music off
+141 snap music-off-again
+145 click 620 450  # main track left
+147 snap main-left
+150 click 859 450  # main right arrow
+152 snap main-arrow
+155 click 620 472  # voice track left
+157 snap voice-left
+160 click 555 472  # voice left arrow
+162 snap voice-arrow
+165 click 800 494  # sfx track right
+167 snap sfx-right
+170 click 620 516  # music track left
+172 snap music-left
+176 move 700 494
+177 wheel 3
+179 snap sfx-wheel
+182 move 700 516
+183 wheel -4
+185 snap music-wheel
+188 click 301 520  # Cancel
+194 snap cancelled
+197 click 63 538           # MENU
+201 click 27 358           # GAME
+205 click 190 410          # Preferences...
+211 click 301 258
+214 snap reopened
+217 click 620 450  # main track left
+219 click 800 472  # voice track right
+221 click 301 497  # OK
+227 snap applied
+231 click 63 538           # MENU
+235 click 27 358           # GAME
+239 click 190 410          # Preferences...
+245 click 301 258
+248 snap saved
+251 click 301 520  # Cancel
+257 snap closed
+262 close

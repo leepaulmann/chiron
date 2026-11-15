@@ -1,0 +1,78 @@
+# The Preferences window (PrefWin, see src/ui/prefwin.c; opened by MENU, GAME, Preferences...): as it opens, the hover looks of a tab, an
+# option and a button, every page of the group of tabs (Preferences, Adv., Warning, Automation, Audio/Visual, Map), the Warning page
+# and the More and Fewer buttons that swap its box for a second, and Cancel. The state regions are the window's own words (the page, the
+# eleven option words), each box's dialog (its count, position, selection and hover), the four sliders' positions, the four sound
+# buttons' states, the visible flag of each box, slider and button a page shows and hides, the tabs' ButtonGroup, the game's preference words and what the window hands over, and the sound object's two
+# channels (the object itself holds pointers that differ from run to run).
+25 load
+42 state words 0x8582ec 0x4c
+42 state box0 0x85dd4c 0x28
+42 state box1 0x85e874 0x28
+42 state box2 0x85f39c 0x28
+42 state box3 0x85fec4 0x28
+42 state box4 0x8609ec 0x28
+42 state box5 0x861514 0x28
+42 state box6 0x86203c 0x28
+42 state bar0 0x862a84 0x10
+42 state bar1 0x864bd0 0x10
+42 state bar2 0x866d1c 0x10
+42 state bar3 0x868e68 0x10
+42 state btn0 0x86d0f8 0x4
+42 state btn1 0x86dc44 0x4
+42 state btn2 0x86e790 0x4
+42 state btn3 0x86f2dc 0x4
+42 state vis_box0 0x85d304 0x4
+42 state vis_box1 0x85de2c 0x4
+42 state vis_box2 0x85e954 0x4
+42 state vis_box3 0x85f47c 0x4
+42 state vis_box4 0x85ffa4 0x4
+42 state vis_box5 0x860acc 0x4
+42 state vis_box6 0x8615f4 0x4
+42 state vis_bar0 0x862100 0x4
+42 state vis_bar1 0x86424c 0x4
+42 state vis_bar2 0x866398 0x4
+42 state vis_bar3 0x8684e4 0x4
+42 state vis_btn0 0x86c77c 0x4
+42 state vis_btn1 0x86d2c8 0x4
+42 state vis_btn2 0x86de14 0x4
+42 state vis_btn3 0x86e960 0x4
+42 state vis_btn5 0x86fff8 0x4
+42 state vis_btn6 0x870b44 0x4
+42 state vis_btn7 0x871690 0x4
+42 state vis_btn8 0x8721dc 0x4
+42 state group 0x8577f0 0x94
+42 state prefs 0x9a6490 0x10
+42 state out 0x94b464 0xc
+42 state flags 0x6970dc 0x4
+42 state uiflags 0x90d91c 0x4
+42 state sound0 0x90d99c 0x8
+42 state sound1 0x90d9b4 0x8
+46 click 63 538           # MENU
+50 click 27 358           # GAME
+54 click 190 410          # Preferences...
+60 snap open
+64 move 301 192           # over the Adv. tab
+66 snap hover-tab
+70 move 500 222           # over an option
+72 snap hover-item
+76 move 301 497           # over OK
+78 snap hover-ok
+82 click 301 192          # Adv. Preferences
+86 snap advanced
+90 click 301 214          # Warning Preferences
+94 snap warnings
+98 click 525 520          # More
+102 snap warnings-more
+106 click 525 520         # Fewer
+110 snap warnings-back
+114 click 301 236         # Automation Preferences
+118 snap automation
+122 click 301 258         # Audio/Visual Preferences
+126 snap audio
+130 click 301 280         # Map Preferences
+134 snap map
+138 click 301 170         # Preferences
+142 snap basic
+146 click 301 520         # Cancel
+152 snap closed
+156 close

@@ -3143,3 +3143,27 @@ extern void(__attribute__((thiscall)) * game_console_on_key_click)(void *console
 extern int (*game_terrain_poly)(void *buf, int a, int b, int faction, int c, int d, int tile_x, int tile_y, int x, int y);
 extern int (*game_base_draw)(void *buf, int base, int x, int y, int a, int b);
 extern void(__attribute__((thiscall)) * game_tutwin_tour)(void *win);
+extern void(__attribute__((thiscall)) * game_tutwin_draw_arrow)(void *win);
+
+// What the Preferences window (src/ui/prefwin.c) calls that Chiron doesn't reimplement yet: a CheckBox's add of an item (text, id,
+// and a flag the window leaves clear) and a Scroll's init (x, y, width, parent, id); the sound object (0x90d978) the volume bars and
+// buttons work: the master volume, a channel's volume, a channel off and on, and everything off and on; the three default
+// preference words (cdecl, read from the preferences file); the voice start the Voice button makes (cdecl, given the word the game
+// keeps at 0x939284); a method of the object at 0x9380dc that the windows that open call first; and the number dialog the Gamma
+// button runs (made, asked for a number as a float, unmade).
+extern void(__attribute__((thiscall)) * game_checkbox_item)(void *box, const char *text, int id, int flag);
+extern void(__attribute__((thiscall)) * game_scroll_init_bar)(void *scroll, int x, int y, int w, void *parent, int id);
+extern void(__attribute__((thiscall)) * game_sound_master)(void *sound, int volume);
+extern void(__attribute__((thiscall)) * game_sound_channel_volume)(void *sound, int channel, int volume);
+extern void(__attribute__((thiscall)) * game_sound_channel_off)(void *sound, int channel);
+extern void(__attribute__((thiscall)) * game_sound_channel_on)(void *sound, int channel);
+extern void(__attribute__((thiscall)) * game_sound_all_off)(void *sound);
+extern void(__attribute__((thiscall)) * game_sound_all_on)(void *sound);
+extern int (*game_pref_default_a)(void);
+extern int (*game_pref_default_b)(void);
+extern int (*game_pref_default_c)(void);
+extern void (*game_voice_start)(int arg);
+extern void(__attribute__((thiscall)) * game_window_opening)(void *object);
+extern void(__attribute__((thiscall)) * game_numdlg_ctor)(void *dlg);
+extern float(__attribute__((thiscall)) * game_numdlg_run)(void *dlg, void *palette, float value, int flag);
+extern void(__attribute__((thiscall)) * game_numdlg_dtor)(void *dlg);
