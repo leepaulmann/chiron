@@ -2,7 +2,7 @@
 
 Reads your own copy of terranx.exe (the path given, else the game folder
 from ~/.config/chiron/chiron.conf, else ~/.local/share/chiron/game) and
-the HOOK tables in src/engine/*.c, and prints, for each 64 KB block of
+the HOOK and UI_HOOK tables in src/*/*.c, and prints, for each 64 KB block of
 the code, how many bytes the hooked functions cover. A function runs from
 its address to the next function start; starts are found as the usual
 `push ebp; mov ebp, esp` after padding, so the totals are estimates.
@@ -55,8 +55,8 @@ def text_section(path):
 
 def hooked():
     found = set()
-    for path in glob.glob(os.path.join(ROOT, 'src', 'engine', '*.c')):
-        for m in re.finditer(r'^\s*HOOK\((0x[0-9a-fA-F]+)', open(path).read(), re.M):
+    for path in glob.glob(os.path.join(ROOT, 'src', '*', '*.c')):
+        for m in re.finditer(r'^\s*(?:UI_)?HOOK(?:_CALL)?\((0x[0-9a-fA-F]+)', open(path).read(), re.M):
             found.add(int(m.group(1), 16))
     return found
 
